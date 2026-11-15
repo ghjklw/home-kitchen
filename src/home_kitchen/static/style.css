@@ -120,6 +120,13 @@ a {
   background: var(--green);
   color: white;
 }
+.secondary-nav {
+  margin-top: auto;
+  text-align: left;
+  border-color: transparent;
+  background: transparent;
+  padding-left: 18px;
+}
 .sidebar-note {
   margin-top: auto;
   color: var(--muted);
@@ -205,6 +212,87 @@ h3 {
 .category-section h2 {
   margin-bottom: 12px;
 }
+.shopping-compact-header {
+  margin-bottom: 12px;
+}
+.shopping-compact-header h1 {
+  font-size: clamp(27px, 3vw, 34px);
+  margin-bottom: 5px;
+}
+.shopping-compact-header .subtitle {
+  font-size: 13px;
+}
+.trip-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 10px 0 14px;
+}
+.trip-progress {
+  display: grid;
+  gap: 5px;
+  min-width: 130px;
+  font-size: 13px;
+}
+.trip-progress progress {
+  width: 100%;
+  height: 8px;
+  accent-color: var(--green);
+}
+.shopping-share-actions {
+  gap: 6px;
+}
+.shopping-share-actions button {
+  min-height: 38px;
+  padding: 7px 10px;
+  font-size: 12px;
+}
+.shopping-info {
+  margin: 12px 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+.shopping-info summary {
+  cursor: pointer;
+  width: fit-content;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.shopping-info p {
+  margin: 8px 0 0;
+  line-height: 1.5;
+}
+.basket-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  align-items: baseline;
+  margin: 10px 0;
+  font-size: 13px;
+  font-weight: 700;
+}
+.basket-status.needs-attention {
+  color: #76541e;
+}
+.basket-price-summary {
+  color: var(--muted);
+  font-weight: 500;
+}
+.basket-issues ul {
+  margin-bottom: 0;
+  padding-left: 20px;
+}
+.oda-connection {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+.oda-connection h2,
+.oda-connection p {
+  margin: 0;
+}
 .field input[readonly] {
   background: #f4f4ed;
   color: var(--muted);
@@ -213,6 +301,9 @@ h3 {
   font-weight: 650;
   min-width: 185px;
   text-align: center;
+}
+.period-toolbar .today-period {
+  white-space: nowrap;
 }
 .date-jump {
   display: inline-flex;
@@ -265,6 +356,11 @@ h3 {
 .meal-slot .muted,
 .meal-slot .empty-meal {
   margin-bottom: 8px;
+}
+.open-slots {
+  margin: auto 0 10px;
+  color: var(--muted);
+  font-size: 12px;
 }
 .day .date {
   font-size: 12px;
@@ -666,6 +762,22 @@ button.link {
     background: #fffef9f5;
     backdrop-filter: blur(12px);
   }
+  .period-toolbar {
+    display: grid;
+    grid-template-columns: 42px minmax(0, 1fr) 42px;
+    gap: 6px;
+  }
+  .period-toolbar .week-range {
+    min-width: 0;
+    font-size: 12px;
+  }
+  .period-toolbar .today-period {
+    grid-column: 1;
+  }
+  .period-toolbar .period-jump {
+    grid-column: 2 / 4;
+    justify-self: end;
+  }
   .sidebar nav button {
     text-align: center;
     font-size: 12px;
@@ -687,11 +799,12 @@ button.link {
     font-size: 38px;
   }
   .week-grid {
+    grid-template-columns: 1fr;
     gap: 10px;
   }
   .day {
     padding: 16px;
-    min-height: 220px;
+    min-height: 0;
   }
   .day .meal-title {
     font-size: 21px;
@@ -950,10 +1063,37 @@ button.link {
 }
 @media (max-width: 650px) {
   .sidebar nav {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
   .sidebar nav button {
     font-size: 11px;
+  }
+  .secondary-nav {
+    min-height: 38px;
+    margin: 0 0 5px auto;
+    padding: 5px 8px;
+    font-size: 12px;
+  }
+  .shopping-compact-header {
+    margin-bottom: 8px;
+  }
+  .shopping-compact-header h1 {
+    font-size: 30px;
+  }
+  .trip-toolbar {
+    align-items: end;
+    gap: 8px;
+  }
+  .trip-progress {
+    flex: 1;
+    min-width: 100px;
+  }
+  .shopping-share-actions {
+    flex-wrap: nowrap;
+  }
+  .shopping-share-actions button {
+    padding: 7px 8px;
+    white-space: nowrap;
   }
   .product-card {
     grid-template-columns: 90px 1fr;

@@ -228,13 +228,15 @@ def create_app(
             raise HTTPException(422, "Recipe could not be imported; paste it manually") from exc
 
     @app.post("/api/ai/recipe")
-    async def generate_recipe(data: Prompt) -> RecipeCreate:
+    async def generate_recipe(data: RecipeDraftRequest):
+        # Legacy URL now uses the shared source-backed editable draft envelope.
+        data.require_ai_source()
         if not (ai or settings.ai_configured):
-            raise HTTPException(503, "Configure an AI model and API credential to generate recipes")
+            raise HTTPException(503, "Configure an AI model and API credential to adapt recipes")
         try:
-            draft = await features.draft_recipe("ai", RecipeDraftRequest(prompt=data.prompt))
-            assert draft.recipe is not None
-            return draft.recipe
+            return await features.draft_recipe("ai", data)
+        except ValueError:
+            raise
         except Exception:
             raise HTTPException(502, "AI draft unavailable; no recipe has been saved") from None
 

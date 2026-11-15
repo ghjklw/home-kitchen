@@ -105,7 +105,10 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
 
     @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
     async def draft_recipe(provider_id: str, request: RecipeDraftRequest) -> RecipeDraft:
-        """Draft via manual, web or AI provider. Review before save_recipe; never auto-save."""
+        """Draft via manual, web or source-backed AI; AI requires recipe, draft, imported or url.
+
+        Optional prompt modifies that source; prompt-only creation is unavailable.
+        Complete unknown quantities/units and review before save_recipe; never auto-save."""
         return await features.draft_recipe(provider_id, request)
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})

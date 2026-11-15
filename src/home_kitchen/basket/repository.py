@@ -11,6 +11,7 @@ from sqlalchemy.engine import Engine
 from home_kitchen.history import HistoryChannel, HistoryEntryCreate, HistoryRepository
 from home_kitchen.models import WeekShopping
 from home_kitchen.service import KitchenService
+from home_kitchen.shopping import normalize_need_text
 
 from .evaluation import evaluate_basket
 from .models import BasketReview, PurchaseNeed, SelectedProduct
@@ -18,12 +19,11 @@ from .models import BasketReview, PurchaseNeed, SelectedProduct
 _selection_adapter = TypeAdapter(SelectedProduct)
 
 
-def _normalize(value: str) -> str:
-    return " ".join(value.split()).casefold()
-
-
 def _need_id(start: date, end: date, name: str, unit: str) -> UUID:
-    return uuid5(NAMESPACE_URL, f"kitchen:{start}:{end}:{_normalize(name)}:{_normalize(unit)}")
+    return uuid5(
+        NAMESPACE_URL,
+        f"kitchen:{start}:{end}:{normalize_need_text(name)}:{normalize_need_text(unit)}",
+    )
 
 
 def _selection_id(start: date, end: date, selection: SelectedProduct) -> UUID:

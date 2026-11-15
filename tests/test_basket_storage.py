@@ -30,6 +30,21 @@ def product(product_id: str, name: str, image_url: str, price: str) -> ProductSn
     )
 
 
+def test_whitespace_variations_merge_into_one_stable_basket_need(test_database_url):
+    kitchen = KitchenService(test_database_url)
+    basket = BasketService(kitchen, HistoryRepository(kitchen.store.engine))
+    start, end = date(2026, 5, 4), date(2026, 5, 10)
+    kitchen.add_item(ShoppingItemCreate(name="olive oil", quantity=1, unit="bottle"))
+    original = basket.review(start, end).needs[0].need
+    kitchen.add_item(ShoppingItemCreate(name="Olive  oil", quantity=2, unit="bottle"))
+    review = basket.review(start, end)
+    assert len(review.needs) == 1
+    assert review.needs[0].need.id == original.id
+    assert review.needs[0].need.quantity == Decimal(3)
+    assert len(review.needs[0].need.origins) == 2
+    kitchen.store.engine.dispose()
+
+
 def test_selection_persists_across_service_restart_and_recomputes_changed_need(test_database_url):
     kitchen = KitchenService(test_database_url)
     kitchen.add_item(ShoppingItemCreate(name="Yoghurt", quantity=16, unit="cup"))

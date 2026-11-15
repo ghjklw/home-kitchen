@@ -16,6 +16,11 @@ from home_kitchen.models import (
 )
 
 
+def normalize_need_text(value: str) -> str:
+    """Use one identity for quantity aggregation and stable basket references."""
+    return " ".join(value.split()).casefold()
+
+
 @dataclass(frozen=True)
 class ShoppingContext:
     meals: list[Meal]
@@ -116,7 +121,7 @@ class ShoppingBuilder:
         for contributor in self.contributors.values():
             contribution = contributor.contribute(context)
             for line in contribution.lines:
-                key = (line.name.casefold().strip(), line.unit.casefold().strip())
+                key = (normalize_need_text(line.name), normalize_need_text(line.unit))
                 if key not in totals:
                     totals[key] = line.model_copy(deep=True)
                 else:

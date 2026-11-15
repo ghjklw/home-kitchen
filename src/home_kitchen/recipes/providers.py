@@ -96,14 +96,17 @@ class AIRecipeProvider:
         elif request.recipe is not None:
             recipe = request.recipe
             source = EditableRecipeDraft(
-                **recipe.model_dump(exclude={"source", "ingredients"}),
-                ingredients=[DraftIngredient(**item.model_dump(), source_indices=[index])
+                **recipe.model_dump(exclude={"source", "ingredients", "source_ingredients", "provenance"}),
+                ingredients=[DraftIngredient(
+                    **item.model_dump(exclude={"source_indices"}),
+                    source_indices=item.source_indices if recipe.source_ingredients else [index],
+                )
                              for index, item in enumerate(recipe.ingredients)],
-                source_ingredients=[
+                source_ingredients=recipe.source_ingredients or [
                     SourceIngredient(index=index, text=f"{item.quantity} {item.unit} {item.name}")
                     for index, item in enumerate(recipe.ingredients)
                 ],
-                provenance=AdaptationProvenance(
+                provenance=recipe.provenance or AdaptationProvenance(
                     original_source=recipe.source, source_url=recipe.source_url,
                 ),
             )

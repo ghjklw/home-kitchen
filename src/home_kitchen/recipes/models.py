@@ -5,7 +5,15 @@ from typing import Literal
 from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 from home_kitchen.imports import ImportedDraft
-from home_kitchen.models import NonBlank, Quantity, RecipeCreate, RecipeSource
+from home_kitchen.models import (
+    AdaptationProvenance,
+    NonBlank,
+    Quantity,
+    RecipeCreate,
+    SourceIndex,
+    SourceIngredient,
+    validate_source_metadata,
+)
 from home_kitchen.settings import Household
 
 
@@ -20,23 +28,12 @@ class RecipeContext(BaseModel):
     actor_id: str | None = None
 
 
-class SourceIngredient(BaseModel):
-    index: int = Field(ge=0)
-    text: NonBlank
-
-
-class AdaptationProvenance(BaseModel):
-    kind: Literal["ai_adaptation"] = "ai_adaptation"
-    original_source: RecipeSource
-    source_url: HttpUrl | None = None
-
-
 class DraftIngredient(BaseModel):
     name: NonBlank
     quantity: Quantity | None = None
     unit: NonBlank | None = None
     category: NonBlank = "Other"
-    source_indices: list[int] = Field(default_factory=list)
+    source_indices: list[SourceIndex] = Field(default_factory=list)
 
 
 class EditableRecipeDraft(BaseModel):
@@ -54,13 +51,10 @@ class EditableRecipeDraft(BaseModel):
 
     @model_validator(mode="after")
     def valid_references(self) -> "EditableRecipeDraft":
-        indices = [item.index for item in self.source_ingredients]
-        if len(set(indices)) != len(indices):
-            raise ValueError("Source ingredient indices must be unique")
-        if any(
-            index not in indices for item in self.ingredients for index in item.source_indices
-        ):
-            raise ValueError("Ingredient source_indices must reference source_ingredients")
+        validate_source_metadata(
+            self.source_ingredients, [item.source_indices for item in self.ingredients],
+            self.source_url, self.provenance,
+        )
         return self
 
 

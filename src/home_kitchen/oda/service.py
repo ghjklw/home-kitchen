@@ -63,6 +63,26 @@ class OdaRecipeSearchResponse(BaseModel):
     recipes: list[OdaRecipeSearchEntry] = Field(max_length=20)
 
 
+class OdaRecipeCollectionEntry(BaseModel):
+    """A recipe returned by an Oda saved or purchased collection."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: StrictInt
+    title: StrictStr
+    url: StrictStr | None = None
+    provider_name: StrictStr | None = Field(default=None, alias="providerName")
+    image_url: StrictStr | None = Field(default=None, alias="imageUrl")
+    deliveries_count: StrictInt | None = Field(default=None, alias="deliveriesCount")
+
+
+class OdaRecipeCollectionResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    has_more: StrictBool = Field(alias="hasMore")
+    recipes: list[OdaRecipeCollectionEntry] = Field(max_length=20)
+
+
 class OdaService:
     def __init__(
         self, engine: Engine, settings: Settings, *, http_client: httpx.Client | None = None
@@ -319,7 +339,13 @@ class OdaService:
             raise OdaError("Disconnected locally; Oda could not confirm remote token revocation")
 
     async def _read(self, actor_id: str, name: str, arguments: dict) -> dict:
-        if name not in {"product_search", "get_cart", "recipe_search"}:
+        if name not in {
+            "product_search",
+            "get_cart",
+            "recipe_search",
+            "get_liked_recipes",
+            "get_purchased_recipes",
+        }:
             raise OdaError("This Oda action is not supported", 400)
         token = await asyncio.to_thread(self.access_token, actor_id)
         try:
@@ -348,7 +374,7 @@ class OdaService:
                     raise OdaError("The Oda search schema changed; review is required")
                 if name == "get_cart" and schema.get("required"):
                     raise OdaError("The Oda cart schema changed; review is required")
-                if name == "recipe_search":
+                if name in {"recipe_search", "get_liked_recipes", "get_purchased_recipes"}:
                     query = properties.get("query", {})
                     page = properties.get("page", {})
                     size = properties.get("size", {})
@@ -357,9 +383,25 @@ class OdaService:
                     recipes = output_properties.get("recipes", {})
                     recipe_properties = recipes.get("items", {}).get("properties", {})
                     recipe_required = set(recipes.get("items", {}).get("required", []))
+                    collection_tool = name in {"get_liked_recipes", "get_purchased_recipes"}
+                    expected_required = set() if collection_tool else {"query"}
+
+                    def has_types(field: str, expected: set[str]) -> bool:
+                        field_schema = recipe_properties.get(field, {})
+                        types = field_schema.get("type", [])
+                        if isinstance(types, str):
+                            types = [types]
+                        if isinstance(types, list) and expected.issubset(set(types)):
+                            return True
+                        alternatives = field_schema.get("anyOf", [])
+                        return expected.issubset(
+                            {item.get("type") for item in alternatives if isinstance(item, dict)}
+                        )
+
                     if (
-                        set(schema.get("required", [])) != {"query"}
-                        or query.get("type") != "string"
+                        set(schema.get("required", [])) != expected_required
+                        or (collection_tool and set(properties) != {"page", "size"})
+                        or (not collection_tool and query.get("type") != "string")
                         or page.get("type") != "integer"
                         or (page.get("minimum"), page.get("maximum")) != (1, 50)
                         or size.get("type") != "integer"
@@ -368,12 +410,30 @@ class OdaService:
                         or set(output.get("required", [])) != {"hasMore", "recipes"}
                         or output_properties.get("hasMore", {}).get("type") != "boolean"
                         or recipes.get("type") != "array"
-                        or not {"id", "title", "likeCount"}.issubset(recipe_required)
+                        or not {"id", "title"}.issubset(recipe_required)
                         or recipe_properties.get("id", {}).get("type") != "integer"
                         or recipe_properties.get("title", {}).get("type") != "string"
-                        or recipe_properties.get("likeCount", {}).get("type") != "integer"
+                        or (
+                            not collection_tool
+                            and (
+                                "likeCount" not in recipe_required
+                                or recipe_properties.get("likeCount", {}).get("type") != "integer"
+                            )
+                        )
+                        or (
+                            collection_tool
+                            and any(
+                                not has_types(field, expected_types)
+                                for field, expected_types in {
+                                    "url": {"string", "null"},
+                                    "providerName": {"string", "null"},
+                                    "imageUrl": {"string", "null"},
+                                    "deliveriesCount": {"integer"},
+                                }.items()
+                            )
+                        )
                     ):
-                        raise OdaError("The Oda recipe search schema changed; review is required")
+                        raise OdaError("The Oda recipe schema changed; review is required")
                 result = await client.call_tool(name, arguments, raise_on_error=True)
                 if result.structured_content is not None:
                     return result.structured_content
@@ -431,3 +491,24 @@ class OdaService:
             )
         except ValueError:
             raise OdaError("The Oda recipe response changed; review is required") from None
+
+    async def list_liked_recipes(self, actor_id: str, page: int = 1, size: int = 10) -> dict:
+        return await self._list_recipe_collection(actor_id, "get_liked_recipes", page, size)
+
+    async def list_purchased_recipes(self, actor_id: str, page: int = 1, size: int = 10) -> dict:
+        return await self._list_recipe_collection(actor_id, "get_purchased_recipes", page, size)
+
+    async def _list_recipe_collection(
+        self, actor_id: str, tool_name: str, page: int, size: int
+    ) -> dict:
+        if not 1 <= page <= 50 or not 1 <= size <= 20:
+            raise OdaError("Oda recipe pagination is outside the supported range", 400)
+        payload = await self._read(actor_id, tool_name, {"page": page, "size": size})
+        try:
+            return OdaRecipeCollectionResponse.model_validate(payload).model_dump(
+                mode="json", by_alias=True
+            )
+        except ValueError:
+            raise OdaError(
+                "The Oda recipe collection response changed; review is required"
+            ) from None

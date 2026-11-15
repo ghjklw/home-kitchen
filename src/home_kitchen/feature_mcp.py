@@ -1,5 +1,8 @@
 """Assistant tools collect explicit context and use the same feature services."""
 
+import asyncio
+import base64
+import binascii
 from datetime import date
 from uuid import UUID
 
@@ -14,6 +17,7 @@ from home_kitchen.catalogue.sku_models import RetailerProductOption, RetailerPro
 from home_kitchen.context import history_context
 from home_kitchen.features import KitchenFeatures
 from home_kitchen.history import HistoryEntry, HistoryEntryCreate, RetrievedEvidence
+from home_kitchen.integrations import IntegrationInfo
 from home_kitchen.inventory import InventoryItem, InventoryItemCreate, PurchasePlan
 from home_kitchen.models import MealCreate
 from home_kitchen.oda.cart import CartProposalRequest
@@ -26,7 +30,10 @@ from home_kitchen.purchasing_reconciliation import (
 )
 from home_kitchen.recipe_feedback import RecipeFeedbackCreate
 from home_kitchen.recipes import RecipeDraft, RecipeDraftRequest, RecipeProviderInfo
+from home_kitchen.recipes.collections import CollectionKind
 from home_kitchen.recipes.discovery import RecipeDiscoveryRequest, RecipeDiscoveryResponse
+from home_kitchen.recipes.images import MAX_RESULTS
+from home_kitchen.recipes.photos import MAX_PHOTO_BYTES
 
 
 def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: BasketService) -> None:
@@ -35,6 +42,96 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
         if not value:
             raise ValueError("Household authentication required")
         return value
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
+    async def upload_recipe_photo(
+        data_base64: str, mime_type: str, book_title: str | None = None, page: str | None = None
+    ) -> dict:
+        """Upload a base64 JPEG, PNG or WebP photo for private transcription.
+
+        This stores the image in the current household and returns an editable draft
+        for review. It never saves a recipe. Keep the base64 input within 8 MiB decoded.
+        """
+        if len(data_base64) > ((MAX_PHOTO_BYTES + 2) // 3) * 4:
+            raise ValueError("Photo must contain between 1 byte and 8 MiB")
+        try:
+            raw = base64.b64decode(data_base64, validate=True)
+        except (ValueError, binascii.Error):
+            raise ValueError("Photo upload data is invalid") from None
+        if not raw or len(raw) > MAX_PHOTO_BYTES:
+            raise ValueError("Photo must contain between 1 byte and 8 MiB")
+        result = await features.recipe_photos.create(
+            raw, mime_type, actor(), book_title=book_title, page=page
+        )
+        return result.model_dump(mode="json")
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
+    async def redraft_recipe_photo(photo_id: UUID) -> dict:
+        """Retry transcription of this household's private stored recipe photo."""
+        return (await features.recipe_photos.redraft(photo_id, actor())).model_dump(mode="json")
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
+    async def preview_recipe_collections(kinds: list[CollectionKind]) -> dict:
+        """Preview liked or purchased Oda recipes. Preview reads metadata only."""
+        return (await features.recipe_collections.start_preview(actor(), kinds)).model_dump(
+            mode="json"
+        )
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
+    async def get_recipe_collection_preview(job_id: UUID) -> dict:
+        """Read the current actor's bounded collection preview and import statuses."""
+        return (await features.recipe_collections.get(actor(), job_id)).model_dump(mode="json")
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
+    async def import_recipe_collection_selection(
+        job_id: UUID, selected_ids: list[str], reviewed: bool = False
+    ) -> dict:
+        """Import only exact selected preview IDs after explicit review.
+
+        Each public source becomes an editable recipe draft saved for review. This
+        uses public page extraction only and never invokes paid AI.
+        """
+        return (
+            await features.recipe_collections.start_import(actor(), job_id, selected_ids, reviewed)
+        ).model_dump(mode="json")
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
+    async def cancel_recipe_collection(job_id: UUID) -> dict:
+        """Cancel this actor's collection job; completed imports remain saved and listed."""
+        return (await features.recipe_collections.cancel(actor(), job_id)).model_dump(mode="json")
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
+    async def search_recipe_images(
+        query: str, limit: int = MAX_RESULTS, continuation: str | None = None
+    ) -> dict:
+        """Search supported Commons images with usable license attribution metadata."""
+        return (
+            await features.recipe_images.search(
+                actor(), query, limit=limit, continuation=continuation
+            )
+        ).model_dump(mode="json")
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
+    async def select_recipe_image(
+        recipe_id: UUID,
+        search_id: UUID,
+        provider_id: str,
+        reviewed: bool = False,
+    ) -> dict:
+        """Apply one exact recent search result only after explicit user review.
+
+        Credit and license metadata come from the server's provider response;
+        caller-supplied attribution is never accepted.
+        """
+        result = await asyncio.to_thread(
+            features.recipe_images.select,
+            actor(),
+            recipe_id,
+            search_id,
+            provider_id,
+            reviewed=reviewed,
+        )
+        return result.model_dump(mode="json")
 
     @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
     async def start_basket_matching(
@@ -87,6 +184,16 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
         occupied slots require a new reviewed proposal; retries reuse applied IDs.
         """
         return features.plan_proposals.confirm(proposal_id, actor(), reviewed=reviewed)
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
+    def list_integrations() -> list[IntegrationInfo]:
+        """List this member's connection status and supported authentication modes.
+
+        Prefer federation, machine identity, API key, then delegated sign-in where
+        the provider actually supports the required data. Never request or expose secrets.
+        Manage connections in the application Settings.
+        """
+        return features.integrations.describe(actor())
 
     @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
     def get_oda_connection_status() -> dict:

@@ -235,8 +235,8 @@ async def test_source_ai_api_mcp_share_drafts_without_persistence(test_database_
             client.post("/api/recipe-drafts/ai", json={"prompt": "Invent soup"}).status_code == 422
         )
         assert client.post("/api/ai/recipe", json={"imported": imported}).json() == draft
-        # The draft is not saveable until the user resolves missing numeric fields.
-        assert client.post("/api/recipes", json=draft["adapted"]).status_code == 422
+        # Explicit Save may retain unquantified ingredients; draft calls still never save.
+        assert client.post("/api/recipes", json=draft["adapted"]).status_code == 201
     async with Client(app.state.mcp) as mcp:
         result = await mcp.call_tool(
             "draft_recipe",
@@ -259,4 +259,4 @@ async def test_source_ai_api_mcp_share_drafts_without_persistence(test_database_
             content.get("result", content)["adapted"]["source_ingredients"]
             == draft["adapted"]["source_ingredients"]
         )
-    assert len(app.state.service.list_recipes()) == 1
+    assert len(app.state.service.list_recipes()) == 2

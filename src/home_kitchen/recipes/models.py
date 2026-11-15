@@ -8,8 +8,10 @@ from home_kitchen.imports import ImportedDraft
 from home_kitchen.models import (
     AdaptationProvenance,
     NonBlank,
+    PhotoSource,
     Quantity,
     RecipeCreate,
+    RecipeImageAttribution,
     SourceIndex,
     SourceIngredient,
     validate_source_metadata,
@@ -48,6 +50,8 @@ class EditableRecipeDraft(BaseModel):
     image_url: HttpUrl | None = None
     source_ingredients: list[SourceIngredient] = Field(default_factory=list)
     provenance: AdaptationProvenance | None = None
+    photo_source: PhotoSource | None = None
+    image_attribution: RecipeImageAttribution | None = None
 
     @model_validator(mode="after")
     def valid_references(self) -> "EditableRecipeDraft":

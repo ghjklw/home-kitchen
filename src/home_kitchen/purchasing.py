@@ -5,12 +5,13 @@ from decimal import Decimal
 from typing import Protocol
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from home_kitchen.context import history_context
 from home_kitchen.history import HistoryEntryCreate, HistoryRepository
 from home_kitchen.inventory import InventoryService, PurchasePlanLine
+from home_kitchen.models import UnquantifiedNeed
 from home_kitchen.oda import OdaService
 
 
@@ -73,6 +74,7 @@ class StoreTripLine(PurchasePlanLine):
 
 
 class StoreTrip(BaseModel):
+    unquantified: list[UnquantifiedNeed] = Field(default_factory=list)
     start: date
     end: date
     lines: list[StoreTripLine]
@@ -117,6 +119,7 @@ class StoreTripService:
             lines=lines,
             checked_count=sum(line.checked for line in lines),
             total_count=len(lines),
+            unquantified=plan.unquantified,
         )
 
     def check(self, start: date, end: date, need_id: UUID, checked: bool) -> StoreTrip:

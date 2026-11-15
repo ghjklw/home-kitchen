@@ -6,6 +6,7 @@ import json
 import re
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from html import unescape
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit
 
@@ -135,6 +136,11 @@ def _image_candidates(value):
 
 def _safe_image_url(value: str) -> HttpUrl | None:
     try:
+        # Some public Oda product pages emit HTML-escaped query separators in
+        # JSON-LD script data (for example ``&amp;format=auto``). Script contents
+        # are not entity-decoded by HTML parsers, so normalize that representation
+        # before validating and returning the actual image URL.
+        value = unescape(value)
         parsed = urlsplit(value)
         if (
             parsed.scheme != "https"

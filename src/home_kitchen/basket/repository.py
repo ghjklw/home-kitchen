@@ -59,6 +59,12 @@ class BasketService:
                 continue
             active.append(_unverified(selection))
         result = evaluate_basket(needs, active)
+        result.unquantified = week.unquantified
+        if week.unquantified:
+            result.ready_for_review = False
+            result.issues.extend(
+                f"Quantity requires review: {need.name}" for need in week.unquantified
+            )
         if stale_count:
             result.issues.append(
                 f"{stale_count} saved product selection(s) no longer match current shopping needs"
@@ -218,6 +224,7 @@ class BasketService:
                 for line in plan.purchase_lines
             ],
             suggestions=plan.suggestions,
+            unquantified=plan.unquantified,
         )
 
     @staticmethod

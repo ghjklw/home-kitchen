@@ -64,10 +64,12 @@ def test_explicit_save_edit_restart_retains_original_attribution_and_history(tes
         assert loaded["source_ingredients"] == source_recipe()["source_ingredients"]
         assert loaded["provenance"] == source_recipe()["provenance"]
         assert loaded["ingredients"][0]["source_indices"] == [0]
-        # A nullable draft remains distinct from a saveable recipe.
+        # Explicitly unquantified saved ingredients preserve source provenance without inventing an amount.
         unresolved = {**loaded, "ingredients": [{"name": "salt", "quantity": None, "unit": None}]}
-        assert client.put(f"/api/recipes/{saved['id']}", json=unresolved).status_code == 422
-        assert client.get(f"/api/recipes/{saved['id']}").json() == expected
+        assert client.put(f"/api/recipes/{saved['id']}", json=unresolved).status_code == 200
+        assert (
+            client.get(f"/api/recipes/{saved['id']}").json()["ingredients"][0]["quantity"] is None
+        )
         history = HistoryRepository(app.state.service.store.engine).list()
         latest_save = next(
             entry for entry in history if entry.structured.get("entity_type") == "recipe"

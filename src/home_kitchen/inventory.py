@@ -11,7 +11,7 @@ from sqlalchemy import text
 
 from home_kitchen.context import history_context
 from home_kitchen.history import HistoryEntryCreate, HistoryRepository
-from home_kitchen.models import NonBlank, RegularItem
+from home_kitchen.models import NonBlank, RegularItem, UnquantifiedNeed
 from home_kitchen.service import KitchenService
 from home_kitchen.shopping import need_id, normalize_need_text
 from home_kitchen.units import add_exact, canonicalize_quantity, compatible_units, normalize_unit
@@ -53,6 +53,7 @@ class PurchasePlan(BaseModel):
     end: date
     lines: list[PurchasePlanLine]
     suggestions: list[RegularItem]
+    unquantified: list[UnquantifiedNeed] = Field(default_factory=list)
 
     @property
     def purchase_lines(self) -> list[PurchasePlanLine]:
@@ -282,4 +283,10 @@ class InventoryService:
                     origins=requirement.origins,
                 )
             )
-        return PurchasePlan(start=start, end=end, lines=lines, suggestions=week.suggestions)
+        return PurchasePlan(
+            start=start,
+            end=end,
+            lines=lines,
+            suggestions=week.suggestions,
+            unquantified=week.unquantified,
+        )

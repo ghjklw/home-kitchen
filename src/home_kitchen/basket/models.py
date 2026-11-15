@@ -7,6 +7,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, HttpUrl, StringConstraints, ValidationInfo, field_validator
 
+from home_kitchen.models import UnquantifiedNeed
+
 NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 PositiveQuantity = Annotated[Decimal, Field(gt=0, allow_inf_nan=False)]
 NonNegative = Annotated[Decimal, Field(ge=0, allow_inf_nan=False)]
@@ -99,6 +101,7 @@ class BasketNeedStatus(BaseModel):
 
 
 class BasketReview(BaseModel):
+    unquantified: list[UnquantifiedNeed] = Field(default_factory=list)
     needs: list[BasketNeedStatus]
     total_cost: NonNegative
     price_complete: bool

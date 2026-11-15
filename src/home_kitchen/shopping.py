@@ -14,6 +14,7 @@ from home_kitchen.models import (
     ShoppingLine,
     WeekShopping,
 )
+from home_kitchen.units import add_exact, canonical_unit, canonicalize_quantity
 
 
 def normalize_need_text(value: str) -> str:
@@ -22,9 +23,14 @@ def normalize_need_text(value: str) -> str:
 
 
 def need_id(start: date, end: date, name: str, unit: str) -> UUID:
+    """Canonical units keep equivalent needs stable; legacy-unit basket selections become stale.
+
+    Selection records with pre-canonical unit IDs are intentionally not migrated implicitly.
+    The basket review reports them as stale so a user must review the converted need.
+    """
     return uuid5(
         NAMESPACE_URL,
-        f"kitchen:{start}:{end}:{normalize_need_text(name)}:{normalize_need_text(unit)}",
+        f"kitchen:{start}:{end}:{normalize_need_text(name)}:{canonical_unit(unit)}",
     )
 
 
@@ -131,11 +137,14 @@ class ShoppingBuilder:
         for contributor in self.contributors.values():
             contribution = contributor.contribute(context)
             for line in contribution.lines:
-                key = (normalize_need_text(line.name), normalize_need_text(line.unit))
+                quantity, unit = canonicalize_quantity(line.quantity, line.unit)
+                key = (normalize_need_text(line.name), unit)
                 if key not in totals:
-                    totals[key] = line.model_copy(deep=True)
+                    totals[key] = line.model_copy(
+                        update={"quantity": quantity, "unit": unit}, deep=True
+                    )
                 else:
-                    totals[key].quantity += line.quantity
+                    totals[key].quantity = add_exact(totals[key].quantity, quantity)
                     if totals[key].category == "Other":
                         totals[key].category = line.category
                     totals[key].origins = list(dict.fromkeys(totals[key].origins + line.origins))

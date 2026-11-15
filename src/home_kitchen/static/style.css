@@ -214,6 +214,22 @@ h3 {
   min-width: 185px;
   text-align: center;
 }
+.date-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.date-jump input {
+  min-height: 40px;
+  max-width: 155px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--ink);
+}
 .week-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(205px, 1fr));
@@ -235,6 +251,20 @@ h3 {
 .day.today {
   border-color: #71977c;
   box-shadow: inset 0 3px #71977c;
+}
+.meal-slot {
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+}
+.meal-slot .eyebrow {
+  margin-bottom: 7px;
+}
+.meal-slot .meal-title {
+  margin-bottom: 5px;
+}
+.meal-slot .muted,
+.meal-slot .empty-meal {
+  margin-bottom: 8px;
 }
 .day .date {
   font-size: 12px;

@@ -112,14 +112,14 @@
     const quantity = value.quantity == null ? "" : String(value.quantity);
     const unit = value.unit == null ? "" : String(value.unit);
     const name = value.name == null ? "" : String(value.name);
-    const sourceText = [quantity, unit, name].filter(Boolean).join(" ");
     return {
-      sourceText,
+      sourceText: "",
       name,
       quantity,
       unit,
       category: value.category == null ? "Other" : String(value.category),
-      parsed: false,
+      parsed: null,
+      hasDraftValues: Boolean(name || quantity || unit),
     };
   }
 

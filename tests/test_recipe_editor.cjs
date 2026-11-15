@@ -37,13 +37,14 @@ test("validates exact positive decimal quantities without numeric rounding", () 
   }
 });
 
-test("maps structured drafts to editable values and retains their source wording", () => {
+test("maps structured drafts without presenting a synthesized summary as source text", () => {
   assert.deepEqual(rowFromDraft({ name: "flour", quantity: 2, unit: "cups", category: "Pantry" }), {
-    sourceText: "2 cups flour",
+    sourceText: "",
     name: "flour",
     quantity: "2",
     unit: "cups",
     category: "Pantry",
-    parsed: false,
+    parsed: null,
+    hasDraftValues: true,
   });
 });

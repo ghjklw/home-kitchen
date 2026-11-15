@@ -6,6 +6,7 @@ from datetime import date
 
 from pydantic_ai import Agent
 
+from home_kitchen.basket.matching import BasketMatchingService, OdaSearchAdapter
 from home_kitchen.context import history_context
 from home_kitchen.history import HistoryRepository
 from home_kitchen.inventory import InventoryService
@@ -20,6 +21,12 @@ from home_kitchen.recipes import (
     RecipeDraft,
     RecipeDraftRequest,
     create_recipe_providers,
+)
+from home_kitchen.recipes.discovery import (
+    MarmitonDiscoveryProvider,
+    MatpratDiscoveryProvider,
+    OdaDiscoveryProvider,
+    RecipeDiscoveryRegistry,
 )
 from home_kitchen.recipes.models import EditableRecipeDraft
 from home_kitchen.recommendations import PlanDraft, build_planner, recommend_plan
@@ -43,9 +50,17 @@ class KitchenFeatures:
         self.oda = OdaService(kitchen.store.engine, settings)
         self.oda_cart = OdaCartService(self.oda)
         self.inventory = InventoryService(kitchen, self.history)
+        self.basket_matching = BasketMatchingService(self.inventory, OdaSearchAdapter(self.oda))
         self.store_trip = StoreTripService(self.inventory, self.history)
         self.purchase_modes = PurchaseModes([OdaMode(self.oda), InStoreMode()])
         self.recipe_providers = create_recipe_providers(settings, ai_agent=ai)
+        self.recipe_discovery = RecipeDiscoveryRegistry(
+            [
+                OdaDiscoveryProvider(self.oda),
+                MarmitonDiscoveryProvider(),
+                MatpratDiscoveryProvider(),
+            ]
+        )
 
     def evidence(self, query: str) -> list[EvidenceSnippet]:
         # Explicit feedback/preferences and actual purchases remain relevant even

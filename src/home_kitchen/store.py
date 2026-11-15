@@ -93,6 +93,12 @@ settings = Table(
     Column("key", Text, primary_key=True),
     Column("value", Text, nullable=False),
 )
+
+
+class MealSlotOccupied(ValueError):
+    """A new meal must never silently replace an existing plan."""
+
+
 TABLES = {"recipe": recipes, "meal": meals, "item": items, "regular": regulars}
 
 
@@ -133,9 +139,19 @@ class Store:
                 previous = connection.execute(
                     select(regulars.c.last_purchased).where(regulars.c.id == entity.id)
                 ).first()
-            connection.execute(
-                statement.on_conflict_do_update(index_elements=conflict, set_=values)
-            )
+            if kind == "meal":
+                inserted = connection.execute(
+                    statement.on_conflict_do_nothing(index_elements=conflict).returning(table.c.id)
+                ).scalar_one_or_none()
+                if inserted is None:
+                    raise MealSlotOccupied(
+                        "This meal slot is already planned. Choose another slot or remove "
+                        "the existing meal before adding its replacement."
+                    )
+            else:
+                connection.execute(
+                    statement.on_conflict_do_update(index_elements=conflict, set_=values)
+                )
             purchased = (
                 isinstance(entity, RegularItem)
                 and entity.last_purchased is not None

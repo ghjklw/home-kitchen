@@ -22,7 +22,7 @@ const state = {
   items: [],
   regular: [],
   integrations: {},
-  week: monday(new Date()),
+  week: localDate(new Date()),
 };
 let noticeTimer;
 function el(tag, text, className) {
@@ -79,7 +79,9 @@ async function api(path, method = "GET", body) {
     const error = new Error(
       response.status === 401 || response.status === 403
         ? "Sign in through your household’s trusted access link, then try again."
-        : detail ||
+        : response.status === 409 && path === "/meals"
+          ? "That meal time is already occupied. Choose another slot, or remove the existing meal first. Your form is still here."
+          : detail ||
           (response.status === 503
             ? path === "/ai/plan"
               ? "AI meal planning needs a provider configured by your household administrator."
@@ -94,10 +96,9 @@ async function api(path, method = "GET", body) {
   }
   return response.status === 204 ? null : response.json();
 }
-function monday(value) {
+function localDate(value) {
   const date = new Date(value);
   date.setHours(12, 0, 0, 0);
-  date.setDate(date.getDate() - ((date.getDay() + 6) % 7));
   return date;
 }
 function iso(date) {
@@ -114,6 +115,17 @@ function day(offset) {
 }
 function range() {
   return "?start=" + iso(day(0)) + "&end=" + iso(day(6));
+}
+function parseDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(value || "")) return null;
+  const [year, month, date] = value.split("-").map(Number);
+  const parsed = new Date(year, month - 1, date, 12);
+  return iso(parsed) === value ? parsed : null;
+}
+function syncPlannerUrl() {
+  const url = new URL(location.href);
+  url.searchParams.set("date", iso(state.week));
+  history.replaceState(null, "", url.pathname + url.search + url.hash);
 }
 function dateLabel(date, options) {
   return date.toLocaleDateString(undefined, options);
@@ -168,11 +180,27 @@ function weekControls() {
   const row = el("div", null, "toolbar");
   const change = async (amount) => {
     state.week.setDate(state.week.getDate() + amount);
+    syncPlannerUrl();
     await refreshView();
   };
+  const previous = button("←", () => change(-7));
+  const next = button("→", () => change(7));
+  const jump = el("label", null, "date-jump");
+  const jumpInput = el("input");
+  jumpInput.type = "date";
+  jumpInput.value = iso(state.week);
+  jumpInput.setAttribute("aria-label", "Jump to date");
+  jump.append(el("span", "Jump to date"), jumpInput);
+  jumpInput.addEventListener("change", async () => {
+    const date = parseDate(jumpInput.value);
+    if (!date) return;
+    state.week = date;
+    syncPlannerUrl();
+    await refreshView();
+  });
   add(
     row,
-    button("←", () => change(-7)),
+    previous,
     el(
       "span",
       dateLabel(day(0), { month: "short", day: "numeric" }) +
@@ -180,18 +208,20 @@ function weekControls() {
         dateLabel(day(6), { month: "short", day: "numeric", year: "numeric" }),
       "week-range",
     ),
-    button("→", () => change(7)),
+    next,
     button(
-      "This week",
+      "Today",
       async () => {
-        state.week = monday(new Date());
+        state.week = localDate(new Date());
+        syncPlannerUrl();
         await refreshView();
       },
       "quiet small",
     ),
+    jump,
   );
-  row.children[0].ariaLabel = "Previous week";
-  row.children[2].ariaLabel = "Next week";
+  previous.ariaLabel = "Previous 7 days";
+  next.ariaLabel = "Next 7 days";
   return row;
 }
 function openDialog(heading) {
@@ -322,7 +352,7 @@ function renderWeek(main) {
     title(
       "Make room for good food",
       "Your week, on a plate.",
-      "A simple plan for the days ahead.",
+      "Plan breakfast, lunch and dinner for the next seven days.",
       [
         button("Suggest my week", suggestWeek),
         button("Plan a meal", () => mealForm(), "primary"),
@@ -349,44 +379,50 @@ function renderWeek(main) {
         "date",
       ),
     );
-    if (meals.length) {
-      meals.forEach((meal) => {
-        const recipe = state.recipes.find((item) => item.id === meal.recipe_id);
-        add(
-          card,
-          el("span", "DINNER", "eyebrow"),
-          el("h3", recipe?.title || "Recipe unavailable", "meal-title"),
-          el("p", meal.servings + " servings", "muted"),
+    ["breakfast", "lunch", "dinner"].forEach((slot) => {
+      const slotSection = el("section", null, "meal-slot");
+      add(slotSection, el("span", slot, "eyebrow"));
+      const slotMeals = meals.filter((meal) => (meal.slot || "dinner") === slot);
+      if (slotMeals.length) {
+        slotMeals.forEach((meal) => {
+          const recipe = state.recipes.find((item) => item.id === meal.recipe_id);
           add(
-            el("div", null, "meal-actions"),
-            recipe
-              ? button("View recipe", () => viewRecipe(recipe), "small")
-              : null,
-            button(
-              "Remove",
-              async () => {
-                try {
-                  await mutate(
-                    "/meals/" + encodeURIComponent(meal.id),
-                    "DELETE",
-                    undefined,
-                    "Meal removed.",
-                  );
-                } catch (err) {
-                  notify(err.message, true);
-                }
-              },
-              "small quiet",
+            slotSection,
+            el("h3", recipe?.title || "Recipe unavailable", "meal-title"),
+            el("p", meal.servings + " servings", "muted"),
+            add(
+              el("div", null, "meal-actions"),
+              recipe
+                ? button("View recipe", () => viewRecipe(recipe), "small")
+                : null,
+              button(
+                "Remove",
+                async () => {
+                  try {
+                    await mutate(
+                      "/meals/" + encodeURIComponent(meal.id),
+                      "DELETE",
+                      undefined,
+                      "Meal removed.",
+                    );
+                  } catch (err) {
+                    notify(err.message, true);
+                  }
+                },
+                "small quiet",
+              ),
             ),
-          ),
+          );
+        });
+      } else {
+        add(
+          slotSection,
+          el("p", "Nothing planned", "empty-meal"),
+          button("+ Add " + slot, () => mealForm(iso(date), undefined, slot), "quiet small"),
         );
-      });
-    } else
-      add(
-        card,
-        el("p", "Something good?", "empty-meal"),
-        button("+ Add dinner", () => mealForm(iso(date)), "quiet"),
-      );
+      }
+      add(card, slotSection);
+    });
     add(grid, card);
   }
   add(main, grid);
@@ -513,7 +549,7 @@ async function suggestWeek() {
     );
   }
 }
-function mealForm(date = iso(day(0)), recipeId) {
+function mealForm(date = iso(day(0)), recipeId, slot = "dinner") {
   if (!state.recipes.length) {
     const root = openDialog("Start with a recipe");
     add(
@@ -523,7 +559,7 @@ function mealForm(date = iso(day(0)), recipeId) {
     );
     return;
   }
-  const root = openDialog("Plan a dinner");
+  const root = openDialog("Plan a meal");
   const form = el("form");
   const chosenDate = field("Day", "date", date);
   chosenDate.input.required = true;
@@ -534,6 +570,13 @@ function mealForm(date = iso(day(0)), recipeId) {
     add(recipe.input, option);
   });
   if (recipeId) recipe.input.value = recipeId;
+  const mealSlot = field("Meal time", "select");
+  ["breakfast", "lunch", "dinner"].forEach((value) => {
+    const option = el("option", value[0].toUpperCase() + value.slice(1));
+    option.value = value;
+    add(mealSlot.input, option);
+  });
+  mealSlot.input.value = slot;
   const servings = field(
     "Servings",
     "number",
@@ -542,20 +585,23 @@ function mealForm(date = iso(day(0)), recipeId) {
   servings.input.min = 1;
   servings.input.max = 100;
   servings.input.required = true;
-  add(form, chosenDate.wrap, recipe.wrap, servings.wrap);
-  formSubmit(form, "Add to week", () =>
-    mutate(
-      "/meals",
-      "POST",
-      {
-        date: chosenDate.input.value,
-        slot: "dinner",
-        recipe_id: recipe.input.value,
-        servings: Number(servings.input.value),
-      },
-      "Dinner is planned.",
-    ),
-  );
+  add(form, chosenDate.wrap, mealSlot.wrap, recipe.wrap, servings.wrap);
+  formSubmit(form, "Add to week", async () => {
+    const mealDate = chosenDate.input.value;
+    await api("/meals", "POST", {
+      date: mealDate,
+      slot: mealSlot.input.value,
+      recipe_id: recipe.input.value,
+      servings: Number(servings.input.value),
+    });
+    state.week = parseDate(mealDate) || localDate(new Date());
+    syncPlannerUrl();
+    $("#modal").close();
+    state.view = "week";
+    location.hash = "week";
+    await refreshView();
+    notify("Meal planned.");
+  });
   add(root, form);
 }
 function renderRecipes(main) {
@@ -576,7 +622,7 @@ function renderRecipes(main) {
   search.type = "search";
   search.placeholder = "Find a recipe…";
   search.ariaLabel = "Find a recipe";
-  add(tools, search, button("Ask AI for an idea", aiForm, "quiet"));
+  add(tools, search);
   add(main, tools);
   const results = el("div");
   const draw = () => {
@@ -589,7 +635,7 @@ function renderRecipes(main) {
         results,
         empty(
           "Your recipe book starts here",
-          "Add a recipe you love, import a recipe link, or ask for a new idea. Your collection is yours to build.",
+          "Add a recipe you love or import one from a link. Your collection is yours to build.",
           button("Add your first recipe", () => recipeForm(), "primary"),
         ),
       );
@@ -637,7 +683,10 @@ function renderRecipes(main) {
   add(main, results);
 }
 function recipeForm(draft = {}, source = "manual") {
-  const root = openDialog(draft.title ? "Review your recipe" : "Add a recipe");
+  const isEditing = Boolean(draft.id);
+  const root = openDialog(
+    isEditing ? "Edit recipe" : draft.title ? "Review your recipe" : "Add a recipe",
+  );
   if (source !== "manual")
     add(
       root,
@@ -651,13 +700,22 @@ function recipeForm(draft = {}, source = "manual") {
   const name = field("Recipe name", "text", draft.title);
   name.input.required = true;
   const servings = field(
-    "Recipe servings",
+    "Recipe servings to save",
     "number",
     draft.servings || state.household.default_servings || 2,
   );
   servings.input.min = 1;
   servings.input.max = 100;
   servings.input.required = true;
+  if (!isEditing && source === "imported" && draft.servings != null)
+    add(
+      form,
+      el(
+        "p",
+        "Source recipe servings: " + draft.servings + ". The value below is what Kitchen will save.",
+        "muted",
+      ),
+    );
   const imageUrl = field(
     "Recipe photo URL (optional)",
     "url",
@@ -665,24 +723,96 @@ function recipeForm(draft = {}, source = "manual") {
     "Use an HTTPS image URL. No photo is added unless you provide one.",
   );
   imageUrl.input.placeholder = "https://…";
-  const ingredientText = (draft.ingredients || [])
-    .map((item) =>
-      typeof item === "string"
-        ? item + " | | | Other"
-        : [item.name, item.quantity, item.unit, item.category || "Other"].join(
-            " | ",
-          ),
-    )
-    .join("\n");
-  const ingredients = field(
-    "Ingredients",
-    "textarea",
-    ingredientText,
-    "One per line: ingredient | quantity | unit | category. For example: Carrots | 3 | item | Produce. Use Other when unsure and a decimal point for quantities, such as 0.5.",
+  const ingredientEditor = el("fieldset", null, "ingredient-editor");
+  add(ingredientEditor, el("legend", "Ingredients"));
+  add(
+    ingredientEditor,
+    el(
+      "p",
+      "Review every ingredient. Source wording stays visible; quantities and units must be explicit before saving.",
+      "muted",
+    ),
   );
-  ingredients.input.required = true;
-  ingredients.input.placeholder =
-    "Carrots | 3 | item | Produce\nOlive oil | 2 | tbsp | Pantry";
+  if (source === "imported" && draft.source_url) {
+    const original = el("a", "Open original recipe", "source-link");
+    original.href = draft.source_url;
+    original.target = "_blank";
+    original.rel = "noopener noreferrer";
+    add(ingredientEditor, original);
+  }
+  const ingredientRows = el("div", null, "ingredient-rows");
+  let rowControllers = (Array.isArray(draft.ingredients) ? draft.ingredients : []).map(
+    (item) => window.KitchenRecipeEditor.rowFromDraft(item),
+  );
+  if (!rowControllers.length) rowControllers.push(window.KitchenRecipeEditor.rowFromDraft({}));
+
+  function updateIngredientRowLabels() {
+    rowControllers.forEach((row, index) => {
+      row.legend.textContent = "Ingredient " + (index + 1);
+      row.remove.setAttribute("aria-label", "Remove ingredient " + (index + 1));
+    });
+  }
+
+  function createIngredientRow(values) {
+    const row = el("fieldset", null, "ingredient-row");
+    const legend = el("legend");
+    const sourceText = values.sourceText
+      ? el("p", "Source text: " + values.sourceText, "ingredient-source")
+      : null;
+    const status = values.parsed === true
+      ? "Quantity and unit parsed from the source. Review both against the original text."
+      : values.parsed === false
+        ? "Quantity or unit is ambiguous. Enter both explicitly; Kitchen will not guess them."
+        : values.hasDraftValues
+          ? "Draft values shown below. Review them before saving."
+          : "Enter an explicit positive quantity and unit.";
+    const sourceStatus = el("p", status, "ingredient-status");
+    const fields = el("div", null, "ingredient-fields");
+    const ingredientName = field("Name", "text", values.name);
+    const quantity = field(
+      "Quantity",
+      "text",
+      values.quantity,
+      "Positive amount; use a decimal point, such as 0.5.",
+    );
+    quantity.input.inputMode = "decimal";
+    const unit = field("Unit", "text", values.unit, "Use an explicit unit, such as g, ml, item, or tbsp.");
+    const category = field("Category", "text", values.category || "Other");
+    const rowError = el("p", "", "ingredient-error");
+    rowError.setAttribute("role", "alert");
+    const remove = button("Remove", () => {
+      const index = rowControllers.indexOf(controller);
+      if (index < 0) return;
+      rowControllers.splice(index, 1);
+      row.remove();
+      updateIngredientRowLabels();
+    }, "quiet small");
+    const controller = {
+      row,
+      legend,
+      remove,
+      name: ingredientName.input,
+      quantity: quantity.input,
+      unit: unit.input,
+      category: category.input,
+      error: rowError,
+    };
+    add(fields, ingredientName.wrap, quantity.wrap, unit.wrap, category.wrap);
+    add(row, legend, sourceText, sourceStatus, fields, rowError, remove);
+    return controller;
+  }
+
+  rowControllers = rowControllers.map(createIngredientRow);
+  rowControllers.forEach((row) => ingredientRows.append(row.row));
+  updateIngredientRowLabels();
+  const addIngredient = button("+ Add ingredient", () => {
+    const row = createIngredientRow(window.KitchenRecipeEditor.rowFromDraft({}));
+    rowControllers.push(row);
+    ingredientRows.append(row.row);
+    updateIngredientRowLabels();
+    row.name.focus();
+  }, "quiet");
+  add(ingredientEditor, ingredientRows, addIngredient);
   const instructions = field(
     "Instructions",
     "textarea",
@@ -695,38 +825,43 @@ function recipeForm(draft = {}, source = "manual") {
     name.wrap,
     servings.wrap,
     imageUrl.wrap,
-    ingredients.wrap,
+    ingredientEditor,
     instructions.wrap,
   );
   formSubmit(form, "Save recipe", async () => {
     const photo = imageUrl.input.value.trim();
     if (photo && !httpsUrl(photo))
       throw new Error("Recipe photo URL must use HTTPS.");
-    const rows = ingredients.input.value
-      .split("\n")
-      .filter((line) => line.trim())
-      .map((line, index) => {
-        const parts = line.split("|").map((value) => value.trim());
-        if (
-          ![3, 4].includes(parts.length) ||
-          !parts[0] ||
-          !/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(parts[1]) ||
-          Number(parts[1]) <= 0 ||
-          !parts[2]
-        )
-          throw new Error(
-            "Ingredient line " +
-              (index + 1) +
-              " needs a name, positive quantity and unit separated by |.",
-          );
-        return {
-          name: parts[0],
-          quantity: parts[1],
-          unit: parts[2],
-          category: parts[3] || "Other",
-        };
-      });
-    await api("/recipes", "POST", {
+    if (!rowControllers.length) throw new Error("Add at least one ingredient before saving.");
+    let hasIngredientErrors = false;
+    const rows = rowControllers.map((row) => {
+      const item = {
+        name: row.name.value.trim(),
+        quantity: row.quantity.value.trim(),
+        unit: row.unit.value.trim(),
+        category: row.category.value.trim() || "Other",
+      };
+      const errors = [];
+      const fieldErrors = {
+        name: !item.name,
+        quantity: !window.KitchenRecipeEditor.isPositiveQuantity(item.quantity),
+        unit: !item.unit,
+      };
+      if (fieldErrors.name) errors.push("Add an ingredient name.");
+      if (fieldErrors.quantity) {
+        errors.push("Enter an exact positive quantity using a decimal point; ambiguous source text needs your review.");
+      }
+      if (fieldErrors.unit) errors.push("Enter the ingredient unit explicitly.");
+      row.error.textContent = errors.join(" ");
+      row.name.setAttribute("aria-invalid", String(fieldErrors.name));
+      row.quantity.setAttribute("aria-invalid", String(fieldErrors.quantity));
+      row.unit.setAttribute("aria-invalid", String(fieldErrors.unit));
+      hasIngredientErrors ||= errors.length > 0;
+      return item;
+    });
+    if (hasIngredientErrors)
+      throw new Error("Fix the ingredient fields marked with an error before saving.");
+    const payload = {
       title: name.input.value.trim(),
       servings: Number(servings.input.value),
       image_url: photo || null,
@@ -737,11 +872,16 @@ function recipeForm(draft = {}, source = "manual") {
         .filter(Boolean),
       source,
       source_url: draft.source_url || null,
-    });
+    };
+    await api(
+      isEditing ? "/recipes/" + encodeURIComponent(draft.id) : "/recipes",
+      isEditing ? "PUT" : "POST",
+      payload,
+    );
     state.recipes = await api("/recipes");
     $("#modal").close();
     navigate("recipes");
-    notify("Recipe added to your collection.");
+    notify(isEditing ? "Recipe changes saved." : "Recipe added to your collection.");
   });
   add(root, form);
 }
@@ -781,6 +921,7 @@ function viewRecipe(recipe) {
     add(
       el("div", null, "actions"),
       button("Plan a dinner", () => mealForm(undefined, recipe.id), "primary"),
+      button("Edit recipe", () => recipeForm(recipe, recipe.source || "manual"), "quiet"),
       button("Rate this recipe", () => feedbackForm(recipe), "quiet"),
       button(
         "Delete recipe",
@@ -840,45 +981,6 @@ function importForm() {
   formSubmit(form, "Import for review", async () => {
     const draft = await api("/recipe-import", "POST", { url: url.input.value });
     recipeForm(draft, "imported");
-  });
-  add(root, form);
-}
-function aiForm() {
-  const root = openDialog("What sounds good?");
-  if (!state.integrations.ai?.configured) {
-    add(
-      root,
-      el(
-        "p",
-        "AI recipe ideas need an AI provider configured by your household administrator. You can add recipes manually or import a link in the meantime.",
-        "callout",
-      ),
-      button("Add a recipe", () => recipeForm(), "primary"),
-    );
-    return;
-  }
-  add(
-    root,
-    el(
-      "p",
-      "Describe the meal you have in mind. Review generated ingredients and instructions before saving.",
-      "muted",
-    ),
-  );
-  const form = el("form");
-  const prompt = field(
-    "Your idea",
-    "textarea",
-    "",
-    "For example: a quick vegetarian dinner with lentils and carrots.",
-  );
-  prompt.input.required = true;
-  add(form, prompt.wrap);
-  formSubmit(form, "Create an idea", async () => {
-    const draft = await api("/ai/recipe", "POST", {
-      prompt: prompt.input.value,
-    });
-    recipeForm(draft, "ai");
   });
   add(root, form);
 }
@@ -2873,7 +2975,7 @@ function renderSettings(main) {
         el("h2", "Connected services"),
         el(
           "p",
-          "AI recipe ideas: " +
+          "AI assistance: " +
             (state.integrations.ai?.configured
               ? "configured"
               : "setup required") +
@@ -2920,6 +3022,8 @@ window.addEventListener("online", () => {
 async function start() {
   try {
     const odaResult = new URLSearchParams(location.search).get("oda");
+    const requestedDate = parseDate(new URLSearchParams(location.search).get("date"));
+    if (requestedDate) state.week = requestedDate;
     [state.household, state.recipes, state.integrations] = await Promise.all([
       api("/household"),
       api("/recipes"),
@@ -2935,12 +3039,17 @@ async function start() {
             )
           ? requested
           : "week";
+    syncPlannerUrl();
     await refreshView();
     if (odaResult) {
+      const remainingQuery = new URLSearchParams(location.search);
+      remainingQuery.delete("oda");
       history.replaceState(
         null,
         "",
-        location.pathname + (state.household.name ? "#basket" : ""),
+        location.pathname +
+          (remainingQuery.size ? "?" + remainingQuery.toString() : "") +
+          (state.household.name ? "#basket" : ""),
       );
       if (odaResult === "connected") {
         try {

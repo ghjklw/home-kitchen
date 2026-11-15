@@ -42,16 +42,15 @@ def test_scaled_meals_capture_and_incompatible_units(service):
     assert soup.instructions == ["Chop", "Cook"]
 
 
-def test_meal_boundaries_replacement_and_unknown_recipe(service):
+def test_meal_boundaries_occupied_slot_and_unknown_recipe(service):
     soup = recipe(service)
     for day in (1, 2, 3):
         service.plan_meal(MealCreate(date=date(2026, 1, day), recipe_id=soup.id, servings=2))
-    replacement = service.plan_meal(
-        MealCreate(date=date(2026, 1, 2), recipe_id=soup.id, servings=4)
-    )
+    with pytest.raises(ValueError, match="already planned"):
+        service.plan_meal(MealCreate(date=date(2026, 1, 2), recipe_id=soup.id, servings=4))
     meals = service.list_meals(date(2026, 1, 2), date(2026, 1, 3))
     assert [meal.date.day for meal in meals] == [2, 3]
-    assert meals[0] == replacement
+    assert meals[0].servings == 2
     with pytest.raises(KeyError):
         service.plan_meal(MealCreate(date=date(2026, 1, 2), recipe_id=uuid4(), servings=2))
     with pytest.raises(ValueError):

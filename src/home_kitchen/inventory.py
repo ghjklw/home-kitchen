@@ -132,6 +132,10 @@ class InventoryService:
             unit=unit_key,
         )
         with self.engine.begin() as connection:
+            connection.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                {"key": f"kitchen:stock:{name_key}:{unit_key}"},
+            )
             legacy_keys = sorted(compatible_units(unit_key))
             unit_params = {f"unit_{index}": value for index, value in enumerate(legacy_keys)}
             placeholders = ",".join(f":{name}" for name in unit_params)
@@ -207,15 +211,25 @@ class InventoryService:
         with self.engine.begin() as connection:
             row = (
                 connection.execute(
-                    text(
-                        "SELECT name,normalized_name,unit FROM kitchen_inventory WHERE id=:id FOR UPDATE"
-                    ),
+                    text("SELECT name,normalized_name,unit FROM kitchen_inventory WHERE id=:id"),
                     {"id": item_id},
                 )
                 .mappings()
                 .first()
             )
             if row is None:
+                raise KeyError(str(item_id))
+            _, unit_key = canonicalize_quantity(Decimal(0), row["unit"])
+            connection.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                {"key": f"kitchen:stock:{row['normalized_name']}:{unit_key}"},
+            )
+            if (
+                connection.execute(
+                    text("SELECT id FROM kitchen_inventory WHERE id=:id"), {"id": item_id}
+                ).first()
+                is None
+            ):
                 raise KeyError(str(item_id))
             # A displayed stock record may aggregate compatible legacy rows.
             # Removing that record must remove its complete visible quantity.

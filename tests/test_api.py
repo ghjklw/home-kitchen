@@ -4,7 +4,7 @@ from decimal import Decimal
 from fastapi.testclient import TestClient
 
 from home_kitchen.app import create_app
-from home_kitchen.settings import Settings
+from home_kitchen.settings import Household, Settings
 
 
 def make_client(path):
@@ -32,6 +32,7 @@ def test_empty_household_recipe_meal_shopping_and_restart(test_database_url):
             "dietary_preferences": [],
             "default_servings": 2,
             "language": "en",
+            "shopping_category_order": Household().shopping_category_order,
         }
         assert client.get("/api/items").json() == []
         household = client.put(

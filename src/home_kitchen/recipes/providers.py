@@ -172,6 +172,7 @@ class AIRecipeProvider:
             source=source,
             evidence_context="\n".join(item.model_dump_json() for item in context.knowledge),
             actor_id=context.actor_id,
+            preserve_source_measures=imported is not None and request.prompt is None,
         )
         return RecipeDraft(
             provider=self.provider_id,

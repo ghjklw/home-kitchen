@@ -6,6 +6,7 @@ import asyncio
 import re
 from collections.abc import Sequence
 from html.parser import HTMLParser
+from itertools import zip_longest
 from typing import Annotated, Literal, Protocol
 from urllib.parse import urljoin, urlsplit
 
@@ -23,6 +24,22 @@ MAX_RESULTS = 10
 USER_AGENT = "HomeKitchenBot/0.1 (+https://github.com/ghjklw/home-kitchen)"
 _MARMITON_HOSTS = {"marmiton.org", "www.marmiton.org"}
 _MARMITON_RECIPE_PATH = re.compile(r"^/recettes/recette_[a-z0-9_.~-]+_[0-9]+\.aspx$")
+_VOID_TAGS = {
+    "area",
+    "base",
+    "br",
+    "col",
+    "embed",
+    "hr",
+    "img",
+    "input",
+    "link",
+    "meta",
+    "param",
+    "source",
+    "track",
+    "wbr",
+}
 
 DiscoveryQuery = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)
@@ -105,6 +122,8 @@ class _MarmitonParser(HTMLParser):
         self.truncated = False
         self._anchor: _Anchor | None = None
         self._anchors: list[_Anchor] = []
+        self._elements: list[tuple[str, set[str]]] = []
+        self.search_list_found = False
 
     def handle_starttag(self, tag, attrs):
         self.node_count += 1
@@ -112,7 +131,26 @@ class _MarmitonParser(HTMLParser):
             self.truncated = True
             return
         attributes = dict(attrs)
-        if tag.casefold() == "a" and self._anchor is None:
+        tag = tag.casefold()
+        classes: set[str] = set((attributes.get("class") or "").split())
+        if tag not in _VOID_TAGS:
+            self._elements.append((tag, classes))
+        if tag == "ul" and "search-list" in classes:
+            self.search_list_found = True
+        in_search_item = False
+        in_search_list = False
+        if tag == "a":
+            for element, element_classes in self._elements:
+                if element == "ul" and "search-list" in element_classes:
+                    in_search_list = True
+                elif in_search_list and element == "li" and "search-list__item" in element_classes:
+                    in_search_item = True
+        if (
+            tag == "a"
+            and self._anchor is None
+            and in_search_item
+            and "card-content__title" in classes
+        ):
             self._anchor = _Anchor(attributes.get("href", ""))
         elif tag.casefold() == "img" and self._anchor is not None:
             self._anchor.image_url = (
@@ -130,6 +168,10 @@ class _MarmitonParser(HTMLParser):
         if tag.casefold() == "a" and self._anchor is not None:
             self._anchors.append(self._anchor)
             self._anchor = None
+        for index in range(len(self._elements) - 1, -1, -1):
+            if self._elements[index][0] == tag.casefold():
+                del self._elements[index:]
+                break
 
     def handle_data(self, data):
         if self._anchor is not None and sum(map(len, self._anchor.text)) < 1000:
@@ -291,8 +333,17 @@ class MarmitonDiscoveryProvider:
         body, page_url = await self._fetch(query)
         parser = _MarmitonParser(min(limit, MAX_RESULTS))
         parser.feed(body.decode("utf-8", errors="replace"))
+        if not parser.search_list_found or parser.truncated:
+            return ProviderSearch(
+                status="unavailable",
+                detail="Marmiton search results could not be identified reliably.",
+                index_url=HttpUrl(MARMITON_INDEX),
+            )
         results = parser.results(page_url)
-        return ProviderSearch(results=results)
+        return ProviderSearch(
+            results=results,
+            detail="Results use Marmiton’s search ranking; check relevance.",
+        )
 
 
 class MatpratDiscoveryProvider:
@@ -394,28 +445,31 @@ class RecipeDiscoveryRegistry:
         provider_responses = await asyncio.gather(*(run(source) for source in selected))
         seen_urls: set[str] = set()
         results: list[RecipeDiscoveryItem] = []
-        source_statuses: list[RecipeSourceStatus] = []
-        for source, provider_response in provider_responses:
-            source_results = []
-            for item in provider_response.results:
+        source_statuses = [
+            RecipeSourceStatus(
+                source=source,
+                status=response.status,
+                detail=response.detail,
+                index_url=response.index_url,
+            )
+            for source, response in provider_responses
+        ]
+        # Interleave each source's ranked results, applying one global limit after deduplication.
+        for batch in zip_longest(*(response.results for _, response in provider_responses)):
+            for index, item in enumerate(batch):
+                if item is None:
+                    continue
                 key = str(item.url) if item.url is not None else None
                 if key is not None and key in seen_urls:
                     continue
                 if key is not None:
                     seen_urls.add(key)
-                source_results.append(item)
                 results.append(item)
-                if len(results) >= MAX_RESULTS:
+                source_statuses[index].result_count += 1
+                if len(results) >= request.limit:
                     break
-            source_statuses.append(
-                RecipeSourceStatus(
-                    source=source,
-                    status=provider_response.status,
-                    detail=provider_response.detail,
-                    index_url=provider_response.index_url,
-                    result_count=len(source_results),
-                )
-            )
+            if len(results) >= request.limit:
+                break
         return RecipeDiscoveryResponse(
             query=request.query, results=results, sources=source_statuses
         )

@@ -6,6 +6,7 @@ from uuid import UUID
 from fastmcp import FastMCP
 
 from home_kitchen.basket import BasketReview, SelectedProduct
+from home_kitchen.basket.jobs import BasketMatchJob
 from home_kitchen.basket.matching import BasketMatchResult
 from home_kitchen.basket.repository import BasketService
 from home_kitchen.catalogue.models import FoodCatalogueItem
@@ -14,7 +15,9 @@ from home_kitchen.context import history_context
 from home_kitchen.features import KitchenFeatures
 from home_kitchen.history import HistoryEntry, HistoryEntryCreate, RetrievedEvidence
 from home_kitchen.inventory import InventoryItem, InventoryItemCreate, PurchasePlan
+from home_kitchen.models import MealCreate
 from home_kitchen.oda.cart import CartProposalRequest
+from home_kitchen.planning_proposals import ProposalRead
 from home_kitchen.purchasing import StoreTrip
 from home_kitchen.purchasing_reconciliation import (
     CompletedTrip,
@@ -30,8 +33,60 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
     def actor() -> str:
         value = history_context.get().actor_id
         if not value:
-            raise ValueError("Household authentication required for an Oda connection")
+            raise ValueError("Household authentication required")
         return value
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
+    async def start_basket_matching(
+        start: date,
+        end: date,
+        page: int = 1,
+        size: int = 5,
+        force_refresh: bool = False,
+        need_ids: list[UUID] | None = None,
+    ) -> BasketMatchJob:
+        """Start or reuse read-only background matching for all net shopping needs.
+
+        Poll get_basket_matching for progressive candidates. Cached source results
+        use current need quantities; no product selection or cart write occurs.
+        """
+        return await features.basket_jobs.start(
+            actor(),
+            start,
+            end,
+            page=page,
+            size=size,
+            force_refresh=force_refresh,
+            need_ids=need_ids,
+        )
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
+    async def get_basket_matching(job_id: str) -> BasketMatchJob:
+        """Read this actor's background candidates and independent per-need status."""
+        return await features.basket_jobs.get(actor(), job_id)
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
+    def propose_meal_plan(meals: list[MealCreate]) -> ProposalRead:
+        """Prepare a bounded multi-meal proposal with explicit dates, slots and servings.
+
+        Show every meal for review; this saves no planned meals. Occupied slots
+        conflict rather than overwrite. Confirm separately after user approval.
+        """
+        return features.plan_proposals.create(actor(), meals)
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
+    def get_meal_plan_proposal(proposal_id: UUID) -> ProposalRead:
+        """Read this actor's reviewed meal-plan proposal, expiry and conflict status."""
+        return features.plan_proposals.get(proposal_id, actor())
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
+    def confirm_meal_plan(proposal_id: UUID, reviewed: bool = False) -> ProposalRead:
+        """Apply all proposed meals atomically ONLY after explicit user review.
+
+        Do not infer reviewed=True from a planning request. Stale sources or
+        occupied slots require a new reviewed proposal; retries reuse applied IDs.
+        """
+        return features.plan_proposals.confirm(proposal_id, actor(), reviewed=reviewed)
 
     @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
     def get_oda_connection_status() -> dict:

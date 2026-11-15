@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Hashable
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_CEILING, Decimal, localcontext
 from typing import Literal, Protocol
@@ -19,7 +19,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 from starlette.concurrency import run_in_threadpool
 
-from home_kitchen.inventory import InventoryService
+from home_kitchen.inventory import InventoryService, PurchasePlan
 from home_kitchen.oda.media import ProductMedia, fetch_product_media
 from home_kitchen.oda.models import OdaSearchResponse
 from home_kitchen.oda.service import OdaService
@@ -39,6 +39,9 @@ SEARCH_TIMEOUT_SECONDS = 15
 MEDIA_TIMEOUT_SECONDS = 8
 MEDIA_CACHE_TTL = timedelta(minutes=15)
 MEDIA_CACHE_MAX_ENTRIES = 256
+SEARCH_CACHE_TTL = timedelta(minutes=5)
+SEARCH_EMPTY_CACHE_TTL = timedelta(seconds=20)
+SEARCH_CACHE_MAX_ENTRIES = 512
 
 
 class BasketCandidate(BaseModel):
@@ -61,6 +64,7 @@ class BasketCandidate(BaseModel):
     pack_description: str | None = None
     pack_quantity: Decimal | None = Field(default=None, gt=0, allow_inf_nan=False)
     pack_unit: str | None = None
+    pack_metadata_source: Literal["product_page", "oda_description"] | None = None
     pack_metadata_status: Literal["unknown", "unverified"] = "unknown"
     match_query: str
     match_reason: str
@@ -122,6 +126,11 @@ class OdaSearchAdapter:
 
     def __init__(self, service: OdaService):
         self.service = service
+
+    async def cache_context(self, actor_id: str) -> Hashable | None:
+        """Read connection lifecycle state without blocking the event loop."""
+        context = getattr(self.service, "search_cache_context", None)
+        return await run_in_threadpool(context, actor_id) if context is not None else None
 
     async def search_products(
         self, actor_id: str, queries: list[str], page: int, size: int
@@ -219,6 +228,36 @@ def _explicit_pack(value: str | None) -> tuple[Decimal, str] | None:
     return quantity, unit
 
 
+def _oda_description_pack(value: str) -> tuple[Decimal, str] | None:
+    """Accept a complete Oda pack descriptor, never a measurement inside prose."""
+    if len(value) > 256:
+        return None
+    pack = _explicit_pack(value)
+    if pack is not None:
+        return pack
+    # Only a comma followed by whitespace separates descriptors. A decimal
+    # comma (including the one in "0,5% fett") must remain part of its number.
+    descriptors = re.split(r",\s+", value.strip())
+    if len(descriptors) < 2:
+        return None
+    prefix = ", ".join(descriptors[:-1])
+    # Percentages describe milk fat, etc. Other numbers may be competing pack
+    # sizes, ranges, or nutrition values and are deliberately left unresolved.
+    prefix_without_percent = re.sub(r"\d+(?:[.,]\d+)?\s*%", "", prefix)
+    if (
+        re.search(r"\d|[/×=<>]", prefix_without_percent)
+        or not all(part.strip() for part in descriptors)
+        or re.search(
+            r"\b(per|pr|ca|cirka|omtrent|fra|til|næringsinnhold|nutrition|"
+            r"energi|energy|protein|karbohydrat|carbohydrate|salt|kcal|kj)\b",
+            prefix,
+            re.I,
+        )
+    ):
+        return None
+    return _explicit_pack(descriptors[-1])
+
+
 def _package_recommendation(
     need_quantity: Decimal, need_unit: str, pack: tuple[Decimal, str] | None
 ) -> tuple[int, Decimal] | None:
@@ -254,20 +293,138 @@ class BasketMatchingService:
         *,
         media_fetcher: MediaFetcher = fetch_product_media,
         media_cache: _MediaCache | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ):
         self.inventory = inventory
         self.provider = provider
         self.media_fetcher = media_fetcher
         self.media_cache = media_cache or _MediaCache()
+        self.clock = clock
+        self._search_cache: OrderedDict[tuple, tuple[datetime, ProviderSearchGroup]] = OrderedDict()
+        self._inflight: dict[tuple, asyncio.Future] = {}
+        self._context_reads: dict[str, asyncio.Task] = {}
+        self._search_semaphore = asyncio.Semaphore(MAX_CONCURRENT_SEARCHES)
+        self._search_tasks: set[asyncio.Task] = set()
+        self._media_semaphore = asyncio.Semaphore(MAX_CONCURRENT_MEDIA)
+
+    async def _context(self, actor_id: str) -> Hashable | None:
+        context = getattr(self.provider, "cache_context", None)
+        if context is None:
+            return id(self.provider)
+        # A cache hit for a whole plan needs one shared lifecycle read, rather
+        # than a database read for every need resolving on the same loop turn.
+        task = self._context_reads.get(actor_id)
+        if task is None:
+            task = asyncio.create_task(context(actor_id))
+            self._context_reads[actor_id] = task
+
+            def clear(completed):
+                if self._context_reads.get(actor_id) is completed:
+                    del self._context_reads[actor_id]
+
+            task.add_done_callback(clear)
+        return await asyncio.shield(task)
+
+    async def _search(
+        self,
+        actor_id: str,
+        queries: list[str],
+        page: int,
+        size: int,
+        force_refresh: bool,
+        on_result: Callable[[str, ProviderSearchGroup | Exception | None], Awaitable[None]],
+    ) -> None:
+        context = await self._context(actor_id)
+        pending = {}
+        owned = []
+        for query in queries:
+            normalized = " ".join(query.casefold().split())
+            if normalized in pending:
+                continue
+            key = (actor_id, id(self.provider), context, normalized, page, size)
+            cached = self._search_cache.get(key) if context is not None else None
+            if cached is not None and cached[0] > self.clock() and not force_refresh:
+                self._search_cache.move_to_end(key)
+                future = asyncio.get_running_loop().create_future()
+                future.set_result(cached[1])
+            elif context is not None and key in self._inflight:
+                future = self._inflight[key]
+            else:
+                self._search_cache.pop(key, None)
+                future = asyncio.get_running_loop().create_future()
+                if context is not None:
+                    self._inflight[key] = future
+                owned.append((key, query, future))
+            pending[normalized] = future
+
+        async def fetch(batch):
+            try:
+                async with self._search_semaphore:
+                    payload = await asyncio.wait_for(
+                        self.provider.search_products(
+                            actor_id, [query for _, query, _ in batch], page, size
+                        ),
+                        timeout=SEARCH_TIMEOUT_SECONDS,
+                    )
+                unchanged = context is not None and await self._context(actor_id) == context
+                groups = {" ".join(group.query.casefold().split()): group for group in payload}
+                for key, _, future in batch:
+                    group = groups.get(key[3])
+                    if context is not None and not unchanged:
+                        group = RuntimeError("Provider connection changed during search")
+                    if unchanged and isinstance(group, ProviderSearchGroup):
+                        ttl = SEARCH_CACHE_TTL if group.products else SEARCH_EMPTY_CACHE_TTL
+                        self._search_cache[key] = (self.clock() + ttl, group)
+                        self._search_cache.move_to_end(key)
+                        while len(self._search_cache) > SEARCH_CACHE_MAX_ENTRIES:
+                            self._search_cache.popitem(last=False)
+                    future.set_result(group)
+            except BaseException as error:
+                for _, _, future in batch:
+                    if not future.done():
+                        future.set_result(
+                            error
+                            if isinstance(error, Exception)
+                            else RuntimeError("Search cancelled")
+                        )
+                if not isinstance(error, Exception):
+                    raise
+            finally:
+                for key, _, future in batch:
+                    if self._inflight.get(key) is future:
+                        del self._inflight[key]
+
+        for offset in range(0, len(owned), 10):
+            task = asyncio.create_task(fetch(owned[offset : offset + 10]))
+            self._search_tasks.add(task)
+            task.add_done_callback(self._search_tasks.discard)
+
+        async def resolve(query, future):
+            group = await asyncio.shield(future)
+            if context is not None and await self._context(actor_id) != context:
+                group = RuntimeError("Provider connection changed during search")
+            await on_result(query, group)
+
+        await asyncio.gather(*(resolve(query, future) for query, future in pending.items()))
 
     async def find_products(
-        self, actor_id: str, start: date, end: date, *, page: int = 1, size: int = 5
+        self,
+        actor_id: str,
+        start: date,
+        end: date,
+        *,
+        page: int = 1,
+        size: int = 5,
+        force_refresh: bool = False,
+        progress: Callable[[NeedMatchResult], Awaitable[None]] | None = None,
+        plan: PurchasePlan | None = None,
     ) -> BasketMatchResult:
         if end < start:
             raise ValueError("end date must be on or after start date")
         if not 1 <= page <= 50 or not 1 <= size <= MAX_RESULTS_PER_NEED:
             raise ValueError("page or result size is outside the supported range")
-        plan = await run_in_threadpool(self.inventory.plan, start, end)
+        if plan is None:
+            plan = await run_in_threadpool(self.inventory.plan, start, end)
         purchase_lines = plan.purchase_lines
         bounded_lines = purchase_lines[:MAX_NEEDS]
         skipped_count = max(0, len(purchase_lines) - len(bounded_lines))
@@ -287,62 +444,36 @@ class BasketMatchingService:
         if not bounded_lines:
             return BasketMatchResult(start=start, end=end, needs=[], skipped_need_count=0)
 
-        semaphore = asyncio.Semaphore(MAX_CONCURRENT_SEARCHES)
-
-        async def search_batch(indexes: list[int]):
-            async with semaphore:
-                queries = [bounded_lines[index].name for index in indexes]
-                return indexes, await asyncio.wait_for(
-                    self.provider.search_products(actor_id, queries, page, size),
-                    timeout=SEARCH_TIMEOUT_SECONDS,
-                )
-
-        batches = [
-            list(range(offset, min(offset + 10, len(bounded_lines))))
-            for offset in range(0, len(bounded_lines), 10)
-        ]
-        search_outcomes = await asyncio.gather(
-            *(search_batch(indexes) for indexes in batches),
-            return_exceptions=True,
-        )
-        groups_by_index = {}
-        for indexes, outcome in zip(batches, search_outcomes, strict=True):
-            if isinstance(outcome, BaseException):
-                for index in indexes:
-                    groups_by_index[index] = outcome
-                continue
-            returned_indexes, payload = outcome
-            try:
-                for index in returned_indexes:
-                    query = bounded_lines[index].name
-                    group = next(
-                        (item for item in payload if item.query.casefold() == query.casefold()),
-                        None,
-                    )
-                    groups_by_index[index] = group
-            except Exception as error:
-                for index in returned_indexes:
-                    groups_by_index[index] = error
         media_slots = MAX_MEDIA_FETCHES
-        media_semaphore = asyncio.Semaphore(MAX_CONCURRENT_MEDIA)
 
-        async def enrich(candidate: BasketCandidate) -> BasketCandidate:
+        async def enrich(candidate: BasketCandidate, current_index: int) -> BasketCandidate:
             nonlocal media_slots
-            if candidate.product_url is None or media_slots <= 0:
-                return candidate
-            media_slots -= 1
-            url = str(candidate.product_url)
-            media = self.media_cache.get(url, datetime.now(UTC))
-            if media is None:
+            media = None
+            url = str(candidate.product_url) if candidate.product_url else None
+            if url:
+                media = self.media_cache.get(url, self.clock())
+            if url and media is None and media_slots > 0:
+                media_slots -= 1
                 try:
-                    async with media_semaphore:
-                        media = await asyncio.wait_for(
-                            self.media_fetcher(url), timeout=MEDIA_TIMEOUT_SECONDS
-                        )
-                    self.media_cache.put(url, media, datetime.now(UTC))
+                    async with self._media_semaphore:
+                        media = self.media_cache.get(url, self.clock())
+                        if media is None:
+                            media = await asyncio.wait_for(
+                                self.media_fetcher(url), timeout=MEDIA_TIMEOUT_SECONDS
+                            )
+                            self.media_cache.put(url, media, self.clock())
                 except Exception:
-                    return candidate
-            pack = _explicit_pack(media.pack_description)
+                    pass
+            pack_description = media.pack_description if media else None
+            pack = _explicit_pack(pack_description)
+            pack_source = "product_page" if pack else None
+            # A valid explicit page pack wins. The official search description
+            # is only a fallback; names, titles and unit prices are never used.
+            if pack is None and candidate.provider == "oda":
+                pack = _oda_description_pack(candidate.description)
+                if pack:
+                    pack_description = candidate.description
+                    pack_source = "oda_description"
             recommendation = _package_recommendation(
                 bounded_lines[current_index].to_buy_quantity,
                 bounded_lines[current_index].unit,
@@ -351,10 +482,11 @@ class BasketMatchingService:
             return candidate.model_copy(
                 update={
                     "media": media,
-                    "pack_description": media.pack_description,
+                    "pack_description": pack_description,
                     "pack_quantity": pack[0] if pack else None,
                     "pack_unit": pack[1] if pack else None,
-                    "pack_metadata_status": "unverified" if media.pack_description else "unknown",
+                    "pack_metadata_source": pack_source,
+                    "pack_metadata_status": "unverified" if pack_description else "unknown",
                     "recommended_packages": recommendation[0] if recommendation else None,
                     "recommended_fulfillment_quantity": recommendation[1]
                     if recommendation
@@ -362,12 +494,13 @@ class BasketMatchingService:
                 }
             )
 
-        for current_index in range(len(bounded_lines)):
-            outcome = groups_by_index.get(current_index)
+        async def match_need(current_index: int, outcome):
             if isinstance(outcome, BaseException):
                 results[current_index].status = "search_failed"
                 results[current_index].detail = "Product search failed or timed out."
-                continue
+                if progress is not None:
+                    await progress(results[current_index])
+                return
             try:
                 group = outcome
                 if group is None:
@@ -375,7 +508,7 @@ class BasketMatchingService:
                     results[
                         current_index
                     ].detail = "The provider returned no result group for this query."
-                    continue
+                    return
                 candidates = [
                     BasketCandidate(
                         id=f"{product.provider}:{product.product_id}",
@@ -399,7 +532,7 @@ class BasketMatchingService:
                 ]
                 results[current_index].has_more = group.has_more or len(group.products) > size
                 results[current_index].candidates = await asyncio.gather(
-                    *(enrich(candidate) for candidate in candidates)
+                    *(enrich(candidate, current_index) for candidate in candidates)
                 )
                 results[current_index].status = "matched" if candidates else "no_results"
                 if group.has_more:
@@ -409,6 +542,36 @@ class BasketMatchingService:
             except Exception:
                 results[current_index].status = "search_unavailable"
                 results[current_index].detail = "The provider response could not be interpreted."
+            finally:
+                if progress is not None:
+                    await progress(results[current_index])
+
+        async def on_result(query, outcome):
+            await asyncio.gather(
+                *(
+                    match_need(index, outcome)
+                    for index, line in enumerate(bounded_lines)
+                    if " ".join(line.name.casefold().split()) == query
+                )
+            )
+
+        try:
+            await self._search(
+                actor_id,
+                [line.name for line in bounded_lines],
+                page,
+                size,
+                force_refresh,
+                on_result,
+            )
+        except Exception as error:
+            await asyncio.gather(
+                *(
+                    match_need(index, error)
+                    for index, result in enumerate(results)
+                    if result.status == "searching"
+                )
+            )
 
         return BasketMatchResult(
             start=start,

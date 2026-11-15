@@ -98,6 +98,7 @@ def create_app(
             try:
                 await close_ai_clients(settings)
             finally:
+                await features.basket_jobs.close()
                 features.oda.close()
                 service.store.engine.dispose()
 

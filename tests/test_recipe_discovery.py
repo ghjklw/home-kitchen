@@ -34,15 +34,21 @@ def test_query_and_source_request_validation():
 async def test_marmiton_search_is_bounded_and_uses_only_canonical_recipe_links():
     observed = []
     html = """
-    <a href="/recettes/recette_carbonara-traditionnelle_340808.aspx">
+    <nav><a class="card-content__title" href="/recettes/recette_unrelated_999.aspx">Unrelated</a></nav>
+    <ul class="search-list"><li class="search-list__item">
+    <a class="card-content__title" href="/recettes/recette_carbonara-traditionnelle_340808.aspx">
       <img src="https://assets.afcdn.com/recipe/340808.jpg" alt="Carbonara traditionnelle">
     </a>
-    <a href="/recettes/recette_carbonara-traditionnelle_340808.aspx">Carbonara traditionnelle</a>
-    <a href="https://evil.example/recettes/recette_fake_123.aspx">Fake</a>
+    <a class="card-content__title" href="/recettes/recette_carbonara-traditionnelle_340808.aspx">Carbonara traditionnelle</a>
+    <a class="card-content__title" href="https://evil.example/recettes/recette_fake_123.aspx">Fake</a>
     <a href="/recettes/recherche.aspx?aqt=carbonara">Search</a>
-    <a href="/recettes/recette_other_456.aspx">
+    </li><li class="search-list__item">
+    <a class="card-content__title" href="/recettes/recette_other_456.aspx">
       <img src="https://127.0.0.1/pixel.jpg" alt="Other recipe">
     </a>
+    <a href="/recettes/recette_editorial_888.aspx">Editorial recipe</a>
+    </li></ul>
+    <footer><a class="card-content__title" href="/recettes/recette_footer_777.aspx">Footer</a></footer>
     """
 
     def handler(request):
@@ -67,6 +73,29 @@ async def test_marmiton_search_is_bounded_and_uses_only_canonical_recipe_links()
     assert first.importable is True
     assert str(second.url) == "https://www.marmiton.org/recettes/recette_other_456.aspx"
     assert second.image_url is None
+    assert response.status == "ok"
+    assert "ranking" in response.detail
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "html",
+    [
+        '<a href="/recettes/recette_unrelated_999.aspx">Unrelated recommendation</a>',
+        '<ul class="search-list"></ul>',
+    ],
+)
+async def test_marmiton_does_not_fall_back_to_generic_recipe_anchors(html):
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, headers={"content-type": "text/html"}, text=html)
+        ),
+        trust_env=False,
+    ) as client:
+        response = await MarmitonDiscoveryProvider(http_client=client).search("soup", 5)
+
+    assert response.results == []
+    assert response.status == ("ok" if 'class="search-list"' in html else "unavailable")
 
 
 @pytest.mark.asyncio
@@ -141,6 +170,35 @@ async def test_registry_keeps_partial_results_times_out_and_deduplicates_exact_u
         ("matprat", "timed_out"),
     ]
     assert [item.result_count for item in response.sources] == [1, 1, 0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [1, 3, 10])
+async def test_registry_interleaves_sources_with_one_global_limit_and_retains_errors(limit):
+    def recipes(source):
+        return [
+            RecipeDiscoveryItem(source=source, title=f"{source} {index}", importable=False)
+            for index in range(10)
+        ]
+
+    registry = RecipeDiscoveryRegistry(
+        [
+            _StaticProvider("oda", ProviderSearch(results=recipes("oda"))),
+            _StaticProvider("marmiton", ProviderSearch(results=recipes("marmiton"))),
+            _StaticProvider(
+                "matprat", ProviderSearch(status="unavailable", detail="Source unavailable.")
+            ),
+        ]
+    )
+
+    response = await registry.search(RecipeDiscoveryRequest(query="laks", limit=limit))
+
+    assert [item.title for item in response.results] == [
+        f"{source} {index}" for index in range(5) for source in ("oda", "marmiton")
+    ][:limit]
+    assert [status.result_count for status in response.sources] == [(limit + 1) // 2, limit // 2, 0]
+    assert response.sources[2].status == "unavailable"
+    assert response.sources[2].detail == "Source unavailable."
 
 
 @pytest.mark.asyncio

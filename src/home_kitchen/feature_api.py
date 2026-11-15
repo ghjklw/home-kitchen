@@ -4,9 +4,10 @@ from datetime import date
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from home_kitchen.basket import BasketReview, SelectedProduct
+from home_kitchen.basket.jobs import BasketMatchJob
 from home_kitchen.basket.matching import BasketMatchResult
 from home_kitchen.basket.repository import BasketService
 from home_kitchen.catalogue.models import FoodCatalogueItem
@@ -14,6 +15,8 @@ from home_kitchen.catalogue.sku_models import RetailerProductOption, RetailerPro
 from home_kitchen.features import KitchenFeatures
 from home_kitchen.history import HistoryEntry, HistoryEntryCreate, RetrievedEvidence
 from home_kitchen.inventory import InventoryItem, InventoryItemCreate, PurchasePlan
+from home_kitchen.models import MealCreate
+from home_kitchen.planning_proposals import ProposalConflict, ProposalRead
 from home_kitchen.purchasing import PurchaseModeInfo, StoreTrip
 from home_kitchen.purchasing_reconciliation import (
     CompletedTrip,
@@ -31,12 +34,74 @@ class BasketSelectionRequest(BaseModel):
     selection: SelectedProduct
 
 
+class MatchJobRequest(BaseModel):
+    start: date
+    end: date
+    page: int = Field(default=1, ge=1, le=50)
+    size: int = Field(default=5, ge=1, le=5)
+    force_refresh: bool = False
+    need_ids: list[UUID] | None = Field(default=None, min_length=1, max_length=100)
+
+
+class MealPlanProposalCreate(BaseModel):
+    meals: list[MealCreate] = Field(min_length=1, max_length=90)
+
+
+class ExplicitReview(BaseModel):
+    reviewed: bool = False
+
+
 class TripCheck(BaseModel):
     checked: bool
 
 
 def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRouter:
     router = APIRouter(prefix="/api")
+
+    def authenticated_actor(request: Request) -> str:
+        actor = getattr(request.state, "actor_id", None)
+        if not actor:
+            raise HTTPException(401, "Household authentication required")
+        return actor
+
+    @router.post("/basket/match-jobs", status_code=202)
+    async def start_match_job(
+        data: MatchJobRequest, request: Request, response: Response
+    ) -> BasketMatchJob:
+        response.headers["Cache-Control"] = "no-store"
+        return await features.basket_jobs.start(authenticated_actor(request), **data.model_dump())
+
+    @router.get("/basket/match-jobs/{job_id}")
+    async def get_match_job(job_id: str, request: Request, response: Response) -> BasketMatchJob:
+        response.headers["Cache-Control"] = "no-store"
+        return await features.basket_jobs.get(authenticated_actor(request), job_id)
+
+    @router.post("/meal-plan-proposals", status_code=201)
+    def propose_meals(
+        data: MealPlanProposalCreate, request: Request, response: Response
+    ) -> ProposalRead:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return features.plan_proposals.create(authenticated_actor(request), data.meals)
+        except ProposalConflict as exc:
+            raise HTTPException(409, str(exc)) from None
+
+    @router.get("/meal-plan-proposals/{proposal_id}")
+    def read_meal_proposal(proposal_id: UUID, request: Request, response: Response) -> ProposalRead:
+        response.headers["Cache-Control"] = "no-store"
+        return features.plan_proposals.get(proposal_id, authenticated_actor(request))
+
+    @router.post("/meal-plan-proposals/{proposal_id}/confirm")
+    def confirm_meal_proposal(
+        proposal_id: UUID, data: ExplicitReview, request: Request, response: Response
+    ) -> ProposalRead:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return features.plan_proposals.confirm(
+                proposal_id, authenticated_actor(request), reviewed=data.reviewed
+            )
+        except ProposalConflict as exc:
+            raise HTTPException(409, str(exc)) from None
 
     @router.get("/inventory")
     def inventory() -> list[InventoryItem]:

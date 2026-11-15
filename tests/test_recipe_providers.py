@@ -153,7 +153,7 @@ async def test_url_shape_keeps_original_words_and_locked_attribution(monkeypatch
         "instructions": ["Simmer"],
         "source_ingredients": [{"index": 0, "text": "model-forged source wording"}],
         "source_url": "https://model.example/forged/",
-        "provenance": {"original_source": "manual"},
+        "provenance": {"original_source": "manual", "source_url": "https://model.example/forged/"},
     })
     providers = create_recipe_providers(settings, recipe_agent(settings, model))
     result = await providers.draft("ai", RecipeDraftRequest(url=imported.source_url), context)

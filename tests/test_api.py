@@ -119,6 +119,19 @@ def test_invalid_input_dates_and_unknown_resources(test_database_url):
 def test_ai_unconfigured_is_unavailable_and_does_not_save(test_database_url):
     with make_client(test_database_url) as client:
         response = client.post("/api/ai/recipe", json={"prompt": "A simple soup"})
+        assert response.status_code == 422
+        assert "source" in response.json()["detail"]
+        response = client.post(
+            "/api/ai/recipe",
+            json={
+                "recipe": {
+                    "title": "Soup",
+                    "servings": 2,
+                    "ingredients": [{"name": "carrot", "quantity": 2}],
+                    "instructions": ["Simmer"],
+                }
+            },
+        )
         assert response.status_code == 503
         assert client.get("/api/recipes").json() == []
 

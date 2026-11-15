@@ -3,7 +3,7 @@
 from datetime import date
 from uuid import UUID
 
-from fastapi import APIRouter, Query, Request, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
 from home_kitchen.basket import BasketReview, SelectedProduct
@@ -64,7 +64,14 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
 
     @router.post("/recipe-drafts/{provider_id}")
     async def recipe_draft(provider_id: str, data: RecipeDraftRequest) -> RecipeDraft:
-        return await features.draft_recipe(provider_id, data)
+        try:
+            return await features.draft_recipe(provider_id, data)
+        except ValueError:
+            raise
+        except Exception:
+            if provider_id == "ai":
+                raise HTTPException(502, "AI draft unavailable; no recipe has been saved") from None
+            raise
 
     @router.post("/recipes/{recipe_id}/feedback", status_code=201)
     def record_recipe_feedback(

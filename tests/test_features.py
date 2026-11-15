@@ -188,3 +188,75 @@ def test_inventory_and_in_store_progress_reduce_purchases_without_changing_needs
         )
         assert len(client.get("/api/store-trip", params=period).json()["lines"]) == 1
         assert len(client.get("/api/basket", params=period).json()["needs"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_source_ai_api_mcp_share_drafts_without_persistence(test_database_url):
+    from pydantic_ai.models.test import TestModel
+
+    from home_kitchen.ai import recipe_agent
+
+    settings = Settings(local_dev=True, database_url=test_database_url)
+    model = TestModel(
+        custom_output_args={
+            "title": "Adapted soup",
+            "servings": 99,
+            "ingredients": [{"name": "salt", "quantity": None, "unit": None}],
+            "instructions": ["Simmer"],
+        }
+    )
+    app = create_app(settings, recipe_agent(settings, model))
+    imported = {
+        "title": "Original soup",
+        "servings": 2,
+        "ingredients": ["a pinch of salt"],
+        "instructions": ["Simmer"],
+        "source_url": "https://www.matprat.no/soup/",
+    }
+    with TestClient(app, client=("127.0.0.1", 5000)) as client:
+        recipe = client.post(
+            "/api/recipes",
+            json={
+                "title": "Saved soup",
+                "servings": 2,
+                "ingredients": [{"name": "salt", "quantity": 2, "unit": "g"}],
+                "instructions": ["Simmer"],
+            },
+        ).json()
+        response = client.post("/api/recipe-drafts/ai", json={"imported": imported})
+        assert response.status_code == 200
+        draft = response.json()
+        assert draft["adapted"]["ingredients"][0]["quantity"] is None
+        assert draft["adapted"]["servings"] == 2
+        assert client.get(f"/api/recipes/{recipe['id']}").json() == recipe
+        assert len(client.get("/api/recipes").json()) == 1
+        assert client.post("/api/ai/recipe", json={"prompt": "Invent soup"}).status_code == 422
+        assert (
+            client.post("/api/recipe-drafts/ai", json={"prompt": "Invent soup"}).status_code == 422
+        )
+        assert client.post("/api/ai/recipe", json={"imported": imported}).json() == draft
+        # The draft is not saveable until the user resolves missing numeric fields.
+        assert client.post("/api/recipes", json=draft["adapted"]).status_code == 422
+    async with Client(app.state.mcp) as mcp:
+        result = await mcp.call_tool(
+            "draft_recipe",
+            {
+                "provider_id": "ai",
+                "request": {"imported": imported},
+            },
+        )
+        content = result.structured_content
+        assert content.get("result", content) == draft
+        iteration = await mcp.call_tool(
+            "draft_recipe",
+            {
+                "provider_id": "ai",
+                "request": {"draft": draft["adapted"], "prompt": "Simplify"},
+            },
+        )
+        content = iteration.structured_content
+        assert (
+            content.get("result", content)["adapted"]["source_ingredients"]
+            == draft["adapted"]["source_ingredients"]
+        )
+    assert len(app.state.service.list_recipes()) == 1

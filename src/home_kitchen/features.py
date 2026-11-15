@@ -6,6 +6,7 @@ from datetime import date
 
 from pydantic_ai import Agent
 
+from home_kitchen.context import history_context
 from home_kitchen.history import HistoryRepository
 from home_kitchen.inventory import InventoryService
 from home_kitchen.models import RecipeCreate
@@ -20,6 +21,7 @@ from home_kitchen.recipes import (
     RecipeDraftRequest,
     create_recipe_providers,
 )
+from home_kitchen.recipes.models import EditableRecipeDraft
 from home_kitchen.recommendations import PlanDraft, build_planner, recommend_plan
 from home_kitchen.service import KitchenService
 from home_kitchen.settings import Household, Settings
@@ -31,7 +33,7 @@ class KitchenFeatures:
         kitchen: KitchenService,
         settings: Settings,
         household: Callable[[], Household],
-        ai: Agent[None, RecipeCreate] | None = None,
+        ai: Agent[None, EditableRecipeDraft] | Agent[None, RecipeCreate] | None = None,
     ):
         self.kitchen = kitchen
         self.settings = settings
@@ -90,6 +92,8 @@ class KitchenFeatures:
         return evidence
 
     async def draft_recipe(self, provider_id: str, data: RecipeDraftRequest) -> RecipeDraft:
+        if provider_id == "ai":
+            data.require_ai_source()
         evidence = self.evidence(data.prompt or "") if provider_id == "ai" else []
         return await self.recipe_providers.draft(
             provider_id,
@@ -97,6 +101,7 @@ class KitchenFeatures:
             RecipeContext(
                 household=self.household(),
                 knowledge=evidence,
+                actor_id=history_context.get().actor_id,
             ),
         )
 

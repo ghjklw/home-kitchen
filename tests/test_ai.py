@@ -6,6 +6,7 @@ from pydantic_ai.models.test import TestModel
 
 from home_kitchen.ai import draft_recipe, recipe_agent
 from home_kitchen.models import Recipe, RecipeCreate
+from home_kitchen.recipes.models import EditableRecipeDraft
 from home_kitchen.recommendations import PlanDraft, build_planner, recommend_plan
 from home_kitchen.service import KitchenService
 from home_kitchen.settings import Household, Settings
@@ -24,13 +25,34 @@ def recipe() -> Recipe:
 @pytest.mark.asyncio
 async def test_recipe_agent_returns_typed_draft():
     draft = await draft_recipe(
-        recipe_agent(Settings(local_dev=True), TestModel()),
+        recipe_agent(
+            Settings(local_dev=True),
+            TestModel(
+                custom_output_args={
+                    "title": "Soup",
+                    "servings": 99,
+                    "ingredients": [{"name": "salt", "quantity": None, "unit": None}],
+                    "instructions": ["Simmer"],
+                    "source_url": "https://model.example/forged",
+                }
+            ),
+        ),
         Household(),
         "A simple soup",
+        source=EditableRecipeDraft(
+            title="Source soup",
+            servings=2,
+            ingredients=[{"name": "salt"}],
+            instructions=["Simmer"],
+            source_url="https://www.matprat.no/soup/",
+        ),
     )
-    assert isinstance(draft, RecipeCreate)
+    assert isinstance(draft, EditableRecipeDraft)
     assert draft.source == "ai"
-    assert draft.source_url is None
+    assert str(draft.source_url) == "https://www.matprat.no/soup/"
+    assert draft.servings == 2
+    assert draft.ingredients[0].quantity is None
+    assert draft.ingredients[0].unit is None
 
 
 @pytest.mark.asyncio

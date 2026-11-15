@@ -46,6 +46,8 @@ recipes = Table(
     Column("source_url", Text),
     Column("image_url", Text),
     Column("source", Text, nullable=False),
+    Column("source_ingredients", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("provenance", JSONB),
 )
 meals = Table(
     "meals",
@@ -107,7 +109,9 @@ def entity_values(entity: BaseModel) -> dict:
     # JSON columns contain JSON values; native dates, UUIDs and decimals elsewhere
     # retain their database types and precision.
     if isinstance(entity, Recipe):
-        values["ingredients"] = entity.model_dump(mode="json")["ingredients"]
+        json_values = entity.model_dump(mode="json")
+        for field in ("ingredients", "source_ingredients", "provenance"):
+            values[field] = json_values[field]
         values["source_url"] = str(entity.source_url) if entity.source_url else None
         values["image_url"] = str(entity.image_url) if entity.image_url else None
     return values

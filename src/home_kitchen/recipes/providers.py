@@ -9,10 +9,14 @@ from home_kitchen import imports
 from home_kitchen.ai import draft_recipe, recipe_agent
 from home_kitchen.models import RecipeCreate, RecipeSource
 from home_kitchen.recipes.models import (
+    AdaptationProvenance,
+    DraftIngredient,
+    EditableRecipeDraft,
     RecipeContext,
     RecipeDraft,
     RecipeDraftRequest,
     RecipeProviderInfo,
+    SourceIngredient,
 )
 from home_kitchen.settings import Settings
 
@@ -56,27 +60,122 @@ class WebRecipeProvider:
 
 class AIRecipeProvider:
     provider_id = "ai"
-    label = "AI recipe draft"
-    capabilities: tuple[str, ...] = ("prompt", "household_context", "knowledge_context")
+    label = "AI source adaptation"
+    capabilities: tuple[str, ...] = (
+        "source_recipe",
+        "source_draft",
+        "source_imported",
+        "url",
+        "modification_prompt",
+        "household_context",
+        "knowledge_context",
+    )
 
-    def __init__(self, settings: Settings, agent: Agent[None, RecipeCreate] | None = None):
+    def __init__(
+        self,
+        settings: Settings,
+        agent: Agent[None, EditableRecipeDraft] | Agent[None, RecipeCreate] | None = None,
+    ):
         self._settings = settings
         self._agent = agent
 
     async def draft(self, request: RecipeDraftRequest, context: RecipeContext) -> RecipeDraft:
-        require_input(request, "prompt")
-        assert request.prompt is not None
+        request.require_ai_source()
+        source = request.draft
+        imported = (
+            await imports.import_recipe(str(request.url))
+            if request.url is not None
+            else request.imported
+        )
+        if imported is not None:
+            source = EditableRecipeDraft(
+                title=imported.title,
+                servings=imported.servings,
+                ingredients=[
+                    DraftIngredient(name=text, source_indices=[index])
+                    for index, text in enumerate(imported.ingredients)
+                ],
+                instructions=imported.instructions,
+                source_url=imported.source_url,
+                image_url=imported.image_url,
+                source_ingredients=[
+                    SourceIngredient(index=index, text=text)
+                    for index, text in enumerate(imported.ingredients)
+                ],
+                provenance=AdaptationProvenance(
+                    original_source=RecipeSource.IMPORTED,
+                    source_url=imported.source_url,
+                ),
+            )
+        elif request.recipe is not None:
+            recipe = request.recipe
+            source = EditableRecipeDraft(
+                **recipe.model_dump(
+                    exclude={"source", "ingredients", "source_ingredients", "provenance"}
+                ),
+                ingredients=[
+                    DraftIngredient(
+                        **item.model_dump(exclude={"source_indices"}),
+                        source_indices=item.source_indices
+                        if recipe.source_ingredients
+                        else [index],
+                    )
+                    for index, item in enumerate(recipe.ingredients)
+                ],
+                source_ingredients=recipe.source_ingredients
+                or [
+                    SourceIngredient(index=index, text=f"{item.quantity} {item.unit} {item.name}")
+                    for index, item in enumerate(recipe.ingredients)
+                ],
+                provenance=recipe.provenance
+                or AdaptationProvenance(
+                    original_source=recipe.source,
+                    source_url=recipe.source_url,
+                ),
+            )
+        assert source is not None
+        if not source.source_ingredients:
+            # Unsaved editable drafts can arrive before they have attribution records.
+            # Retain their actual input fields, including unknown quantities and units.
+            source = source.model_copy(
+                update={
+                    "source_ingredients": [
+                        SourceIngredient(
+                            index=index,
+                            text=" ".join(
+                                str(value)
+                                for value in (item.quantity, item.unit, item.name)
+                                if value is not None
+                            ),
+                        )
+                        for index, item in enumerate(source.ingredients)
+                    ],
+                }
+            )
+        provenance = source.provenance or AdaptationProvenance(
+            original_source=RecipeSource.AI,
+            source_url=source.source_url,
+        )
+        source = source.model_copy(
+            update={
+                "provenance": provenance.model_copy(update={"source_url": source.source_url}),
+            }
+        )
         if self._agent is None:
+            if not self._settings.ai_configured:
+                raise ValueError("Configure an AI model and API credential to adapt recipes")
             self._agent = recipe_agent(self._settings)
-        recipe = await draft_recipe(
+        adapted = await draft_recipe(
             self._agent,
             context.household,
-            request.prompt,
+            request.prompt or "Normalize the supplied source into an editable recipe draft",
+            source=source,
             evidence_context="\n".join(item.model_dump_json() for item in context.knowledge),
+            actor_id=context.actor_id,
         )
         return RecipeDraft(
             provider=self.provider_id,
-            recipe=recipe,
+            adapted=adapted,
             evidence_ids=list(dict.fromkeys(item.evidence_id for item in context.knowledge)),
         )
 
@@ -117,7 +216,8 @@ class RecipeProviderRegistry:
 
 
 def create_recipe_providers(
-    settings: Settings, ai_agent: Agent[None, RecipeCreate] | None = None
+    settings: Settings,
+    ai_agent: Agent[None, EditableRecipeDraft] | Agent[None, RecipeCreate] | None = None,
 ) -> RecipeProviderRegistry:
     return RecipeProviderRegistry(
         [ManualRecipeProvider(), WebRecipeProvider(), AIRecipeProvider(settings, ai_agent)]

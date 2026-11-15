@@ -720,7 +720,11 @@ function recipeForm(draft = {}, source = "manual") {
   servings.input.min = 1;
   servings.input.max = 100;
   servings.input.required = true;
-  if (!isEditing && source === "imported" && draft.servings != null)
+  if (
+    !isEditing &&
+    (source === "imported" || draft.provenance?.original_source === "imported") &&
+    draft.servings != null
+  )
     add(
       form,
       el(
@@ -746,7 +750,7 @@ function recipeForm(draft = {}, source = "manual") {
       "muted",
     ),
   );
-  if (source === "imported" && draft.source_url) {
+  if (draft.source_url) {
     const original = el("a", "Open original recipe", "source-link");
     original.href = draft.source_url;
     original.target = "_blank";
@@ -901,6 +905,70 @@ function recipeForm(draft = {}, source = "manual") {
     notify(isEditing ? "Recipe changes saved." : "Recipe added to your collection.");
   });
   add(root, form);
+  if (state.integrations.ai?.configured && (isEditing || source === "ai")) {
+    const revision = el("details", null, "recipe-ai-revision");
+    add(
+      revision,
+      el("summary", "Revise with AI"),
+      el(
+        "p",
+        isEditing
+          ? "AI proposes a draft. Your saved recipe changes only when you choose Save."
+          : "AI proposes a draft. Review it and choose Save recipe when ready.",
+        "muted",
+      ),
+    );
+    const prompt = field(
+      "What should change?",
+      "textarea",
+      "",
+      "For example: make it vegetarian, faster, or suitable for more servings.",
+    );
+    prompt.input.required = true;
+    prompt.input.maxLength = 1000;
+    prompt.input.rows = 3;
+    const revisionError = el("p", "", "form-error");
+    revisionError.setAttribute("role", "alert");
+    const revise = button("Review AI revision", async () => {
+      revise.disabled = true;
+      revisionError.textContent = "";
+      try {
+        const payload = window.KitchenRecipeEditor.buildRevisionRequest(
+          {
+            title: name.input.value,
+            servings: servings.input.value,
+            ingredients: rowControllers.map((row) => ({
+              name: row.name.value,
+              quantity: row.quantity.value,
+              unit: row.unit.value,
+              category: row.category.value,
+              source_indices: row.source_indices,
+            })),
+            instructions: instructions.input.value,
+            source_url: draft.source_url || null,
+            image_url: imageUrl.input.value,
+            source_ingredients: sourceIngredients,
+            provenance: draft.provenance || null,
+          },
+          { isEditing, source },
+          prompt.input.value,
+        );
+        const response = await api("/recipe-drafts/ai", "POST", payload);
+        if (!response?.adapted)
+          throw new Error("AI did not return an editable draft. Your recipe is unchanged.");
+        const revisedDraft = isEditing
+          ? { ...response.adapted, id: draft.id }
+          : response.adapted;
+        recipeForm(revisedDraft, isEditing ? source : "ai");
+      } catch (error) {
+        revisionError.textContent = error.message;
+      } finally {
+        if (revise.isConnected) revise.disabled = false;
+      }
+    }, "primary");
+    add(revision, prompt.wrap, revisionError, revise);
+    add(root, revision);
+  }
 }
 function viewRecipe(recipe) {
   const root = openDialog(recipe.title);
@@ -986,7 +1054,7 @@ function importForm() {
     root,
     el(
       "p",
-      "Paste a recipe page link. You’ll review the result and add ingredient quantities before saving.",
+      "Paste a supported recipe link. AI will shape it into an editable draft for review.",
       "muted",
     ),
   );
@@ -995,9 +1063,11 @@ function importForm() {
   url.input.required = true;
   url.input.placeholder = "https://…";
   add(form, url.wrap);
-  formSubmit(form, "Import for review", async () => {
-    const draft = await api("/recipe-import", "POST", { url: url.input.value });
-    recipeForm(draft, "imported");
+  formSubmit(form, "Shape URL for review", async () => {
+    const response = await api("/recipe-drafts/ai", "POST", { url: url.input.value });
+    if (!response?.adapted)
+      throw new Error("AI did not return an editable recipe draft. No recipe was saved.");
+    recipeForm(response.adapted, "ai");
   });
   add(root, form);
 }
@@ -2504,8 +2574,12 @@ function renderBasket(main) {
       "basket-status" + (basket.ready_for_review ? "" : " needs-attention"),
     );
     const priceSummary = window.KitchenShoppingView.basketPriceSummary(basket);
-    if (priceSummary)
-      add(status, el("span", priceSummary.label, "basket-price-summary"));
+    if (priceSummary) {
+      const summary = el("span", priceSummary.label, "basket-price-summary");
+      if (priceSummary.accessibleLabel)
+        summary.setAttribute("aria-label", priceSummary.accessibleLabel);
+      add(status, summary);
+    }
     add(main, status);
   }
   if (basket.issues?.length) {
@@ -2513,15 +2587,13 @@ function renderBasket(main) {
     add(issues, el("summary", "Review details (" + basket.issues.length + ")"));
     const list = el("ul");
     basket.issues.forEach((issue) =>
-      add(
-        list,
-        el(
-          "li",
-          typeof issue === "string"
-            ? issue
-            : issue.message || JSON.stringify(issue),
-        ),
-      ),
+      (() => {
+        const exact =
+          typeof issue === "string" ? issue : issue.message || JSON.stringify(issue);
+        const item = el("li", window.KitchenShoppingView.formatQuantityMentions(exact));
+        item.title = exact;
+        return add(list, item);
+      })(),
     );
     add(issues, list);
     add(main, issues);
@@ -2575,21 +2647,34 @@ function renderBasket(main) {
       entry.remaining_quantity != null ||
       entry.overbuy_quantity != null
     ) {
+      const allocated = String(entry.allocated_quantity ?? "0");
+      const remaining = String(entry.remaining_quantity ?? "unknown");
+      const overbuy = String(entry.overbuy_quantity ?? "unknown");
+      const unit = need.unit || "";
       const allocation = el(
         "p",
         "Covered by selected packs: " +
-          (entry.allocated_quantity ?? "0") +
-          " " +
-          (need.unit || "") +
+          window.KitchenShoppingView.formatQuantityForDisplay(allocated) +
+          (unit ? " " + unit : "") +
           " · Still needed: " +
-          (entry.remaining_quantity ?? "unknown") +
-          " " +
-          (need.unit || "") +
+          window.KitchenShoppingView.formatQuantityForDisplay(remaining) +
+          (unit ? " " + unit : "") +
           " · Extra from selected packs: " +
-          (entry.overbuy_quantity ?? "unknown") +
-          " " +
-          (need.unit || ""),
+          window.KitchenShoppingView.formatQuantityForDisplay(overbuy) +
+          (unit ? " " + unit : ""),
         "muted",
+      );
+      allocation.setAttribute(
+        "aria-label",
+        "Exact quantities: covered by selected packs " +
+          allocated +
+          (unit ? " " + unit : "") +
+          "; still needed " +
+          remaining +
+          (unit ? " " + unit : "") +
+          "; extra from selected packs " +
+          overbuy +
+          (unit ? " " + unit : ""),
       );
       add(section, allocation);
     }

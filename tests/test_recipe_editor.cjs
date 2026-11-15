@@ -3,6 +3,7 @@ const test = require("node:test");
 
 const {
   isPositiveQuantity,
+  buildRevisionRequest,
   normalizeQuantity,
   parseSourceIngredient,
   rowFromDraft,
@@ -19,6 +20,57 @@ test("parses a leading exact decimal and recognized explicit unit", () => {
   });
   assert.equal(parseSourceIngredient("2 ss olivenolje").unit, "ss");
   assert.equal(parseSourceIngredient("0,5 kg gulrøtter").quantity, "0.5");
+});
+
+test("AI revision keeps an adapted draft editable when quantities need review", () => {
+  const payload = buildRevisionRequest({
+    title: "Soup",
+    servings: "4",
+    ingredients: [{ name: "carrots", quantity: "", unit: "", source_indices: [0] }],
+    instructions: "Chop\nSimmer",
+    source_url: "https://example.test/soup",
+    image_url: "",
+    source_ingredients: [{ index: 0, text: "carrots to taste" }],
+    provenance: { kind: "ai_adaptation", original_source: "imported", source_url: "https://example.test/soup" },
+  }, { isEditing: false, source: "ai" }, " make it vegan ");
+
+  assert.deepEqual(payload, {
+    draft: {
+      title: "Soup",
+      servings: 4,
+      ingredients: [{ name: "carrots", quantity: null, unit: null, category: "Other", source_indices: [0] }],
+      instructions: ["Chop", "Simmer"],
+      source_url: "https://example.test/soup",
+      image_url: null,
+      source_ingredients: [{ index: 0, text: "carrots to taste" }],
+      provenance: { kind: "ai_adaptation", original_source: "imported", source_url: "https://example.test/soup" },
+      source: "ai",
+    },
+    prompt: "make it vegan",
+  });
+});
+
+test("AI revision sends complete saved recipes and requires explicit quantities and units", () => {
+  const values = {
+    title: "Bread", servings: 2,
+    ingredients: [{ name: "flour", quantity: "1,25", unit: "kg", source_indices: [1] }],
+    instructions: ["Mix"], source_ingredients: [{ index: 1, text: "1.25 kg flour" }],
+    provenance: { kind: "ai_adaptation", source_url: null },
+  };
+  assert.deepEqual(buildRevisionRequest(values, { isEditing: true, source: "imported" }, " halve it "), {
+    recipe: {
+      title: "Bread", servings: 2,
+      ingredients: [{ name: "flour", quantity: "1.25", unit: "kg", category: "Other", source_indices: [1] }],
+      instructions: ["Mix"], source_url: null, image_url: null,
+      source_ingredients: [{ index: 1, text: "1.25 kg flour" }],
+      provenance: { kind: "ai_adaptation", source_url: null }, source: "imported",
+    },
+    prompt: "halve it",
+  });
+  assert.throws(
+    () => buildRevisionRequest({ ...values, ingredients: [{ name: "flour", quantity: "", unit: "kg" }] }, { isEditing: true, source: "manual" }, "revise"),
+    /Complete each quantity and unit/,
+  );
 });
 
 test("leaves ambiguous or unrecognized source text unresolved", () => {

@@ -1,6 +1,7 @@
 """Encrypted, expiring OAuth records in the application's PostgreSQL database."""
 
 import json
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -22,6 +23,10 @@ oauth_records = Table(
 )
 
 
+class OAuthRegistrationLimitError(ValueError):
+    """The bounded public client registry cannot accept this registration."""
+
+
 class PostgresOAuthStore(BaseStore):
     """Share client registrations and token state across workers and restarts.
 
@@ -29,6 +34,11 @@ class PostgresOAuthStore(BaseStore):
     BaseStore supplies bulk operations and TTL semantics; database I/O runs off
     the event loop. Payloads bind their collection/key to prevent row swapping.
     """
+
+    CLIENT_COLLECTION = "mcp-oauth-proxy-clients"
+    PENDING_CLIENT_TTL = 24 * 3600
+    MAX_CLIENTS = 1000
+    MAX_CLIENT_RECORD_BYTES = 16 * 1024
 
     def __init__(self, engine: Engine, encryption_key: str):
         super().__init__(stable_api=True)
@@ -74,6 +84,13 @@ class PostgresOAuthStore(BaseStore):
         payload = json.dumps(
             {"collection": collection, "key": key, "value": dict(managed_entry.value)}
         ).encode()
+        is_client = collection == self.CLIENT_COLLECTION
+        if is_client and len(payload) > self.MAX_CLIENT_RECORD_BYTES:
+            raise OAuthRegistrationLimitError("MCP client metadata is too large")
+        expires_at = managed_entry.expires_at
+        if is_client and expires_at is None:
+            # Anonymous DCR requests cannot create permanent registry entries.
+            expires_at = datetime.now(UTC) + timedelta(seconds=self.PENDING_CLIENT_TTL)
         values = {
             "collection": collection,
             # SDK keys include authorization codes: retain only their hash
@@ -81,13 +98,42 @@ class PostgresOAuthStore(BaseStore):
             "key": sha256(key.encode()).hexdigest(),
             "encrypted_payload": self.fernet.encrypt(payload).decode(),
             "created_at": managed_entry.created_at,
-            "expires_at": managed_entry.expires_at,
+            "expires_at": expires_at,
         }
 
         def write():
             with self.engine.begin() as connection:
+                if is_client:
+                    # Serialize admission across all pods. Existing clients may
+                    # renew at capacity; no live registration is evicted.
+                    connection.execute(select(func.pg_advisory_xact_lock(0x4B49544348454E)))
+                    existing = connection.execute(
+                        select(oauth_records.c.key).where(
+                            oauth_records.c.collection == collection,
+                            oauth_records.c.key == values["key"],
+                            or_(
+                                oauth_records.c.expires_at.is_(None),
+                                oauth_records.c.expires_at > func.now(),
+                            ),
+                        )
+                    ).first()
+                    count = connection.scalar(
+                        select(func.count())
+                        .select_from(oauth_records)
+                        .where(
+                            oauth_records.c.collection == collection,
+                            or_(
+                                oauth_records.c.expires_at.is_(None),
+                                oauth_records.c.expires_at > func.now(),
+                            ),
+                        )
+                    )
+                    if existing is None and (count is None or count >= self.MAX_CLIENTS):
+                        raise OAuthRegistrationLimitError(
+                            "MCP client registry is full; try again after pending registrations expire"
+                        )
                 # Remove expired transactions during writes; registrations with
-                # no expiry must survive until the user disconnects the client.
+                # a live token lifetime remain available for refresh.
                 connection.execute(
                     delete(oauth_records).where(oauth_records.c.expires_at <= func.now())
                 )

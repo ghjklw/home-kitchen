@@ -5,7 +5,7 @@ import math
 import secrets
 import time
 from hashlib import sha256
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 from fastmcp.server.auth import AccessToken
@@ -20,15 +20,17 @@ from fastmcp.server.auth.redirect_validation import validate_redirect_uri
 from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.middleware import Middleware
 from mcp.server.auth.provider import AuthorizationCode, RefreshToken, RegistrationError, TokenError
+from mcp.server.transport_security import RequestBodyLimitMiddleware
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from pydantic import AnyUrl
 from sqlalchemy.engine import Engine
+from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse
 from starlette.routing import Route
 
 from home_kitchen.context import HistoryContext, history_context
-from home_kitchen.mcp_oauth_storage import PostgresOAuthStore
+from home_kitchen.mcp_oauth_storage import OAuthRegistrationLimitError, PostgresOAuthStore
 from home_kitchen.settings import Settings
 
 
@@ -117,7 +119,10 @@ class HouseholdAzureProvider(AzureProvider):
         client_info.token_endpoint_auth_method = "none"
         client_info.client_secret = None
         client_info.client_secret_expires_at = None
-        await super().register_client(client_info)
+        try:
+            await super().register_client(client_info)
+        except OAuthRegistrationLimitError as error:
+            raise RegistrationError("invalid_client_metadata", str(error)) from None
 
     def get_routes(self, mcp_path=None):
         routes = super().get_routes(mcp_path)
@@ -129,6 +134,21 @@ class HouseholdAzureProvider(AzureProvider):
                         route.path, endpoint=PublicClientMetadata(route.app), methods=route.methods
                     )
                 )
+            elif isinstance(route, Route) and route.path in {
+                "/authorize",
+                "/token",
+                "/register",
+                "/consent",
+            }:
+                # FastMCP replaces some SDK routes without its body limiter.
+                # Keep CORS outermost so oversized browser requests receive
+                # the same CORS headers, and leave actual MCP payloads alone.
+                endpoint = route.app
+                if isinstance(endpoint, CORSMiddleware):
+                    endpoint.app = RequestBodyLimitMiddleware(endpoint.app, 64 * 1024)
+                else:
+                    endpoint = RequestBodyLimitMiddleware(endpoint, 64 * 1024)
+                result.append(Route(route.path, endpoint=endpoint, methods=route.methods))
             else:
                 result.append(route)
         return result
@@ -145,10 +165,45 @@ class HouseholdAzureProvider(AzureProvider):
         return client
 
     async def load_access_token(self, token: str) -> AccessToken | None:
+        # FastMCP 2.14 validates both token kinds identically and stores refresh
+        # JTIs alongside access JTIs. Reject refresh JWTs before the token swap.
+        try:
+            payload = self.jwt_issuer.verify_token(token)
+            if payload.get("token_use") not in (None, "access"):
+                return None
+        except Exception:
+            return None
         # The SDK validates the broker signature/audience and swaps the reference
         # for its stored Entra token, verifying its signature/issuer/aud/scopes.
         verified = await super().load_access_token(token)
         return self.household_identity(verified)
+
+    async def authorize(self, client, params):
+        # An omitted scope uses the advertised required scope. Keep explicit
+        # requests intact so the normal client scope validation remains binding.
+        if params.scopes is None:
+            params = params.model_copy(update={"scopes": [self.household_scope]})
+        return await super().authorize(client, params)
+
+    async def _submit_consent(self, request: Request):
+        # The SDK checks the form token against the transaction, but does not
+        # bind it to the browser that viewed consent. An attacker can otherwise
+        # copy their own form/token into an auto-submitting victim browser.
+        public = urlsplit(str(self.base_url))
+        expected_origin = f"{public.scheme}://{public.netloc}"
+        form = await request.form()
+        csrf = str(form.get("csrf_token", ""))
+        cookie_name = self._cookie_name("MCP_CONSENT_STATE")
+        browser_tokens = (
+            self._decode_list_cookie(request, "MCP_CONSENT_STATE")
+            if request.cookies.get(cookie_name)
+            else []
+        )
+        if request.headers.get("origin") != expected_origin or not any(
+            secrets.compare_digest(csrf.encode(), value.encode()) for value in browser_tokens
+        ):
+            return JSONResponse({"detail": "Invalid consent request"}, status_code=400)
+        return await super()._submit_consent(request)
 
     def household_identity(self, verified) -> AccessToken | None:
         """Require complete signed upstream claims, including overage fail-closed."""
@@ -306,7 +361,7 @@ class HouseholdAzureProvider(AzureProvider):
             if prior
             else now + 30 * 24 * 3600
         )
-        refresh_ttl = max(0, int((refresh_expiry or now) - now))
+        refresh_ttl = max(0, int((refresh_expiry or now) - now)) if refresh_value else 0
         upstream_id, access_jti = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
         await self._upstream_token_store.put(
             upstream_id,
@@ -353,6 +408,13 @@ class HouseholdAzureProvider(AzureProvider):
                 ),
                 ttl=refresh_ttl,
             )
+        # Pending registrations expire after one day, while an authenticated
+        # client's record must remain available for every token it was issued.
+        await self._client_store.put(
+            client.client_id,
+            client,
+            ttl=max(self.storage.PENDING_CLIENT_TTL, expires_in, refresh_ttl),
+        )
         return OAuthToken(
             access_token=access,
             token_type="Bearer",
@@ -364,6 +426,8 @@ class HouseholdAzureProvider(AzureProvider):
     async def exchange_refresh_token(self, client, refresh_token: RefreshToken, scopes):
         try:
             payload = self.jwt_issuer.verify_token(refresh_token.token)
+            if payload.get("token_use") != "refresh":
+                raise ValueError("Invalid token type")
             if not set(scopes).issubset(refresh_token.scopes):
                 raise ValueError("Scope escalation")
             mapping = await self._jti_mapping_store.get(payload["jti"])

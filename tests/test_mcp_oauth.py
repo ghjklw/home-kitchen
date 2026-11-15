@@ -3,7 +3,7 @@ import hashlib
 import logging
 import re
 import time
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 from uuid import uuid4
 
 import jwt
@@ -15,11 +15,12 @@ from fastapi.testclient import TestClient
 from fastmcp.server.auth.oauth_proxy import JTIMapping, UpstreamTokenSet
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from pydantic import ValidationError
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, func, select
 
 from home_kitchen.app import create_app
 from home_kitchen.context import history_context
 from home_kitchen.mcp_auth import HouseholdAzureProvider
+from home_kitchen.mcp_oauth_storage import oauth_records
 from home_kitchen.settings import Settings
 
 TENANT = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -258,6 +259,57 @@ def test_discovery_challenge_and_dcr_redirects(test_database_url):
                 assert "error=" in rejected.headers["location"]
 
 
+def test_public_registration_limit_fails_safely(test_database_url, monkeypatch):
+    app = create_app(oauth_settings(test_database_url))
+    monkeypatch.setattr(app.state.mcp.auth.storage, "MAX_CLIENTS", 0)
+    with TestClient(app, base_url="https://kitchen.example") as client:
+        response = client.post(
+            "/mcp/register",
+            json={"redirect_uris": ["https://claude.ai/api/mcp/auth_callback"]},
+        )
+        assert response.status_code == 400
+        assert response.json()["error"] == "invalid_client_metadata"
+        assert "registry is full" in response.json()["error_description"]
+
+
+@pytest.mark.parametrize("stream_body", [False, True])
+def test_oauth_request_bodies_are_bounded_before_persistence(test_database_url, stream_body):
+    app = create_app(oauth_settings(test_database_url))
+    engine = app.state.service.store.engine
+    with TestClient(app, base_url="https://kitchen.example") as client:
+        registration = client.post(
+            "/mcp/register",
+            json={"redirect_uris": ["https://claude.ai/api/mcp/auth_callback"]},
+        ).json()
+        with engine.begin() as connection:
+            before = connection.scalar(select(func.count()).select_from(oauth_records))
+        payload = urlencode(
+            {
+                "client_id": registration["client_id"],
+                "response_type": "code",
+                "scope": "Kitchen.Access",
+                "code_challenge": "test-challenge",
+                "state": "x" * (65 * 1024),
+            }
+        ).encode()
+        for path in ("/authorize", "/consent", "/token", "/register"):
+            body = iter([payload[:1024], payload[1024:]]) if stream_body else payload
+            response = client.post(
+                "/mcp" + path,
+                content=body,
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Origin": "https://kitchen.example",
+                },
+                follow_redirects=False,
+            )
+            assert response.status_code == 413
+            if path in ("/token", "/register"):
+                assert response.headers["access-control-allow-origin"] == "*"
+        with engine.begin() as connection:
+            assert connection.scalar(select(func.count()).select_from(oauth_records)) == before
+
+
 @pytest.mark.asyncio
 async def test_broker_tool_call_has_verified_actor_and_mcp_channel(test_database_url, upstream_key):
     app = create_app(oauth_settings(test_database_url))
@@ -293,8 +345,9 @@ async def test_broker_tool_call_has_verified_actor_and_mcp_channel(test_database
 
 
 @pytest.mark.parametrize("failure", [None, "household", "network"])
+@pytest.mark.parametrize("request_scope", [None, "Kitchen.Access"])
 def test_browser_oauth_consent_pkce_callback_and_one_use_code(
-    test_database_url, upstream_key, monkeypatch, caplog, failure
+    test_database_url, upstream_key, monkeypatch, caplog, failure, request_scope
 ):
     app = create_app(oauth_settings(test_database_url))
     provider = app.state.mcp.auth
@@ -356,6 +409,12 @@ def test_browser_oauth_consent_pkce_callback_and_one_use_code(
         ).json()
         assert registration["token_endpoint_auth_method"] == "none"
         assert not registration.get("client_secret")
+        _, pending_ttl = client.portal.call(
+            lambda: provider.storage.ttl(
+                registration["client_id"], collection=provider.storage.CLIENT_COLLECTION
+            )
+        )
+        assert 0 < pending_ttl <= 24 * 3600
         verifier = "test-only-client-verifier-value-with-at-least-43-characters"
         challenge = (
             base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
@@ -368,7 +427,7 @@ def test_browser_oauth_consent_pkce_callback_and_one_use_code(
                 "client_id": registration["client_id"],
                 "response_type": "code",
                 "redirect_uri": "https://claude.ai/api/mcp/auth_callback",
-                "scope": "Kitchen.Access",
+                **({"scope": request_scope} if request_scope is not None else {}),
                 "state": "client-state",
                 "resource": BASE + "/",
                 "code_challenge": challenge,
@@ -383,13 +442,48 @@ def test_browser_oauth_consent_pkce_callback_and_one_use_code(
         csrf = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
         assert (
             client.post(
-                "/mcp/consent", data={"txn_id": txn_id, "action": "approve", "csrf_token": "wrong"}
+                "/mcp/consent",
+                data={"txn_id": txn_id, "action": "approve", "csrf_token": "wrong"},
+                headers={"Origin": "https://kitchen.example"},
             ).status_code
             == 400
         )
+        consent_form = {"txn_id": txn_id, "action": "approve", "csrf_token": csrf}
+        # A form token fetched by another browser cannot authorize this browser.
+        outsider = TestClient(app, base_url="https://kitchen.example")
+        try:
+            assert (
+                outsider.post(
+                    "/mcp/consent",
+                    data=consent_form,
+                    headers={"Origin": "https://kitchen.example"},
+                    follow_redirects=False,
+                ).status_code
+                == 400
+            )
+        finally:
+            outsider.close()
+        for headers in (
+            {},
+            {"Origin": "https://attacker.example"},
+            {
+                "Origin": "https://kitchen.example",
+                "Cookie": "__Host-MCP_CONSENT_STATE=tampered",
+            },
+        ):
+            assert (
+                client.post(
+                    "/mcp/consent",
+                    data=consent_form,
+                    headers=headers,
+                    follow_redirects=False,
+                ).status_code
+                == 400
+            )
         approved = client.post(
             "/mcp/consent",
-            data={"txn_id": txn_id, "action": "approve", "csrf_token": csrf},
+            data=consent_form,
+            headers={"Origin": "https://kitchen.example"},
             follow_redirects=False,
         )
         assert approved.status_code == 302
@@ -440,6 +534,30 @@ def test_browser_oauth_consent_pkce_callback_and_one_use_code(
         assert tokens.status_code == 200
         assert tokens.json()["access_token"]
         assert tokens.json()["refresh_token"]
+        _, authenticated_ttl = client.portal.call(
+            lambda: provider.storage.ttl(
+                registration["client_id"], collection=provider.storage.CLIENT_COLLECTION
+            )
+        )
+        assert authenticated_ttl > 29 * 24 * 3600
+
+        def use_bearer(value):
+            return client.post(
+                "/mcp/",
+                headers={
+                    "Authorization": f"Bearer {value}",
+                    "Accept": "application/json, text/event-stream",
+                },
+                json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+            )
+
+        assert use_bearer(tokens.json()["access_token"]).status_code == 200
+        assert use_bearer(tokens.json()["refresh_token"]).status_code == 401
+        payload = provider.jwt_issuer.verify_token(tokens.json()["access_token"])
+        expired = provider.jwt_issuer.issue_access_token(
+            registration["client_id"], ["Kitchen.Access"], payload["jti"], expires_in=-1
+        )
+        assert use_bearer(expired).status_code == 401
         assert client.post("/mcp/token", data=exchange).status_code == 400
         refresh_request = {
             "grant_type": "refresh_token",
@@ -451,6 +569,8 @@ def test_browser_oauth_consent_pkce_callback_and_one_use_code(
         assert refreshed.status_code == 200
         assert refreshed.json()["refresh_token"] != tokens.json()["refresh_token"]
         assert client.post("/mcp/token", data=refresh_request).status_code == 400
+        assert use_bearer(tokens.json()["access_token"]).status_code == 200
+        assert use_bearer(refreshed.json()["refresh_token"]).status_code == 401
         assert len(closed) == 2
         allowed_groups.clear()
         denied_refresh = client.post(

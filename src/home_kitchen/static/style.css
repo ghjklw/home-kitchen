@@ -744,7 +744,7 @@ button.link {
 .product-card .image-fallback {
   min-height: 70px;
 }
-.@media(max-width:650px) {
+@media (max-width: 650px) {
   .sidebar nav {
     grid-template-columns: repeat(5, minmax(0, 1fr));
   }

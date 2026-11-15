@@ -81,6 +81,7 @@ The complete request and response schemas are generated in `/openapi.json`; `/do
 | `PUT /api/basket/selections` | Save a candidate product snapshot for a need; it remains unverified. |
 | `DELETE /api/basket/selections/{need_id}/{product_id}?start=…&end=…` | Remove a saved candidate selection. |
 | `POST /api/interactions` | Explicitly save one caller-provided history entry. |
+| `POST /api/recipes/{recipe_id}/feedback` | Save a typed rating, would-make-again answer, or note for an existing recipe. |
 | `GET /api/interactions` | List recent saved history entries. |
 | `GET /api/knowledge/search?query=…` | Search recorded history and return evidence records. |
 

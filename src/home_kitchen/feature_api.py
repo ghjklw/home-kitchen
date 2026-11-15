@@ -12,6 +12,7 @@ from home_kitchen.features import KitchenFeatures
 from home_kitchen.history import HistoryEntry, HistoryEntryCreate, RetrievedEvidence
 from home_kitchen.inventory import InventoryItem, InventoryItemCreate, PurchasePlan
 from home_kitchen.purchasing import PurchaseModeInfo, StoreTrip
+from home_kitchen.recipe_feedback import RecipeFeedbackCreate
 from home_kitchen.recipes import RecipeDraft, RecipeDraftRequest, RecipeProviderInfo
 
 
@@ -64,6 +65,17 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
     @router.post("/recipe-drafts/{provider_id}")
     async def recipe_draft(provider_id: str, data: RecipeDraftRequest) -> RecipeDraft:
         return await features.draft_recipe(provider_id, data)
+
+    @router.post("/recipes/{recipe_id}/feedback", status_code=201)
+    def record_recipe_feedback(
+        recipe_id: UUID, data: RecipeFeedbackCreate, request: Request
+    ) -> HistoryEntry:
+        return features.recipe_feedback.record(
+            recipe_id,
+            data,
+            channel="app" if request.headers.get("sec-fetch-site") == "same-origin" else "api",
+            actor_id=getattr(request.state, "actor_id", None),
+        )
 
     @router.post("/interactions", status_code=201)
     def record_interaction(data: HistoryEntryCreate, request: Request) -> HistoryEntry:

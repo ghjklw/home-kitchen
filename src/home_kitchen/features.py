@@ -12,6 +12,7 @@ from home_kitchen.models import RecipeCreate
 from home_kitchen.oda import OdaService
 from home_kitchen.oda.cart import OdaCartService
 from home_kitchen.purchasing import InStoreMode, OdaMode, PurchaseModes, StoreTripService
+from home_kitchen.recipe_feedback import RecipeFeedbackService
 from home_kitchen.recipes import (
     EvidenceSnippet,
     RecipeContext,
@@ -36,6 +37,7 @@ class KitchenFeatures:
         self.settings = settings
         self.household = household
         self.history = HistoryRepository(kitchen.store.engine)
+        self.recipe_feedback = RecipeFeedbackService(kitchen, self.history)
         self.oda = OdaService(kitchen.store.engine, settings)
         self.oda_cart = OdaCartService(self.oda)
         self.inventory = InventoryService(kitchen, self.history)

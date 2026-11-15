@@ -2559,6 +2559,48 @@ function renderBasket(main) {
 }
 function feedbackForm(recipe) {
   const root = openDialog(recipe ? "Rate this recipe" : "Share feedback");
+  if (recipe) {
+    add(
+      root,
+      el(
+        "p",
+        "Your rating or note is saved as household context for future recommendations. This form records only the feedback you enter, not a full chat.",
+        "muted",
+      ),
+    );
+    const form = el("form");
+    const rating = field("Rating (optional)", "number", "", "Choose a whole number from 1 to 5.");
+    rating.input.min = "1";
+    rating.input.max = "5";
+    rating.input.step = "1";
+    const wouldMakeAgain = field("Would cook this again? (optional)", "select");
+    [
+      ["", "No answer"],
+      ["true", "Yes"],
+      ["false", "No"],
+    ].forEach(([value, label]) => {
+      const option = el("option", label);
+      option.value = value;
+      add(wouldMakeAgain.input, option);
+    });
+    const notes = field("Notes (optional)", "textarea", "", "What worked well, or what should change next time?");
+    notes.input.maxLength = 2000;
+    notes.input.rows = 4;
+    add(form, rating.wrap, wouldMakeAgain.wrap, notes.wrap);
+    formSubmit(form, "Save feedback", async () => {
+      const payload = {};
+      if (rating.input.value.trim()) payload.rating = Number(rating.input.value);
+      if (wouldMakeAgain.input.value) {
+        payload.would_make_again = wouldMakeAgain.input.value === "true";
+      }
+      if (notes.input.value.trim()) payload.notes = notes.input.value.trim();
+      await api(`/recipes/${recipe.id}/feedback`, "POST", payload);
+      $("#modal").close();
+      notify("Feedback saved for future recommendations.");
+    });
+    add(root, form);
+    return;
+  }
   add(
     root,
     el(

@@ -3,6 +3,8 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+from home_kitchen.units import add_exact, canonicalize_quantity, multiply_integer_exact
+
 from .models import BasketNeedStatus, BasketReview, PurchaseNeed, SelectedProduct
 
 
@@ -19,8 +21,13 @@ def evaluate_basket(
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
 
-    by_id: dict[object, PurchaseNeed] = {}
+    normalized_needs = []
     for need in needs:
+        quantity, unit = canonicalize_quantity(need.quantity, need.unit)
+        normalized_needs.append(need.model_copy(update={"quantity": quantity, "unit": unit}))
+
+    by_id: dict[object, PurchaseNeed] = {}
+    for need in normalized_needs:
         if need.id in by_id:
             raise ValueError(f"duplicate need id: {need.id}")
         by_id[need.id] = need
@@ -30,7 +37,10 @@ def evaluate_basket(
         if selection.need_id not in grouped:
             raise ValueError(f"selection references unknown need: {selection.need_id}")
         need = by_id[selection.need_id]
-        if selection.product.pack_unit != need.unit:
+        _, pack_unit = canonicalize_quantity(
+            selection.product.pack_quantity, selection.product.pack_unit
+        )
+        if pack_unit != need.unit:
             raise ValueError(
                 f"incompatible units for {selection.product.name}: "
                 f"{selection.product.pack_unit} cannot satisfy {need.unit}"
@@ -45,13 +55,16 @@ def evaluate_basket(
     all_products_ready = True
     freshness = timedelta(hours=freshness_hours)
 
-    for need in needs:
+    for need in normalized_needs:
         selected = grouped[need.id]
-        allocated = sum(
-            (entry.product.pack_quantity * entry.packages for entry in selected), Decimal(0)
-        )
-        remaining = max(need.quantity - allocated, Decimal(0))
-        overbuy = max(allocated - need.quantity, Decimal(0))
+        allocated = Decimal(0)
+        for entry in selected:
+            pack_quantity, _ = canonicalize_quantity(
+                entry.product.pack_quantity, entry.product.pack_unit
+            )
+            allocated = add_exact(allocated, multiply_integer_exact(pack_quantity, entry.packages))
+        remaining = max(add_exact(need.quantity, -allocated), Decimal(0))
+        overbuy = max(add_exact(allocated, -need.quantity), Decimal(0))
         need_ready = remaining == 0
         for entry in selected:
             product = entry.product
@@ -61,7 +74,9 @@ def evaluate_basket(
             if product.price is None:
                 all_prices_known = False
             else:
-                total_cost += product.price * entry.packages
+                total_cost = add_exact(
+                    total_cost, multiply_integer_exact(product.price, entry.packages)
+                )
             currencies.add(product.currency)
             if not verified:
                 issues.append(f"{product.name}: product evidence is unverified")

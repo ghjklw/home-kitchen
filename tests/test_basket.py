@@ -127,6 +127,40 @@ def test_unknown_need_duplicate_needs_and_incompatible_units_are_rejected():
         )
 
 
+def test_explicit_mass_volume_packages_convert_only_for_basket_arithmetic():
+    flour = need("1000", unit="g")
+    kilo = product("flour-kilo", "Flour", pack_quantity="0.5", pack_unit="kg")
+    flour_review = evaluate_basket(
+        [flour], [SelectedProduct(need_id=flour.id, product=kilo, packages=2)], now=NOW
+    )
+    flour_status = flour_review.needs[0]
+    assert flour_status.need.unit == "g"
+    assert flour_status.need.quantity == Decimal("1000")
+    assert flour_status.allocated_quantity == Decimal("1000")
+    assert flour_status.remaining_quantity == Decimal("0")
+    assert flour_status.selections[0].product.pack_quantity == Decimal("0.5")
+    assert flour_status.selections[0].product.pack_unit == "kg"
+
+    milk = need("1", unit="l")
+    bottle = product("milk-half-litre", "Milk", pack_quantity="500", pack_unit="ml")
+    milk_review = evaluate_basket(
+        [milk], [SelectedProduct(need_id=milk.id, product=bottle, packages=2)], now=NOW
+    )
+    milk_status = milk_review.needs[0]
+    assert milk_status.need.unit == "ml"
+    assert milk_status.allocated_quantity == Decimal("1000")
+    assert milk_status.remaining_quantity == Decimal("0")
+    assert milk_status.selections[0].product.pack_quantity == Decimal("500")
+
+    incompatible = need("1", unit="g")
+    with pytest.raises(ValueError, match="incompatible units"):
+        evaluate_basket(
+            [incompatible],
+            [SelectedProduct(need_id=incompatible.id, product=bottle, packages=2)],
+            now=NOW,
+        )
+
+
 def test_product_snapshots_enforce_links_and_timezone():
     with pytest.raises(ValidationError, match="oda.com"):
         product("bad", "Imposter", url="https://fake-oda.com/product/1")

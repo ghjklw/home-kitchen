@@ -11,6 +11,7 @@ from .mcp_auth import MCPActorMiddleware
 from .models import (
     Meal,
     MealCreate,
+    PlannedMealRecipe,
     Recipe,
     RecipeCreate,
     RegularItem,
@@ -70,6 +71,16 @@ def build_mcp(
     def list_meals(start: date, end: date) -> list[Meal]:
         """List planned meals from start through end, inclusive."""
         return service.list_meals(start, end)
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
+    def get_planned_meal_recipe(meal_id: UUID) -> PlannedMealRecipe:
+        """Get scaled cooking ingredients for a planned meal.
+
+        source_recipe retains the original instructions, servings and provenance.
+        Only the top-level ingredients are scaled; never multiply oven temperatures,
+        cooking times or other numbers in source instructions. No recipe is changed.
+        """
+        return service.meal_recipe(meal_id)
 
     @mcp.tool(
         annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False}

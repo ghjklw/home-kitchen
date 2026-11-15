@@ -6,6 +6,7 @@ from uuid import UUID
 from fastmcp import FastMCP
 
 from home_kitchen.basket import BasketReview, SelectedProduct
+from home_kitchen.basket.matching import BasketMatchResult
 from home_kitchen.basket.repository import BasketService
 from home_kitchen.context import history_context
 from home_kitchen.features import KitchenFeatures
@@ -15,6 +16,7 @@ from home_kitchen.oda.cart import CartProposalRequest
 from home_kitchen.purchasing import StoreTrip
 from home_kitchen.recipe_feedback import RecipeFeedbackCreate
 from home_kitchen.recipes import RecipeDraft, RecipeDraftRequest, RecipeProviderInfo
+from home_kitchen.recipes.discovery import RecipeDiscoveryRequest, RecipeDiscoveryResponse
 
 
 def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: BasketService) -> None:
@@ -98,6 +100,17 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
         """Record picking progress. This never asserts payment or alters home stock."""
         return features.store_trip.check(start, end, need_id, checked)
 
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
+    async def find_recipes(request: RecipeDiscoveryRequest) -> RecipeDiscoveryResponse:
+        """Find genuine source links; unavailable sources retain explicit status.
+
+        A result is metadata, never a saved recipe. Import an exact supplied URL
+        and review the editable source draft before saving or planning it.
+        """
+        return await features.recipe_discovery.search(
+            request, actor_id=history_context.get().actor_id
+        )
+
     @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
     def list_recipe_providers() -> list[RecipeProviderInfo]:
         """List installed recipe draft adapters and their accepted inputs."""
@@ -135,6 +148,19 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
     def get_basket_review(start: date, end: date) -> BasketReview:
         """Separate required food quantities from exact product references and alternatives."""
         return basket.review(start, end)
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
+    async def find_basket_products(
+        start: date, end: date, page: int = 1, size: int = 5
+    ) -> BasketMatchResult:
+        """Find candidates and alternatives for all net needs without selecting or buying.
+
+        Package counts use only explicit compatible package metadata. Unknown
+        quantities stay unresolved; every candidate needs review before selection.
+        """
+        return await features.basket_matching.find_products(
+            actor(), start, end, page=page, size=size
+        )
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
     def propose_basket_product(start: date, end: date, selection: SelectedProduct) -> BasketReview:

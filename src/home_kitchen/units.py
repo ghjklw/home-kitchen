@@ -77,3 +77,17 @@ def compatible_units(unit: str) -> frozenset[str]:
         return frozenset({normalized})
     canonical = mapping[0]
     return frozenset(key for key, (base, _) in _UNIT_SCALE.items() if base == canonical)
+
+
+def scale_quantity(value: Decimal, servings: int, source_servings: int) -> Decimal:
+    """Scale with fixed decimal precision shared by cooking and shopping.
+
+    Finite exact results retain their digits; repeating fractions use at least
+    28 significant digits, independent of a caller's Decimal context.
+    """
+    if servings <= 0 or source_servings <= 0:
+        raise ValueError("servings must be positive")
+    numerator = multiply_integer_exact(value, servings)
+    with localcontext() as context:
+        context.prec = max(28, len(numerator.as_tuple().digits) + len(str(source_servings)))
+        return numerator / Decimal(source_servings)

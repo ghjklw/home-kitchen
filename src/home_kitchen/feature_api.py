@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
 from home_kitchen.basket import BasketReview, SelectedProduct
+from home_kitchen.basket.matching import BasketMatchResult
 from home_kitchen.basket.repository import BasketService
 from home_kitchen.features import KitchenFeatures
 from home_kitchen.history import HistoryEntry, HistoryEntryCreate, RetrievedEvidence
@@ -14,6 +15,7 @@ from home_kitchen.inventory import InventoryItem, InventoryItemCreate, PurchaseP
 from home_kitchen.purchasing import PurchaseModeInfo, StoreTrip
 from home_kitchen.recipe_feedback import RecipeFeedbackCreate
 from home_kitchen.recipes import RecipeDraft, RecipeDraftRequest, RecipeProviderInfo
+from home_kitchen.recipes.discovery import RecipeDiscoveryRequest, RecipeDiscoveryResponse
 
 
 class BasketSelectionRequest(BaseModel):
@@ -57,6 +59,15 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
     @router.put("/store-trip/items/{need_id}")
     def check_store_item(need_id: UUID, data: TripCheck, start: date, end: date) -> StoreTrip:
         return features.store_trip.check(start, end, need_id, data.checked)
+
+    @router.post("/recipe-discovery")
+    async def discover_recipes(
+        request: Request, data: RecipeDiscoveryRequest, response: Response
+    ) -> RecipeDiscoveryResponse:
+        response.headers["Cache-Control"] = "no-store"
+        return await features.recipe_discovery.search(
+            data, actor_id=getattr(request.state, "actor_id", None)
+        )
 
     @router.get("/recipe-providers")
     def recipe_providers() -> list[RecipeProviderInfo]:
@@ -112,6 +123,23 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
     @router.get("/basket")
     def review_basket(start: date, end: date) -> BasketReview:
         return basket.review(start, end)
+
+    @router.get("/basket/matches")
+    async def find_basket_products(
+        request: Request,
+        response: Response,
+        start: date,
+        end: date,
+        page: int = Query(default=1, ge=1, le=50),
+        size: int = Query(default=5, ge=1, le=5),
+    ) -> BasketMatchResult:
+        actor_id = getattr(request.state, "actor_id", None)
+        if not actor_id:
+            raise HTTPException(401, "Household authentication required")
+        response.headers["Cache-Control"] = "no-store"
+        return await features.basket_matching.find_products(
+            actor_id, start, end, page=page, size=size
+        )
 
     @router.put("/basket/selections")
     def select_product(data: BasketSelectionRequest) -> BasketReview:

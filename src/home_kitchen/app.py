@@ -27,6 +27,7 @@ from home_kitchen.mcp_server import build_mcp
 from home_kitchen.models import (
     Meal,
     MealCreate,
+    PlannedMealRecipe,
     Recipe,
     RecipeCreate,
     RegularItem,
@@ -171,6 +172,10 @@ def create_app(
     @app.post("/api/meals", status_code=201)
     def plan_meal(data: MealCreate) -> Meal:
         return service.plan_meal(data)
+
+    @app.get("/api/meals/{meal_id}/recipe")
+    def get_meal_recipe(meal_id: UUID) -> PlannedMealRecipe:
+        return service.meal_recipe(meal_id)
 
     @app.delete("/api/meals/{meal_id}")
     def delete_meal(meal_id: UUID) -> dict[str, bool]:

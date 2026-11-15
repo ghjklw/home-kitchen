@@ -1,8 +1,6 @@
 """Household recipes, meal planning, and deliberate shopping suggestions."""
 
 from datetime import date
-from decimal import Decimal
-from pathlib import Path
 from uuid import UUID, uuid4
 
 from .models import (
@@ -13,15 +11,16 @@ from .models import (
     RegularItem,
     ShoppingItem,
     ShoppingItemCreate,
-    ShoppingLine,
     WeekShopping,
 )
+from .shopping import ShoppingBuilder, ShoppingContext, default_shopping_builder
 from .store import Store
 
 
 class KitchenService:
-    def __init__(self, db_path: Path):
-        self.store = Store(db_path)
+    def __init__(self, database_url: str, shopping_builder: ShoppingBuilder | None = None):
+        self.store = Store(database_url)
+        self.shopping_builder = shopping_builder or default_shopping_builder()
 
     def create_recipe(self, data: RecipeCreate) -> Recipe:
         recipe = Recipe(id=uuid4(), **data.model_dump())
@@ -100,41 +99,15 @@ class KitchenService:
 
     def shopping_list(self, start: date, end: date, today: date) -> WeekShopping:
         self._validate_range(start, end)
-        lines: dict[tuple[str, str], ShoppingLine] = {}
-
-        def add(name: str, quantity: Decimal, unit: str, origin: str) -> None:
-            key = (name.strip().casefold(), unit.strip().casefold())
-            if key not in lines:
-                lines[key] = ShoppingLine(
-                    name=name.strip(), quantity=quantity, unit=key[1], origins=[origin]
-                )
-            else:
-                line = lines[key]
-                line.quantity += quantity
-                if origin not in line.origins:
-                    line.origins.append(origin)
-
-        for meal in self.list_meals(start, end):
-            recipe = self.get_recipe(meal.recipe_id)
-            for ingredient in recipe.ingredients:
-                quantity = ingredient.quantity * Decimal(meal.servings) / Decimal(recipe.servings)
-                add(ingredient.name, quantity, ingredient.unit, f"meal:{meal.id}")
-        for item in self.list_items():
-            if not item.completed:
-                add(item.name, item.quantity, item.unit, f"item:{item.id}")
-        confirmed = self.store.active_confirmations()
-        suggestions = []
-        for regular in self.list_regular_items():
-            if regular.id in confirmed:
-                continue
-            if regular.last_purchased is None:
-                add(regular.name, regular.quantity, regular.unit, f"regular:{regular.id}")
-            elif (today - regular.last_purchased).days >= regular.interval_days:
-                suggestions.append(regular)
-        return WeekShopping(
-            lines=sorted(lines.values(), key=lambda line: (line.name.casefold(), line.unit)),
-            suggestions=suggestions,
+        context = ShoppingContext(
+            meals=self.list_meals(start, end),
+            recipes={recipe.id: recipe for recipe in self.list_recipes()},
+            captures=self.list_items(),
+            regulars=self.list_regular_items(),
+            active_confirmations=self.store.active_confirmations(),
+            today=today,
         )
+        return self.shopping_builder.build(context)
 
     @staticmethod
     def _validate_range(start: date, end: date) -> None:

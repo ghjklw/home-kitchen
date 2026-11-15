@@ -1,140 +1,242 @@
-"""Small SQLite entity store; every operation owns its connection."""
+"""Transactional PostgreSQL storage for kitchen records."""
 
-import sqlite3
 from collections.abc import Generator
 from contextlib import contextmanager
-from pathlib import Path
 from typing import TypeVar
 from uuid import UUID
 
 from pydantic import BaseModel
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
+    Column,
+    Date,
+    ForeignKey,
+    Identity,
+    Integer,
+    MetaData,
+    Numeric,
+    Table,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    create_engine,
+    select,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSONB, insert
+from sqlalchemy.engine import Connection, make_url
 
+from .context import history_context
+from .history import HistoryEntryCreate, HistoryRepository
 from .models import Meal, Recipe, RegularItem, ShoppingItem
 
 Model = TypeVar("Model", bound=BaseModel)
+metadata = MetaData()
+recipes = Table(
+    "recipes",
+    metadata,
+    Column("id", Uuid, primary_key=True),
+    Column("position", BigInteger, Identity(), nullable=False, unique=True),
+    Column("title", Text, nullable=False),
+    Column("servings", Integer, nullable=False),
+    Column("ingredients", JSON().with_variant(JSONB, "postgresql"), nullable=False),
+    Column("instructions", JSON().with_variant(JSONB, "postgresql"), nullable=False),
+    Column("source_url", Text),
+    Column("image_url", Text),
+    Column("source", Text, nullable=False),
+)
+meals = Table(
+    "meals",
+    metadata,
+    Column("id", Uuid, primary_key=True),
+    Column("position", BigInteger, Identity(), nullable=False, unique=True),
+    Column("date", Date, nullable=False),
+    Column("slot", Text, nullable=False),
+    Column("recipe_id", Uuid, ForeignKey("recipes.id"), nullable=False),
+    Column("servings", Integer, nullable=False),
+    UniqueConstraint("date", "slot"),
+)
+items = Table(
+    "items",
+    metadata,
+    Column("id", Uuid, primary_key=True),
+    Column("position", BigInteger, Identity(), nullable=False, unique=True),
+    Column("name", Text, nullable=False),
+    Column("quantity", Numeric, nullable=False),
+    Column("unit", Text, nullable=False),
+    Column("completed", Boolean, nullable=False),
+)
+regulars = Table(
+    "regulars",
+    metadata,
+    Column("id", Uuid, primary_key=True),
+    Column("position", BigInteger, Identity(), nullable=False, unique=True),
+    Column("name", Text, nullable=False),
+    Column("quantity", Numeric, nullable=False),
+    Column("unit", Text, nullable=False),
+    Column("interval_days", Integer, nullable=False),
+    Column("last_purchased", Date),
+)
+confirmations = Table(
+    "confirmations",
+    metadata,
+    Column("regular_id", Uuid, ForeignKey("regulars.id", ondelete="CASCADE"), primary_key=True),
+    Column("item_id", Uuid, ForeignKey("items.id", ondelete="CASCADE"), nullable=False),
+)
+settings = Table(
+    "settings",
+    metadata,
+    Column("key", Text, primary_key=True),
+    Column("value", Text, nullable=False),
+)
+TABLES = {"recipe": recipes, "meal": meals, "item": items, "regular": regulars}
+
+
+def entity_values(entity: BaseModel) -> dict:
+    values = entity.model_dump()
+    # JSON columns contain JSON values; native dates, UUIDs and decimals elsewhere
+    # retain their database types and precision.
+    if isinstance(entity, Recipe):
+        values["ingredients"] = entity.model_dump(mode="json")["ingredients"]
+        values["source_url"] = str(entity.source_url) if entity.source_url else None
+        values["image_url"] = str(entity.image_url) if entity.image_url else None
+    return values
 
 
 class Store:
-    def __init__(self, path: Path):
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.connection() as connection:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.executescript("""
-                CREATE TABLE IF NOT EXISTS entities (
-                    kind TEXT NOT NULL,
-                    id TEXT NOT NULL,
-                    payload TEXT NOT NULL,
-                    meal_date TEXT,
-                    meal_slot TEXT,
-                    PRIMARY KEY (kind, id)
-                );
-                CREATE UNIQUE INDEX IF NOT EXISTS meal_slots
-                    ON entities (meal_date, meal_slot) WHERE kind = 'meal';
-                CREATE TABLE IF NOT EXISTS confirmations (
-                    regular_id TEXT PRIMARY KEY,
-                    item_id TEXT NOT NULL
-                );
-            """)
+    def __init__(self, database_url: str):
+        if make_url(database_url).drivername != "postgresql+psycopg":
+            raise ValueError("database_url must use postgresql+psycopg")
+        self.engine = create_engine(database_url, pool_pre_ping=True)
 
     @contextmanager
-    def connection(self) -> Generator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.path, timeout=10)
-        try:
-            connection.execute("PRAGMA busy_timeout=10000")
-            with connection:
-                yield connection
-        finally:
-            connection.close()
+    def connection(self) -> Generator[Connection]:
+        with self.engine.begin() as connection:
+            yield connection
+
+    def health(self) -> None:
+        with self.connection() as connection:
+            connection.execute(text("SELECT 1"))
 
     def save(self, kind: str, entity: Recipe | Meal | RegularItem | ShoppingItem) -> None:
-        meal_date = entity.date.isoformat() if isinstance(entity, Meal) else None
-        meal_slot = entity.slot if isinstance(entity, Meal) else None
+        table = TABLES[kind]
+        values = entity_values(entity)
+        statement = insert(table).values(**values)
+        conflict = [table.c.date, table.c.slot] if kind == "meal" else [table.c.id]
         with self.connection() as connection:
-            if kind == "meal":
-                connection.execute("BEGIN IMMEDIATE")
-                connection.execute(
-                    "DELETE FROM entities WHERE kind = 'meal' AND meal_date = ? AND meal_slot = ?",
-                    (meal_date, meal_slot),
-                )
+            previous = None
+            if isinstance(entity, RegularItem):
+                previous = connection.execute(
+                    select(regulars.c.last_purchased).where(regulars.c.id == entity.id)
+                ).first()
             connection.execute(
-                """INSERT INTO entities (kind, id, payload, meal_date, meal_slot)
-                   VALUES (?, ?, ?, ?, ?)
-                   ON CONFLICT(kind, id) DO UPDATE SET payload = excluded.payload,
-                   meal_date = excluded.meal_date, meal_slot = excluded.meal_slot""",
-                (
-                    kind,
-                    str(entity.id),
-                    entity.model_dump_json(),
-                    meal_date,
-                    meal_slot,
+                statement.on_conflict_do_update(index_elements=conflict, set_=values)
+            )
+            purchased = (
+                isinstance(entity, RegularItem)
+                and entity.last_purchased is not None
+                and (previous is None or previous[0] != entity.last_purchased)
+            )
+            HistoryRepository(self.engine).record(
+                HistoryEntryCreate(
+                    channel=history_context.get().channel,
+                    kind="purchase"
+                    if purchased
+                    else "planning"
+                    if kind == "meal"
+                    else "domain_event",
+                    message=f"Purchased {entity.name}" if purchased else f"Saved {kind}",
+                    structured={
+                        "entity_type": kind,
+                        "entity_id": str(entity.id),
+                        "data": entity.model_dump(mode="json"),
+                    },
+                    recipe_id=entity.id
+                    if isinstance(entity, Recipe)
+                    else entity.recipe_id
+                    if isinstance(entity, Meal)
+                    else None,
                 ),
+                connection=connection,
             )
 
     def get(self, kind: str, entity_id: UUID, model: type[Model]) -> Model:
+        table = TABLES[kind]
         with self.connection() as connection:
-            row = connection.execute(
-                "SELECT payload FROM entities WHERE kind = ? AND id = ?",
-                (kind, str(entity_id)),
-            ).fetchone()
+            row = (
+                connection.execute(select(table).where(table.c.id == entity_id)).mappings().first()
+            )
         if row is None:
             raise KeyError(str(entity_id))
-        return model.model_validate_json(row[0])
+        return model.model_validate(dict(row))
 
     def list(self, kind: str, model: type[Model]) -> list[Model]:
         with self.connection() as connection:
-            rows = connection.execute(
-                "SELECT payload FROM entities WHERE kind = ? ORDER BY rowid", (kind,)
-            ).fetchall()
-        return [model.model_validate_json(row[0]) for row in rows]
+            rows = (
+                connection.execute(select(TABLES[kind]).order_by(TABLES[kind].c.position))
+                .mappings()
+                .all()
+            )
+        return [model.model_validate(dict(row)) for row in rows]
 
     def delete(self, kind: str, entity_id: UUID) -> None:
+        table = TABLES[kind]
         with self.connection() as connection:
-            cursor = connection.execute(
-                "DELETE FROM entities WHERE kind = ? AND id = ?", (kind, str(entity_id))
-            )
-            if cursor.rowcount == 0:
+            result = connection.execute(table.delete().where(table.c.id == entity_id))
+            if result.rowcount == 0:
                 raise KeyError(str(entity_id))
 
     def active_confirmations(self) -> set[UUID]:
         with self.connection() as connection:
-            rows = connection.execute(
-                """SELECT c.regular_id, e.payload FROM confirmations c JOIN entities e
-                   ON e.kind = 'item' AND e.id = c.item_id"""
-            ).fetchall()
-        return {
-            UUID(regular_id)
-            for regular_id, payload in rows
-            if not ShoppingItem.model_validate_json(payload).completed
-        }
+            return set(
+                connection.execute(
+                    select(confirmations.c.regular_id)
+                    .join(items)
+                    .where(items.c.completed.is_(False))
+                ).scalars()
+            )
 
     def confirm(self, regular_id: UUID, item: ShoppingItem) -> ShoppingItem:
-        """Atomically reuse the current unfinished capture, even across processes."""
+        """Lock the regular record so concurrent requests reuse its active capture."""
         with self.connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
             regular = connection.execute(
-                "SELECT payload FROM entities WHERE kind = 'regular' AND id = ?",
-                (str(regular_id),),
-            ).fetchone()
+                select(regulars.c.id).where(regulars.c.id == regular_id).with_for_update()
+            ).first()
             if regular is None:
                 raise KeyError(str(regular_id))
-            RegularItem.model_validate_json(regular[0])
-            row = connection.execute(
-                """SELECT e.payload FROM confirmations c JOIN entities e
-                   ON e.kind = 'item' AND e.id = c.item_id WHERE c.regular_id = ?""",
-                (str(regular_id),),
-            ).fetchone()
-            if row is not None:
-                existing = ShoppingItem.model_validate_json(row[0])
-                if not existing.completed:
-                    return existing
-            connection.execute(
-                "INSERT INTO entities (kind, id, payload) VALUES ('item', ?, ?)",
-                (str(item.id), item.model_dump_json()),
+            row = (
+                connection.execute(
+                    select(items)
+                    .join(confirmations)
+                    .where(confirmations.c.regular_id == regular_id)
+                )
+                .mappings()
+                .first()
             )
+            if row is not None and not row["completed"]:
+                return ShoppingItem.model_validate(dict(row))
+            connection.execute(insert(items).values(**entity_values(item)))
+            statement = insert(confirmations).values(regular_id=regular_id, item_id=item.id)
             connection.execute(
-                """INSERT INTO confirmations (regular_id, item_id) VALUES (?, ?)
-                   ON CONFLICT(regular_id) DO UPDATE SET item_id = excluded.item_id""",
-                (str(regular_id), str(item.id)),
+                statement.on_conflict_do_update(
+                    index_elements=[confirmations.c.regular_id], set_={"item_id": item.id}
+                )
             )
         return item
+
+    def get_setting(self, key: str) -> str | None:
+        with self.connection() as connection:
+            return connection.execute(
+                select(settings.c.value).where(settings.c.key == key)
+            ).scalar()
+
+    def set_setting(self, key: str, value: str) -> None:
+        statement = insert(settings).values(key=key, value=value)
+        with self.connection() as connection:
+            connection.execute(
+                statement.on_conflict_do_update(
+                    index_elements=[settings.c.key], set_={"value": value}
+                )
+            )

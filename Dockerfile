@@ -8,6 +8,8 @@ RUN uv sync --frozen --no-dev --no-editable --compile-bytecode
 FROM python:3.12-slim
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
+COPY alembic.ini ./
+COPY migrations ./migrations
 ENV PATH="/app/.venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 USER 10001:10001
 EXPOSE 8000

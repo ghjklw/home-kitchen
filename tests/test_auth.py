@@ -25,7 +25,7 @@ def signing_keys():
 
 def production_settings(path, **overrides):
     return Settings(
-        database_path=path,
+        database_url=path,
         entra_tenant_id=TENANT,
         entra_audience=AUDIENCE,
         entra_allowed_group=GROUP,
@@ -50,10 +50,10 @@ def token(private_key, **overrides):
 
 
 def test_jwt_accepts_only_expected_tenant_audience_issuer_expiry_group_and_scope(
-    tmp_path, signing_keys
+    test_database_url, signing_keys
 ):
     private_key, public_key = signing_keys
-    access = AccessControl(production_settings(tmp_path / "kitchen.sqlite3"))
+    access = AccessControl(production_settings(test_database_url))
     access.jwks = SimpleNamespace(
         get_signing_key_from_jwt=lambda _token: SimpleNamespace(key=public_key)
     )
@@ -71,18 +71,16 @@ def test_jwt_accepts_only_expected_tenant_audience_issuer_expiry_group_and_scope
         assert access.verify(token(private_key, **claims)) is False
 
 
-def test_production_denies_unauthenticated_static_api_and_mcp(tmp_path):
-    app = create_app(production_settings(tmp_path / "kitchen.sqlite3"))
+def test_production_denies_unauthenticated_static_api_and_mcp(test_database_url):
+    app = create_app(production_settings(test_database_url))
     with TestClient(app, client=("203.0.113.20", 5000)) as client:
         for path in ("/", "/static/app.js", "/api/recipes", "/mcp/"):
             response = client.get(path)
             assert response.status_code == 401, path
 
 
-def test_untrusted_proxy_headers_cannot_authenticate(tmp_path):
-    app = create_app(
-        production_settings(tmp_path / "kitchen.sqlite3", trusted_proxy_cidrs=["127.0.0.1/32"])
-    )
+def test_untrusted_proxy_headers_cannot_authenticate(test_database_url):
+    app = create_app(production_settings(test_database_url, trusted_proxy_cidrs=["127.0.0.1/32"]))
     headers = {
         "x-auth-request-user": "spoofed@example.test",
         "x-auth-request-groups": str(GROUP),
@@ -92,10 +90,8 @@ def test_untrusted_proxy_headers_cannot_authenticate(tmp_path):
         assert client.get("/api/recipes", headers=headers).status_code == 401
 
 
-def test_trusted_proxy_reads_but_mutations_need_same_origin_and_mcp_needs_bearer(tmp_path):
-    app = create_app(
-        production_settings(tmp_path / "kitchen.sqlite3", trusted_proxy_cidrs=["127.0.0.1/32"])
-    )
+def test_trusted_proxy_reads_but_mutations_need_same_origin_and_mcp_needs_bearer(test_database_url):
+    app = create_app(production_settings(test_database_url, trusted_proxy_cidrs=["127.0.0.1/32"]))
     headers = {
         "x-auth-request-user": "member@example.test",
         "x-auth-request-groups": str(GROUP),
@@ -114,11 +110,11 @@ def test_trusted_proxy_reads_but_mutations_need_same_origin_and_mcp_needs_bearer
         assert client.get("/mcp/", headers=headers).status_code == 401
 
 
-def test_local_dev_still_requires_loopback_peer(tmp_path):
-    app = create_app(Settings(local_dev=True, database_path=tmp_path / "kitchen.sqlite3"))
+def test_local_dev_still_requires_loopback_peer(test_database_url):
+    app = create_app(Settings(local_dev=True, database_url=test_database_url))
     with TestClient(app, client=("203.0.113.20", 5000)) as client:
         assert client.get("/api/recipes").status_code == 401
         assert client.get("/api/recipes", headers={"host": "localhost"}).status_code == 401
-    loopback_app = create_app(Settings(local_dev=True, database_path=tmp_path / "loopback.sqlite3"))
+    loopback_app = create_app(Settings(local_dev=True, database_url=test_database_url))
     with TestClient(loopback_app, client=("127.0.0.1", 5000)) as client:
         assert client.get("/api/recipes").status_code == 200

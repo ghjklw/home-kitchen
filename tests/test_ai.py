@@ -67,9 +67,9 @@ async def test_recommendation_rejects_duplicate_date_and_slot():
 
 
 @pytest.mark.asyncio
-async def test_recommendation_returns_draft_without_mutating_service(tmp_path):
+async def test_recommendation_returns_draft_without_mutating_service(test_database_url):
     item = recipe()
-    service = KitchenService(tmp_path / "kitchen.sqlite3")
+    service = KitchenService(test_database_url)
     saved = service.create_recipe(RecipeCreate.model_validate(item.model_dump(exclude={"id"})))
     start = date(2026, 3, 2)
     agent = build_planner(

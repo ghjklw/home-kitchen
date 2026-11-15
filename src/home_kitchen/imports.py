@@ -17,6 +17,7 @@ class ImportedDraft(BaseModel):
     ingredients: list[str]
     instructions: list[str]
     source_url: HttpUrl
+    image_url: HttpUrl | None = None
 
 
 def validate_url(url: str) -> None:
@@ -38,12 +39,19 @@ def parse_recipe(html: str, url: str) -> ImportedDraft:
 
     yield_text = scraper.yields()
     match = re.search(r"\d+", yield_text)
+    try:
+        image = HttpUrl(scraper.image())
+        if image.scheme != "https" or image.username or image.password:
+            image = None
+    except (ValueError, TypeError, AttributeError):
+        image = None
     return ImportedDraft(
         title=scraper.title(),
         servings=max(1, int(match.group()) if match else 1),
         ingredients=scraper.ingredients() or scraper.schema.ingredients(),
         instructions=[step.strip() for step in scraper.instructions().splitlines() if step.strip()],
         source_url=HttpUrl(url),
+        image_url=image,
     )
 
 

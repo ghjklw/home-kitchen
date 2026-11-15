@@ -10,8 +10,8 @@ from home_kitchen.service import KitchenService
 
 
 @pytest.fixture
-def service(tmp_path):
-    return KitchenService(tmp_path / "kitchen.sqlite3")
+def service(test_database_url):
+    return KitchenService(test_database_url)
 
 
 def recipe(service):
@@ -80,8 +80,8 @@ def test_regular_due_confirmation_and_explicit_purchase(service):
     assert service.confirm_suggestion(milk.id).id != capture.id
 
 
-def test_sqlite_persistence_and_confirmation_across_instances(tmp_path):
-    path = tmp_path / "persistent.sqlite3"
+def test_postgres_persistence_and_confirmation_across_instances(test_database_url):
+    path = test_database_url
     first = KitchenService(path)
     soup = recipe(first)
     meal = first.plan_meal(MealCreate(date=date(2026, 1, 1), recipe_id=soup.id, servings=1))

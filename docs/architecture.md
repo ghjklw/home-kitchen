@@ -1,0 +1,99 @@
+# Architecture
+
+Reviewed 2026-11-15. This document describes the public application source and its implemented boundaries. Private deployment details are maintained separately.
+
+## Runtime shape
+
+```mermaid
+flowchart LR
+    Browser[PWA browser] --> API[FastAPI REST]
+    Caller[REST caller] --> API
+    Assistant[MCP client] --> MCP[MCP endpoint]
+    API --> Features[Feature services]
+    MCP --> Features
+    Features --> Domain[Kitchen domain services]
+    Features --> Providers[Explicit recipe provider registry]
+    Domain --> PG[(PostgreSQL)]
+    Features --> History[History and retrieval]
+    History --> PG
+    Features --> Basket[Basket review]
+    Basket --> PG
+    AI[Optional Anthropic model] -. typed draft/recommendation .-> Features
+```
+
+`app.py` composes FastAPI, the kitchen service, history, feature routes, the basket service, and FastMCP. REST and MCP transports call the same application and domain services for their corresponding operations. The browser PWA uses the REST API. FastAPI serves the OpenAPI document at `/openapi.json`, interactive API docs at `/docs`, the PWA under `/`, and the MCP transport at `/mcp/`.
+
+The system is not a checkout integration. Kitchen calculates and reviews data; a person makes the save, product-selection, or external purchase decision.
+
+## Storage and transactions
+
+Runtime storage is PostgreSQL through SQLAlchemy and the `psycopg` driver. `KITCHEN_DATABASE_URL` is a required secret setting and must use `postgresql+psycopg`. SQLite is not supported. Alembic migrations define the normalized recipe, meal, item, regular-item, confirmation, and settings tables, then add history and basket-selection tables. Run migrations with `uv run python -m alembic upgrade head` before starting the service.
+
+Recipe ingredients, instructions, household interaction structure, and saved basket selections use JSONB where appropriate. History search uses a generated PostgreSQL `tsvector` over the message and structured JSON text with a GIN index. `KnowledgeRetriever` is the replaceable retrieval boundary; the current implementation uses PostgreSQL full-text search. There is no vector index, embedding pipeline, or embedding charge.
+
+`Store.save` writes a domain entity and its corresponding history event in one PostgreSQL transaction. Basket selection and removal similarly persist the selection change and its domain event in one transaction. These guarantees apply to those paths; they do not imply that every application operation automatically creates an event or that external effects share a database transaction.
+
+## Recipes and meal planning
+
+Recipe acquisition uses an explicit `RecipeProvider` protocol and registry. The current adapters are:
+
+- `manual`, which validates a supplied recipe;
+- `web`, which imports supported public Matprat and Marmiton pages into a draft; and
+- `ai`, which uses an explicitly configured Anthropic model to draft a recipe.
+
+Provider drafts are typed and marked `requires_review`. They do not write to the recipe store. A person reviews a draft and saves it through the recipe API. Imported ingredient text is retained for review instead of guessing missing quantities. A recipe can have an optional HTTPS `image_url` from an imported source or a person. An image URL returned as part of AI output is unverified and must be checked before saving. Kitchen does not create placeholder or generated recipe photos.
+
+The weekly planner receives household settings, the requested date range, the recipe catalog, and selected retrieved evidence. Its typed result contains proposed meals, notes, and evidence IDs. It can only refer to recipes in the supplied catalog; dates, servings, and duplicate slots are validated. The result is still a draft. The user saves individual meals deliberately. No recipe or meal is written as a side effect of model generation.
+
+AI configuration is optional and uses `KITCHEN_AI_MODEL` plus `KITCHEN_ANTHROPIC_API_KEY`. Without both, the AI endpoints return a setup response. Automated tests use controlled model doubles; they do not prove live Anthropic connectivity, current model behavior, or operating cost.
+
+## Shopping needs and basket review
+
+The shopping service combines scaled ingredients from planned meals with open quick additions and eligible regular items. A regular-item suggestion remains separate until the household confirms it. The distinct regular-item purchase action records a purchase date; checking off a quick addition does not assert that an item was purchased.
+
+Basket review converts those aggregate shopping lines into stable need records for a date range. A need describes the quantity and unit Kitchen calculates. A selected product is a separate provider snapshot with exact name, brand, URL, image URL, pack size, package count, price/currency, availability, observation time, evidence status, and alternatives. Deterministic evaluation calculates allocated, remaining, and overbuy quantities and flags missing quantity, stale or future-dated evidence, unverified data, unknown availability, unknown prices, and currency mismatches.
+
+A `ProductProvider` protocol and registry define a future search/verification adapter, but no live product provider is registered or connected. The current selection API and MCP proposal tool accept candidate snapshots. The basket service forcibly sets candidate and alternative evidence to `unverified` both when saving and when reviewing. It does not authenticate or check a product reference. A candidate's URL, image, timestamp, provider label, or evidence ID must not be described as a verified citation. There is no cart submission or order operation.
+
+The word “ready” means the deterministic review checks passed for the submitted snapshots; it is not authorization to check out, an assurance of correctness, or proof that a merchant still has the product.
+
+## Explicit history and recommendation context
+
+`HistoryRepository` stores caller-selected messages plus structured JSON, channel (`app`, `api`, or `mcp`), kind, occurrence time, and optional recipe/session identifiers. Request authentication may provide actor context; verify that integration before relying on attribution. The API does not copy an external conversation automatically. MCP recording is an explicit tool call with instructions to preserve only context the user wants remembered.
+
+History kinds include feedback, preference, recipe rating, purchase, planning, domain event, and explicitly supplied chat excerpts. Search is bounded PostgreSQL full-text retrieval. AI recipe and meal-plan context can include recent preferences, feedback, ratings, and purchases as well as text matches. Retrieved entries are untrusted context, not instructions. Evidence IDs identify stored records supplied to the model; they are not independently checked citations and do not prove a claim.
+
+The retrieval interface can support a future alternative such as vector search, but the current implementation does not compute embeddings or imply a cost or quality benefit from them.
+
+## HTTP feature routes
+
+The complete request and response schemas are generated in `/openapi.json`; `/docs` presents the current interactive reference. The main feature routes are:
+
+| Route | Purpose |
+| --- | --- |
+| `GET /api/recipe-providers` | List registered recipe draft adapters and their accepted inputs. |
+| `POST /api/recipe-drafts/{provider_id}` | Request a typed manual, web, or AI recipe draft for review. |
+| `POST /api/ai/recipe` | Compatibility route for an AI recipe draft; it never saves the result. |
+| `POST /api/ai/plan` | Generate a reviewable weekly plan draft from the recipe catalog. |
+| `GET /api/basket?start=…&end=…` | Review calculated needs and current product selections. |
+| `PUT /api/basket/selections` | Save a candidate product snapshot for a need; it remains unverified. |
+| `DELETE /api/basket/selections/{need_id}/{product_id}?start=…&end=…` | Remove a saved candidate selection. |
+| `POST /api/interactions` | Explicitly save one caller-provided history entry. |
+| `GET /api/interactions` | List recent saved history entries. |
+| `GET /api/knowledge/search?query=…` | Search recorded history and return evidence records. |
+
+The existing recipe, meal, shopping-list, regular-item, and household routes are also described by OpenAPI. The `/api/recipe-import`, `/api/ai/recipe`, and `/api/ai/plan` endpoints return drafts; persistence occurs only through an explicit save route.
+
+## Authentication and local development
+
+Settings are loaded from `KITCHEN_`-prefixed environment variables. `KITCHEN_DATABASE_URL` is always required. Local development requires `KITCHEN_LOCAL_DEV=true` and is accepted only when the request peer is loopback. Otherwise startup requires Entra tenant, audience, and allowed-group configuration. Forwarded proxy headers are disabled in Uvicorn by default; a deployment must explicitly configure trusted proxy networks before relying on identity headers from a proxy.
+
+The application does not include a public OAuth broker or ingress configuration. An authenticated remote MCP deployment requires those deployment components and a real connection test; the presence of `/mcp/` in source does not establish remote availability.
+
+## Current limits and decisions to revisit
+
+- There is no connected product catalog or verifier, checkout, or order submission.
+- AI requires an operator-configured model and credential. No live provider test is implied by unit tests or generated content.
+- Product candidates remain unverified unless a future authenticated provider verification path is implemented and independently tested.
+- PostgreSQL persistence requires an operational backup and restore path before production-readiness claims.
+- External recipe websites, image URLs, and model services can change or fail independently of Kitchen.

@@ -35,7 +35,15 @@ class RecipeCreate(BaseModel):
     ingredients: list[Ingredient] = Field(min_length=1)
     instructions: list[NonBlank] = Field(min_length=1)
     source_url: HttpUrl | None = None
+    image_url: HttpUrl | None = None
     source: RecipeSource = RecipeSource.MANUAL
+
+    @field_validator("image_url")
+    @classmethod
+    def safe_image_url(cls, value: HttpUrl | None) -> HttpUrl | None:
+        if value and (value.scheme != "https" or value.username or value.password):
+            raise ValueError("Recipe images must use public HTTPS URLs without credentials")
+        return value
 
 
 class Recipe(RecipeCreate):

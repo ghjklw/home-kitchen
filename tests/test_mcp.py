@@ -12,8 +12,8 @@ def payload(result):
 
 
 @pytest.mark.asyncio
-async def test_tools_share_service_and_persist_confirmed_suggestion(tmp_path):
-    service = KitchenService(tmp_path / "kitchen.sqlite3")
+async def test_tools_share_service_and_persist_confirmed_suggestion(test_database_url):
+    service = KitchenService(test_database_url)
     mcp = build_mcp(service, lambda: Household(name="Test home"))
 
     async with Client(mcp) as client:
@@ -66,8 +66,8 @@ async def test_tools_share_service_and_persist_confirmed_suggestion(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_tool_catalog_annotations_and_guidance(tmp_path):
-    mcp = build_mcp(KitchenService(tmp_path / "kitchen.sqlite3"), Household)
+async def test_tool_catalog_annotations_and_guidance(test_database_url):
+    mcp = build_mcp(KitchenService(test_database_url), Household)
     async with Client(mcp) as client:
         tools = {tool.name: tool for tool in await client.list_tools()}
 

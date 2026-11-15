@@ -8,7 +8,7 @@ from home_kitchen.settings import Settings
 
 
 def make_client(path):
-    settings = Settings(local_dev=True, database_path=path)
+    settings = Settings(local_dev=True, database_url=path)
     return TestClient(create_app(settings), client=("127.0.0.1", 5000))
 
 
@@ -21,8 +21,8 @@ def recipe_payload():
     }
 
 
-def test_empty_household_recipe_meal_shopping_and_restart(tmp_path):
-    database = tmp_path / "kitchen.sqlite3"
+def test_empty_household_recipe_meal_shopping_and_restart(test_database_url):
+    database = test_database_url
     with make_client(database) as client:
         assert client.get("/api/recipes").json() == []
         assert client.get("/api/household").json() == {
@@ -80,8 +80,8 @@ def test_empty_household_recipe_meal_shopping_and_restart(tmp_path):
         assert Decimal(line["quantity"]) == Decimal("400")
 
 
-def test_invalid_input_dates_and_unknown_resources(tmp_path):
-    with make_client(tmp_path / "kitchen.sqlite3") as client:
+def test_invalid_input_dates_and_unknown_resources(test_database_url):
+    with make_client(test_database_url) as client:
         assert (
             client.post("/api/recipes", json={**recipe_payload(), "servings": 0}).status_code == 422
         )
@@ -116,15 +116,15 @@ def test_invalid_input_dates_and_unknown_resources(tmp_path):
         )
 
 
-def test_ai_unconfigured_is_unavailable_and_does_not_save(tmp_path):
-    with make_client(tmp_path / "kitchen.sqlite3") as client:
+def test_ai_unconfigured_is_unavailable_and_does_not_save(test_database_url):
+    with make_client(test_database_url) as client:
         response = client.post("/api/ai/recipe", json={"prompt": "A simple soup"})
         assert response.status_code == 503
         assert client.get("/api/recipes").json() == []
 
 
-def test_regular_item_api_accepts_interval_and_records_purchase(tmp_path):
-    with make_client(tmp_path / "kitchen.sqlite3") as client:
+def test_regular_item_api_accepts_interval_and_records_purchase(test_database_url):
+    with make_client(test_database_url) as client:
         created = client.post(
             "/api/regular-items",
             json={"name": "Milk", "quantity": 2, "unit": "L", "interval_days": 5},

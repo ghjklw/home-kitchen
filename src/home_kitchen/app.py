@@ -1,6 +1,6 @@
 """Shared household actions for the PWA, REST clients and AI assistants."""
 
-import sqlite3
+from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 from typing import Annotated
@@ -12,11 +12,15 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, HttpUrl, StringConstraints
 from pydantic_ai import Agent
+from sqlalchemy.exc import SQLAlchemyError
 from starlette.requests import Request
 
-from home_kitchen.ai import draft_recipe, recipe_agent
 from home_kitchen.auth import AccessControl
-from home_kitchen.imports import ImportedDraft, import_recipe
+from home_kitchen.basket.repository import BasketService
+from home_kitchen.feature_api import feature_router
+from home_kitchen.feature_mcp import install_feature_tools
+from home_kitchen.features import KitchenFeatures
+from home_kitchen.imports import ImportedDraft
 from home_kitchen.mcp_server import build_mcp
 from home_kitchen.models import (
     Meal,
@@ -28,7 +32,8 @@ from home_kitchen.models import (
     ShoppingItemCreate,
     WeekShopping,
 )
-from home_kitchen.recommendations import PlanDraft, build_planner, recommend_plan
+from home_kitchen.recipes import RecipeDraftRequest
+from home_kitchen.recommendations import PlanDraft
 from home_kitchen.service import KitchenService
 from home_kitchen.settings import Household, Settings
 
@@ -62,19 +67,30 @@ def create_app(
     settings: Settings | None = None, ai: Agent[None, RecipeCreate] | None = None
 ) -> FastAPI:
     settings = settings or Settings()
-    service = KitchenService(settings.database_path)
-    with service.store.connection() as connection:
-        connection.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+    service = KitchenService(settings.database_url.get_secret_value())
 
     def load_household() -> Household:
-        with service.store.connection() as connection:
-            row = connection.execute("SELECT value FROM settings WHERE key='household'").fetchone()
-        return Household.model_validate_json(row[0]) if row else Household()
+        value = service.store.get_setting("household")
+        return Household.model_validate_json(value) if value else Household()
 
+    features = KitchenFeatures(service, settings, load_household, ai)
+    basket = BasketService(service, features.history)
     mcp = build_mcp(service, load_household)
+    install_feature_tools(mcp, features, basket)
     mcp_app = mcp.http_app(path="/", stateless_http=True)
-    app = FastAPI(title="Home Kitchen", version="0.1.0", lifespan=mcp_app.lifespan)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        try:
+            async with mcp_app.lifespan(app):
+                yield
+        finally:
+            service.store.engine.dispose()
+
+    app = FastAPI(title="Home Kitchen", version="0.1.0", lifespan=lifespan)
+    app.state.features = features
     app.state.service = service
+    app.include_router(feature_router(features, basket))
     app.state.mcp = mcp
     access = AccessControl(settings)
     app.state.access = access
@@ -91,9 +107,8 @@ def create_app(
     @app.get("/healthz", include_in_schema=False)
     def health():
         try:
-            with service.store.connection() as connection:
-                connection.execute("SELECT 1").fetchone()
-        except sqlite3.Error:
+            service.store.health()
+        except SQLAlchemyError:
             raise HTTPException(503, "Storage unavailable") from None
         return {"status": "ok"}
 
@@ -103,12 +118,7 @@ def create_app(
 
     @app.put("/api/household")
     def update_household(data: Household) -> Household:
-        with service.store.connection() as connection:
-            connection.execute(
-                "INSERT INTO settings VALUES ('household', ?) ON CONFLICT(key) "
-                "DO UPDATE SET value=excluded.value",
-                (data.model_dump_json(),),
-            )
+        service.store.set_setting("household", data.model_dump_json())
         return data
 
     @app.get("/api/recipes")
@@ -186,7 +196,9 @@ def create_app(
     @app.post("/api/recipe-import")
     async def import_draft(data: ImportRequest) -> ImportedDraft:
         try:
-            return await import_recipe(str(data.url))
+            draft = await features.draft_recipe("web", RecipeDraftRequest(url=data.url))
+            assert draft.imported is not None
+            return draft.imported
         except httpx.HTTPError:
             raise HTTPException(422, "Recipe source could not be fetched") from None
         except Exception as exc:
@@ -195,12 +207,12 @@ def create_app(
 
     @app.post("/api/ai/recipe")
     async def generate_recipe(data: Prompt) -> RecipeCreate:
+        if not (ai or (settings.ai_model and settings.anthropic_api_key)):
+            raise HTTPException(503, "Configure an AI model and API credential to generate recipes")
         try:
-            agent = ai or recipe_agent(settings)
-        except ValueError as exc:
-            raise HTTPException(503, str(exc)) from None
-        try:
-            return await draft_recipe(agent, get_household(), data.prompt)
+            draft = await features.draft_recipe("ai", RecipeDraftRequest(prompt=data.prompt))
+            assert draft.recipe is not None
+            return draft.recipe
         except Exception:
             raise HTTPException(502, "AI draft unavailable; no recipe has been saved") from None
 
@@ -208,14 +220,10 @@ def create_app(
     async def generate_plan(data: PlanRequest) -> PlanDraft:
         if not service.list_recipes():
             raise HTTPException(422, "Save a recipe before requesting a meal plan")
+        if not (settings.ai_model and settings.anthropic_api_key):
+            raise HTTPException(503, "Configure an AI model and API credential to recommend meals")
         try:
-            planner = build_planner(settings)
-        except ValueError as exc:
-            raise HTTPException(503, str(exc)) from None
-        try:
-            return await recommend_plan(
-                planner, get_household(), service.list_recipes(), data.start, data.days
-            )
+            return await features.recommend_week(data.start, data.days)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
         except Exception:

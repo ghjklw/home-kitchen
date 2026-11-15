@@ -28,6 +28,19 @@ jobs:
     permissions:
       contents: read
       packages: write
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: kitchen
+          POSTGRES_PASSWORD: kitchen
+          POSTGRES_DB: kitchen_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U kitchen -d kitchen_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      KITCHEN_TEST_DATABASE_URL: postgresql+psycopg://kitchen:kitchen@127.0.0.1:5432/kitchen_test
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -76,6 +89,9 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/ghjklw/home-kitchen
             org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
+            org.opencontainers.image.version=${{ github.event.release.tag_name }}
+            io.home-kitchen.run-id=${{ github.run_id }}
+            io.home-kitchen.run-attempt=${{ github.run_attempt }}
       - name: Record verified image identity for the deployment repository
         env:
           SOURCE_SHA: ${{ steps.source.outputs.sha }}

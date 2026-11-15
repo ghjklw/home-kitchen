@@ -64,6 +64,35 @@
     );
   }
 
+  function normalizeIntegrationResponse(payload) {
+    if (Array.isArray(payload)) return payload;
+    return null;
+  }
+
+  function connectionStatusSnapshot(integrationsResult, odaResult) {
+    const integrationResponse = integrationsResult?.status === "fulfilled"
+      ? normalizeIntegrationResponse(integrationsResult.value)
+      : null;
+    const odaValue = odaResult?.value;
+    const odaOk =
+      odaResult?.status === "fulfilled" &&
+      odaValue !== null &&
+      typeof odaValue === "object" &&
+      !Array.isArray(odaValue) &&
+      typeof odaValue.configured === "boolean" &&
+      typeof odaValue.connected === "boolean";
+    return {
+      integrations: integrationResponse || [],
+      oda: odaOk ? odaValue : null,
+      integrationsError: integrationResponse
+        ? null
+        : "Integration status is unavailable. You can retry without leaving this page.",
+      odaStatusError: odaOk
+        ? null
+        : "Oda status is unavailable. Other connection details remain available.",
+    };
+  }
+
   function odaNeedsReconnect(message) {
     return /connect (?:your )?oda|oda (?:connection|authorization).*(?:expired|invalid|cannot be read)|authorization.*connect|connection requires review/iu.test(
       message || "",
@@ -76,6 +105,8 @@
     normalizeShoppingCategoryOrder,
     integrationStatusLabel,
     integrationAuthLabel,
+    normalizeIntegrationResponse,
+    connectionStatusSnapshot,
     odaNeedsReconnect,
   };
   if (typeof module !== "undefined" && module.exports)

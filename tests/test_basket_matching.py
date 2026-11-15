@@ -304,6 +304,68 @@ async def test_oda_adapter_normalizes_official_fields_to_provider_contract():
     assert groups[0].products[0].description == "1 kg carrots"
 
 
+@pytest.mark.asyncio
+async def test_oda_adapter_expands_and_filters_known_false_food_matches():
+    class Oda:
+        def __init__(self):
+            self.queries = None
+
+        async def search_products(self, actor_id, queries, page, size):
+            self.queries = queries
+
+            def product(id, name, brand=None):
+                return {
+                    "id": id,
+                    "name": name,
+                    "description": name,
+                    "brand": brand,
+                    "price": "29.90",
+                    "unitPrice": "29.90",
+                    "unitName": "per kg",
+                    "url": f"https://oda.com/no/products/{id}-{id}",
+                }
+
+            groups = {
+                "Coffee": {
+                    "query": "Coffee",
+                    "hasMore": False,
+                    "products": [
+                        product(1, "Coffee Mate Original", "Nestlé"),
+                        product(2, "Filter coffee", "Evergood"),
+                    ],
+                },
+                "kaffe": {
+                    "query": "kaffe",
+                    "hasMore": True,
+                    "products": [product(2, "Filter coffee", "Evergood"), product(3, "Kaffe")],
+                },
+                "Tomato": {
+                    "query": "Tomato",
+                    "hasMore": False,
+                    "products": [product(4, "Tomatpure"), product(5, "Tomatoes")],
+                },
+                "tomat": {
+                    "query": "tomat",
+                    "hasMore": False,
+                    "products": [product(6, "Tomat"), product(4, "Tomatpure")],
+                },
+            }
+            return {"result": [groups[query] for query in queries]}
+
+    service = Oda()
+    groups = await OdaSearchAdapter(service).search_products(
+        "household-1", ["Coffee", "Tomato"], 1, 5
+    )
+
+    assert service.queries == ["Coffee", "kaffe", "Tomato", "tomat"]
+    assert [product.name for product in groups[0].products] == [
+        "Filter coffee",
+        "Kaffe",
+    ]
+    assert groups[0].has_more is True
+    assert [product.name for product in groups[1].products] == ["Tomatoes", "Tomat"]
+
+
 async def _media(pack_description):
     return ProductMedia(
         url="https://oda.com/no/products/10-product",

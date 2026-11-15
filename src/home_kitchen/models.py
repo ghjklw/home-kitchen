@@ -16,6 +16,7 @@ class Ingredient(BaseModel):
     name: NonBlank
     quantity: Quantity
     unit: NonBlank = "item"
+    category: NonBlank = "Other"
 
     @field_validator("unit")
     @classmethod
@@ -65,6 +66,7 @@ class ShoppingItemCreate(BaseModel):
     name: NonBlank
     quantity: Quantity = Decimal("1")
     unit: NonBlank = "item"
+    category: NonBlank = "Other"
 
     @field_validator("unit")
     @classmethod
@@ -87,6 +89,7 @@ class ShoppingLine(BaseModel):
     name: NonBlank
     quantity: Quantity
     unit: NonBlank
+    category: NonBlank = "Other"
     origins: list[str]
 
 

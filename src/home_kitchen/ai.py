@@ -2,22 +2,16 @@
 
 from pydantic_ai import Agent
 from pydantic_ai.models import Model
-from pydantic_ai.models.anthropic import AnthropicModel
-from pydantic_ai.providers.anthropic import AnthropicProvider
 from pydantic_ai.usage import UsageLimits
 
+from home_kitchen.ai_credentials import anthropic_model
 from home_kitchen.models import RecipeCreate
 from home_kitchen.settings import Household, Settings
 
 
 def recipe_agent(settings: Settings, model: Model | None = None) -> Agent[None, RecipeCreate]:
     if model is None:
-        if not settings.ai_model or not settings.anthropic_api_key:
-            raise ValueError("Configure an AI model and API credential to generate recipes")
-        model = AnthropicModel(
-            settings.ai_model,
-            provider=AnthropicProvider(api_key=settings.anthropic_api_key.get_secret_value()),
-        )
+        model = anthropic_model(settings)
     return Agent(
         model,
         output_type=RecipeCreate,

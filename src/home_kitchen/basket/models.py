@@ -18,6 +18,7 @@ class PurchaseNeed(BaseModel):
     quantity: PositiveQuantity
     unit: NonBlank
     origins: list[str] = Field(default_factory=list)
+    category: NonBlank = "Other"
 
     @field_validator("unit")
     @classmethod
@@ -30,7 +31,7 @@ class ProductSnapshot(BaseModel):
     product_id: NonBlank
     name: NonBlank
     brand: NonBlank | None = None
-    url: HttpUrl
+    url: HttpUrl | None = None
     image_url: HttpUrl | None = None
     pack_quantity: PositiveQuantity
     pack_unit: NonBlank
@@ -42,7 +43,9 @@ class ProductSnapshot(BaseModel):
 
     @field_validator("url")
     @classmethod
-    def validate_product_url(cls, value: HttpUrl, info: ValidationInfo) -> HttpUrl:
+    def validate_product_url(cls, value: HttpUrl | None, info: ValidationInfo) -> HttpUrl | None:
+        if value is None:
+            return None
         host = value.host or ""
         if value.scheme != "https":
             raise ValueError("Product references must use HTTPS")

@@ -14,4 +14,5 @@ ENV PATH="/app/.venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 USER 10001:10001
 EXPOSE 8000
 # Proxy addresses are read from the real socket peer, never X-Forwarded-For.
-CMD ["uvicorn", "home_kitchen.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--no-proxy-headers"]
+# OAuth callback query parameters must never appear in server access logs.
+CMD ["uvicorn", "home_kitchen.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--no-proxy-headers", "--no-access-log"]

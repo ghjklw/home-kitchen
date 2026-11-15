@@ -15,6 +15,7 @@ from pydantic_ai import Agent
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.requests import Request
 
+from home_kitchen.ai_credentials import close_ai_clients
 from home_kitchen.auth import AccessControl
 from home_kitchen.basket.repository import BasketService
 from home_kitchen.feature_api import feature_router
@@ -32,6 +33,7 @@ from home_kitchen.models import (
     ShoppingItemCreate,
     WeekShopping,
 )
+from home_kitchen.oda_api import oda_router
 from home_kitchen.recipes import RecipeDraftRequest
 from home_kitchen.recommendations import PlanDraft
 from home_kitchen.service import KitchenService
@@ -85,12 +87,17 @@ def create_app(
             async with mcp_app.lifespan(app):
                 yield
         finally:
-            service.store.engine.dispose()
+            try:
+                await close_ai_clients(settings)
+            finally:
+                features.oda.close()
+                service.store.engine.dispose()
 
     app = FastAPI(title="Home Kitchen", version="0.1.0", lifespan=lifespan)
     app.state.features = features
     app.state.service = service
     app.include_router(feature_router(features, basket))
+    app.include_router(oda_router(features.oda, features.oda_cart))
     app.state.mcp = mcp
     access = AccessControl(settings)
     app.state.access = access
@@ -207,7 +214,7 @@ def create_app(
 
     @app.post("/api/ai/recipe")
     async def generate_recipe(data: Prompt) -> RecipeCreate:
-        if not (ai or (settings.ai_model and settings.anthropic_api_key)):
+        if not (ai or settings.ai_configured):
             raise HTTPException(503, "Configure an AI model and API credential to generate recipes")
         try:
             draft = await features.draft_recipe("ai", RecipeDraftRequest(prompt=data.prompt))
@@ -220,7 +227,7 @@ def create_app(
     async def generate_plan(data: PlanRequest) -> PlanDraft:
         if not service.list_recipes():
             raise HTTPException(422, "Save a recipe before requesting a meal plan")
-        if not (settings.ai_model and settings.anthropic_api_key):
+        if not settings.ai_configured:
             raise HTTPException(503, "Configure an AI model and API credential to recommend meals")
         try:
             return await features.recommend_week(data.start, data.days)
@@ -230,15 +237,16 @@ def create_app(
             raise HTTPException(502, "AI plan unavailable; no meals have been saved") from None
 
     @app.get("/api/integrations")
-    def integrations():
+    def integrations(request: Request):
+        oda_status = features.oda.status(request.state.actor_id)
         return {
             "oda": {
-                "status": "setup_required",
+                "status": "connected" if oda_status["connected"] else "setup_required",
                 "mcp_url": "https://oda.com/mcp",
                 "checkout_url": "https://oda.com/no/cart/",
-                "message": "Connect Oda in your AI app alongside Kitchen. Review and pay in Oda.",
+                "message": "Connect your Oda account directly in Kitchen. Review and pay in Oda.",
             },
-            "ai": {"configured": bool(ai or (settings.ai_model and settings.anthropic_api_key))},
+            "ai": {"configured": bool(ai or settings.ai_configured)},
             "auth": {"mode": "local" if settings.local_dev else "entra"},
         }
 

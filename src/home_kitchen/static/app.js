@@ -6,6 +6,18 @@ const state = {
   recipes: [],
   meals: [],
   shopping: { lines: [], suggestions: [] },
+  purchasePlan: { lines: [], suggestions: [] },
+  inventory: [],
+  storeTrip: null,
+  oda: null,
+  odaSearch: {},
+  odaMedia: {},
+  cartProposalLoading: false,
+  cartConfirming: false,
+  cartProposalHandled: false,
+  cartProposalBlocked: false,
+  shoppingPanel: "needs",
+  purchaseMode: "oda",
   basket: null,
   items: [],
   regular: [],
@@ -58,12 +70,13 @@ async function api(path, method = "GET", body) {
     );
   }
   if (!response.ok) {
+    let data;
     let detail;
     try {
-      const data = await response.json();
+      data = await response.json();
       detail = typeof data.detail === "string" ? data.detail : data.message;
     } catch {}
-    throw new Error(
+    const error = new Error(
       response.status === 401 || response.status === 403
         ? "Sign in through your household’s trusted access link, then try again."
         : detail ||
@@ -75,6 +88,9 @@ async function api(path, method = "GET", body) {
               ? "No recipes are available for meal planning. Add a recipe, then try again."
               : "Could not complete that request. Please try again."),
     );
+    if (Number.isFinite(data?.retry_after_seconds))
+      error.retryAfterSeconds = Math.max(0, data.retry_after_seconds);
+    throw error;
   }
   return response.status === 204 ? null : response.json();
 }
@@ -239,12 +255,30 @@ async function refreshView() {
     if (state.view === "shopping") {
       const results = await Promise.all([
         api("/shopping" + range()),
+        api("/purchase-plan" + range()),
         api("/items"),
         api("/regular-items"),
+        api("/inventory"),
       ]);
-      [state.shopping, state.items, state.regular] = results;
+      [
+        state.shopping,
+        state.purchasePlan,
+        state.items,
+        state.regular,
+        state.inventory,
+      ] = results;
+      if (state.shoppingPanel === "in_store")
+        state.storeTrip = await api("/store-trip" + range());
     }
-    if (state.view === "basket") state.basket = await api("/basket" + range());
+    if (state.view === "basket") {
+      const results = await Promise.all([
+        api("/basket" + range()),
+        api("/oda/status"),
+      ]);
+      [state.basket, state.oda] = results;
+      if (state.purchaseMode === "in_store")
+        state.storeTrip = await api("/store-trip" + range());
+    }
     render();
   } catch (error) {
     notify(error.message, true);
@@ -634,18 +668,21 @@ function recipeForm(draft = {}, source = "manual") {
   const ingredientText = (draft.ingredients || [])
     .map((item) =>
       typeof item === "string"
-        ? item + " | | "
-        : [item.name, item.quantity, item.unit].join(" | "),
+        ? item + " | | | Other"
+        : [item.name, item.quantity, item.unit, item.category || "Other"].join(
+            " | ",
+          ),
     )
     .join("\n");
   const ingredients = field(
     "Ingredients",
     "textarea",
     ingredientText,
-    "One per line: ingredient | quantity | unit. For example: Carrots | 3 | item. Use a decimal point for quantities, such as 0.5.",
+    "One per line: ingredient | quantity | unit | category. For example: Carrots | 3 | item | Produce. Use Other when unsure and a decimal point for quantities, such as 0.5.",
   );
   ingredients.input.required = true;
-  ingredients.input.placeholder = "Carrots | 3 | item\nOlive oil | 2 | tbsp";
+  ingredients.input.placeholder =
+    "Carrots | 3 | item | Produce\nOlive oil | 2 | tbsp | Pantry";
   const instructions = field(
     "Instructions",
     "textarea",
@@ -671,7 +708,7 @@ function recipeForm(draft = {}, source = "manual") {
       .map((line, index) => {
         const parts = line.split("|").map((value) => value.trim());
         if (
-          parts.length !== 3 ||
+          ![3, 4].includes(parts.length) ||
           !parts[0] ||
           !/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(parts[1]) ||
           Number(parts[1]) <= 0 ||
@@ -682,7 +719,12 @@ function recipeForm(draft = {}, source = "manual") {
               (index + 1) +
               " needs a name, positive quantity and unit separated by |.",
           );
-        return { name: parts[0], quantity: parts[1], unit: parts[2] };
+        return {
+          name: parts[0],
+          quantity: parts[1],
+          unit: parts[2],
+          category: parts[3] || "Other",
+        };
       });
     await api("/recipes", "POST", {
       title: name.input.value.trim(),
@@ -849,17 +891,251 @@ function shoppingOrigins(origins = []) {
   });
   return [...labels].join(", ");
 }
+function shoppingSections() {
+  const nav = el("div", null, "section-tabs");
+  [
+    ["needs", "Shopping needs"],
+    ["in_store", "In-store trip"],
+    ["pantry", "At home"],
+  ].forEach(([key, label]) => {
+    const tab = button(
+      label,
+      async () => {
+        state.shoppingPanel = key;
+        await refreshView();
+      },
+      state.shoppingPanel === key ? "primary" : "quiet",
+    );
+    if (state.shoppingPanel === key) tab.setAttribute("aria-current", "page");
+    nav.append(tab);
+  });
+  return nav;
+}
+function groupedByCategory(lines) {
+  const groups = new Map();
+  [...lines]
+    .sort(
+      (a, b) =>
+        (a.category || "Other").localeCompare(b.category || "Other") ||
+        a.name.localeCompare(b.name),
+    )
+    .forEach((line) => {
+      const category = line.category?.trim() || "Other";
+      if (!groups.has(category)) groups.set(category, []);
+      groups.get(category).push(line);
+    });
+  return groups;
+}
+function renderInStore(main) {
+  const trip = state.storeTrip || {
+    lines: [],
+    checked_count: 0,
+    total_count: 0,
+  };
+  add(
+    main,
+    el(
+      "p",
+      "Checked means picked up for this trip. It does not mark an item as bought or reduce what you have at home.",
+      "callout",
+    ),
+    el(
+      "p",
+      (trip.checked_count || 0) +
+        " of " +
+        (trip.total_count || 0) +
+        " needs picked up",
+      "muted",
+    ),
+  );
+  if (!trip.lines.length) {
+    add(
+      main,
+      empty(
+        "No in-store needs",
+        "Add meals or shopping needs first. Only quantities still needed after your at-home inventory appear here.",
+        button(
+          "Review shopping needs",
+          () => {
+            state.shoppingPanel = "needs";
+            render();
+          },
+          "quiet",
+        ),
+      ),
+    );
+    return;
+  }
+  groupedByCategory(trip.lines).forEach((lines, category) => {
+    const section = add(
+      el("section", null, "panel category-section"),
+      el("h2", category),
+    );
+    const list = el("ul", null, "list");
+    lines.forEach((line) => {
+      const row = el("li", null, line.checked ? "completed" : "");
+      const check = el("input");
+      check.type = "checkbox";
+      check.checked = Boolean(line.checked);
+      check.setAttribute(
+        "aria-label",
+        (check.checked ? "Uncheck " : "Mark picked up: ") + line.name,
+      );
+      check.addEventListener("change", async () => {
+        check.disabled = true;
+        try {
+          await api(
+            "/store-trip/items/" + encodeURIComponent(line.id) + range(),
+            "PUT",
+            { checked: check.checked },
+          );
+          await refreshView();
+        } catch (error) {
+          check.checked = Boolean(line.checked);
+          notify(error.message, true);
+        } finally {
+          check.disabled = false;
+        }
+      });
+      const detail = add(el("div", null, "detail"), el("strong", line.name));
+      add(
+        detail,
+        el(
+          "small",
+          (line.to_buy_quantity || "0") +
+            " " +
+            (line.unit || "") +
+            " to pick up" +
+            (line.origins?.length ? " · " + shoppingOrigins(line.origins) : ""),
+        ),
+      );
+      add(row, check, detail);
+      list.append(row);
+    });
+    add(section, list);
+    main.append(section);
+  });
+}
+function inventoryForm(item = {}) {
+  const root = openDialog(
+    item.id ? "Update what you have" : "Add to at-home inventory",
+  );
+  const form = el("form");
+  const name = field("Item name", "text", item.name || "");
+  name.input.required = true;
+  if (item.id) name.input.readOnly = true;
+  const quantity = field("Quantity on hand", "number", item.quantity ?? "0");
+  quantity.input.min = "0";
+  quantity.input.step = "any";
+  quantity.input.required = true;
+  const unit = field("Unit", "text", item.unit || "item");
+  unit.input.required = true;
+  if (item.id) unit.input.readOnly = true;
+  const category = field(
+    "Category",
+    "text",
+    item.category || "Other",
+    "Used to organize the in-store list.",
+  );
+  category.input.maxLength = 60;
+  const note = field("Note (optional)", "text", item.note || "");
+  note.input.maxLength = 500;
+  add(
+    form,
+    name.wrap,
+    add(el("div", null, "form-grid"), quantity.wrap, unit.wrap),
+    category.wrap,
+    note.wrap,
+  );
+  formSubmit(form, item.id ? "Save quantity" : "Add at home", async () => {
+    const payload = {
+      name: name.input.value.trim(),
+      quantity: quantity.input.value,
+      unit: unit.input.value.trim(),
+      category: category.input.value.trim() || "Other",
+      note: note.input.value.trim() || null,
+    };
+    await api("/inventory", "PUT", payload);
+    state.inventory = await api("/inventory");
+    $("#modal").close();
+    render();
+    notify("At-home quantity saved.");
+  });
+  add(root, form);
+}
+function renderInventory(main) {
+  add(
+    main,
+    el(
+      "p",
+      "Keep a simple quantity on hand. Kitchen subtracts it from shopping needs; checking off an in-store item does not change this inventory.",
+      "muted",
+    ),
+  );
+  if (!state.inventory.length) {
+    add(
+      main,
+      empty(
+        "Nothing in your at-home list yet",
+        "Add what you already have so the shopping list can show the remaining quantity.",
+      ),
+    );
+    return;
+  }
+  const list = el("ul", null, "list");
+  state.inventory.forEach((item) => {
+    const row = add(
+      el("li"),
+      add(
+        el("div", null, "detail"),
+        el("strong", item.name),
+        el(
+          "small",
+          item.quantity +
+            " " +
+            item.unit +
+            " · " +
+            (item.category || "Other") +
+            (item.note ? " · " + item.note : ""),
+        ),
+      ),
+      button("Edit", () => inventoryForm(item), "quiet small"),
+      button(
+        "Remove",
+        async () => {
+          try {
+            await api("/inventory/" + encodeURIComponent(item.id), "DELETE");
+            await refreshView();
+            notify("At-home item removed.");
+          } catch (error) {
+            notify(error.message, true);
+          }
+        },
+        "quiet small",
+      ),
+    );
+    list.append(row);
+  });
+  add(main, list);
+}
 function renderShopping(main) {
   add(
     main,
     title(
       "One less thing to remember",
       "The shopping list.",
-      "Shopping totals combine ingredients from your meal plan, regulars, and quick additions.",
-      [button("+ Add item", () => itemForm(), "primary")],
+      "Plan needs from meals, regulars, and quick additions. At-home quantities reduce what you need to buy.",
+      [
+        state.shoppingPanel === "pantry"
+          ? button("+ Add at-home item", () => inventoryForm(), "primary")
+          : button("+ Add shopping need", () => itemForm(), "primary"),
+      ],
     ),
     weekControls(),
+    shoppingSections(),
   );
+  if (state.shoppingPanel === "in_store") return renderInStore(main);
+  if (state.shoppingPanel === "pantry") return renderInventory(main);
   const columns = el("div", null, "two-columns");
   const left = el("div");
   const planned = add(
@@ -867,11 +1143,12 @@ function renderShopping(main) {
     el("h2", "Shopping totals"),
     el(
       "p",
-      "Combined quantities from your meal plan, regulars, and quick additions.",
+      "Required quantity, what is at home, and the remaining amount to buy.",
       "muted",
     ),
   );
-  if (!state.shopping.lines.length)
+  const planLines = state.purchasePlan.lines || [];
+  if (!planLines.length)
     add(
       planned,
       el("p", "Plan a dinner to bring its ingredients here.", "muted"),
@@ -879,7 +1156,7 @@ function renderShopping(main) {
     );
   else {
     const list = el("ul", null, "list");
-    state.shopping.lines.forEach((item) =>
+    planLines.forEach((item) =>
       add(
         list,
         add(
@@ -889,9 +1166,18 @@ function renderShopping(main) {
             el("strong", item.name),
             el(
               "small",
-              item.quantity +
+              (item.required_quantity ?? item.quantity) +
                 " " +
                 item.unit +
+                (item.available_quantity != null
+                  ? " · " + item.available_quantity + " at home"
+                  : "") +
+                " · " +
+                (Number(item.to_buy_quantity ?? item.quantity ?? 0) > 0
+                  ? (item.to_buy_quantity ?? item.quantity) + " to buy"
+                  : "covered at home") +
+                " · " +
+                (item.category || "Other") +
                 (item.origins?.length
                   ? " · " + shoppingOrigins(item.origins)
                   : ""),
@@ -907,7 +1193,7 @@ function renderShopping(main) {
     el("h2", "Manage quick additions"),
     el(
       "p",
-      "Items you add here are included in the shopping totals above.",
+      "Items you add here are included in the shopping totals above. Exclude a capture from planning; picking progress is in In-store trip.",
       "muted",
     ),
   );
@@ -919,7 +1205,7 @@ function renderShopping(main) {
     const check = el("input");
     check.type = "checkbox";
     check.checked = item.completed;
-    check.ariaLabel = "Check off " + item.name;
+    check.ariaLabel = "Exclude " + item.name + " from plan";
     check.addEventListener("change", async () => {
       check.disabled = true;
       try {
@@ -934,9 +1220,14 @@ function renderShopping(main) {
         check.disabled = false;
       }
     });
+    const exclude = add(
+      el("label", null, "check-label"),
+      check,
+      el("span", "Exclude " + item.name + " from plan"),
+    );
     add(
       row,
-      check,
+      exclude,
       add(
         el("div", null, "detail"),
         el("strong", item.name),
@@ -1050,19 +1341,17 @@ function renderShopping(main) {
   );
   const oda = add(
     el("section", null, "panel"),
-    el("span", "SETUP REQUIRED", "badge"),
-    el("h2", "Shopping with Oda"),
+    el("h2", "Oda shopping"),
     el(
       "p",
-      "Oda cart access needs a separate connector setup. Once configured, an Oda connector can use your shopping list. No order is placed from Kitchen.",
+      "Connect your Oda account to Kitchen from the Buy view. The in-store list works without Oda, and Kitchen does not place orders.",
       "muted",
     ),
   );
-  const link = el("a", "Open Oda ↗");
-  link.href = "https://oda.com/no/cart/";
-  link.target = "_blank";
-  link.rel = "noopener noreferrer";
-  add(oda, link);
+  add(
+    oda,
+    button("Set up Oda in Kitchen", () => navigate("basket"), "quiet"),
+  );
   add(right, regular, oda);
   add(columns, left, right);
   add(main, columns);
@@ -1158,17 +1447,874 @@ function basketProduct(product, packages, alternatives = false) {
   add(card, details);
   return card;
 }
+function officialOdaProductUrl(value) {
+  try {
+    const url = new URL(value);
+    if (
+      url.protocol === "https:" &&
+      !url.username &&
+      !url.password &&
+      (url.hostname === "oda.com" || url.hostname.endsWith(".oda.com"))
+    )
+      return value;
+  } catch {}
+  return "";
+}
+function safeImageUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password
+      ? url.href
+      : "";
+  } catch {
+    return "";
+  }
+}
+function providerDecimalPrice(value) {
+  if (typeof value !== "string") return null;
+  const price = value.trim();
+  return /^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(price) ? price : null;
+}
+function chooseOdaProduct(product, need) {
+  const productId = Number(product.id);
+  if (!Number.isSafeInteger(productId) || productId < 1) {
+    notify("Oda did not provide a usable product ID for this result.", true);
+    return;
+  }
+  const root = openDialog("Confirm product and package size");
+  add(
+    root,
+    el(
+      "p",
+      "You choose how many of " +
+        need.unit +
+        " are in one package. Kitchen will not infer the package size from the Oda listing.",
+      "callout",
+    ),
+    el("h3", product.name || "Oda product"),
+    product.brand ? el("p", product.brand, "muted") : null,
+  );
+  const form = el("form");
+  const packages = field("Number of packages", "number", "");
+  packages.input.min = "1";
+  packages.input.max = "999";
+  packages.input.step = "1";
+  packages.input.required = true;
+  const packQuantity = field(
+    "Amount of " + need.unit + " per package",
+    "number",
+    "",
+  );
+  packQuantity.input.min = "0.000001";
+  packQuantity.input.step = "any";
+  packQuantity.input.required = true;
+  add(form, packages.wrap, packQuantity.wrap);
+  formSubmit(form, "Save product choice", async () => {
+    const packageCount = Number(packages.input.value);
+    const quantityText = packQuantity.input.value.trim();
+    if (!Number.isSafeInteger(packageCount) || packageCount < 1)
+      throw new Error("Enter a whole number of packages greater than zero.");
+    if (
+      !/^(?:\d+(?:\.\d+)?|\.\d+)$/.test(quantityText) ||
+      !Number.isFinite(Number(quantityText)) ||
+      Number(quantityText) <= 0
+    )
+      throw new Error("Enter a positive decimal amount per package.");
+    const productUrl = officialOdaProductUrl(product.url);
+    const media = productUrl ? state.odaMedia[productUrl] || {} : {};
+    await api("/basket/selections", "PUT", {
+      start: iso(day(0)),
+      end: iso(day(6)),
+      selection: {
+        need_id: need.id,
+        product: {
+          provider: "oda",
+          product_id: String(productId),
+          name: product.name,
+          brand: product.brand || null,
+          url: productUrl || null,
+          image_url: safeImageUrl(media.image_url) || null,
+          pack_quantity: quantityText,
+          pack_unit: need.unit,
+          price: providerDecimalPrice(product.price),
+          currency: "NOK",
+          available:
+            typeof product.availability?.isAvailable === "boolean"
+              ? product.availability.isAvailable
+              : null,
+          observed_at: new Date().toISOString(),
+          evidence_status: "unverified",
+        },
+        packages: packageCount,
+        alternatives: [],
+      },
+    });
+    state.cartProposalHandled = false;
+    $("#modal").close();
+    await refreshView();
+    notify("Oda product choice saved for review. It remains unverified.");
+  });
+  add(root, form);
+}
+function mediaRetryWait(media) {
+  return Math.max(0, (media?.retryUntil || 0) - Date.now());
+}
+function odaSearchResultCard(product, need) {
+  const productUrl = officialOdaProductUrl(product.url);
+  const media = productUrl ? state.odaMedia[productUrl] || {} : {};
+  const retryWait = mediaRetryWait(media);
+  if (retryWait && !media.retryTimer) {
+    media.retryTimer = setTimeout(() => {
+      media.retryTimer = null;
+      render();
+    }, retryWait + 25);
+    if (productUrl) state.odaMedia[productUrl] = media;
+  }
+  const card = add(
+    el("article", null, "oda-result-card"),
+    el("div", null, "oda-picture-gallery"),
+  );
+  const pictureGallery = card.firstChild;
+  const imageUrls = [media.image_url, ...(media.additional_image_urls || [])]
+    .map(safeImageUrl)
+    .filter(Boolean)
+    .filter((url, index, values) => values.indexOf(url) === index)
+    .slice(0, 3);
+  if (imageUrls.length) {
+    imageUrls.forEach((imageUrl, index) => {
+      const image = recipeImage(
+        { title: product.name || "Oda product", image_url: imageUrl },
+        "product-image",
+      );
+      if (image) {
+        image.classList.add("oda-photo-frame");
+        if (index > 0) image.classList.add("oda-photo-extra");
+        pictureGallery.append(image);
+      }
+    });
+  } else {
+    add(
+      pictureGallery,
+      el(
+        "div",
+        media.error
+          ? "Product picture could not be loaded"
+          : "Picture unavailable",
+        "oda-picture-fallback",
+      ),
+    );
+  }
+  const details = add(
+    el("div", null, "product-details"),
+    el("h3", product.name || "Oda product"),
+  );
+  if (product.brand) add(details, el("p", product.brand, "muted"));
+  if (product.description) add(details, el("p", product.description));
+  if (product.price)
+    add(details, el("p", "Oda price: " + product.price, "product-price"));
+  else add(details, el("p", "Price unavailable", "muted"));
+  if (product.unitPrice || product.unitName)
+    add(
+      details,
+      el(
+        "p",
+        "Unit price: " +
+          (product.unitPrice || "not provided") +
+          (product.unitName ? " per " + product.unitName : ""),
+        "muted",
+      ),
+    );
+  if (product.availability?.description)
+    add(
+      details,
+      el("p", "Availability: " + product.availability.description, "muted"),
+    );
+  else if (product.availability?.isAvailable === true)
+    add(details, el("p", "Oda marks this as available.", "muted"));
+  else if (product.availability?.isAvailable === false)
+    add(details, el("p", "Oda marks this as unavailable.", "muted"));
+  else add(details, el("p", "Availability not provided", "muted"));
+  if (productUrl) {
+    const link = el("a", "View Oda reference ↗");
+    link.href = productUrl;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    add(details, link);
+  }
+  if (media.pack_description)
+    add(details, el("p", "Pack details from Oda: " + media.pack_description));
+  else
+    add(
+      details,
+      el(
+        "p",
+        "Pack size unknown. Oda’s unit price is not a package quantity.",
+        "muted",
+      ),
+    );
+  if (media.detail) add(details, el("p", media.detail, "muted"));
+  if (productUrl && !imageUrls.length) {
+    const loadPhoto = button(
+      media.loading
+        ? "Loading product details…"
+        : retryWait
+          ? "Try again in " + Math.ceil(retryWait / 1000) + "s"
+          : media.requested
+            ? "Check for product photo again"
+            : "Load product photo",
+      async () => {
+        if (media.loading || mediaRetryWait(media)) return;
+        state.odaMedia[productUrl] = { loading: true, requested: true };
+        render();
+        try {
+          const response = await api("/oda/products/media", "POST", {
+            url: product.url,
+          });
+          const retryAfter = Number(response.retry_after_seconds);
+          state.odaMedia[productUrl] = {
+            ...response,
+            requested: true,
+            ...(Number.isFinite(retryAfter) && retryAfter > 0
+              ? { retryUntil: Date.now() + retryAfter * 1000 }
+              : {}),
+          };
+        } catch (error) {
+          state.odaMedia[productUrl] = {
+            error: error.message,
+            requested: true,
+            ...(Number.isFinite(error.retryAfterSeconds) &&
+            error.retryAfterSeconds > 0
+              ? { retryUntil: Date.now() + error.retryAfterSeconds * 1000 }
+              : {}),
+          };
+        }
+        render();
+      },
+      "quiet small",
+    );
+    loadPhoto.disabled = Boolean(media.loading || retryWait);
+    add(details, loadPhoto);
+  }
+  if (Number.isSafeInteger(Number(product.id)) && Number(product.id) > 0)
+    add(
+      details,
+      button(
+        "Choose product",
+        () => chooseOdaProduct(product, need),
+        "primary small",
+      ),
+    );
+  add(
+    details,
+    el("small", "Oda search result · not independently verified", "muted"),
+  );
+  add(card, details);
+  return card;
+}
+function odaSearchForNeed(need) {
+  const current = state.odaSearch[need.id] || {};
+  const form = el("form", null, "oda-search-form");
+  const query = field(
+    "Search Oda products",
+    "search",
+    current.query || need.name,
+  );
+  query.input.required = true;
+  query.input.maxLength = 300;
+  const submit = el(
+    "button",
+    current.loading ? "Searching…" : "Search Oda",
+    "quiet",
+  );
+  submit.type = "submit";
+  submit.disabled = current.loading || !state.oda?.connected;
+  add(form, query.wrap, submit);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const text = query.input.value.trim();
+    if (!text) return;
+    state.odaSearch[need.id] = { query: text, loading: true };
+    render();
+    try {
+      const response = await api("/oda/products/search", "POST", {
+        queries: [text],
+        page: 1,
+        size: 5,
+      });
+      state.odaSearch[need.id] = {
+        query: text,
+        results: response.result || [],
+      };
+    } catch (error) {
+      state.odaSearch[need.id] = { query: text, error: error.message };
+    }
+    render();
+  });
+  const root = add(
+    el("section", null, "oda-search"),
+    el("h3", "Find Oda products"),
+    form,
+  );
+  if (!state.oda?.connected) {
+    add(
+      root,
+      el("p", "Connect your Oda account to Kitchen before searching.", "muted"),
+    );
+  } else if (current.loading) {
+    add(root, el("p", "Searching Oda…", "muted"));
+  } else if (current.error) {
+    add(root, el("p", current.error, "form-error"));
+  } else if (current.results) {
+    const products = current.results.flatMap((result) => result.products || []);
+    if (products.length)
+      products.forEach((product) =>
+        add(root, odaSearchResultCard(product, need)),
+      );
+    else add(root, el("p", "No products found for that search.", "muted"));
+    if (current.results.some((result) => result.hasMore))
+      add(
+        root,
+        el(
+          "p",
+          "More results are available in Oda. Kitchen shows the first results here.",
+          "muted",
+        ),
+      );
+  }
+  return root;
+}
+function odaCartProposalRequest(basket) {
+  const byProduct = new Map();
+  const queries = new Set();
+  let invalidSelections = 0;
+  (basket.needs || []).forEach((entry) => {
+    const need = entry.need || {};
+    (entry.selections || []).forEach((selection) => {
+      const product = selection.product || {};
+      const productId = Number(product.product_id);
+      const quantity = Number(selection.packages);
+      if (
+        product.provider !== "oda" ||
+        !Number.isSafeInteger(productId) ||
+        productId < 1 ||
+        !Number.isSafeInteger(quantity) ||
+        quantity < 1
+      ) {
+        invalidSelections += 1;
+        return;
+      }
+      const key = String(productId);
+      const current = byProduct.get(key) || {
+        product_id: productId,
+        quantity: 0,
+      };
+      if (!Number.isSafeInteger(current.quantity + quantity)) {
+        invalidSelections += 1;
+        return;
+      }
+      current.quantity += quantity;
+      byProduct.set(key, current);
+      if (need.name) queries.add(need.name);
+    });
+  });
+  const additions = [...byProduct.values()];
+  return {
+    queries: [...queries],
+    additions,
+    invalidSelections,
+    issue:
+      additions.length > 10 || queries.size > 10
+        ? "Review at most 10 distinct product types at a time."
+        : !queries.size
+          ? "Each selected Oda product needs a shopping-need name for a fresh provider check."
+          : invalidSelections
+            ? "One or more saved product choices do not have a usable Oda product ID or package count. Review those choices first."
+            : "",
+  };
+}
+function proposalProductDetails(product) {
+  const details = add(
+    el("div", null, "product-details proposal-product"),
+    el("h3", product.name || "Oda product"),
+  );
+  if (product.brand) add(details, el("p", product.brand, "muted"));
+  if (product.description) add(details, el("p", product.description));
+  const productUrl = officialOdaProductUrl(product.url);
+  const savedMedia = productUrl ? state.odaMedia[productUrl] || {} : {};
+  const imageUrl = safeImageUrl(product.image_url || savedMedia.image_url);
+  if (imageUrl) {
+    const image = recipeImage(
+      { title: product.name || "Oda product", image_url: imageUrl },
+      "product-image",
+    );
+    if (image) {
+      image.classList.add("oda-proposal-image");
+      details.prepend(image);
+    }
+  }
+  const availability =
+    product.availability?.description ||
+    (product.availability?.isAvailable === true || product.available === true
+      ? "Oda marks this available"
+      : product.availability?.isAvailable === false ||
+          product.available === false
+        ? "Oda marks this unavailable"
+        : "Availability not provided");
+  add(
+    details,
+    el(
+      "p",
+      product.price == null
+        ? "Fresh Oda price unavailable"
+        : "Fresh Oda price: " +
+            product.price +
+            (product.currency ? " " + product.currency : ""),
+      product.price == null ? "muted" : "product-price",
+    ),
+    el("p", availability, "muted"),
+  );
+  if (productUrl) {
+    const link = el("a", "View this Oda product ↗");
+    link.href = productUrl;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    add(details, link);
+  } else {
+    add(details, el("p", "Oda returned no product page reference.", "muted"));
+  }
+  return details;
+}
+function proposalWarningText(warning) {
+  const code = typeof warning === "string" ? warning : warning?.code;
+  if (code === "mapping_unverified")
+    return "Oda refreshed the selected products, but their match to each shopping need is not independently verified. Review the product and quantity details above.";
+  if (code === "payment_at_oda")
+    return "Any order and payment must be reviewed and completed at Oda.";
+  return typeof warning === "string"
+    ? warning.replaceAll("_", " ")
+    : warning?.message || warning?.detail || "Oda returned a warning.";
+}
+function selectedMappingDetails(productId) {
+  const details = [];
+  (state.basket?.needs || []).forEach((entry) => {
+    const need = entry.need || {};
+    (entry.selections || []).forEach((selection) => {
+      if (String(selection.product?.product_id) === String(productId))
+        details.push(
+          "You entered " +
+            selection.packages +
+            " packages for " +
+            (need.name || "this need") +
+            " · " +
+            selection.product.pack_quantity +
+            " " +
+            selection.product.pack_unit +
+            " per package",
+        );
+    });
+  });
+  return details;
+}
+function proposalExpiryText(value) {
+  if (!value) return "";
+  const timestamp = Date.parse(value);
+  return Number.isNaN(timestamp)
+    ? ""
+    : "Review expires " + new Date(timestamp).toLocaleString() + ".";
+}
+function renderProposalOutcome(
+  proposal,
+  status,
+  detail = "",
+  cleanupFailed = false,
+) {
+  const known = ["success", "stale", "uncertain", "attempted"].includes(status)
+    ? status
+    : "uncertain";
+  state.cartProposalHandled = known === "success";
+  state.cartProposalBlocked =
+    cleanupFailed || known === "uncertain" || known === "attempted";
+  render();
+  const root = openDialog("Oda cart update status");
+  const messages = {
+    success:
+      "Oda accepted the reviewed additions. This changed the Oda cart only; it did not place an order or make a payment.",
+    stale:
+      "The Oda cart changed after review. Kitchen did not apply these additions. Refresh and review again before deciding what to add.",
+    uncertain:
+      "Kitchen cannot confirm whether Oda applied these additions. Do not confirm again. Check the actual Oda cart first.",
+    attempted:
+      "Oda reported an attempted update, but Kitchen cannot confirm the final cart. Do not confirm again. Check the actual Oda cart first.",
+  };
+  add(root, el("p", "Status: " + known.replaceAll("_", " "), "eyebrow"));
+  add(
+    root,
+    el(
+      "p",
+      detail || messages[known],
+      known === "success" ? "callout" : "callout offline",
+    ),
+  );
+  add(root, el("p", messages[known], "muted"));
+  const cartLink = el("a", "Review your Oda cart ↗");
+  cartLink.href = "https://oda.com/no/cart/";
+  cartLink.target = "_blank";
+  cartLink.rel = "noopener noreferrer";
+  add(root, cartLink);
+  const close = button("Close", () => $("#modal").close(), "quiet");
+  add(root, add(el("div", null, "actions"), close));
+  return root;
+}
+function renderOdaProposal(proposal, request) {
+  const root = openDialog("Review proposed Oda cart additions");
+  add(
+    root,
+    el(
+      "p",
+      "This adds these packages to your existing Oda cart. Review the full cart and pay at Oda. Kitchen does not place an order or handle payment.",
+      "callout",
+    ),
+  );
+  if (proposal.expires_at)
+    add(root, el("p", proposalExpiryText(proposal.expires_at), "muted"));
+  const list = el("div", null, "proposal-additions");
+  (proposal.additions || []).forEach((addition) => {
+    const item = add(el("section", null, "proposal-addition"));
+    const product = addition.product || {};
+    add(item, proposalProductDetails(product));
+    selectedMappingDetails(product.id ?? product.product_id).forEach(
+      (mapping) => add(item, el("p", mapping, "muted")),
+    );
+    add(
+      item,
+      el(
+        "p",
+        "Packages added: " +
+          addition.quantity +
+          " · Oda cart quantity: " +
+          (addition.current_quantity ?? "unknown") +
+          " → " +
+          (addition.after_quantity ?? "unknown"),
+        "proposal-quantity",
+      ),
+    );
+    list.append(item);
+  });
+  add(root, list);
+  if (proposal.warnings?.length) {
+    const warnings = add(
+      el("section", null, "callout offline"),
+      el("strong", "Review these notes"),
+    );
+    const warningList = el("ul");
+    proposal.warnings.forEach((warning) =>
+      add(warningList, el("li", proposalWarningText(warning))),
+    );
+    add(warnings, warningList);
+    add(root, warnings);
+  }
+  add(
+    root,
+    el(
+      "p",
+      "Only the listed additions are proposed. Other items already in your Oda cart stay as they are.",
+      "muted",
+    ),
+  );
+  const expiry = Date.parse(proposal.expires_at || "");
+  const expired = Number.isFinite(expiry) && expiry <= Date.now();
+  const confirm = button(
+    expired ? "Review expired" : "Confirm cart additions",
+    async () => confirmOdaCartProposal(proposal, request),
+    "primary",
+  );
+  confirm.disabled =
+    proposal.status !== "pending" ||
+    !proposal.proposal_id ||
+    !proposal.additions?.length ||
+    expired;
+  const close = button("Cancel", () => $("#modal").close(), "quiet");
+  add(root, add(el("div", null, "actions"), close, confirm));
+  if (confirm.disabled)
+    add(
+      root,
+      el(
+        "p",
+        "This proposal cannot be confirmed. Request a fresh review before continuing.",
+        "form-error",
+      ),
+    );
+  else
+    add(
+      root,
+      el(
+        "p",
+        "Confirming adds only the package counts listed above. No order or payment is made.",
+        "muted",
+      ),
+    );
+}
+async function clearConfirmedSelections(request) {
+  const confirmedIds = new Set(
+    request.additions.map((item) => String(item.product_id)),
+  );
+  const toRemove = [];
+  (state.basket?.needs || []).forEach((entry) => {
+    (entry.selections || []).forEach((selection) => {
+      const product = selection.product || {};
+      if (
+        product.provider === "oda" &&
+        confirmedIds.has(String(product.product_id))
+      )
+        toRemove.push({
+          needId: entry.need?.id,
+          productId: product.product_id,
+        });
+    });
+  });
+  const removed = [];
+  const failures = [];
+  for (const selection of toRemove) {
+    const key = String(selection.needId) + ":" + String(selection.productId);
+    if (removed.includes(key)) continue;
+    try {
+      await api(
+        "/basket/selections/" +
+          encodeURIComponent(selection.needId) +
+          "/" +
+          encodeURIComponent(selection.productId) +
+          range(),
+        "DELETE",
+      );
+      removed.push(key);
+    } catch (error) {
+      failures.push(error.message);
+    }
+  }
+  if (removed.length && state.basket?.needs) {
+    state.basket.needs = state.basket.needs.map((entry) => ({
+      ...entry,
+      selections: (entry.selections || []).filter(
+        (selection) =>
+          !removed.includes(
+            String(entry.need?.id) +
+              ":" +
+              String(selection.product?.product_id),
+          ),
+      ),
+    }));
+  }
+  if (!failures.length) {
+    try {
+      state.basket = await api("/basket" + range());
+    } catch (error) {
+      failures.push(error.message);
+    }
+  }
+  return failures;
+}
+async function confirmOdaCartProposal(proposal, request) {
+  if (state.cartConfirming || !proposal.proposal_id) return;
+  state.cartConfirming = true;
+  const buttonStates = [...document.querySelectorAll("button")].map((node) => [
+    node,
+    node.disabled,
+  ]);
+  buttonStates.forEach(([node]) => {
+    node.disabled = true;
+  });
+  const root = $("#modal-content");
+  root.replaceChildren(
+    el("h2", "Confirming Oda cart additions"),
+    el(
+      "p",
+      "Waiting for Oda. Do not close this dialog or retry the confirmation.",
+      "callout",
+    ),
+  );
+  let status = "uncertain";
+  let detail = "";
+  let cleanupFailed = false;
+  try {
+    const result = await api(
+      "/oda/cart/proposals/" +
+        encodeURIComponent(proposal.proposal_id) +
+        "/confirm",
+      "POST",
+      { reviewed: true },
+    );
+    status = result?.status || "uncertain";
+    detail = result?.detail || result?.message || "";
+    if (status === "success") {
+      const failures = await clearConfirmedSelections(request);
+      if (failures.length) {
+        cleanupFailed = true;
+        detail =
+          "Oda accepted the additions, but Kitchen could not clear every saved product choice. Remove any remaining choices from review before another Oda cart update.";
+      }
+    }
+  } catch (error) {
+    detail = error.message;
+    status = "uncertain";
+  } finally {
+    state.cartConfirming = false;
+    buttonStates.forEach(([node, disabled]) => {
+      if (node.isConnected) node.disabled = disabled;
+    });
+  }
+  renderProposalOutcome(proposal, status, detail, cleanupFailed);
+}
+async function createOdaCartProposal(request, trigger) {
+  if (state.cartProposalLoading) return;
+  state.cartProposalLoading = true;
+  if (trigger) {
+    trigger.disabled = true;
+    trigger.textContent = "Checking current Oda cart…";
+  }
+  try {
+    const proposal = await api("/oda/cart/proposals", "POST", {
+      queries: request.queries,
+      additions: request.additions,
+    });
+    if (!proposal || typeof proposal !== "object")
+      throw new Error(
+        "Oda returned an unreadable cart proposal. No additions were confirmed.",
+      );
+    renderOdaProposal(proposal, request);
+  } catch (error) {
+    notify(error.message + " No cart additions were confirmed.", true);
+  } finally {
+    state.cartProposalLoading = false;
+    if (trigger?.isConnected) {
+      trigger.disabled = false;
+      trigger.textContent = "Review additions to Oda cart";
+    }
+  }
+}
 function renderBasket(main) {
   const basket = state.basket || { needs: [], issues: [] };
   add(
     main,
     title(
       "Shopping with confidence",
-      "Basket review.",
-      "Compare what the meal plan needs with exact products, pack sizes, availability, and evidence.",
+      "Review what to buy.",
+      "Choose Oda or an in-store trip. In-store checkoffs track pickup only; Oda cart additions need a separate review and confirmation.",
       [button("Refresh basket", refreshView, "quiet")],
     ),
   );
+  const purchaseModes = el("div", null, "section-tabs purchase-modes");
+  [
+    ["oda", "Oda"],
+    ["in_store", "In-store"],
+  ].forEach(([mode, label]) => {
+    const option = button(
+      label,
+      async () => {
+        state.purchaseMode = mode;
+        if (mode === "in_store")
+          state.storeTrip = await api("/store-trip" + range());
+        render();
+      },
+      state.purchaseMode === mode ? "primary" : "quiet",
+    );
+    if (state.purchaseMode === mode)
+      option.setAttribute("aria-current", "page");
+    purchaseModes.append(option);
+  });
+  add(main, purchaseModes);
+  if (state.purchaseMode === "in_store") {
+    add(
+      main,
+      el(
+        "p",
+        "This checklist tracks items picked up for this trip. It does not record purchases or change at-home quantities.",
+        "callout",
+      ),
+    );
+    renderInStore(main);
+    return;
+  }
+  const odaSetup = add(
+    el("section", null, "panel"),
+    el("h2", "Connect Oda to Kitchen"),
+  );
+  if (state.oda?.connected) {
+    add(
+      odaSetup,
+      el(
+        "p",
+        "Oda is connected to Kitchen. Search products for each need, choose a package size, then review cart additions before confirming.",
+        "muted",
+      ),
+    );
+    add(
+      odaSetup,
+      button(
+        "Disconnect Oda",
+        async () => {
+          try {
+            await api("/oda/connection", "DELETE");
+            state.oda = await api("/oda/status");
+            render();
+            notify("Oda disconnected from Kitchen.");
+          } catch (error) {
+            notify(error.message, true);
+          }
+        },
+        "quiet",
+      ),
+    );
+  } else if (state.oda?.configured) {
+    add(
+      odaSetup,
+      el(
+        "p",
+        "Connect your Oda account securely to Kitchen. Kitchen will not place an order.",
+        "muted",
+      ),
+    );
+    add(
+      odaSetup,
+      button(
+        "Connect Oda account",
+        async () => {
+          try {
+            const result = await api("/oda/connect", "POST", {});
+            let authorization;
+            try {
+              authorization = new URL(result.authorization_url);
+            } catch {}
+            if (
+              !authorization ||
+              authorization.protocol !== "https:" ||
+              authorization.host !== "oda.com" ||
+              !authorization.pathname.startsWith("/o/authorize/")
+            )
+              throw new Error(
+                "Kitchen did not return a valid Oda authorization link.",
+              );
+            window.location.assign(authorization.href);
+          } catch (error) {
+            notify(error.message, true);
+          }
+        },
+        "primary",
+      ),
+    );
+  } else {
+    add(
+      odaSetup,
+      el(
+        "p",
+        "Oda connection is not configured for this Kitchen yet. Ask the household administrator to finish setup here.",
+        "muted",
+      ),
+    );
+    const unavailable = button("Oda setup required", () => {}, "quiet");
+    unavailable.disabled = true;
+    add(odaSetup, unavailable);
+  }
+  add(main, odaSetup);
   add(
     main,
     el(
@@ -1227,7 +2373,7 @@ function renderBasket(main) {
       main,
       empty(
         "Your basket is empty",
-        "Plan meals or add shopping needs first. Product matching appears here when your shopping connection is available.",
+        "Plan meals or add shopping needs first. Oda product references appear here when the Kitchen connection supports them.",
         button("Open shopping list", () => navigate("shopping"), "primary"),
       ),
     );
@@ -1235,11 +2381,10 @@ function renderBasket(main) {
       main,
       add(
         el("section", null, "panel"),
-        el("span", "SETUP REQUIRED", "badge"),
-        el("h2", "Product matching"),
+        el("h2", "Oda product search"),
         el(
           "p",
-          "Product matching needs an Oda connection. No checkout is available here.",
+          "Connect Oda to Kitchen above, then search products from a shopping need. Kitchen does not place orders.",
           "muted",
         ),
       ),
@@ -1292,13 +2437,42 @@ function renderBasket(main) {
         section,
         el(
           "p",
-          "No product selected. Product matching needs an Oda connection.",
+          state.oda?.connected
+            ? "No Oda product selected yet. Search below to review product options."
+            : "Connect Oda to Kitchen before searching for products.",
           "callout",
         ),
       );
+    add(section, odaSearchForNeed(need));
     selections.forEach((selection) => {
-      if (selection.product)
-        add(section, basketProduct(selection.product, selection.packages));
+      if (selection.product) {
+        const selected = el("div", null, "selected-product");
+        add(selected, basketProduct(selection.product, selection.packages));
+        add(
+          selected,
+          button(
+            "Remove from review",
+            async () => {
+              try {
+                await api(
+                  "/basket/selections/" +
+                    encodeURIComponent(need.id) +
+                    "/" +
+                    encodeURIComponent(selection.product.product_id) +
+                    range(),
+                  "DELETE",
+                );
+                state.cartProposalHandled = false;
+                await refreshView();
+              } catch (error) {
+                notify(error.message, true);
+              }
+            },
+            "quiet small",
+          ),
+        );
+        add(section, selected);
+      }
       if (selection.alternatives?.length) {
         add(section, el("h3", "Alternatives"));
         const alternatives = el("div", null, "alternatives-grid");
@@ -1316,15 +2490,68 @@ function renderBasket(main) {
     add(needs, section);
   });
   add(main, needs);
+  const proposalRequest = odaCartProposalRequest(basket);
+  if (proposalRequest.additions.length || proposalRequest.invalidSelections) {
+    const cartPanel = add(
+      el("section", null, "panel oda-cart-panel"),
+      el("h2", "Add selected products to Oda"),
+      el(
+        "p",
+        "Review exact additions against the current Oda cart before confirming. Existing Oda cart items are kept.",
+        "muted",
+      ),
+    );
+    if (proposalRequest.issue)
+      add(cartPanel, el("p", proposalRequest.issue, "form-error"));
+    else if (state.cartProposalBlocked)
+      add(
+        cartPanel,
+        el(
+          "p",
+          "The last Oda cart update may have been applied. Do not retry it from Kitchen. Review the actual Oda cart first.",
+          "callout offline",
+        ),
+      );
+    else if (state.cartProposalHandled)
+      add(
+        cartPanel,
+        el(
+          "p",
+          "The reviewed additions were accepted and removed from this Kitchen review.",
+          "callout",
+        ),
+      );
+    else if (!state.oda?.connected)
+      add(
+        cartPanel,
+        el(
+          "p",
+          "Connect Oda to Kitchen before preparing cart additions.",
+          "muted",
+        ),
+      );
+    else {
+      let review;
+      review = button(
+        state.cartProposalLoading
+          ? "Checking current Oda cart…"
+          : "Review additions to Oda cart",
+        () => createOdaCartProposal(proposalRequest, review),
+        "primary",
+      );
+      review.disabled = state.cartProposalLoading;
+      add(cartPanel, review);
+    }
+    add(main, cartPanel);
+  }
   add(
     main,
     add(
       el("section", null, "panel"),
-      el("span", "SETUP REQUIRED", "badge"),
-      el("h2", "Checkout"),
+      el("h2", "Orders and payment"),
       el(
         "p",
-        "Kitchen can review product references, but no checkout or order can be placed here.",
+        "Kitchen does not place orders or handle payment. Review product references here and complete any purchase on Oda.",
         "muted",
       ),
     ),
@@ -1393,10 +2620,18 @@ function itemForm(regular = false) {
   quantity.input.required = true;
   const unit = field("Unit", "text", "item");
   unit.input.required = true;
+  const category = field(
+    "Category",
+    "text",
+    "Other",
+    "Used to organize the in-store list.",
+  );
+  category.input.maxLength = 60;
   add(
     form,
     name.wrap,
     add(el("div", null, "form-grid"), quantity.wrap, unit.wrap),
+    category.wrap,
   );
   const interval = field("Usually buy every (days)", "number", 7);
   interval.input.min = 1;
@@ -1410,6 +2645,7 @@ function itemForm(regular = false) {
         name: name.input.value.trim(),
         quantity: quantity.input.value,
         unit: unit.input.value.trim(),
+        category: category.input.value.trim() || "Other",
         ...(regular ? { interval_days: Number(interval.input.value) } : {}),
       },
       regular ? "Regular item saved." : "Item added.",
@@ -1529,7 +2765,7 @@ function renderSettings(main) {
             (state.integrations.ai?.configured
               ? "configured"
               : "setup required") +
-            ". Oda shopping: connector setup required.",
+            ". Oda account connection and setup are managed from Buy in Kitchen.",
           "muted",
         ),
         el(
@@ -1541,6 +2777,9 @@ function renderSettings(main) {
     );
   }
 }
+$("#modal").addEventListener("cancel", (event) => {
+  if (state.cartConfirming) event.preventDefault();
+});
 document
   .querySelectorAll("[data-view]")
   .forEach((node) =>
@@ -1568,6 +2807,7 @@ window.addEventListener("online", () => {
 });
 async function start() {
   try {
+    const odaResult = new URLSearchParams(location.search).get("oda");
     [state.household, state.recipes, state.integrations] = await Promise.all([
       api("/household"),
       api("/recipes"),
@@ -1576,12 +2816,34 @@ async function start() {
     const requested = location.hash.slice(1);
     state.view = !state.household.name
       ? "settings"
-      : ["week", "recipes", "shopping", "basket", "settings"].includes(
-            requested,
-          )
-        ? requested
-        : "week";
+      : odaResult
+        ? "basket"
+        : ["week", "recipes", "shopping", "basket", "settings"].includes(
+              requested,
+            )
+          ? requested
+          : "week";
     await refreshView();
+    if (odaResult) {
+      history.replaceState(
+        null,
+        "",
+        location.pathname + (state.household.name ? "#basket" : ""),
+      );
+      if (odaResult === "connected") {
+        try {
+          state.oda = await api("/oda/status");
+        } catch {}
+        notify(
+          state.oda?.connected
+            ? "Oda connected to Kitchen."
+            : "Kitchen could not confirm the Oda connection.",
+          !state.oda?.connected,
+        );
+      } else {
+        notify("Oda connection did not complete. You can try again.", true);
+      }
+    }
   } catch (error) {
     const main = $("#main");
     main.replaceChildren(

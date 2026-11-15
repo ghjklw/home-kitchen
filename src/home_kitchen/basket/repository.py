@@ -9,21 +9,15 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from home_kitchen.history import HistoryChannel, HistoryEntryCreate, HistoryRepository
-from home_kitchen.models import WeekShopping
+from home_kitchen.inventory import InventoryService
+from home_kitchen.models import ShoppingLine, WeekShopping
 from home_kitchen.service import KitchenService
-from home_kitchen.shopping import normalize_need_text
+from home_kitchen.shopping import need_id
 
 from .evaluation import evaluate_basket
 from .models import BasketReview, PurchaseNeed, SelectedProduct
 
 _selection_adapter = TypeAdapter(SelectedProduct)
-
-
-def _need_id(start: date, end: date, name: str, unit: str) -> UUID:
-    return uuid5(
-        NAMESPACE_URL,
-        f"kitchen:{start}:{end}:{normalize_need_text(name)}:{normalize_need_text(unit)}",
-    )
 
 
 def _selection_id(start: date, end: date, selection: SelectedProduct) -> UUID:
@@ -49,6 +43,7 @@ class BasketService:
         self.kitchen = kitchen
         self.engine: Engine = kitchen.store.engine
         self.history = history
+        self.inventory = InventoryService(kitchen, history)
 
     def review(self, start: date, end: date) -> BasketReview:
         week = self._week(start, end)
@@ -210,19 +205,31 @@ class BasketService:
         return self.review(start, end)
 
     def _week(self, start: date, end: date) -> WeekShopping:
-        if end < start:
-            raise ValueError("end must be on or after start")
-        return self.kitchen.shopping_list(start, end, today=date.today())
+        plan = self.inventory.plan(start, end)
+        return WeekShopping(
+            lines=[
+                ShoppingLine(
+                    name=line.name,
+                    quantity=line.to_buy_quantity,
+                    unit=line.unit,
+                    category=line.category,
+                    origins=line.origins,
+                )
+                for line in plan.purchase_lines
+            ],
+            suggestions=plan.suggestions,
+        )
 
     @staticmethod
     def _needs(week: WeekShopping, start: date, end: date) -> list[PurchaseNeed]:
         return [
             PurchaseNeed(
-                id=_need_id(start, end, line.name, line.unit),
+                id=need_id(start, end, line.name, line.unit),
                 name=line.name,
                 quantity=line.quantity,
                 unit=line.unit,
                 origins=line.origins,
+                category=line.category,
             )
             for line in week.lines
         ]

@@ -7,7 +7,11 @@ from datetime import date
 from pydantic_ai import Agent
 
 from home_kitchen.history import HistoryRepository
+from home_kitchen.inventory import InventoryService
 from home_kitchen.models import RecipeCreate
+from home_kitchen.oda import OdaService
+from home_kitchen.oda.cart import OdaCartService
+from home_kitchen.purchasing import InStoreMode, OdaMode, PurchaseModes, StoreTripService
 from home_kitchen.recipes import (
     EvidenceSnippet,
     RecipeContext,
@@ -32,6 +36,11 @@ class KitchenFeatures:
         self.settings = settings
         self.household = household
         self.history = HistoryRepository(kitchen.store.engine)
+        self.oda = OdaService(kitchen.store.engine, settings)
+        self.oda_cart = OdaCartService(self.oda)
+        self.inventory = InventoryService(kitchen, self.history)
+        self.store_trip = StoreTripService(self.inventory, self.history)
+        self.purchase_modes = PurchaseModes([OdaMode(self.oda), InStoreMode()])
         self.recipe_providers = create_recipe_providers(settings, ai_agent=ai)
 
     def evidence(self, query: str) -> list[EvidenceSnippet]:
@@ -42,7 +51,7 @@ class KitchenFeatures:
         )
         matched = self.history.search(query[:1000], limit=8) if query.strip() else []
         entries = {entry.id: entry for entry in [*recent, *matched]}
-        return [
+        evidence = [
             EvidenceSnippet(
                 evidence_id=str(entry.id),
                 text=json.dumps(
@@ -57,6 +66,26 @@ class KitchenFeatures:
             )
             for entry in list(entries.values())[:12]
         ]
+        # Current counts complement historical feedback; they are explicit user
+        # observations, never proof of freshness or automatic consumption.
+        stock = [item for item in self.inventory.list() if item.quantity > 0]
+        evidence.extend(
+            EvidenceSnippet(
+                evidence_id=f"inventory:{item.id}",
+                text=json.dumps(
+                    {
+                        "kind": "current_inventory",
+                        "name": item.name,
+                        "quantity": str(item.quantity),
+                        "unit": item.unit,
+                        "category": item.category,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            for item in stock[:8]
+        )
+        return evidence
 
     async def draft_recipe(self, provider_id: str, data: RecipeDraftRequest) -> RecipeDraft:
         evidence = self.evidence(data.prompt or "") if provider_id == "ai" else []

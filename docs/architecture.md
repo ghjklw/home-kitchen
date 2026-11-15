@@ -53,7 +53,9 @@ The shopping service combines scaled ingredients from planned meals with open qu
 
 Basket review converts those aggregate shopping lines into stable need records for a date range. A need describes the quantity and unit Kitchen calculates. A selected product is a separate provider snapshot with exact name, brand, URL, image URL, pack size, package count, price/currency, availability, observation time, evidence status, and alternatives. Deterministic evaluation calculates allocated, remaining, and overbuy quantities and flags missing quantity, stale or future-dated evidence, unverified data, unknown availability, unknown prices, and currency mismatches.
 
-A `ProductProvider` protocol and registry define a future search/verification adapter, but no live product provider is registered or connected. The current selection API and MCP proposal tool accept candidate snapshots. The basket service forcibly sets candidate and alternative evidence to `unverified` both when saving and when reviewing. It does not authenticate or check a product reference. A candidate's URL, image, timestamp, provider label, or evidence ID must not be described as a verified citation. There is no cart submission or order operation.
+A `ProductProvider` protocol and registry define a future search/verification adapter. Oda OAuth/MCP product search and cart inspection remain read-only. For image enrichment, Kitchen fetches only a validated public Oda product-page URL and accepts explicit existing image references when the page identifies the exact requested product; it does not construct image URLs or infer package quantities. This public page enrichment is not product or fulfillment verification. Candidate selections submitted through the basket API/MCP remain forcibly `unverified`, including alternatives.
+
+Cart additions use a separate review flow. Kitchen searches for the requested products, reads and fingerprints the current cart, and persists a short-lived proposal scoped to the authenticated actor and Oda connection generation. The proposal displays exact positive package additions and their warnings. Explicit confirmation claims the proposal in a transaction before any remote write; actor-level serialization and the persisted `attempted` state prevent replay. Confirmation reads the cart again and sends additions only if its fingerprint is unchanged. If the remote outcome is uncertain, Kitchen records that state and never retries the write. This path changes cart contents only; checkout and payment remain with the user at Oda. The implementation has mocked protocol tests; live Oda OAuth and cart-write acceptance remain unverified.
 
 The word “ready” means the deterministic review checks passed for the submitted snapshots; it is not authorization to check out, an assurance of correctness, or proof that a merchant still has the product.
 
@@ -92,8 +94,22 @@ The application does not include a public OAuth broker or ingress configuration.
 
 ## Current limits and decisions to revisit
 
-- There is no connected product catalog or verifier, checkout, or order submission.
+- Oda OAuth and cart-write behavior has mocked tests only and requires live acceptance testing; no product verifier, checkout, or order submission is enabled.
 - AI requires an operator-configured model and credential. No live provider test is implied by unit tests or generated content.
 - Product candidates remain unverified unless a future authenticated provider verification path is implemented and independently tested.
 - PostgreSQL persistence requires an operational backup and restore path before production-readiness claims.
 - External recipe websites, image URLs, and model services can change or fail independently of Kitchen.
+
+## Shopping plan, stock and purchase modes
+
+`InventoryService` combines the gross `ShoppingBuilder` result with explicit PostgreSQL stock records. Each line retains required, available, covered and net quantities. Fully covered lines stay visible in the plan and are excluded from both the Oda basket and in-store checklist. No unit conversion or consumption is inferred. `PurchaseModes` is a registry of purchase adapters; each mode uses this shared plan. Categories are household-supplied on ingredients, quick captures, regulars and stock, with `Other` as fallback.
+
+`StoreTripService` stores picking progress independently by period and stable need ID. It compares the checked quantity with the current net requirement, so adding quantities does not silently mark them picked. History records these as domain events, not purchases.
+
+Additional routes: `GET /api/purchase-plan`, `GET /api/purchase-modes`, `GET|PUT /api/inventory`, `DELETE /api/inventory/{id}`, `GET /api/store-trip`, and `PUT /api/store-trip/items/{need_id}`. Their MCP counterparts use the same services.
+
+## Direct Oda OAuth
+
+`OdaService` owns discovery, dynamic client registration on an explicit Connect request, ten-minute actor-bound single-use state, PKCE S256, token exchange, serialized refresh and revocation. State payloads and tokens are encrypted with a Fernet key injected through `KITCHEN_ODA_ENCRYPTION_KEY` before reaching PostgreSQL. The browser receives an authorization URL and static callback success/failure redirects, never tokens. `KITCHEN_PUBLIC_URL` must be an HTTPS origin. The callback remains behind household authentication; reverse-proxy and app access logs must exclude its query parameters.
+
+`GET /api/oda/status`, `POST /api/oda/connect`, `GET /api/oda/callback`, and `DELETE /api/oda/connection` manage connection lifecycle. `POST /api/oda/products/search` and `GET /api/oda/cart` expose a fixed read-only tool allowlist and validate the provider's tool annotations/schema. `POST /api/oda/products/media` accepts only an exact public Oda product-page URL and extracts matching JSON-LD media; `POST /api/oda/cart/proposals` creates a review, `GET /api/oda/cart/proposals/{id}` reads it, and `POST /api/oda/cart/proposals/{id}/confirm` requires explicit review before a single-use cart update. There is no generic MCP tool proxy. Oda's official product schema has no image or numeric package-size field; page enrichment uses only source-provided image URLs and explicit size descriptions, retaining unknowns. Live registration, consent, refresh, and authenticated remote calls remain acceptance gates.

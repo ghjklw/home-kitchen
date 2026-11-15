@@ -1,0 +1,352 @@
+"""Direct Oda OAuth with PKCE and a deliberately read-only MCP adapter."""
+
+import asyncio
+import json
+import secrets
+import time
+from base64 import urlsafe_b64encode
+from datetime import UTC, datetime, timedelta
+from hashlib import sha256
+from urllib.parse import urlencode
+
+import httpx
+from cryptography.fernet import Fernet, InvalidToken
+from fastmcp import Client
+from sqlalchemy.engine import Engine
+
+from home_kitchen.settings import Settings
+
+from .models import OdaSearchResponse
+from .repository import OdaRepository
+
+RESOURCE = "https://oda.com/mcp"
+ISSUER = "https://oda.com/o"
+AUTHORIZE = ISSUER + "/authorize/"
+TOKEN = ISSUER + "/token/"
+REGISTER = ISSUER + "/register/"
+REVOKE = ISSUER + "/revoke_token/"
+PRM = "https://oda.com/.well-known/oauth-protected-resource/mcp"
+AS_METADATA = "https://oda.com/.well-known/oauth-authorization-server"
+
+
+class OdaError(Exception):
+    """Only fixed, non-sensitive messages may cross the REST boundary."""
+
+    def __init__(self, detail: str, status_code: int = 502):
+        super().__init__(detail)
+        self.detail = detail
+        self.status_code = status_code
+
+
+class OdaService:
+    def __init__(
+        self, engine: Engine, settings: Settings, *, http_client: httpx.Client | None = None
+    ):
+        self.settings = settings
+        self.http = http_client or httpx.Client(timeout=20, follow_redirects=False)
+        self._owns_http = http_client is None
+        self.repository = (
+            OdaRepository(engine, Fernet(settings.oda_encryption_key.get_secret_value().encode()))
+            if settings.oda_encryption_key is not None
+            else None
+        )
+
+    def close(self) -> None:
+        if self._owns_http:
+            self.http.close()
+
+    @property
+    def configured(self) -> bool:
+        return self.repository is not None and self.settings.public_url is not None
+
+    def _repository(self) -> OdaRepository:
+        if not self.configured or self.repository is None:
+            raise OdaError("Oda connection is not configured", 503)
+        return self.repository
+
+    @property
+    def redirect_uri(self) -> str:
+        return str(self.settings.public_url).rstrip("/") + "/api/oda/callback"
+
+    def status(self, actor_id: str) -> dict:
+        connected = (
+            self.repository.has_connection(actor_id)
+            if self.configured and self.repository is not None
+            else False
+        )
+        return {
+            "configured": self.configured,
+            "connected": connected,
+            "detail": "Connected"
+            if connected
+            else "Not connected"
+            if self.configured
+            else "Configure the public HTTPS URL and Oda encryption key to connect",
+        }
+
+    def _json(self, method: str, url: str, **kwargs) -> dict:
+        try:
+            response = self.http.request(method, url, follow_redirects=False, **kwargs)
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise ValueError
+            return payload
+        except (httpx.HTTPError, ValueError):
+            raise OdaError("Oda could not complete this request; try again or reconnect") from None
+
+    def _discover(self) -> None:
+        resource = self._json("GET", PRM)
+        server = self._json("GET", AS_METADATA)
+        if (
+            resource.get("resource") != RESOURCE
+            or ISSUER not in resource.get("authorization_servers", [])
+            or server.get("issuer") != ISSUER
+            or server.get("authorization_endpoint") != AUTHORIZE
+            or server.get("token_endpoint") != TOKEN
+            or server.get("registration_endpoint") != REGISTER
+            or server.get("revocation_endpoint") != REVOKE
+            or "S256" not in server.get("code_challenge_methods_supported", [])
+            or "none" not in server.get("token_endpoint_auth_methods_supported", [])
+        ):
+            raise OdaError("Oda OAuth configuration changed; connection requires review")
+
+    def connect(self, actor_id: str) -> str:
+        repository = self._repository()
+        generation = repository.begin_connect(actor_id)
+        self._discover()
+        registered = self._json(
+            "POST",
+            REGISTER,
+            json={
+                "client_name": "Home Kitchen",
+                "redirect_uris": [self.redirect_uri],
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+                "token_endpoint_auth_method": "none",
+                "scope": "mcp",
+            },
+        )
+        client_id = registered.get("client_id")
+        if (
+            not isinstance(client_id, str)
+            or not 1 <= len(client_id) <= 1024
+            or registered.get("token_endpoint_auth_method", "none") != "none"
+        ):
+            raise OdaError("Oda did not register a supported public OAuth client")
+        verifier = secrets.token_urlsafe(64)
+        state = secrets.token_urlsafe(32)
+        accepted = repository.save_state(
+            state,
+            actor_id,
+            datetime.now(UTC) + timedelta(minutes=10),
+            {
+                "client_id": client_id,
+                "verifier": verifier,
+                "redirect_uri": self.redirect_uri,
+                "generation": generation,
+            },
+            generation,
+        )
+        if not accepted:
+            raise OdaError("Oda authorization was cancelled; connect again", 409)
+        challenge = urlsafe_b64encode(sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+        return (
+            AUTHORIZE
+            + "?"
+            + urlencode(
+                {
+                    "response_type": "code",
+                    "client_id": client_id,
+                    "redirect_uri": self.redirect_uri,
+                    "scope": "mcp",
+                    "resource": RESOURCE,
+                    "state": state,
+                    "code_challenge": challenge,
+                    "code_challenge_method": "S256",
+                }
+            )
+        )
+
+    @staticmethod
+    def _token_payload(response: dict, previous: dict) -> dict:
+        token = response.get("access_token")
+        refresh = response.get("refresh_token", previous.get("refresh_token"))
+        try:
+            expires = int(response.get("expires_in", 300))
+        except (TypeError, ValueError):
+            expires = 0
+        if (
+            not isinstance(token, str)
+            or not token
+            or len(token) > 32768
+            or str(response.get("token_type", "")).casefold() != "bearer"
+            or not 0 < expires <= 31536000
+            or (refresh is not None and (not isinstance(refresh, str) or not refresh))
+            or not isinstance(response.get("scope", "mcp"), str)
+            or "mcp" not in response.get("scope", "mcp").split()
+        ):
+            raise OdaError("Oda returned an unsupported OAuth token response")
+        return {
+            "client_id": previous["client_id"],
+            "access_token": token,
+            "refresh_token": refresh,
+            "expires_at": time.time() + expires,
+        }
+
+    def callback(self, actor_id: str, state: str, code: str) -> None:
+        repository = self._repository()
+        if not 20 <= len(state) <= 256 or not 1 <= len(code) <= 4096:
+            raise OdaError("Invalid or expired Oda authorization; connect again", 400)
+        try:
+            pending = repository.consume_state(state, actor_id, datetime.now(UTC))
+        except (InvalidToken, ValueError):
+            raise OdaError("Oda authorization cannot be read; connect again", 400) from None
+        if pending is None or pending["redirect_uri"] != self.redirect_uri:
+            raise OdaError("Invalid or expired Oda authorization; connect again", 400)
+        response = self._json(
+            "POST",
+            TOKEN,
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "client_id": pending["client_id"],
+                "code_verifier": pending["verifier"],
+                "redirect_uri": pending["redirect_uri"],
+                "resource": RESOURCE,
+            },
+        )
+        token = self._token_payload(response, pending)
+        if not repository.save_connection(actor_id, token, pending["generation"]):
+            self._revoke_tokens(token)
+            raise OdaError("Oda authorization was cancelled; connect again", 409)
+
+    def cancel_authorization(self, actor_id: str, state: str) -> None:
+        try:
+            self._repository().consume_state(state, actor_id, datetime.now(UTC))
+        except (InvalidToken, ValueError):
+            raise OdaError("Oda authorization cannot be read; connect again", 400) from None
+
+    def access_token(self, actor_id: str) -> str:
+        repository = self._repository()
+        try:
+            with repository.locked_connection(actor_id) as (connection, token):
+                if token is None:
+                    raise OdaError("Connect your Oda account first", 409)
+                if token["expires_at"] <= time.time() + 30:
+                    if not token.get("refresh_token"):
+                        raise OdaError("Your Oda connection expired; connect again", 409)
+                    response = self._json(
+                        "POST",
+                        TOKEN,
+                        data={
+                            "grant_type": "refresh_token",
+                            "refresh_token": token["refresh_token"],
+                            "client_id": token["client_id"],
+                            "resource": RESOURCE,
+                        },
+                    )
+                    token = self._token_payload(response, token)
+                    repository.update_connection(connection, actor_id, token)
+                return token["access_token"]
+        except (InvalidToken, ValueError, KeyError):
+            raise OdaError("Your Oda connection cannot be read; connect again", 409) from None
+
+    def _revoke_tokens(self, token: dict) -> bool:
+        failed = False
+        for key in ("refresh_token", "access_token"):
+            if token.get(key):
+                try:
+                    response = self.http.post(
+                        REVOKE,
+                        data={
+                            "token": token[key],
+                            "token_type_hint": key,
+                            "client_id": token["client_id"],
+                        },
+                        follow_redirects=False,
+                    )
+                    response.raise_for_status()
+                except httpx.HTTPError:
+                    failed = True
+        return not failed
+
+    def disconnect(self, actor_id: str) -> None:
+        repository = self._repository()
+        try:
+            token = repository.disconnect(actor_id)
+        except (InvalidToken, ValueError, KeyError):
+            raise OdaError(
+                "Disconnected locally; stored OAuth credentials could not be revoked"
+            ) from None
+        if token is not None and not self._revoke_tokens(token):
+            raise OdaError("Disconnected locally; Oda could not confirm remote token revocation")
+
+    async def _read(self, actor_id: str, name: str, arguments: dict) -> dict:
+        if name not in {"product_search", "get_cart"}:
+            raise OdaError("This Oda action is not supported", 400)
+        token = await asyncio.to_thread(self.access_token, actor_id)
+        try:
+            async with Client(RESOURCE, auth=token, timeout=20) as client:
+                tools = {tool.name: tool for tool in await client.list_tools()}
+                if name not in tools:
+                    raise OdaError("The Oda read-only tool is unavailable")
+                if (
+                    tools[name].annotations is None
+                    or tools[name].annotations.readOnlyHint is not True
+                ):
+                    raise OdaError("The Oda tool is no longer advertised as read-only")
+                schema = tools[name].inputSchema
+                properties = schema.get("properties", {})
+                if (
+                    schema.get("type") != "object"
+                    or schema.get("additionalProperties") is not False
+                ):
+                    raise OdaError("The Oda tool schema changed; review is required")
+                if name == "product_search" and (
+                    set(schema.get("required", [])) != {"queries"}
+                    or properties.get("queries", {}).get("type") != "array"
+                    or properties.get("queries", {}).get("items", {}).get("type") != "string"
+                    or properties.get("queries", {}).get("maxItems") != 10
+                ):
+                    raise OdaError("The Oda search schema changed; review is required")
+                if name == "get_cart" and schema.get("required"):
+                    raise OdaError("The Oda cart schema changed; review is required")
+                result = await client.call_tool(name, arguments, raise_on_error=True)
+                if result.structured_content is not None:
+                    return result.structured_content
+                if len(result.content) == 1 and result.content[0].type == "text":
+                    decoded = json.loads(result.content[0].text)
+                    if isinstance(decoded, dict):
+                        return decoded
+                raise OdaError("Oda returned an unsupported read-only response")
+        except OdaError:
+            raise
+        except Exception:
+            raise OdaError("Oda could not complete the read-only request") from None
+
+    async def search_products(
+        self, actor_id: str, queries: list[str], page: int = 1, size: int = 5
+    ) -> dict:
+        if not 1 <= len(queries) <= 10 or any(
+            not query.strip() or len(query) > 300 for query in queries
+        ):
+            raise OdaError("Provide between one and ten product queries", 400)
+        if not 1 <= page <= 50 or not 1 <= size <= 20:
+            raise OdaError("Oda search pagination is outside the supported range", 400)
+        payload = await self._read(
+            actor_id,
+            "product_search",
+            {
+                "queries": [query.strip() for query in queries],
+                "page": page,
+                "size": size,
+            },
+        )
+        try:
+            return OdaSearchResponse.model_validate(payload).model_dump(mode="json", by_alias=True)
+        except ValueError:
+            raise OdaError("The Oda product response changed; review is required") from None
+
+    async def get_cart(self, actor_id: str) -> dict:
+        return await self._read(actor_id, "get_cart", {})

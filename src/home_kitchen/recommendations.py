@@ -5,10 +5,9 @@ from datetime import date, timedelta
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 from pydantic_ai.models import Model
-from pydantic_ai.models.anthropic import AnthropicModel
-from pydantic_ai.providers.anthropic import AnthropicProvider
 from pydantic_ai.usage import UsageLimits
 
+from home_kitchen.ai_credentials import anthropic_model
 from home_kitchen.models import MealCreate, Recipe
 from home_kitchen.settings import Household, Settings
 
@@ -23,12 +22,7 @@ class PlanDraft(BaseModel):
 
 def build_planner(settings: Settings, model: Model | None = None) -> Agent[None, PlanDraft]:
     if model is None:
-        if not settings.ai_model or not settings.anthropic_api_key:
-            raise ValueError("Configure an AI model and API credential to recommend a meal plan")
-        model = AnthropicModel(
-            settings.ai_model,
-            provider=AnthropicProvider(api_key=settings.anthropic_api_key.get_secret_value()),
-        )
+        model = anthropic_model(settings)
     return Agent(
         model,
         output_type=PlanDraft,

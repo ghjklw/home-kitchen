@@ -3,13 +3,15 @@
 from datetime import date
 from uuid import UUID
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Query, Request, Response
 from pydantic import BaseModel
 
 from home_kitchen.basket import BasketReview, SelectedProduct
 from home_kitchen.basket.repository import BasketService
 from home_kitchen.features import KitchenFeatures
 from home_kitchen.history import HistoryEntry, HistoryEntryCreate, RetrievedEvidence
+from home_kitchen.inventory import InventoryItem, InventoryItemCreate, PurchasePlan
+from home_kitchen.purchasing import PurchaseModeInfo, StoreTrip
 from home_kitchen.recipes import RecipeDraft, RecipeDraftRequest, RecipeProviderInfo
 
 
@@ -19,8 +21,41 @@ class BasketSelectionRequest(BaseModel):
     selection: SelectedProduct
 
 
+class TripCheck(BaseModel):
+    checked: bool
+
+
 def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRouter:
     router = APIRouter(prefix="/api")
+
+    @router.get("/inventory")
+    def inventory() -> list[InventoryItem]:
+        return features.inventory.list()
+
+    @router.put("/inventory")
+    def set_inventory(data: InventoryItemCreate) -> InventoryItem:
+        return features.inventory.upsert(data)
+
+    @router.delete("/inventory/{item_id}", status_code=204)
+    def remove_inventory(item_id: UUID) -> Response:
+        features.inventory.remove(item_id)
+        return Response(status_code=204)
+
+    @router.get("/purchase-plan")
+    def purchase_plan(start: date, end: date) -> PurchasePlan:
+        return features.inventory.plan(start, end)
+
+    @router.get("/purchase-modes")
+    def purchase_modes() -> list[PurchaseModeInfo]:
+        return features.purchase_modes.catalog()
+
+    @router.get("/store-trip")
+    def store_trip(start: date, end: date) -> StoreTrip:
+        return features.store_trip.review(start, end)
+
+    @router.put("/store-trip/items/{need_id}")
+    def check_store_item(need_id: UUID, data: TripCheck, start: date, end: date) -> StoreTrip:
+        return features.store_trip.check(start, end, need_id, data.checked)
 
     @router.get("/recipe-providers")
     def recipe_providers() -> list[RecipeProviderInfo]:

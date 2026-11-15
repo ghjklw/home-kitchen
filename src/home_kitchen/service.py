@@ -94,7 +94,9 @@ class KitchenService:
 
     def confirm_suggestion(self, item_id: UUID) -> ShoppingItem:
         regular = self.store.get("regular", item_id, RegularItem)
-        item = ShoppingItem(id=uuid4(), **regular.model_dump(include={"name", "quantity", "unit"}))
+        item = ShoppingItem(
+            id=uuid4(), **regular.model_dump(include={"name", "quantity", "unit", "category"})
+        )
         return self.store.confirm(item_id, item)
 
     def shopping_list(self, start: date, end: date, today: date) -> WeekShopping:

@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from typing import Protocol
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from home_kitchen.models import (
     Meal,
@@ -19,6 +19,13 @@ from home_kitchen.models import (
 def normalize_need_text(value: str) -> str:
     """Use one identity for quantity aggregation and stable basket references."""
     return " ".join(value.split()).casefold()
+
+
+def need_id(start: date, end: date, name: str, unit: str) -> UUID:
+    return uuid5(
+        NAMESPACE_URL,
+        f"kitchen:{start}:{end}:{normalize_need_text(name)}:{normalize_need_text(unit)}",
+    )
 
 
 @dataclass(frozen=True)
@@ -57,6 +64,7 @@ class PlannedRecipes:
                     * Decimal(meal.servings)
                     / Decimal(recipe.servings),
                     unit=ingredient.unit,
+                    category=ingredient.category,
                     origins=[f"meal:{meal.id}"],
                 )
                 for ingredient in recipe.ingredients
@@ -74,6 +82,7 @@ class QuickAdditions:
                     name=item.name,
                     quantity=item.quantity,
                     unit=item.unit,
+                    category=item.category,
                     origins=[f"item:{item.id}"],
                 )
                 for item in context.captures
@@ -96,6 +105,7 @@ class RegularItems:
                         name=item.name,
                         quantity=item.quantity,
                         unit=item.unit,
+                        category=item.category,
                         origins=[f"regular:{item.id}"],
                     )
                 )
@@ -126,6 +136,8 @@ class ShoppingBuilder:
                     totals[key] = line.model_copy(deep=True)
                 else:
                     totals[key].quantity += line.quantity
+                    if totals[key].category == "Other":
+                        totals[key].category = line.category
                     totals[key].origins = list(dict.fromkeys(totals[key].origins + line.origins))
             suggestions.update({item.id: item for item in contribution.suggestions})
         return WeekShopping(

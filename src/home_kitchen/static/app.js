@@ -12,11 +12,32 @@ const state = {
   oda: null,
   odaSearch: {},
   odaMedia: {},
+  basketMatchPlanKey: null,
+  basketMatchPlanEpoch: 0,
+  basketMatchNeedVersions: {},
+  basketMatchPages: {},
+  basketMatchCurrentPage: {},
+  basketMatchBusy: {},
+  basketMatchErrors: {},
+  basketMatchJobs: {},
+  basketMatchStartSequence: 0,
+  basketMatchStarted: false,
+  basketMatchGlobalError: "",
+  basketMatchGlobalRefreshing: false,
+  basketMatchConnected: null,
+  basketMatchSkippedNeedCount: 0,
+  odaManualSearchOpen: {},
   cartProposalLoading: false,
   cartConfirming: false,
   cartProposalHandled: false,
   cartProposalBlocked: false,
   shoppingPanel: "needs",
+  shoppingLastRefreshedAt: null,
+  shoppingRefreshInFlight: false,
+  shoppingRefreshPending: false,
+  shoppingRefreshLastEventAt: 0,
+  shoppingRefreshRequestCount: 0,
+  shoppingWriteInFlight: 0,
   basket: null,
   items: [],
   regular: [],
@@ -94,6 +115,33 @@ async function api(path, method = "GET", body) {
     throw error;
   }
   return response.status === 204 ? null : response.json();
+}
+function integrationById(id) {
+  if (Array.isArray(state.integrations))
+    return state.integrations.find((integration) => integration.id === id) || null;
+  return state.integrations?.[id] || null;
+}
+function recipeAssistantConfigured() {
+  const integration = integrationById("anthropic") || integrationById("ai");
+  return (
+    ["connected", "configured"].includes(integration?.status) ||
+    integration?.configured === true
+  );
+}
+function connectionSettingsButton(label = "Manage connections in Settings") {
+  return button(
+    label,
+    () => {
+      if ($("#modal")?.open) {
+        const url = new URL(location.href);
+        url.hash = "settings";
+        window.open(url.href, "_blank", "noopener,noreferrer");
+        return;
+      }
+      navigate("settings");
+    },
+    "quiet",
+  );
 }
 function localDate(value) {
   const date = new Date(value);
@@ -254,12 +302,16 @@ function field(label, type = "text", value = "", help = "") {
   add(wrap, el("span", label), input, help ? el("small", help) : null);
   return { wrap, input };
 }
-function formSubmit(form, text, action) {
+function formSubmit(form, text, action, { settingsOnFailure = false } = {}) {
   const error = el("p", "", "form-error");
   error.setAttribute("role", "alert");
+  const settingsLink = settingsOnFailure
+    ? connectionSettingsButton("Review connections in Settings")
+    : null;
+  if (settingsLink) settingsLink.hidden = true;
   const submit = el("button", text, "primary");
   submit.type = "submit";
-  add(form, error, add(el("div", null, "actions"), submit));
+  add(form, error, settingsLink, add(el("div", null, "actions"), submit));
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     submit.disabled = true;
@@ -268,6 +320,7 @@ function formSubmit(form, text, action) {
       await action();
     } catch (err) {
       error.textContent = err.message;
+      if (settingsLink) settingsLink.hidden = false;
     } finally {
       submit.disabled = false;
     }
@@ -279,9 +332,91 @@ async function mutate(path, method, body, message) {
   await refreshView();
   if (message) notify(message);
 }
+function shouldRefreshShopping(view, visibility, modalOpen, formOpen) {
+  return (
+    view === "shopping" &&
+    visibility !== "hidden" &&
+    !modalOpen &&
+    !formOpen
+  );
+}
+function shoppingRefreshLabel() {
+  if (state.shoppingRefreshInFlight) return "Refreshing…";
+  if (!state.shoppingLastRefreshedAt) return "Not refreshed yet";
+  const time = new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(state.shoppingLastRefreshedAt));
+  return "Updated " + time;
+}
+function updateShoppingRefreshControl() {
+  const control = $("#shopping-refresh");
+  const status = $("#shopping-refresh-status");
+  if (control) {
+    control.disabled = state.shoppingRefreshInFlight;
+    control.textContent = state.shoppingRefreshInFlight ? "Refreshing…" : "Refresh";
+    control.setAttribute(
+      "aria-label",
+      state.shoppingRefreshInFlight
+        ? "Refreshing shared shopping list"
+        : "Refresh shared shopping list",
+    );
+  }
+  if (status) status.textContent = shoppingRefreshLabel();
+}
+function queuePendingShoppingRefresh() {
+  if (!state.shoppingRefreshPending) return;
+  setTimeout(() => {
+    if (state.shoppingRefreshPending) void refreshShoppingIfSafe(true);
+  }, 0);
+}
+async function refreshShoppingIfSafe(force = false) {
+  if (state.view !== "shopping") return;
+  if (
+    !shouldRefreshShopping(
+      state.view,
+      document.visibilityState,
+      $("#modal").open,
+      Boolean($("#main form")),
+    ) || state.shoppingWriteInFlight > 0
+  ) {
+    state.shoppingRefreshPending = true;
+    return;
+  }
+  if (state.shoppingRefreshInFlight || state.shoppingRefreshRequestCount > 0) {
+    state.shoppingRefreshPending = true;
+    return;
+  }
+  const now = Date.now();
+  if (!force && now - state.shoppingRefreshLastEventAt < 1500) return;
+  state.shoppingRefreshLastEventAt = now;
+  state.shoppingRefreshPending = false;
+  state.shoppingRefreshInFlight = true;
+  updateShoppingRefreshControl();
+  try {
+    await refreshView();
+  } finally {
+    state.shoppingRefreshInFlight = false;
+    updateShoppingRefreshControl();
+    queuePendingShoppingRefresh();
+  }
+}
 async function refreshView() {
+  const matchingVisible = state.view === "shopping" && state.shoppingPanel === "oda";
+  const refreshingShopping = state.view === "shopping";
+  if (refreshingShopping) {
+    state.shoppingRefreshPending = false;
+    state.shoppingRefreshRequestCount += 1;
+  }
+  pauseBasketMatchPolling();
   try {
     if (state.view === "week") state.meals = await api("/meals" + range());
+    if (state.view === "settings") {
+      [state.integrations, state.oda] = await Promise.all([
+        api("/integrations"),
+        api("/oda/status"),
+      ]);
+    }
     if (state.view === "shopping") {
       const results = await Promise.all([
         api("/shopping" + range()),
@@ -302,13 +437,270 @@ async function refreshView() {
           api("/basket" + range()),
           api("/oda/status"),
         ]);
+        if (state.oda?.connected) ensureBasketMatches();
+        else resetBasketMatching();
       } else if (state.shoppingPanel === "in_store") {
         state.storeTrip = await api("/store-trip" + range());
       }
+      state.shoppingLastRefreshedAt = Date.now();
     }
     render();
+    return true;
   } catch (error) {
     notify(error.message, true);
+    if (matchingVisible)
+      Object.values(state.basketMatchJobs).forEach((record) =>
+        scheduleBasketMatchPoll(record),
+      );
+    return false;
+  } finally {
+    if (!matchingVisible) pauseBasketMatchPolling();
+    if (refreshingShopping) {
+      state.shoppingRefreshRequestCount = Math.max(
+        0,
+        state.shoppingRefreshRequestCount - 1,
+      );
+      if (!state.shoppingRefreshRequestCount && !state.shoppingRefreshInFlight)
+        queuePendingShoppingRefresh();
+    }
+  }
+}
+function pauseBasketMatchPolling() {
+  Object.values(state.basketMatchJobs).forEach((record) => {
+    if (record.timer) clearTimeout(record.timer);
+    record.timer = null;
+    record.pollVersion = (record.pollVersion || 0) + 1;
+  });
+}
+function resetBasketMatching() {
+  pauseBasketMatchPolling();
+  state.basketMatchPlanEpoch += 1;
+  state.basketMatchPlanKey = null;
+  state.basketMatchNeedVersions = {};
+  state.basketMatchPages = {};
+  state.basketMatchCurrentPage = {};
+  state.basketMatchBusy = {};
+  state.basketMatchErrors = {};
+  state.basketMatchJobs = {};
+  state.basketMatchStarted = false;
+  state.basketMatchGlobalError = "";
+  state.basketMatchGlobalRefreshing = false;
+  state.basketMatchSkippedNeedCount = 0;
+}
+function currentBasketMatchDates() {
+  return { start: iso(day(0)), end: iso(day(6)) };
+}
+function currentBasketMatchNeeds() {
+  return (state.basket?.needs || [])
+    .map((entry) => entry.need)
+    .filter((need) => need?.id);
+}
+function isCurrentBasketMatchRecord(record) {
+  const { start, end } = currentBasketMatchDates();
+  return (
+    record.planEpoch === state.basketMatchPlanEpoch &&
+    record.planKey === state.basketMatchPlanKey &&
+    record.start === start &&
+    record.end === end
+  );
+}
+function ensureBasketMatches() {
+  if (!state.oda?.connected) {
+    if (state.basketMatchConnected !== false) resetBasketMatching();
+    state.basketMatchConnected = false;
+    return;
+  }
+  if (state.basketMatchConnected !== true) {
+    resetBasketMatching();
+    state.basketMatchConnected = true;
+  }
+  const { start, end } = currentBasketMatchDates();
+  const needs = currentBasketMatchNeeds();
+  const planKey = window.KitchenBasketMatchView.planKey(start, end, needs);
+  if (planKey !== state.basketMatchPlanKey) {
+    resetBasketMatching();
+    state.basketMatchPlanKey = planKey;
+    state.basketMatchNeedVersions = Object.fromEntries(
+      needs.map((need) => [String(need.id), 0]),
+    );
+  }
+  if (!needs.length) return;
+  if (!state.basketMatchStarted && !state.basketMatchGlobalError) {
+    void startBasketMatchJob({ initial: true, renderAfter: false });
+    return;
+  }
+  Object.values(state.basketMatchJobs).forEach((record) => {
+    if (record.jobId && ["queued", "running"].includes(record.status))
+      scheduleBasketMatchPoll(record);
+  });
+}
+function applyBasketMatchSnapshot(job, record) {
+  if (!isCurrentBasketMatchRecord(record)) return;
+  state.basketMatchSkippedNeedCount = job.skipped_need_count || 0;
+  state.basketMatchPages = window.KitchenBasketMatchView.mergeNeedPages(
+    state.basketMatchPages,
+    job.needs,
+    state.basketMatchNeedVersions,
+    record.needVersions,
+  );
+  (job.needs || []).forEach((need) => {
+    const id = String(need.need_id);
+    if (record.needVersions[id] !== state.basketMatchNeedVersions[id]) return;
+    const terminal = !["pending", "searching"].includes(need.status);
+    if (terminal) {
+      state.basketMatchCurrentPage[id] = need.page || 1;
+      delete state.basketMatchBusy[id];
+      delete state.basketMatchErrors[id];
+    } else if (!state.basketMatchBusy[id]) {
+      state.basketMatchBusy[id] = { page: need.page || 1 };
+    }
+  });
+  if (job.status === "failed" && job.detail) {
+    const allNeeds = currentBasketMatchNeeds();
+    if (record.needIds.length === allNeeds.length)
+      state.basketMatchGlobalError = job.detail;
+  }
+}
+function scheduleBasketMatchPoll(record) {
+  if (
+    !record.jobId ||
+    !["queued", "running"].includes(record.status) ||
+    state.view !== "shopping" ||
+    state.shoppingPanel !== "oda" ||
+    !navigator.onLine ||
+    !isCurrentBasketMatchRecord(record) ||
+    record.timer
+  )
+    return;
+  const version = record.pollVersion || 0;
+  record.timer = setTimeout(() => {
+    record.timer = null;
+    void pollBasketMatchJob(record, version);
+  }, 800);
+}
+async function pollBasketMatchJob(record, version) {
+  if (
+    version !== record.pollVersion ||
+    state.basketMatchJobs[record.key] !== record ||
+    !isCurrentBasketMatchRecord(record)
+  )
+    return;
+  try {
+    const job = await api(
+      "/basket/match-jobs/" + encodeURIComponent(record.jobId),
+    );
+    if (
+      version !== record.pollVersion ||
+      state.basketMatchJobs[record.key] !== record ||
+      !isCurrentBasketMatchRecord(record)
+    )
+      return;
+    record.status = job.status;
+    applyBasketMatchSnapshot(job, record);
+    if (["queued", "running"].includes(job.status)) scheduleBasketMatchPoll(record);
+    else delete state.basketMatchJobs[record.key];
+    render();
+  } catch (error) {
+    if (
+      version !== record.pollVersion ||
+      state.basketMatchJobs[record.key] !== record ||
+      !isCurrentBasketMatchRecord(record)
+    )
+      return;
+    record.needIds.forEach((id) => {
+      if (record.needVersions[id] !== state.basketMatchNeedVersions[id]) return;
+      delete state.basketMatchBusy[id];
+      state.basketMatchErrors[id] = error.message;
+    });
+    if (record.needIds.length === currentBasketMatchNeeds().length)
+      state.basketMatchGlobalError = error.message;
+    delete state.basketMatchJobs[record.key];
+    render();
+  }
+}
+async function startBasketMatchJob({
+  needIds = null,
+  page = 1,
+  forceRefresh = false,
+  initial = false,
+  renderAfter = true,
+} = {}) {
+  const { start, end } = currentBasketMatchDates();
+  const needs = currentBasketMatchNeeds();
+  const allIds = needs.map((need) => String(need.id));
+  const targetIds = needIds ? needIds.map(String).filter((id) => allIds.includes(id)) : allIds;
+  if (!state.oda?.connected || !targetIds.length) return;
+  if (state.basketMatchPlanKey !== window.KitchenBasketMatchView.planKey(start, end, needs))
+    return;
+
+  const needVersions = {};
+  targetIds.forEach((id) => {
+    const version = state.basketMatchNeedVersions[id] || 0;
+    state.basketMatchNeedVersions[id] = initial ? version : version + 1;
+    needVersions[id] = state.basketMatchNeedVersions[id];
+    state.basketMatchBusy[id] = { page };
+    delete state.basketMatchErrors[id];
+  });
+  if (!needIds) state.basketMatchGlobalError = "";
+  state.basketMatchStarted = true;
+  state.basketMatchGlobalRefreshing = !needIds && !initial && forceRefresh;
+  const sequence = ++state.basketMatchStartSequence;
+  const tempKey = "starting-" + sequence;
+  const record = {
+    key: tempKey,
+    jobId: null,
+    planEpoch: state.basketMatchPlanEpoch,
+    planKey: state.basketMatchPlanKey,
+    start,
+    end,
+    needIds: targetIds,
+    needVersions,
+    page,
+    status: "starting",
+    pollVersion: 0,
+    timer: null,
+  };
+  state.basketMatchJobs[tempKey] = record;
+  if (renderAfter) render();
+  try {
+    const request = {
+      start,
+      end,
+      page,
+      size: 5,
+      force_refresh: forceRefresh,
+      ...(needIds ? { need_ids: targetIds } : {}),
+    };
+    const job = await api("/basket/match-jobs", "POST", request);
+    if (!isCurrentBasketMatchRecord(record)) {
+      delete state.basketMatchJobs[tempKey];
+      return;
+    }
+    delete state.basketMatchJobs[tempKey];
+    record.jobId = job.job_id;
+    record.key = job.job_id;
+    record.status = job.status;
+    state.basketMatchJobs[record.key] = record;
+    applyBasketMatchSnapshot(job, record);
+    if (["queued", "running"].includes(job.status)) scheduleBasketMatchPoll(record);
+    else delete state.basketMatchJobs[record.key];
+  } catch (error) {
+    if (!isCurrentBasketMatchRecord(record)) {
+      delete state.basketMatchJobs[tempKey];
+      return;
+    }
+    delete state.basketMatchJobs[tempKey];
+    targetIds.forEach((id) => {
+      if (needVersions[id] !== state.basketMatchNeedVersions[id]) return;
+      delete state.basketMatchBusy[id];
+      state.basketMatchErrors[id] = error.message;
+    });
+    if (!needIds) state.basketMatchGlobalError = error.message;
+  } finally {
+    if (isCurrentBasketMatchRecord(record)) {
+      if (!needIds) state.basketMatchGlobalRefreshing = false;
+      if (renderAfter || !record.jobId) render();
+    }
   }
 }
 function navigate(view) {
@@ -322,6 +714,11 @@ function navigate(view) {
 }
 function render() {
   const main = $("#main");
+  const focused = document.activeElement;
+  const focusKey = focused?.dataset?.focusKey;
+  const selection = focusKey && typeof focused.selectionStart === "number"
+    ? [focused.selectionStart, focused.selectionEnd]
+    : null;
   main.replaceChildren();
   document.querySelectorAll("[data-view]").forEach((node) => {
     if (node.dataset.view === state.view)
@@ -345,6 +742,17 @@ function render() {
       settings: renderSettings,
     })[state.view] || renderWeek
   )(main);
+  if (focusKey) {
+    const replacement = [...main.querySelectorAll("[data-focus-key]")].find(
+      (node) => node.dataset.focusKey === focusKey,
+    );
+    replacement?.focus({ preventScroll: true });
+    if (replacement && selection) {
+      try {
+        replacement.setSelectionRange(...selection);
+      } catch {}
+    }
+  }
 }
 function renderWeek(main) {
   add(
@@ -636,6 +1044,19 @@ function renderRecipes(main) {
       ],
     ),
   );
+  if (!recipeAssistantConfigured()) {
+    add(
+      main,
+      add(
+        el("section", null, "callout connection-prompt"),
+        el(
+          "p",
+          "AI recipe shaping and meal suggestions are not configured. You can still browse sources and edit recipes; manage the recipe assistant connection in Settings.",
+        ),
+        connectionSettingsButton(),
+      ),
+    );
+  }
   const tools = el("div", null, "toolbar");
   const search = el("input", null, "search");
   search.type = "search";
@@ -911,7 +1332,7 @@ function recipeForm(draft = {}, source = "manual") {
     notify(isEditing ? "Recipe changes saved." : "Recipe added to your collection.");
   });
   add(root, form);
-  if (state.integrations.ai?.configured && (isEditing || source === "ai")) {
+  if (recipeAssistantConfigured() && (isEditing || source === "ai")) {
     const revision = el("details", null, "recipe-ai-revision");
     add(
       revision,
@@ -935,6 +1356,8 @@ function recipeForm(draft = {}, source = "manual") {
     prompt.input.rows = 3;
     const revisionError = el("p", "", "form-error");
     revisionError.setAttribute("role", "alert");
+    const revisionSettings = connectionSettingsButton("Review recipe assistant settings");
+    revisionSettings.hidden = true;
     const revise = button("Review AI revision", async () => {
       revise.disabled = true;
       revisionError.textContent = "";
@@ -968,12 +1391,22 @@ function recipeForm(draft = {}, source = "manual") {
         recipeForm(revisedDraft, isEditing ? source : "ai");
       } catch (error) {
         revisionError.textContent = error.message;
+        revisionSettings.hidden = false;
       } finally {
         if (revise.isConnected) revise.disabled = false;
       }
     }, "primary");
-    add(revision, prompt.wrap, revisionError, revise);
+    add(revision, prompt.wrap, revisionError, revisionSettings, revise);
     add(root, revision);
+  } else if (isEditing || source === "ai") {
+    add(
+      root,
+      add(
+        el("section", null, "callout connection-prompt"),
+        el("p", "The recipe assistant is not configured, so AI revision is unavailable."),
+        connectionSettingsButton(),
+      ),
+    );
   }
 }
 function viewRecipe(recipe) {
@@ -1064,6 +1497,15 @@ function importForm() {
       "muted",
     ),
   );
+  if (!recipeAssistantConfigured())
+    add(
+      root,
+      add(
+        el("section", null, "callout connection-prompt"),
+        el("p", "AI is needed to shape a recipe link into an editable draft."),
+        connectionSettingsButton(),
+      ),
+    );
   const form = el("form");
   const url = field("Recipe link", "url");
   url.input.required = true;
@@ -1074,7 +1516,7 @@ function importForm() {
     if (!response?.adapted)
       throw new Error("AI did not return an editable recipe draft. No recipe was saved.");
     recipeForm(response.adapted, "ai");
-  });
+  }, { settingsOnFailure: true });
   add(root, form);
 }
 function discoveryForm() {
@@ -1087,6 +1529,15 @@ function discoveryForm() {
       "muted",
     ),
   );
+  if (!recipeAssistantConfigured())
+    add(
+      root,
+      add(
+        el("section", null, "callout connection-prompt"),
+        el("p", "You can search sources, but AI is needed to shape a result into an editable draft."),
+        connectionSettingsButton(),
+      ),
+    );
   const form = el("form");
   const query = field(
     "Dish or ingredients",
@@ -1171,7 +1622,14 @@ function discoveryForm() {
           );
         add(card, el("span", result.sourceLabel, "badge"), el("h3", result.title));
         if (result.sourceAttribution) add(card, el("p", result.sourceAttribution, "muted"));
-        const facts = [result.duration, result.difficulty].filter(Boolean).join(" · ");
+        const facts = [
+          result.duration
+            ? window.KitchenBasketMatchView.formatDuration(result.duration)
+            : "",
+          result.difficulty,
+        ]
+          .filter(Boolean)
+          .join(" · ");
         if (facts) add(card, el("p", facts, "muted"));
         if (result.detail) add(card, el("p", result.detail, "muted"));
         const actions = el("div", null, "actions");
@@ -1185,10 +1643,13 @@ function discoveryForm() {
         if (result.importable) {
           const error = el("p", "", "form-error discovery-import-error");
           error.setAttribute("role", "alert");
+          const settingsLink = connectionSettingsButton("Review recipe assistant settings");
+          settingsLink.hidden = true;
           const importButton = button(
             "Import for review",
             async () => {
               importButton.disabled = true;
+              importButton.textContent = "Preparing draft…";
               error.textContent = "";
               try {
                 const draft = await api("/recipe-drafts/ai", "POST", {
@@ -1202,14 +1663,18 @@ function discoveryForm() {
                 recipeForm(draft.adapted, "ai");
               } catch (err) {
                 error.textContent = err.message;
+                settingsLink.hidden = false;
               } finally {
-                if (importButton.isConnected) importButton.disabled = false;
+                if (importButton.isConnected) {
+                  importButton.disabled = false;
+                  importButton.textContent = "Import for review";
+                }
               }
             },
             "primary small",
           );
           add(actions, importButton);
-          add(card, actions, error);
+          add(card, actions, error, settingsLink);
         } else {
           add(actions, el("span", "This result cannot be imported yet.", "muted"));
           add(card, actions);
@@ -1234,6 +1699,7 @@ function plannedMealView(view) {
   const recipe = view.sourceRecipe;
   const root = openDialog(recipe.title);
   const body = el("div", null, "recipe-body planned-cooking-view");
+  let shareFallback = null;
   add(
     body,
     recipeImage(recipe),
@@ -1246,16 +1712,12 @@ function plannedMealView(view) {
   );
   const ingredients = el("ul");
   view.ingredients.forEach((item) => {
-    const exact = String(item.quantity);
-    const row = el(
-      "li",
-      window.KitchenShoppingView.formatQuantityForDisplay(exact) +
-        " " +
-        item.unit +
-        " " +
-        item.name,
+    const presentation = window.KitchenPlannedCooking.formatPlannedIngredient(
+      item,
+      (quantity) => window.KitchenShoppingView.formatQuantityForDisplay(quantity),
     );
-    row.setAttribute("aria-label", exact + " " + item.unit + " " + item.name);
+    const row = el("li", presentation.text);
+    row.setAttribute("aria-label", presentation.accessibleLabel);
     add(ingredients, row);
   });
   const provenance = recipe.provenance;
@@ -1274,7 +1736,54 @@ function plannedMealView(view) {
   const steps = el("ol");
   recipe.instructions.forEach((step) => add(steps, el("li", step)));
   add(body, ingredients, el("h3", "Method"), steps);
-  add(body, button("View saved recipe amounts", () => viewRecipe(recipe), "quiet"));
+  const shareIngredients = button("Share ingredients", async () => {
+    const text = window.KitchenPlannedCooking.formatPlannedIngredientList(
+      view,
+      (quantity) => window.KitchenShoppingView.formatQuantityForDisplay(quantity),
+    );
+    if (typeof navigator.share === "function") {
+      try {
+        await navigator.share({ title: recipe.title, text });
+        notify("Ingredients shared.");
+        return;
+      } catch (error) {
+        if (error?.name === "AbortError") return;
+      }
+    }
+    if (typeof navigator.clipboard?.writeText === "function") {
+      try {
+        await navigator.clipboard.writeText(text);
+        notify("Ingredient list copied.");
+        return;
+      } catch {}
+    }
+    if (!shareFallback) {
+      const content = el("textarea");
+      content.setAttribute("aria-label", "Ingredient list to copy");
+      content.readOnly = true;
+      content.rows = Math.min(14, Math.max(5, text.split("\n").length));
+      shareFallback = add(
+        el("details", null, "shopping-info"),
+        el("summary", "Copy ingredients manually"),
+        content,
+      );
+      shareFallback.open = true;
+      add(body, shareFallback);
+    }
+    const content = shareFallback.querySelector("textarea");
+    content.value = text;
+    content.focus();
+    content.select();
+    notify("Select and copy the ingredient list.");
+  }, "quiet");
+  add(
+    body,
+    add(
+      el("div", null, "actions"),
+      shareIngredients,
+      button("View saved recipe amounts", () => viewRecipe(recipe), "quiet"),
+    ),
+  );
   add(root, body);
 }
 function shoppingOrigins(origins = []) {
@@ -1305,6 +1814,24 @@ function shoppingSections() {
     if (state.shoppingPanel === key) tab.setAttribute("aria-current", "page");
     nav.append(tab);
   });
+  const refresh = button(
+    state.shoppingRefreshInFlight ? "Refreshing…" : "Refresh",
+    () => refreshShoppingIfSafe(true),
+    "quiet small",
+  );
+  refresh.id = "shopping-refresh";
+  refresh.disabled = state.shoppingRefreshInFlight;
+  refresh.setAttribute(
+    "aria-label",
+    state.shoppingRefreshInFlight
+      ? "Refreshing shared shopping list"
+      : "Refresh shared shopping list",
+  );
+  const status = el("span", shoppingRefreshLabel(), "shopping-refresh-status");
+  status.id = "shopping-refresh-status";
+  status.setAttribute("role", "status");
+  status.setAttribute("aria-live", "polite");
+  add(nav, add(el("div", null, "shopping-refresh-controls"), refresh, status));
   return nav;
 }
 function renderInStore(main) {
@@ -1446,6 +1973,7 @@ function renderInStore(main) {
       );
       check.addEventListener("change", async () => {
         check.disabled = true;
+        state.shoppingWriteInFlight += 1;
         try {
           await api(
             "/store-trip/items/" + encodeURIComponent(line.id) + range(),
@@ -1457,7 +1985,9 @@ function renderInStore(main) {
           check.checked = Boolean(line.checked);
           notify(error.message, true);
         } finally {
+          state.shoppingWriteInFlight = Math.max(0, state.shoppingWriteInFlight - 1);
           check.disabled = false;
+          queuePendingShoppingRefresh();
         }
       });
       const detail = add(el("div", null, "detail"), el("strong", line.name));
@@ -2216,6 +2746,11 @@ function odaSearchForNeed(need) {
   );
   query.input.required = true;
   query.input.maxLength = 300;
+  query.input.dataset.focusKey = "oda-search-query-" + need.id;
+  query.input.addEventListener("input", () => {
+    const latest = state.odaSearch[need.id] || {};
+    state.odaSearch[need.id] = { ...latest, query: query.input.value };
+  });
   const submit = el(
     "button",
     current.loading ? "Searching…" : "Search Oda",
@@ -2686,88 +3221,318 @@ async function createOdaCartProposal(request, trigger) {
     }
   }
 }
-function renderBasket(main) {
-  const basket = state.basket || { needs: [], issues: [] };
-  const odaSetup = add(
-    el("section", null, "panel oda-connection"),
-    el("h2", state.oda?.connected ? "Oda connected" : "Connect Oda"),
+function renderBasketMatchSummary() {
+  const needs = currentBasketMatchNeeds();
+  const busyCount = needs.filter((need) => state.basketMatchBusy[String(need.id)]).length;
+  const foundCount = needs.filter((need) => {
+    const page = state.basketMatchCurrentPage[String(need.id)] || 1;
+    return (state.basketMatchPages[String(need.id)]?.[page]?.candidates || []).length > 0;
+  }).length;
+  const summary = busyCount
+    ? "Searching products for " + busyCount + " of " + needs.length + " items…"
+    : foundCount + " of " + needs.length + " items have product suggestions.";
+  const panel = add(
+    el("section", null, "panel basket-match-summary"),
+    el("h2", "Product suggestions"),
+    el("p", summary, "muted"),
   );
-  if (state.oda?.connected) {
-    add(
-      odaSetup,
-      button(
-        "Disconnect Oda",
-        async () => {
-          try {
-            await api("/oda/connection", "DELETE");
-            state.oda = await api("/oda/status");
-            render();
-            notify("Oda disconnected from Kitchen.");
-          } catch (error) {
-            notify(error.message, true);
-          }
-        },
-        "quiet",
-      ),
+  if (state.basketMatchGlobalError) {
+    const error = el("p", state.basketMatchGlobalError, "form-error");
+    error.setAttribute("role", "alert");
+    add(panel, error);
+  }
+  if (state.basketMatchSkippedNeedCount)
+    add(panel, el("p", state.basketMatchSkippedNeedCount + " more items were skipped by the search limit.", "muted"));
+  const refresh = button(
+    state.basketMatchGlobalRefreshing ? "Refreshing matches…" : "Refresh all matches",
+    () => void startBasketMatchJob({ forceRefresh: true }),
+    "quiet small",
+  );
+  refresh.disabled =
+    state.basketMatchGlobalRefreshing || busyCount > 0 || !state.oda?.connected;
+  add(panel, refresh);
+  return panel;
+}
+function showBasketMatchPage(needId, page) {
+  state.basketMatchCurrentPage[String(needId)] = page;
+  render();
+}
+function renderBasketMatchNeed(need) {
+  const id = String(need.id);
+  const pages = state.basketMatchPages[id] || {};
+  const currentPage = state.basketMatchCurrentPage[id] || 1;
+  const result = pages[currentPage] || pages[1];
+  const busy = state.basketMatchBusy[id];
+  const error = state.basketMatchErrors[id];
+  const panel = add(
+    el("section", null, "basket-match-need"),
+    el("h3", "Suggested products"),
+  );
+  if (busy) {
+    add(panel, el("p", busy.page > currentPage ? "Loading page " + busy.page + "…" : "Searching Oda…", "muted"));
+  } else if (error) {
+    const errorText = el("p", error, "form-error");
+    errorText.setAttribute("role", "alert");
+    add(panel, errorText);
+  } else if (result) {
+    add(panel, el("p", window.KitchenBasketMatchView.statusLabel(result.status), "muted"));
+    if (result.detail) add(panel, el("p", result.detail, "muted"));
+  } else {
+    add(panel, el("p", "Waiting for automatic product search…", "muted"));
+  }
+
+  if (result?.candidates?.length) {
+    add(panel, renderBasketMatchCandidate(result.candidates[0], need));
+    if (result.candidates.length > 1) {
+      const alternatives = el("details", null, "basket-match-alternatives");
+      add(alternatives, el("summary", "Other matches (" + (result.candidates.length - 1) + ")"));
+      const list = el("div", null, "basket-match-candidates");
+      result.candidates.slice(1).forEach((candidate) =>
+        list.append(renderBasketMatchCandidate(candidate, need)),
+      );
+      add(alternatives, list);
+      add(panel, alternatives);
+    }
+  }
+  const actions = el("div", null, "actions basket-match-actions");
+  if (error || ["search_failed", "search_unavailable"].includes(result?.status)) {
+    const retry = button(
+      busy ? "Searching…" : "Retry this item",
+      () => void startBasketMatchJob({ needIds: [id], forceRefresh: true, page: 1 }),
+      "quiet small",
     );
-    const odaInfo = el("details", null, "shopping-info");
-    add(
-      odaInfo,
-      el("summary", "About Oda product choices"),
-      el("p", "Product matches are unverified suggestions. Check the exact product and enter package quantities explicitly. Kitchen never places orders or pays."),
+    retry.disabled = Boolean(busy) || !state.oda?.connected;
+    add(actions, retry);
+  }
+  if (currentPage > 1 && pages[currentPage - 1])
+    add(actions, button("Previous results", () => showBasketMatchPage(id, currentPage - 1), "quiet small"));
+  if (result?.has_more && currentPage < 50) {
+    const nextPage = currentPage + 1;
+    const cached = pages[nextPage];
+    const more = button(
+      busy?.page === nextPage ? "Loading more…" : cached ? "Next results" : "More results",
+      () => {
+        if (cached) showBasketMatchPage(id, nextPage);
+        else void startBasketMatchJob({ needIds: [id], page: nextPage });
+      },
+      "quiet small",
     );
-    add(odaSetup, odaInfo);
-  } else if (state.oda?.configured) {
+    more.disabled = Boolean(busy);
+    add(actions, more);
+  }
+  add(panel, actions);
+  return panel;
+}
+function renderBasketMatchCandidate(candidate, need) {
+  const card = el("article", null, "basket-match-candidate");
+  const media = candidate.media || {};
+  const imageUrl = safeImageUrl(media.image_url);
+  if (imageUrl) {
+    card.classList.add("has-image");
+    add(card, recipeImage({ title: candidate.name, image_url: imageUrl }, "product-image"));
+  }
+  const summary = el("div", null, "basket-match-candidate-main");
+  const details = add(el("div", null, "product-details"), el("strong", candidate.name));
+  if (candidate.brand) add(details, el("small", candidate.brand, "muted"));
+  if (candidate.recommended_packages != null && candidate.recommended_fulfillment_quantity != null) {
     add(
-      odaSetup,
+      details,
       el(
-        "p",
-        "Connect your Oda account to search products and review cart additions.",
+        "small",
+        "Suggested " + candidate.recommended_packages + " packs · " +
+          window.KitchenShoppingView.formatQuantityForDisplay(String(candidate.recommended_fulfillment_quantity)) +
+          " " + need.unit + " total",
         "muted",
-      ),
-    );
-    add(
-      odaSetup,
-      button(
-        "Connect Oda account",
-        async () => {
-          try {
-            const result = await api("/oda/connect", "POST", {});
-            let authorization;
-            try {
-              authorization = new URL(result.authorization_url);
-            } catch {}
-            if (
-              !authorization ||
-              authorization.protocol !== "https:" ||
-              authorization.host !== "oda.com" ||
-              !authorization.pathname.startsWith("/o/authorize/")
-            )
-              throw new Error(
-                "Kitchen did not return a valid Oda authorization link.",
-              );
-            window.location.assign(authorization.href);
-          } catch (error) {
-            notify(error.message, true);
-          }
-        },
-        "primary",
       ),
     );
   } else {
+    const pack = candidate.pack_quantity != null && candidate.pack_unit
+      ? "Pack " + candidate.pack_quantity + " " + candidate.pack_unit + " · count not calculated"
+      : "Pack size unclear · check before choosing";
+    add(details, el("small", pack, "muted"));
+  }
+  if (candidate.price) add(details, el("small", "Oda price: " + candidate.price, "muted"));
+  add(summary, details);
+  const productUrl = officialOdaProductUrl(candidate.product_url);
+  add(summary, button("Choose", () => chooseMatchedCandidate(candidate, need), "primary small"));
+  const more = el("details", null, "basket-match-candidate-details");
+  add(more, el("summary", "Details"));
+  if (candidate.description) add(more, el("p", candidate.description, "muted"));
+  if (candidate.pack_description)
+    add(more, el("p", "Pack details from Oda: " + candidate.pack_description + " · unverified", "muted"));
+  else if (media.pack_description)
+    add(more, el("p", "Pack details from Oda: " + media.pack_description + " · unverified", "muted"));
+  if (candidate.available === true) add(more, el("p", "Oda marks this as available.", "muted"));
+  else if (candidate.available === false) add(more, el("p", "Oda marks this as unavailable.", "muted"));
+  if (media.detail) add(more, el("p", media.detail, "muted"));
+  if (productUrl) {
+    const link = el("a", "View Oda reference ↗");
+    link.href = productUrl;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    add(more, link);
+  }
+  add(card, summary, more);
+  return card;
+}
+function chooseMatchedCandidate(candidate, need) {
+  if (candidate.provider !== "oda" || !candidate.product_id) {
+    notify("This result does not include a usable Oda product reference.", true);
+    return;
+  }
+  const recommendation = window.KitchenBasketMatchView.selectionRecommendation(
+    candidate,
+    need.unit,
+  );
+  const recommendedPackages = recommendation?.packages;
+  const recommendedFulfillment = recommendation?.fulfillment;
+  const hasRecommendation = Boolean(recommendation);
+  const root = openDialog("Confirm product and package size");
+  add(
+    root,
+    el("p", "This saves a product choice for basket review only. It does not add anything to your Oda cart. Oda pack details are unverified; check them before saving.", "callout"),
+    el("h3", candidate.name),
+    candidate.brand ? el("p", candidate.brand, "muted") : null,
+    candidate.pack_description ? el("p", "Oda pack description: " + candidate.pack_description, "muted") : null,
+    hasRecommendation
+      ? el("p", "Suggested count: " + recommendedPackages + " packs for " + recommendedFulfillment + " " + need.unit + ". Review or change the values below.", "muted")
+      : el("p", "No reliable package count is available. Enter the per-pack amount in " + need.unit + " and choose a package count.", "muted"),
+  );
+  const form = el("form");
+  const packages = field("Number of packages", "number", hasRecommendation ? recommendedPackages : "");
+  packages.input.min = "1";
+  packages.input.max = "999";
+  packages.input.step = "1";
+  packages.input.required = true;
+  const amount = field("Amount per package (" + need.unit + ")", "number", recommendation?.packQuantity || "");
+  amount.input.min = "0.000001";
+  amount.input.step = "any";
+  amount.input.required = true;
+  add(form, packages.wrap, amount.wrap);
+  formSubmit(form, "Save product choice", async () => {
+    const packageCount = Number(packages.input.value);
+    if (!Number.isSafeInteger(packageCount) || packageCount < 1)
+      throw new Error("Enter a whole number of packages greater than zero.");
+    const quantityText = amount.input.value.trim();
+    if (!/^(?:\d+(?:\.\d+)?|\.\d+)$/.test(quantityText) || !Number.isFinite(Number(quantityText)) || Number(quantityText) <= 0)
+      throw new Error("Enter a positive amount per package.");
+    await api("/basket/selections", "PUT", {
+      start: iso(day(0)),
+      end: iso(day(6)),
+      selection: {
+        need_id: need.id,
+        product: {
+          provider: "oda",
+          product_id: String(candidate.product_id),
+          name: candidate.name,
+          brand: candidate.brand || null,
+          url: officialOdaProductUrl(candidate.product_url) || null,
+          image_url: safeImageUrl(candidate.media?.image_url) || null,
+          pack_quantity: quantityText,
+          pack_unit: need.unit,
+          price: providerDecimalPrice(candidate.price),
+          currency: "NOK",
+          available: typeof candidate.available === "boolean" ? candidate.available : null,
+          observed_at: new Date().toISOString(),
+          evidence_status: "unverified",
+        },
+        packages: packageCount,
+        alternatives: [],
+      },
+    });
+    state.cartProposalHandled = false;
+    $("#modal").close();
+    await refreshView();
+    notify("Oda product choice saved for review. It remains unverified.");
+  });
+  add(root, form);
+}
+async function connectOdaAccount() {
+  try {
+    const result = await api("/oda/connect", "POST", {});
+    let authorization;
+    try {
+      authorization = new URL(result.authorization_url);
+    } catch {}
+    if (
+      !authorization ||
+      authorization.protocol !== "https:" ||
+      authorization.host !== "oda.com" ||
+      !authorization.pathname.startsWith("/o/authorize/")
+    )
+      throw new Error("Kitchen did not return a valid Oda authorization link.");
+    window.location.assign(authorization.href);
+  } catch (error) {
+    notify(error.message, true);
+  }
+}
+async function disconnectOdaAccount() {
+  try {
+    await api("/oda/connection", "DELETE");
+    resetBasketMatching();
+    state.basketMatchConnected = false;
+    await refreshView();
+    notify("Oda disconnected from Kitchen.");
+  } catch (error) {
+    notify(error.message, true);
+  }
+}
+function odaConnectionIssue() {
+  const messages = [
+    state.basketMatchGlobalError,
+    ...Object.values(state.basketMatchErrors),
+    ...Object.values(state.basketMatchPages).flatMap((pages) =>
+      Object.values(pages || {}).map((page) => page.detail || ""),
+    ),
+  ];
+  return messages.find((message) =>
+    window.KitchenSettingsView.odaNeedsReconnect(message),
+  );
+}
+function renderShoppingConnectionPrompt(main) {
+  const connectionIssue = state.oda?.connected ? odaConnectionIssue() : null;
+  if (connectionIssue) {
     add(
-      odaSetup,
-      el(
-        "p",
-        "Oda setup needs to be completed by your household administrator.",
-        "muted",
+      main,
+      add(
+        el("section", null, "callout connection-prompt"),
+        el("strong", "Oda connection needs attention"),
+        el("p", connectionIssue),
+        connectionSettingsButton("Reconnect Oda in Settings"),
       ),
     );
-    const unavailable = button("Oda setup required", () => {}, "quiet");
-    unavailable.disabled = true;
-    add(odaSetup, unavailable);
+    return;
   }
-  add(main, odaSetup);
+  if (state.oda?.connected) {
+    add(
+      main,
+      add(
+        el("details", null, "shopping-info basket-oda-info"),
+        el("summary", "About Oda product choices"),
+        el("p", "Product matches are suggestions. Check the exact product and package quantities before saving a choice. Kitchen does not place an order or handle payment."),
+      ),
+    );
+    return;
+  }
+  const configured = Boolean(state.oda?.configured);
+  add(
+    main,
+    add(
+      el("section", null, "callout connection-prompt"),
+      el("strong", configured ? "Oda is not connected" : "Oda setup is required"),
+      el(
+        "p",
+        configured
+          ? "Connect your account in Settings to search Oda products and review cart additions."
+          : "Oda product matching needs operator setup. You can still use the in-store shopping list.",
+      ),
+      connectionSettingsButton(),
+    ),
+  );
+}
+function renderBasket(main) {
+  const basket = state.basket || { needs: [], issues: [] };
+  renderShoppingConnectionPrompt(main);
   if (basket.needs?.length) {
     const hasSelections = window.KitchenShoppingView.hasSelectedProducts(basket);
     const status = el(
@@ -2804,6 +3569,8 @@ function renderBasket(main) {
     add(issues, list);
     add(main, issues);
   }
+  if (state.oda?.connected && basket.needs?.length)
+    add(main, renderBasketMatchSummary());
   if (!basket.needs?.length) {
     add(
       main,
@@ -2885,7 +3652,17 @@ function renderBasket(main) {
       add(section, allocation);
     }
     const selections = entry.selections || [];
-    add(section, odaSearchForNeed(need));
+    if (state.oda?.connected) {
+      add(section, renderBasketMatchNeed(need));
+      const manualSearch = odaSearchForNeed(need);
+      const manualDetails = el("details", null, "oda-manual-search");
+      manualDetails.open = Boolean(state.odaManualSearchOpen[String(need.id)]);
+      add(manualDetails, el("summary", "Refine with a manual Oda search"), manualSearch);
+      manualDetails.addEventListener("toggle", () => {
+        state.odaManualSearchOpen[String(need.id)] = manualDetails.open;
+      });
+      add(section, manualDetails);
+    }
     selections.forEach((selection) => {
       if (selection.product) {
         const selected = el("div", null, "selected-product");
@@ -3114,6 +3891,84 @@ function itemForm(regular = false) {
   );
   add(root, form);
 }
+function renderConnectionSettings(main) {
+  const section = add(
+    el("section", null, "panel connection-settings"),
+    el("h2", "Connections"),
+    el("p", "Manage provider access here. Secrets are never shown in Kitchen.", "muted"),
+  );
+  const integrations = Array.isArray(state.integrations) ? state.integrations : [];
+  integrations.forEach((integration) => {
+    const status = integration.id === "oda"
+      ? state.oda?.connected
+        ? "connected"
+        : state.oda?.configured
+          ? "configured"
+          : "not_configured"
+      : integration.status;
+    const row = add(
+      el("article", null, "connection-card"),
+      add(
+        el("div", null, "connection-card-heading"),
+        el("h3", integration.name || integration.id),
+        el(
+          "span",
+          window.KitchenSettingsView.integrationStatusLabel(status),
+          "connection-status",
+        ),
+      ),
+    );
+    const activeMode = integration.id === "oda" && !state.oda?.connected
+      ? null
+      : integration.auth_mode;
+    const supportedMethods = (integration.supported_auth_modes || [])
+      .map((mode) => window.KitchenSettingsView.integrationAuthLabel(mode))
+      .join(", ");
+    const authentication = activeMode
+      ? "Authentication: " + window.KitchenSettingsView.integrationAuthLabel(activeMode, true)
+      : "Supported methods: " + (supportedMethods || "Not reported");
+    add(
+      row,
+      el(
+        "p",
+        integration.id === "oda"
+          ? state.oda?.detail || integration.detail || "No Oda connection details are available."
+          : integration.detail || "No connection details are available.",
+        "muted",
+      ),
+      el(
+        "p",
+        authentication,
+        "connection-auth-mode muted",
+      ),
+    );
+    if (integration.id === "oda") {
+      const actions = add(el("div", null, "actions connection-actions"));
+      if (state.oda?.connected) {
+        add(
+          actions,
+          button("Reconnect Oda", connectOdaAccount, "quiet"),
+          button("Disconnect Oda", disconnectOdaAccount, "quiet danger"),
+        );
+      } else if (state.oda?.configured) {
+        add(actions, button("Connect Oda account", connectOdaAccount, "primary"));
+      } else {
+        const setup = button("Setup required", () => {}, "quiet");
+        setup.disabled = true;
+        add(actions, setup);
+      }
+      add(row, actions);
+    }
+    section.append(row);
+  });
+  if (!integrations.length)
+    add(section, el("p", "Connection status is unavailable. Refresh Settings to try again.", "muted"));
+  add(
+    section,
+    el("p", "You can install Kitchen from your browser’s menu on Android. The app shell opens offline; shared recipes and changes need a connection.", "muted"),
+  );
+  add(main, section);
+}
 function renderSettings(main) {
   const household = state.household;
   const first = !household.name;
@@ -3172,6 +4027,121 @@ function renderSettings(main) {
     "Optional. One per line, including allergies or ingredients to avoid. Always check recipes and product labels.",
   );
   preferences.input.rows = 3;
+  let nextCategoryKey = 0;
+  let categoryRows = (household.shopping_category_order || []).map((value) => ({
+    key: String(nextCategoryKey++),
+    value,
+  }));
+  const categoryEditor = add(
+    el("section", null, "category-order-settings"),
+    el("h2", "Store walking order"),
+    el(
+      "p",
+      "Set the household’s preferred category order for the in-store list and shared list text. Unlisted categories follow alphabetically; this is household guidance, not a store aisle map.",
+      "muted",
+    ),
+  );
+  const categoryList = el("ol", null, "category-order-list");
+  const renderCategoryRows = (focusKey = null) => {
+    categoryList.replaceChildren();
+    if (!categoryRows.length)
+      add(categoryList, el("li", "All categories will be sorted alphabetically.", "muted category-order-empty"));
+    categoryRows.forEach((row, index) => {
+      const item = el("li", null, "category-order-row");
+      const input = el("input");
+      input.type = "text";
+      input.maxLength = 100;
+      input.value = row.value;
+      input.setAttribute("aria-label", "Category at position " + (index + 1));
+      input.dataset.focusKey = "shopping-category-" + row.key;
+      input.addEventListener("input", () => { row.value = input.value; });
+      const moveUp = button("Move up", () => {
+        categoryRows = window.KitchenSettingsView.moveShoppingCategory(categoryRows, index, index - 1);
+        renderCategoryRows("shopping-category-" + row.key);
+      }, "quiet category-order-move");
+      moveUp.disabled = index === 0;
+      moveUp.setAttribute("aria-label", "Move " + row.value + " up");
+      const moveDown = button("Move down", () => {
+        categoryRows = window.KitchenSettingsView.moveShoppingCategory(categoryRows, index, index + 1);
+        renderCategoryRows("shopping-category-" + row.key);
+      }, "quiet category-order-move");
+      moveDown.disabled = index === categoryRows.length - 1;
+      moveDown.setAttribute("aria-label", "Move " + row.value + " down");
+      const remove = button("Remove", () => {
+        categoryRows = categoryRows.filter((category) => category.key !== row.key);
+        const next = categoryRows[Math.min(index, categoryRows.length - 1)];
+        renderCategoryRows(next ? "shopping-category-" + next.key : null);
+        if (!next) categoryEntry.input.focus();
+      }, "quiet category-order-remove");
+      remove.setAttribute("aria-label", "Remove " + row.value);
+      add(item, input, moveUp, moveDown, remove);
+      categoryList.append(item);
+    });
+    if (focusKey)
+      categoryList.querySelector('[data-focus-key="' + focusKey + '"]')?.focus({ preventScroll: true });
+  };
+  renderCategoryRows();
+  const categoryEntry = field("Add a category", "text", "", "For example: Bakery or Household.");
+  categoryEntry.input.maxLength = 100;
+  categoryEntry.input.dataset.focusKey = "new-shopping-category";
+  const categoryError = el("p", "", "form-error");
+  categoryError.setAttribute("role", "alert");
+  const addCategory = button("Add category", () => {
+    const value = categoryEntry.input.value.trim();
+    const normalized = window.KitchenSettingsView.normalizeShoppingCategoryOrder(
+      categoryRows.map((row) => row.value),
+    );
+    if (!value) {
+      categoryError.textContent = "Enter a category name.";
+      categoryEntry.input.focus();
+      return;
+    }
+    if (value.length > 100) {
+      categoryError.textContent = "Category names can be up to 100 characters.";
+      categoryEntry.input.focus();
+      return;
+    }
+    if (categoryRows.length >= 64) {
+      categoryError.textContent = "You can add up to 64 categories.";
+      return;
+    }
+    if (normalized.error === "duplicate" || normalized.value?.some((category) => category.toLowerCase() === value.toLowerCase())) {
+      categoryError.textContent = "Each category must have a unique name.";
+      categoryEntry.input.focus();
+      return;
+    }
+    categoryRows.push({ key: String(nextCategoryKey++), value });
+    categoryEntry.input.value = "";
+    categoryError.textContent = "";
+    renderCategoryRows();
+    categoryEntry.input.focus();
+  }, "quiet");
+  categoryEntry.input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      addCategory.click();
+    }
+  });
+  const restoreDefaults = button("Restore curated order", () => {
+    categoryRows = window.KitchenSettingsView.DEFAULT_SHOPPING_CATEGORY_ORDER.map((value) => ({
+      key: String(nextCategoryKey++),
+      value,
+    }));
+    categoryError.textContent = "";
+    renderCategoryRows();
+  }, "quiet");
+  const alphabetical = button("Use alphabetical order", () => {
+    categoryRows = [];
+    categoryError.textContent = "";
+    renderCategoryRows();
+  }, "quiet");
+  add(
+    categoryEditor,
+    categoryList,
+    add(el("div", null, "category-order-add"), categoryEntry.wrap, addCategory),
+    categoryError,
+    add(el("div", null, "actions category-order-presets"), restoreDefaults, alphabetical),
+  );
   add(
     form,
     name.wrap,
@@ -3189,8 +4159,9 @@ function renderSettings(main) {
       "The interface currently uses English. Your preferred language is saved for recipe and household context.",
       "muted",
     ),
+    categoryEditor,
   );
-  formSubmit(form, first ? "Set up my kitchen" : "Save household", async () => {
+  formSubmit(form, first ? "Set up my kitchen" : "Save household settings", async () => {
     const values = children.input.value
       .split(",")
       .map((value) => value.trim())
@@ -3199,6 +4170,15 @@ function renderSettings(main) {
       throw new Error(
         "Enter children’s ages as whole numbers from 0 to 17, separated by commas.",
       );
+    const order = window.KitchenSettingsView.normalizeShoppingCategoryOrder(
+      categoryRows.map((row) => row.value),
+    );
+    if (order.error === "duplicate")
+      throw new Error("Category names must be unique, ignoring capitalization.");
+    if (order.error === "too_many")
+      throw new Error("You can save up to 64 shopping categories.");
+    if (order.error)
+      throw new Error("Each shopping category needs a name no longer than 100 characters.");
     state.household = await api("/household", "PUT", {
       name: name.input.value.trim(),
       adults: Number(adults.input.value),
@@ -3209,34 +4189,13 @@ function renderSettings(main) {
         .filter(Boolean),
       default_servings: Number(servings.input.value),
       language: language.input.value,
+      shopping_category_order: order.value,
     });
     notify("Household saved.");
     if (first) navigate("week");
   });
   add(main, form);
-  if (!first) {
-    add(
-      main,
-      add(
-        el("section", null, "panel"),
-        el("h2", "Connected services"),
-        el(
-          "p",
-          "AI assistance: " +
-            (state.integrations.ai?.configured
-              ? "configured"
-              : "setup required") +
-            ". Oda account connection and setup are managed from Shopping.",
-          "muted",
-        ),
-        el(
-          "p",
-          "You can install Kitchen from your browser’s menu on Android. The app shell opens offline; shared recipes and changes need a connection.",
-          "muted",
-        ),
-      ),
-    );
-  }
+  renderConnectionSettings(main);
 }
 $("#modal").addEventListener("cancel", (event) => {
   if (state.cartConfirming) event.preventDefault();
@@ -3267,8 +4226,16 @@ window.addEventListener("offline", () => {
 });
 window.addEventListener("online", () => {
   notify("Connection restored.");
-  if (!$("#modal").open && !$("#main form")) refreshView();
+  if (state.view === "shopping") void refreshShoppingIfSafe(true);
+  else if (!$("#modal").open && !$("#main form")) refreshView();
 });
+function refreshShoppingOnReturn() {
+  if (document.visibilityState !== "hidden") void refreshShoppingIfSafe();
+}
+window.addEventListener("focus", refreshShoppingOnReturn);
+window.addEventListener("pageshow", refreshShoppingOnReturn);
+document.addEventListener("visibilitychange", refreshShoppingOnReturn);
+$("#modal").addEventListener("close", queuePendingShoppingRefresh);
 async function start() {
   try {
     const odaResult = new URLSearchParams(location.search).get("oda");

@@ -15,15 +15,21 @@ SourceIndex = Annotated[int, Field(ge=0)]
 
 class Ingredient(BaseModel):
     name: NonBlank
-    quantity: Quantity
-    unit: NonBlank = "item"
+    quantity: Quantity | None
+    unit: NonBlank | None = "item"
     category: NonBlank = "Other"
     source_indices: list[SourceIndex] = Field(default_factory=list)
 
     @field_validator("unit")
     @classmethod
-    def normalize_unit(cls, value: str) -> str:
-        return value.casefold()
+    def normalize_unit(cls, value: str | None) -> str | None:
+        return value.casefold() if value is not None else None
+
+    @model_validator(mode="after")
+    def measured_ingredient_requires_unit(self) -> "Ingredient":
+        if self.quantity is not None and self.unit is None:
+            raise ValueError("Measured ingredients require a unit")
+        return self
 
 
 class RecipeSource(StrEnum):
@@ -60,6 +66,32 @@ def validate_source_metadata(
         raise ValueError("Provenance source_url must match recipe source_url")
 
 
+class PhotoSource(BaseModel):
+    """Private source identity; caller-supplied book attribution is unverified."""
+
+    id: UUID
+    book_title: NonBlank | None = Field(default=None, max_length=300)
+    page: NonBlank | None = Field(default=None, max_length=80)
+
+
+class RecipeImageAttribution(BaseModel):
+    """Provider attribution for an explicitly selected public recipe image."""
+
+    provider: Literal["wikimedia_commons"] = "wikimedia_commons"
+    provider_id: NonBlank = Field(max_length=80)
+    query: NonBlank = Field(max_length=200)
+    title: NonBlank = Field(max_length=300)
+    image_url: HttpUrl
+    source_page_url: HttpUrl
+    artist: str | None = Field(default=None, max_length=500)
+    credit: str | None = Field(default=None, max_length=500)
+    license_name: NonBlank = Field(max_length=100)
+    license_url: HttpUrl
+    attribution_required: bool
+    attribution: str | None = Field(default=None, max_length=500)
+    obligations: list[NonBlank] = Field(default_factory=list, max_length=4)
+
+
 class RecipeCreate(BaseModel):
     title: NonBlank
     servings: int = Field(gt=0)
@@ -70,6 +102,8 @@ class RecipeCreate(BaseModel):
     source: RecipeSource = RecipeSource.MANUAL
     source_ingredients: list[SourceIngredient] = Field(default_factory=list)
     provenance: AdaptationProvenance | None = None
+    photo_source: PhotoSource | None = None
+    image_attribution: RecipeImageAttribution | None = None
 
     @model_validator(mode="after")
     def valid_source_metadata(self) -> "RecipeCreate":
@@ -79,6 +113,10 @@ class RecipeCreate(BaseModel):
             self.source_url,
             self.provenance,
         )
+        if self.image_attribution and self.image_url != self.image_attribution.image_url:
+            # A caller may be editing the image URL while echoing a prior Recipe
+            # response. Drop stale credit; only the selection service may attach it.
+            self.image_attribution = None
         return self
 
     @field_validator("image_url")
@@ -144,6 +182,17 @@ class ShoppingLine(BaseModel):
     origins: list[str]
 
 
+class UnquantifiedNeed(BaseModel):
+    """An explicit requirement whose quantity still needs human review."""
+
+    name: NonBlank
+    unit: NonBlank | None = None
+    category: NonBlank = "Other"
+    origins: list[str]
+    source_indices: list[SourceIndex] = Field(default_factory=list)
+
+
 class WeekShopping(BaseModel):
     lines: list[ShoppingLine]
     suggestions: list[RegularItem]
+    unquantified: list[UnquantifiedNeed] = Field(default_factory=list)

@@ -11,6 +11,7 @@ from home_kitchen.models import (
     RegularItem,
     ShoppingItem,
     ShoppingLine,
+    UnquantifiedNeed,
     WeekShopping,
 )
 from home_kitchen.units import add_exact, canonical_unit, canonicalize_quantity, scale_quantity
@@ -47,6 +48,7 @@ class ShoppingContext:
 class ShoppingContribution:
     lines: list[ShoppingLine] = field(default_factory=list)
     suggestions: list[RegularItem] = field(default_factory=list)
+    unquantified: list[UnquantifiedNeed] = field(default_factory=list)
 
 
 class ShoppingContributor(Protocol):
@@ -59,20 +61,35 @@ class PlannedRecipes:
     contributor_id = "planned_recipes"
 
     def contribute(self, context: ShoppingContext) -> ShoppingContribution:
-        lines = []
+        result = ShoppingContribution()
         for meal in context.meals:
             recipe = context.recipes[meal.recipe_id]
-            lines.extend(
-                ShoppingLine(
-                    name=ingredient.name,
-                    quantity=scale_quantity(ingredient.quantity, meal.servings, recipe.servings),
-                    unit=ingredient.unit,
-                    category=ingredient.category,
-                    origins=[f"meal:{meal.id}"],
+            for ingredient in recipe.ingredients:
+                if ingredient.quantity is None:
+                    result.unquantified.append(
+                        UnquantifiedNeed(
+                            name=ingredient.name,
+                            unit=ingredient.unit,
+                            category=ingredient.category,
+                            origins=[f"meal:{meal.id}"],
+                            source_indices=ingredient.source_indices,
+                        )
+                    )
+                    continue
+                # Ingredient validation guarantees a unit for measured amounts.
+                assert ingredient.unit is not None
+                result.lines.append(
+                    ShoppingLine(
+                        name=ingredient.name,
+                        quantity=scale_quantity(
+                            ingredient.quantity, meal.servings, recipe.servings
+                        ),
+                        unit=ingredient.unit,
+                        category=ingredient.category,
+                        origins=[f"meal:{meal.id}"],
+                    )
                 )
-                for ingredient in recipe.ingredients
-            )
-        return ShoppingContribution(lines=lines)
+        return result
 
 
 class QuickAdditions:
@@ -131,6 +148,7 @@ class ShoppingBuilder:
     def build(self, context: ShoppingContext) -> WeekShopping:
         totals: dict[tuple[str, str], ShoppingLine] = {}
         suggestions: dict[UUID, RegularItem] = {}
+        unquantified: list[UnquantifiedNeed] = []
         for contributor in self.contributors.values():
             contribution = contributor.contribute(context)
             for line in contribution.lines:
@@ -146,9 +164,11 @@ class ShoppingBuilder:
                         totals[key].category = line.category
                     totals[key].origins = list(dict.fromkeys(totals[key].origins + line.origins))
             suggestions.update({item.id: item for item in contribution.suggestions})
+            unquantified.extend(contribution.unquantified)
         return WeekShopping(
             lines=sorted(totals.values(), key=lambda item: (item.name.casefold(), item.unit)),
             suggestions=list(suggestions.values()),
+            unquantified=unquantified,
         )
 
 

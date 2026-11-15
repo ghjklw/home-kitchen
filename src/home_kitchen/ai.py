@@ -72,6 +72,8 @@ async def draft_recipe(
         image_url=source.image_url,
         source_ingredients=[item.model_dump() for item in source.source_ingredients],
         provenance=source.provenance,
+        photo_source=source.photo_source,
+        image_attribution=source.image_attribution,
     )
     adapted = EditableRecipeDraft.model_validate(output)
     if preserve_source_measures:

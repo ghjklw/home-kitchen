@@ -15,6 +15,12 @@ from home_kitchen.catalogue.sku_repository import PostgresCatalogueSkuRepository
 from home_kitchen.catalogue.sku_service import CatalogueSkuService
 from home_kitchen.context import history_context
 from home_kitchen.history import HistoryRepository
+from home_kitchen.integrations import (
+    AIIntegration,
+    CookidooIntegration,
+    IntegrationRegistry,
+    OdaIntegration,
+)
 from home_kitchen.inventory import InventoryService
 from home_kitchen.models import RecipeCreate
 from home_kitchen.oda import OdaService
@@ -30,13 +36,16 @@ from home_kitchen.recipes import (
     RecipeDraftRequest,
     create_recipe_providers,
 )
+from home_kitchen.recipes.collections import CollectionService, OdaCollectionProvider
 from home_kitchen.recipes.discovery import (
     MarmitonDiscoveryProvider,
     MatpratDiscoveryProvider,
     OdaDiscoveryProvider,
     RecipeDiscoveryRegistry,
 )
+from home_kitchen.recipes.images import RecipeImageService
 from home_kitchen.recipes.models import EditableRecipeDraft
+from home_kitchen.recipes.photo_storage import PhotoRecipeService
 from home_kitchen.recommendations import PlanDraft, build_planner, recommend_plan
 from home_kitchen.service import KitchenService
 from home_kitchen.settings import Household, Settings
@@ -64,6 +73,9 @@ class KitchenFeatures:
         self.recipe_feedback = RecipeFeedbackService(kitchen, self.history)
         self.oda = OdaService(kitchen.store.engine, settings)
         self.oda_cart = OdaCartService(self.oda)
+        self.integrations = IntegrationRegistry(
+            [OdaIntegration(self.oda), AIIntegration(settings), CookidooIntegration()]
+        )
         self.inventory = InventoryService(kitchen, self.history)
         self.basket_matching = BasketMatchingService(self.inventory, OdaSearchAdapter(self.oda))
         self.basket_jobs = BasketMatchJobs(
@@ -74,6 +86,13 @@ class KitchenFeatures:
         self.trip_completion = TripCompletionService(self.inventory, self.history)
         self.purchase_modes = PurchaseModes([OdaMode(self.oda), InStoreMode()])
         self.recipe_providers = create_recipe_providers(settings, ai_agent=ai)
+        self.recipe_photos = PhotoRecipeService(
+            settings, self.household_id, kitchen.store.engine, household
+        )
+        self.recipe_images = RecipeImageService(kitchen)
+        self.recipe_collections = CollectionService(
+            kitchen, self.history, OdaCollectionProvider(self.oda)
+        )
         self.recipe_discovery = RecipeDiscoveryRegistry(
             [
                 OdaDiscoveryProvider(self.oda),

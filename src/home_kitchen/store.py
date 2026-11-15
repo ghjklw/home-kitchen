@@ -48,6 +48,9 @@ recipes = Table(
     Column("source", Text, nullable=False),
     Column("source_ingredients", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
     Column("provenance", JSONB),
+    Column("photo_source", JSONB),
+    Column("photo_source_id", Uuid, ForeignKey("recipe_photos.id")),
+    Column("image_attribution", JSONB),
 )
 meals = Table(
     "meals",
@@ -110,8 +113,15 @@ def entity_values(entity: BaseModel) -> dict:
     # retain their database types and precision.
     if isinstance(entity, Recipe):
         json_values = entity.model_dump(mode="json")
-        for field in ("ingredients", "source_ingredients", "provenance"):
+        for field in (
+            "ingredients",
+            "source_ingredients",
+            "provenance",
+            "photo_source",
+            "image_attribution",
+        ):
             values[field] = json_values[field]
+        values["photo_source_id"] = entity.photo_source.id if entity.photo_source else None
         values["source_url"] = str(entity.source_url) if entity.source_url else None
         values["image_url"] = str(entity.image_url) if entity.image_url else None
     return values
@@ -138,6 +148,14 @@ class Store:
         statement = insert(table).values(**values)
         conflict = [table.c.date, table.c.slot] if kind == "meal" else [table.c.id]
         with self.connection() as connection:
+            if isinstance(entity, Recipe) and entity.photo_source is not None:
+                from .recipes.photo_storage import recipe_photos
+
+                exists = connection.execute(
+                    select(recipe_photos.c.id).where(recipe_photos.c.id == entity.photo_source.id)
+                ).scalar_one_or_none()
+                if exists is None:
+                    raise ValueError("Photo source was not found")
             previous = None
             if isinstance(entity, RegularItem):
                 previous = connection.execute(

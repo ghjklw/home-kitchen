@@ -99,6 +99,7 @@ def create_app(
                 await close_ai_clients(settings)
             finally:
                 await features.basket_jobs.close()
+                await features.recipe_collections.close()
                 features.oda.close()
                 service.store.engine.dispose()
 
@@ -258,20 +259,6 @@ def create_app(
             raise HTTPException(422, str(exc)) from None
         except Exception:
             raise HTTPException(502, "AI plan unavailable; no meals have been saved") from None
-
-    @app.get("/api/integrations")
-    def integrations(request: Request):
-        oda_status = features.oda.status(request.state.actor_id)
-        return {
-            "oda": {
-                "status": "connected" if oda_status["connected"] else "setup_required",
-                "mcp_url": "https://oda.com/mcp",
-                "checkout_url": "https://oda.com/no/cart/",
-                "message": "Connect your Oda account directly in Kitchen. Review and pay in Oda.",
-            },
-            "ai": {"configured": bool(ai or settings.ai_configured)},
-            "auth": {"mode": "local" if settings.local_dev else "entra"},
-        }
 
     @app.get("/sw.js", include_in_schema=False)
     def service_worker():

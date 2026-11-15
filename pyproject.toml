@@ -19,6 +19,7 @@ dependencies = [
   "pyjwt[crypto]>=2.10,<3",
   "recipe-scrapers>=15,<16",
   "uvicorn>=0.34,<1",
+  "pillow>=11",
 ]
 
 [dependency-groups]

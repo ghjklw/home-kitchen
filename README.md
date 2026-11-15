@@ -38,6 +38,8 @@ FastAPI publishes the current route schema at `/openapi.json` and its interactiv
 - Cookidoo API integration or device-side cooking control. Recipe imports may contain source instructions, but Kitchen does not connect to a Thermomix device.
 - Google Keep integration. Google documents a Keep API, but it is restricted to approved Workspace use cases and is not a general consumer sync API: <https://developers.google.com/workspace/keep/api/guides>.
 
+The [product roadmap](docs/product-roadmap.md) tracks priorities, open UX issues, integrations, and acceptance evidence.
+
 See [docs/architecture.md](docs/architecture.md) for runtime boundaries and data flows, and [docs/decisions.md](docs/decisions.md) for provisional assumptions to revisit.
 
 ## AI configuration

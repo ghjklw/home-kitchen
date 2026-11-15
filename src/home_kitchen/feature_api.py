@@ -1,5 +1,8 @@
 """Feature routes use application services also exposed through MCP."""
 
+import base64
+import binascii
+import json
 from datetime import date
 from uuid import UUID
 
@@ -14,8 +17,9 @@ from home_kitchen.catalogue.models import FoodCatalogueItem
 from home_kitchen.catalogue.sku_models import RetailerProductOption, RetailerProductSnapshot
 from home_kitchen.features import KitchenFeatures
 from home_kitchen.history import HistoryEntry, HistoryEntryCreate, RetrievedEvidence
+from home_kitchen.integrations import IntegrationInfo
 from home_kitchen.inventory import InventoryItem, InventoryItemCreate, PurchasePlan
-from home_kitchen.models import MealCreate
+from home_kitchen.models import MealCreate, Recipe
 from home_kitchen.planning_proposals import ProposalConflict, ProposalRead
 from home_kitchen.purchasing import PurchaseModeInfo, StoreTrip
 from home_kitchen.purchasing_reconciliation import (
@@ -25,7 +29,46 @@ from home_kitchen.purchasing_reconciliation import (
 )
 from home_kitchen.recipe_feedback import RecipeFeedbackCreate
 from home_kitchen.recipes import RecipeDraft, RecipeDraftRequest, RecipeProviderInfo
+from home_kitchen.recipes.collections import CollectionJob, CollectionKind
 from home_kitchen.recipes.discovery import RecipeDiscoveryRequest, RecipeDiscoveryResponse
+from home_kitchen.recipes.images import (
+    MAX_CONTINUATION_LENGTH,
+    MAX_QUERY_LENGTH,
+    MAX_RESULTS,
+    RecipeImageSearchSession,
+)
+from home_kitchen.recipes.photo_storage import PhotoAcquisition, StoredPhoto
+from home_kitchen.recipes.photos import MAX_PHOTO_BYTES
+
+MAX_PHOTO_JSON_BYTES = ((MAX_PHOTO_BYTES + 2) // 3) * 4 + 16_384
+
+
+class PhotoUpload(BaseModel):
+    mime_type: str = Field(max_length=64)
+    data_base64: str = Field(min_length=4, max_length=((MAX_PHOTO_BYTES + 2) // 3) * 4)
+    book_title: str | None = Field(default=None, max_length=300)
+    page: str | None = Field(default=None, max_length=40)
+
+
+class CollectionPreviewRequest(BaseModel):
+    kinds: list[CollectionKind] = Field(min_length=1, max_length=2)
+
+
+class CollectionImportRequest(BaseModel):
+    selected_ids: list[str] = Field(min_length=1, max_length=1000)
+    reviewed: bool = False
+
+
+class RecipeImageSearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=MAX_QUERY_LENGTH)
+    limit: int = Field(default=MAX_RESULTS, ge=1, le=MAX_RESULTS)
+    continuation: str | None = Field(default=None, max_length=MAX_CONTINUATION_LENGTH)
+
+
+class RecipeImageSelectionRequest(BaseModel):
+    search_id: UUID
+    provider_id: str = Field(min_length=1, max_length=80)
+    reviewed: bool = False
 
 
 class BasketSelectionRequest(BaseModel):
@@ -63,6 +106,108 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
         if not actor:
             raise HTTPException(401, "Household authentication required")
         return actor
+
+    @router.post("/recipe-photos", status_code=201)
+    async def upload_recipe_photo(request: Request, response: Response) -> PhotoAcquisition:
+        actor = authenticated_actor(request)
+        response.headers["Cache-Control"] = "no-store"
+        if request.headers.get("content-type", "").split(";", 1)[0].strip() != "application/json":
+            raise HTTPException(415, "Photo upload requires JSON with base64 image data")
+        chunks, size = [], 0
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > MAX_PHOTO_JSON_BYTES:
+                raise HTTPException(413, "Photo upload exceeds the supported size")
+            chunks.append(chunk)
+        try:
+            data = PhotoUpload.model_validate(json.loads(b"".join(chunks)))
+            raw = base64.b64decode(data.data_base64, validate=True)
+        except (ValueError, TypeError, binascii.Error, json.JSONDecodeError):
+            raise HTTPException(422, "Photo upload data is invalid") from None
+        if not raw or len(raw) > MAX_PHOTO_BYTES:
+            raise HTTPException(413, "Photo must contain between 1 byte and 8 MiB")
+        return await features.recipe_photos.create(
+            raw, data.mime_type, actor, book_title=data.book_title, page=data.page
+        )
+
+    @router.get("/recipe-photos/{photo_id}")
+    async def get_recipe_photo(photo_id: UUID, request: Request, response: Response) -> Response:
+        authenticated_actor(request)
+        photo: StoredPhoto = await features.recipe_photos.get(photo_id)
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return Response(
+            photo.data,
+            media_type=photo.mime_type,
+            headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
+        )
+
+    @router.post("/recipe-photos/{photo_id}/redraft")
+    async def redraft_recipe_photo(
+        photo_id: UUID, request: Request, response: Response
+    ) -> PhotoAcquisition:
+        response.headers["Cache-Control"] = "no-store"
+        return await features.recipe_photos.redraft(photo_id, authenticated_actor(request))
+
+    @router.post("/recipe-collections", status_code=202)
+    async def preview_recipe_collections(
+        data: CollectionPreviewRequest, request: Request, response: Response
+    ) -> CollectionJob:
+        response.headers["Cache-Control"] = "no-store"
+        return await features.recipe_collections.start_preview(
+            authenticated_actor(request), data.kinds
+        )
+
+    @router.get("/recipe-collections/{job_id}")
+    async def get_recipe_collection_job(
+        job_id: UUID, request: Request, response: Response
+    ) -> CollectionJob:
+        response.headers["Cache-Control"] = "no-store"
+        return await features.recipe_collections.get(authenticated_actor(request), job_id)
+
+    @router.post("/recipe-collections/{job_id}/import", status_code=202)
+    async def import_recipe_collection(
+        job_id: UUID, data: CollectionImportRequest, request: Request, response: Response
+    ) -> CollectionJob:
+        response.headers["Cache-Control"] = "no-store"
+        return await features.recipe_collections.start_import(
+            authenticated_actor(request), job_id, data.selected_ids, data.reviewed
+        )
+
+    @router.post("/recipe-collections/{job_id}/cancel")
+    async def cancel_recipe_collection(
+        job_id: UUID, request: Request, response: Response
+    ) -> CollectionJob:
+        response.headers["Cache-Control"] = "no-store"
+        return await features.recipe_collections.cancel(authenticated_actor(request), job_id)
+
+    @router.post("/recipe-images/search")
+    async def search_recipe_images(
+        data: RecipeImageSearchRequest, request: Request, response: Response
+    ) -> RecipeImageSearchSession:
+        response.headers["Cache-Control"] = "no-store"
+        return await features.recipe_images.search(
+            authenticated_actor(request),
+            data.query,
+            limit=data.limit,
+            continuation=data.continuation,
+        )
+
+    @router.post("/recipes/{recipe_id}/image")
+    def select_recipe_image(
+        recipe_id: UUID,
+        data: RecipeImageSelectionRequest,
+        request: Request,
+        response: Response,
+    ) -> Recipe:
+        response.headers["Cache-Control"] = "no-store"
+        return features.recipe_images.select(
+            authenticated_actor(request),
+            recipe_id,
+            data.search_id,
+            data.provider_id,
+            reviewed=data.reviewed,
+        )
 
     @router.post("/basket/match-jobs", status_code=202)
     async def start_match_job(
@@ -102,6 +247,11 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
             )
         except ProposalConflict as exc:
             raise HTTPException(409, str(exc)) from None
+
+    @router.get("/integrations")
+    def integrations(request: Request, response: Response) -> list[IntegrationInfo]:
+        response.headers["Cache-Control"] = "no-store"
+        return features.integrations.describe(authenticated_actor(request))
 
     @router.get("/inventory")
     def inventory() -> list[InventoryItem]:

@@ -25,7 +25,8 @@ class KitchenService:
         self.shopping_builder = shopping_builder or default_shopping_builder()
 
     def create_recipe(self, data: RecipeCreate) -> Recipe:
-        recipe = Recipe(id=uuid4(), **data.model_dump())
+        # Image credit is written only by the authenticated candidate-selection flow.
+        recipe = Recipe(id=uuid4(), **data.model_dump(exclude={"image_attribution"}))
         self.store.save("recipe", recipe)
         return recipe
 
@@ -36,8 +37,12 @@ class KitchenService:
         return self.store.get("recipe", recipe_id, Recipe)
 
     def update_recipe(self, recipe_id: UUID, data: RecipeCreate) -> Recipe:
-        self.get_recipe(recipe_id)
-        recipe = Recipe(id=recipe_id, **data.model_dump())
+        existing = self.get_recipe(recipe_id)
+        values = data.model_dump(exclude={"image_attribution"})
+        values["image_attribution"] = (
+            existing.image_attribution if data.image_url == existing.image_url else None
+        )
+        recipe = Recipe(id=recipe_id, **values)
         self.store.save("recipe", recipe)
         return recipe
 
@@ -70,8 +75,10 @@ class KitchenService:
             ingredients=[
                 ingredient.model_copy(
                     update={
-                        "quantity": scale_quantity(
-                            ingredient.quantity, meal.servings, recipe.servings
+                        "quantity": (
+                            scale_quantity(ingredient.quantity, meal.servings, recipe.servings)
+                            if ingredient.quantity is not None
+                            else None
                         )
                     }
                 )

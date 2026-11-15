@@ -18,6 +18,64 @@
     };
   }
 
-  root.KitchenPlannedCooking = { buildPlannedCookingView };
+  function formatPlannedIngredient(item, formatQuantity = (value) => value) {
+    const name = String(item?.name || "Ingredient").trim();
+    const unit = String(item?.unit || "").trim();
+    if (item?.quantity == null || !unit) {
+      const text = "Quantity not specified · " + name;
+      return {
+        text,
+        accessibleLabel: "Quantity not specified for " + name,
+        copyText: text,
+      };
+    }
+    const exact = String(item.quantity);
+    const displayQuantity = String(formatQuantity(exact));
+    const text = displayQuantity + " " + unit + " " + name;
+    const spokenUnit =
+      {
+        g: "grams",
+        kg: "kilograms",
+        mg: "milligrams",
+        ml: "milliliters",
+        cl: "centiliters",
+        dl: "deciliters",
+        l: "liters",
+        tsp: "teaspoons",
+        tbsp: "tablespoons",
+        item: "items",
+        items: "items",
+        pc: "pieces",
+        pcs: "pieces",
+        stk: "pieces",
+        pinch: "pinch",
+        pinches: "pinches",
+      }[unit.toLowerCase()] || unit;
+    return {
+      text,
+      accessibleLabel: "Amount: " + displayQuantity + " " + spokenUnit + " " + name,
+      copyText: text,
+    };
+  }
+
+  function formatPlannedIngredientList(view, formatQuantity = (value) => value) {
+    const title = String(view?.sourceRecipe?.title || "Recipe").trim();
+    const ingredients = (view?.ingredients || []).map((item) =>
+      formatPlannedIngredient(item, formatQuantity).copyText,
+    );
+    return [
+      title,
+      "For " + view.servings + " servings",
+      "",
+      "Ingredients:",
+      ...(ingredients.length ? ingredients.map((item) => "- " + item) : ["- No ingredients listed"]),
+    ].join("\n");
+  }
+
+  root.KitchenPlannedCooking = {
+    buildPlannedCookingView,
+    formatPlannedIngredient,
+    formatPlannedIngredientList,
+  };
   if (typeof module !== "undefined" && module.exports) module.exports = root.KitchenPlannedCooking;
 })(globalThis);

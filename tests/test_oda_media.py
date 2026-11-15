@@ -71,6 +71,29 @@ async def test_extracts_only_existing_https_oda_image_references_and_explicit_si
 
 
 @pytest.mark.asyncio
+async def test_decodes_html_escaped_query_separators_from_oda_jsonld_image_urls():
+    # Oda's public pages place HTML-escaped query separators in JSON-LD script
+    # text. Since script text is parsed as raw text, leaving these escaped makes
+    # the browser request an ``amp;format`` parameter instead of ``format``.
+    escaped_image = (
+        "https://images.oda.com/local_products/item.jpg?fit=bounds&amp;format=auto"
+        "&amp;optimize=medium&amp;width=331&amp;s=signature"
+    )
+    html = page(images=escaped_image)
+
+    async def handler(_request):
+        return httpx.Response(200, headers={"content-type": "text/html"}, text=html)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        media = await fetch_product_media(PRODUCT_URL, http_client=client)
+
+    assert str(media.image_url) == (
+        "https://images.oda.com/local_products/item.jpg?fit=bounds&format=auto"
+        "&optimize=medium&width=331&s=signature"
+    )
+
+
+@pytest.mark.asyncio
 async def test_missing_jsonld_images_and_ambiguous_description_return_no_media():
     html = page(images=None, extra={"description": "Milk in 1 L carton"})
 

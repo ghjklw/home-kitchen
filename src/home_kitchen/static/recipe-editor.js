@@ -65,18 +65,22 @@
     "hoder",
   ]);
 
-  function isPositiveQuantity(value) {
-    if (typeof value !== "string") return false;
+  function normalizeQuantity(value) {
+    if (typeof value !== "string") return null;
     const quantity = value.trim();
-    return (
-      /^(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)$/u.test(quantity) &&
-      /[1-9]/u.test(quantity.replace(".", ""))
-    );
+    if (!/^(?:[0-9]+(?:[.,][0-9]+)?|[.,][0-9]+)$/u.test(quantity)) return null;
+    const normalized = quantity.replace(",", ".");
+    return /[1-9]/u.test(normalized.replace(".", "")) ? normalized : null;
+  }
+
+  function isPositiveQuantity(value) {
+    return normalizeQuantity(value) !== null;
   }
 
   function emptyRow(sourceText = "") {
     return {
       sourceText,
+      source_indices: [],
       name: sourceText.trim(),
       quantity: "",
       unit: "",
@@ -87,7 +91,7 @@
 
   function parseSourceIngredient(value) {
     const sourceText = String(value ?? "");
-    const match = /^\s*((?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+))\s+(\S+)\s+(.+?)\s*$/u.exec(
+    const match = /^\s*((?:[0-9]+(?:[.,][0-9]+)?|[.,][0-9]+))\s+(\S+)\s+(.+?)\s*$/u.exec(
       sourceText,
     );
     if (!match || !isPositiveQuantity(match[1])) return emptyRow(sourceText);
@@ -99,21 +103,29 @@
     return {
       sourceText,
       name,
-      quantity: match[1],
+      quantity: normalizeQuantity(match[1]),
       unit: match[2],
       category: "Other",
       parsed: true,
     };
   }
 
-  function rowFromDraft(value) {
-    if (typeof value === "string") return parseSourceIngredient(value);
+  function rowFromDraft(value, sourceIndex) {
+    if (typeof value === "string") {
+      const row = parseSourceIngredient(value);
+      if (Number.isSafeInteger(sourceIndex) && sourceIndex >= 0)
+        row.source_indices = [sourceIndex];
+      return row;
+    }
     if (!value || typeof value !== "object") return emptyRow();
     const quantity = value.quantity == null ? "" : String(value.quantity);
     const unit = value.unit == null ? "" : String(value.unit);
     const name = value.name == null ? "" : String(value.name);
     return {
       sourceText: "",
+      source_indices: Array.isArray(value.source_indices)
+        ? [...value.source_indices]
+        : [],
       name,
       quantity,
       unit,
@@ -125,6 +137,7 @@
 
   root.KitchenRecipeEditor = {
     isPositiveQuantity,
+    normalizeQuantity,
     parseSourceIngredient,
     rowFromDraft,
   };

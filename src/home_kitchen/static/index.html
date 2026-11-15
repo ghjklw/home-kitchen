@@ -12,6 +12,7 @@
     <link rel="icon" href="/static/icon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/static/style.css" />
     <title>Kitchen</title>
+    <script defer src="/static/shopping-view.js"></script>
     <script defer src="/static/shopping-share.js"></script>
     <script defer src="/static/recipe-editor.js"></script>
     <script defer src="/static/app.js"></script>
@@ -25,12 +26,11 @@
           ></a
         >
         <nav aria-label="Main navigation">
-          <button data-view="week">Week</button
+          <button data-view="week">Plan</button
           ><button data-view="recipes">Recipes</button
           ><button data-view="shopping">Shopping</button
-          ><button data-view="basket">Buy</button
-          ><button data-view="settings">Household</button>
         </nav>
+        <button class="secondary-nav" data-view="settings">Household settings</button>
         <p class="sidebar-note">
           Good meals start with<br />a little room to plan.
         </p>

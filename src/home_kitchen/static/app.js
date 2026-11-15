@@ -17,7 +17,6 @@ const state = {
   cartProposalHandled: false,
   cartProposalBlocked: false,
   shoppingPanel: "needs",
-  purchaseMode: "oda",
   basket: null,
   items: [],
   regular: [],
@@ -177,7 +176,7 @@ function empty(heading, description, action) {
   );
 }
 function weekControls() {
-  const row = el("div", null, "toolbar");
+  const row = el("div", null, "toolbar period-toolbar");
   const change = async (amount) => {
     state.week.setDate(state.week.getDate() + amount);
     syncPlannerUrl();
@@ -186,6 +185,7 @@ function weekControls() {
   const previous = button("←", () => change(-7));
   const next = button("→", () => change(7));
   const jump = el("label", null, "date-jump");
+  jump.classList.add("period-jump");
   const jumpInput = el("input");
   jumpInput.type = "date";
   jumpInput.value = iso(state.week);
@@ -216,7 +216,7 @@ function weekControls() {
         syncPlannerUrl();
         await refreshView();
       },
-      "quiet small",
+      "quiet small today-period",
     ),
     jump,
   );
@@ -297,17 +297,14 @@ async function refreshView() {
         state.regular,
         state.inventory,
       ] = results;
-      if (state.shoppingPanel === "in_store")
+      if (state.shoppingPanel === "oda") {
+        [state.basket, state.oda] = await Promise.all([
+          api("/basket" + range()),
+          api("/oda/status"),
+        ]);
+      } else if (state.shoppingPanel === "in_store") {
         state.storeTrip = await api("/store-trip" + range());
-    }
-    if (state.view === "basket") {
-      const results = await Promise.all([
-        api("/basket" + range()),
-        api("/oda/status"),
-      ]);
-      [state.basket, state.oda] = results;
-      if (state.purchaseMode === "in_store")
-        state.storeTrip = await api("/store-trip" + range());
+      }
     }
     render();
   } catch (error) {
@@ -315,6 +312,10 @@ async function refreshView() {
   }
 }
 function navigate(view) {
+  if (view === "basket") {
+    state.shoppingPanel = "oda";
+    view = "shopping";
+  }
   state.view = view;
   location.hash = view;
   refreshView();
@@ -341,7 +342,6 @@ function render() {
       week: renderWeek,
       recipes: renderRecipes,
       shopping: renderShopping,
-      basket: renderBasket,
       settings: renderSettings,
     })[state.view] || renderWeek
   )(main);
@@ -379,11 +379,12 @@ function renderWeek(main) {
         "date",
       ),
     );
+    const occupiedSlots = new Set(meals.map((meal) => meal.slot || "dinner"));
     ["breakfast", "lunch", "dinner"].forEach((slot) => {
       const slotSection = el("section", null, "meal-slot");
-      add(slotSection, el("span", slot, "eyebrow"));
       const slotMeals = meals.filter((meal) => (meal.slot || "dinner") === slot);
       if (slotMeals.length) {
+        add(slotSection, el("span", slot, "eyebrow"));
         slotMeals.forEach((meal) => {
           const recipe = state.recipes.find((item) => item.id === meal.recipe_id);
           add(
@@ -414,15 +415,27 @@ function renderWeek(main) {
             ),
           );
         });
-      } else {
-        add(
-          slotSection,
-          el("p", "Nothing planned", "empty-meal"),
-          button("+ Add " + slot, () => mealForm(iso(date), undefined, slot), "quiet small"),
-        );
       }
-      add(card, slotSection);
+      if (slotMeals.length) add(card, slotSection);
     });
+    const openSlots = ["breakfast", "lunch", "dinner"].filter(
+      (slot) => !occupiedSlots.has(slot),
+    );
+    if (openSlots.length) {
+      add(
+        card,
+        el(
+          "p",
+          meals.length ? "Open: " + openSlots.join(" · ") : "Nothing planned yet",
+          "open-slots",
+        ),
+        button(
+          "+ Add meal",
+          () => mealForm(iso(date), undefined, openSlots[0]),
+          "quiet small",
+        ),
+      );
+    }
     add(grid, card);
   }
   add(main, grid);
@@ -700,7 +713,7 @@ function recipeForm(draft = {}, source = "manual") {
   const name = field("Recipe name", "text", draft.title);
   name.input.required = true;
   const servings = field(
-    "Recipe servings to save",
+    "Recipe makes",
     "number",
     draft.servings || state.household.default_servings || 2,
   );
@@ -729,7 +742,7 @@ function recipeForm(draft = {}, source = "manual") {
     ingredientEditor,
     el(
       "p",
-      "Review every ingredient. Source wording stays visible; quantities and units must be explicit before saving.",
+      "Review source lines. Use positive quantities with a decimal point or comma and explicit units before saving.",
       "muted",
     ),
   );
@@ -741,8 +754,21 @@ function recipeForm(draft = {}, source = "manual") {
     add(ingredientEditor, original);
   }
   const ingredientRows = el("div", null, "ingredient-rows");
+  const sourceIngredients = Array.isArray(draft.source_ingredients)
+    ? draft.source_ingredients
+    : source === "imported" && Array.isArray(draft.ingredients)
+      ? draft.ingredients.map((text, index) => ({ index, text }))
+      : [];
   let rowControllers = (Array.isArray(draft.ingredients) ? draft.ingredients : []).map(
-    (item) => window.KitchenRecipeEditor.rowFromDraft(item),
+    (item, index) => {
+      const row = window.KitchenRecipeEditor.rowFromDraft(item, index);
+      if (!row.sourceText && row.source_indices.length)
+        row.sourceText = row.source_indices
+          .map((sourceIndex) => sourceIngredients.find((entry) => entry.index === sourceIndex)?.text)
+          .filter(Boolean)
+          .join(" · ");
+      return row;
+    },
   );
   if (!rowControllers.length) rowControllers.push(window.KitchenRecipeEditor.rowFromDraft({}));
 
@@ -759,24 +785,11 @@ function recipeForm(draft = {}, source = "manual") {
     const sourceText = values.sourceText
       ? el("p", "Source text: " + values.sourceText, "ingredient-source")
       : null;
-    const status = values.parsed === true
-      ? "Quantity and unit parsed from the source. Review both against the original text."
-      : values.parsed === false
-        ? "Quantity or unit is ambiguous. Enter both explicitly; Kitchen will not guess them."
-        : values.hasDraftValues
-          ? "Draft values shown below. Review them before saving."
-          : "Enter an explicit positive quantity and unit.";
-    const sourceStatus = el("p", status, "ingredient-status");
     const fields = el("div", null, "ingredient-fields");
     const ingredientName = field("Name", "text", values.name);
-    const quantity = field(
-      "Quantity",
-      "text",
-      values.quantity,
-      "Positive amount; use a decimal point, such as 0.5.",
-    );
+    const quantity = field("Quantity", "text", values.quantity);
     quantity.input.inputMode = "decimal";
-    const unit = field("Unit", "text", values.unit, "Use an explicit unit, such as g, ml, item, or tbsp.");
+    const unit = field("Unit", "text", values.unit);
     const category = field("Category", "text", values.category || "Other");
     const rowError = el("p", "", "ingredient-error");
     rowError.setAttribute("role", "alert");
@@ -794,11 +807,12 @@ function recipeForm(draft = {}, source = "manual") {
       name: ingredientName.input,
       quantity: quantity.input,
       unit: unit.input,
+      source_indices: [...(values.source_indices || [])],
       category: category.input,
       error: rowError,
     };
     add(fields, ingredientName.wrap, quantity.wrap, unit.wrap, category.wrap);
-    add(row, legend, sourceText, sourceStatus, fields, rowError, remove);
+    add(row, legend, sourceText, fields, rowError, remove);
     return controller;
   }
 
@@ -837,9 +851,10 @@ function recipeForm(draft = {}, source = "manual") {
     const rows = rowControllers.map((row) => {
       const item = {
         name: row.name.value.trim(),
-        quantity: row.quantity.value.trim(),
+        quantity: window.KitchenRecipeEditor.normalizeQuantity(row.quantity.value),
         unit: row.unit.value.trim(),
         category: row.category.value.trim() || "Other",
+        source_indices: [...row.source_indices],
       };
       const errors = [];
       const fieldErrors = {
@@ -849,7 +864,7 @@ function recipeForm(draft = {}, source = "manual") {
       };
       if (fieldErrors.name) errors.push("Add an ingredient name.");
       if (fieldErrors.quantity) {
-        errors.push("Enter an exact positive quantity using a decimal point; ambiguous source text needs your review.");
+        errors.push("Enter an exact positive quantity using a decimal point or comma; ambiguous source text needs your review.");
       }
       if (fieldErrors.unit) errors.push("Enter the ingredient unit explicitly.");
       row.error.textContent = errors.join(" ");
@@ -872,6 +887,8 @@ function recipeForm(draft = {}, source = "manual") {
         .filter(Boolean),
       source,
       source_url: draft.source_url || null,
+      source_ingredients: sourceIngredients,
+      provenance: draft.provenance || null,
     };
     await api(
       isEditing ? "/recipes/" + encodeURIComponent(draft.id) : "/recipes",
@@ -920,7 +937,7 @@ function viewRecipe(recipe) {
     body,
     add(
       el("div", null, "actions"),
-      button("Plan a dinner", () => mealForm(undefined, recipe.id), "primary"),
+      button("Plan a meal", () => mealForm(undefined, recipe.id), "primary"),
       button("Edit recipe", () => recipeForm(recipe, recipe.source || "manual"), "quiet"),
       button("Rate this recipe", () => feedbackForm(recipe), "quiet"),
       button(
@@ -996,8 +1013,9 @@ function shoppingOrigins(origins = []) {
 function shoppingSections() {
   const nav = el("div", null, "section-tabs");
   [
-    ["needs", "Shopping needs"],
-    ["in_store", "In-store trip"],
+    ["needs", "Needs"],
+    ["oda", "Oda"],
+    ["in_store", "In-store"],
     ["pantry", "At home"],
   ].forEach(([key, label]) => {
     const tab = button(
@@ -1012,21 +1030,6 @@ function shoppingSections() {
     nav.append(tab);
   });
   return nav;
-}
-function groupedByCategory(lines) {
-  const groups = new Map();
-  [...lines]
-    .sort(
-      (a, b) =>
-        (a.category || "Other").localeCompare(b.category || "Other") ||
-        a.name.localeCompare(b.name),
-    )
-    .forEach((line) => {
-      const category = line.category?.trim() || "Other";
-      if (!groups.has(category)) groups.set(category, []);
-      groups.get(category).push(line);
-    });
-  return groups;
 }
 function renderInStore(main) {
   const trip = state.storeTrip || {
@@ -1043,7 +1046,11 @@ function renderInStore(main) {
     dateLabel(day(6), { month: "short", day: "numeric", year: "numeric" });
   const shareTitle = "Kitchen shopping list · " + rangeTitle;
   const sharedText = () =>
-    window.KitchenShoppingShare.formatRemainingShoppingText(shareTitle, remaining);
+    window.KitchenShoppingShare.formatRemainingShoppingText(
+      shareTitle,
+      remaining,
+      state.household.shopping_category_order || [],
+    );
   const copyDialog = (text, explanation) => {
     const root = openDialog("Copy shopping list");
     add(root, el("p", explanation, "muted"));
@@ -1100,24 +1107,30 @@ function renderInStore(main) {
   const share = button("Share remaining list", shareRemaining, "quiet");
   const copy = button("Copy remaining list", () => copyRemaining(), "quiet");
   share.disabled = copy.disabled = remaining.length === 0;
-  add(
-    main,
-    add(el("div", null, "actions shopping-share-actions"), share, copy),
+  const progressData = window.KitchenShoppingView.pickupProgress(
+    trip.checked_count,
+    trip.total_count,
+  );
+  const progress = el("progress");
+  progress.max = 100;
+  progress.value = progressData.percent;
+  progress.setAttribute("aria-label", "Trip pickup progress");
+  const progressSummary = add(
+    el("div", null, "trip-progress"),
+    el("strong", progressData.label),
+    progress,
   );
   add(
     main,
+    add(el("div", null, "trip-toolbar"), progressSummary, add(el("div", null, "actions shopping-share-actions"), share, copy)),
+  );
+  const pickupInfo = el("details", null, "shopping-info");
+  add(
+    pickupInfo,
+    el("summary", "About pickup tracking"),
     el(
       "p",
-      "Checked means picked up for this trip. It does not mark an item as bought or reduce what you have at home.",
-      "callout",
-    ),
-    el(
-      "p",
-      (trip.checked_count || 0) +
-        " of " +
-        (trip.total_count || 0) +
-        " needs picked up",
-      "muted",
+      "Checking an item off means you picked it up for this trip. It does not record a purchase or change at-home quantities.",
     ),
   );
   if (!trip.lines.length) {
@@ -1136,9 +1149,11 @@ function renderInStore(main) {
         ),
       ),
     );
+    add(main, pickupInfo);
     return;
   }
-  groupedByCategory(trip.lines).forEach((lines, category) => {
+  const categoryOrder = state.household.shopping_category_order || [];
+  window.KitchenShoppingView.groupedByCategory(trip.lines, categoryOrder).forEach((lines, category) => {
     const section = add(
       el("section", null, "panel category-section"),
       el("h2", category),
@@ -1170,16 +1185,23 @@ function renderInStore(main) {
         }
       });
       const detail = add(el("div", null, "detail"), el("strong", line.name));
+      const exactQuantity = String(line.to_buy_quantity ?? "0");
+      const unit = line.unit || "";
+      const quantity = el(
+        "small",
+        window.KitchenShoppingView.formatQuantityForDisplay(exactQuantity) +
+          (unit ? " " + unit : "") +
+          " to pick up" +
+          (line.origins?.length ? " · " + shoppingOrigins(line.origins) : ""),
+      );
+      quantity.setAttribute(
+        "aria-label",
+        "Exact amount: " + exactQuantity + (unit ? " " + unit : "") + " to pick up",
+      );
+      quantity.title = "Exact amount: " + exactQuantity + (unit ? " " + unit : "");
       add(
         detail,
-        el(
-          "small",
-          (line.to_buy_quantity || "0") +
-            " " +
-            (line.unit || "") +
-            " to pick up" +
-            (line.origins?.length ? " · " + shoppingOrigins(line.origins) : ""),
-        ),
+        quantity,
       );
       add(row, check, detail);
       list.append(row);
@@ -1187,6 +1209,7 @@ function renderInStore(main) {
     add(section, list);
     main.append(section);
   });
+  add(main, pickupInfo);
 }
 function inventoryForm(item = {}) {
   const root = openDialog(
@@ -1291,22 +1314,37 @@ function renderInventory(main) {
   add(main, list);
 }
 function renderShopping(main) {
-  add(
-    main,
-    title(
-      "One less thing to remember",
-      "The shopping list.",
-      "Plan needs from meals, regulars, and quick additions. At-home quantities reduce what you need to buy.",
-      [
-        state.shoppingPanel === "pantry"
-          ? button("+ Add at-home item", () => inventoryForm(), "primary")
-          : button("+ Add shopping need", () => itemForm(), "primary"),
-      ],
-    ),
-    weekControls(),
-    shoppingSections(),
+  const inStore = state.shoppingPanel === "in_store";
+  const isOda = state.shoppingPanel === "oda";
+  const isPantry = state.shoppingPanel === "pantry";
+  const heading = title(
+    "Shopping",
+    inStore
+      ? "In-store trip"
+      : isOda
+        ? "Oda products"
+        : isPantry
+          ? "At home"
+          : "The shopping list.",
+    inStore
+      ? "Pick up what remains for this period."
+      : isOda
+        ? "Review product choices for this period."
+        : isPantry
+          ? "Quantities here reduce what remains to buy."
+          : "Your list combines planned meals, everyday items, and anything you add.",
+    inStore || isOda
+      ? []
+      : [
+          isPantry
+            ? button("+ Add at-home item", () => inventoryForm(), "primary")
+            : button("+ Add shopping need", () => itemForm(), "primary"),
+        ],
   );
+  if (inStore) heading.classList.add("shopping-compact-header");
+  add(main, heading, weekControls(), shoppingSections());
   if (state.shoppingPanel === "in_store") return renderInStore(main);
+  if (state.shoppingPanel === "oda") return renderBasket(main);
   if (state.shoppingPanel === "pantry") return renderInventory(main);
   const columns = el("div", null, "two-columns");
   const left = el("div");
@@ -1323,41 +1361,46 @@ function renderShopping(main) {
   if (!planLines.length)
     add(
       planned,
-      el("p", "Plan a dinner to bring its ingredients here.", "muted"),
+      el("p", "Plan a meal to bring its ingredients here.", "muted"),
       button("Go to meal plan", () => navigate("week"), "quiet"),
     );
   else {
     const list = el("ul", null, "list");
-    planLines.forEach((item) =>
-      add(
-        list,
-        add(
-          el("li"),
-          add(
-            el("div", null, "detail"),
-            el("strong", item.name),
-            el(
-              "small",
-              (item.required_quantity ?? item.quantity) +
-                " " +
-                item.unit +
-                (item.available_quantity != null
-                  ? " · " + item.available_quantity + " at home"
-                  : "") +
-                " · " +
-                (Number(item.to_buy_quantity ?? item.quantity ?? 0) > 0
-                  ? (item.to_buy_quantity ?? item.quantity) + " to buy"
-                  : "covered at home") +
-                " · " +
-                (item.category || "Other") +
-                (item.origins?.length
-                  ? " · " + shoppingOrigins(item.origins)
-                  : ""),
-            ),
-          ),
-        ),
-      ),
-    );
+    planLines.forEach((item) => {
+      const unit = item.unit || "";
+      const required = String(item.required_quantity ?? item.quantity ?? "");
+      const available = item.available_quantity == null ? null : String(item.available_quantity);
+      const toBuy = String(item.to_buy_quantity ?? item.quantity ?? "0");
+      const summary = el(
+        "small",
+        window.KitchenShoppingView.formatQuantityForDisplay(required) +
+          (unit ? " " + unit : "") +
+          (available != null
+            ? " · " + window.KitchenShoppingView.formatQuantityForDisplay(available) + " at home"
+            : "") +
+          " · " +
+          (window.KitchenShoppingView.isPositiveDecimal(toBuy)
+            ? window.KitchenShoppingView.formatQuantityForDisplay(toBuy) + " to buy"
+            : "covered at home") +
+          " · " +
+          (item.category || "Other") +
+          (item.origins?.length ? " · " + shoppingOrigins(item.origins) : ""),
+      );
+      summary.setAttribute(
+        "aria-label",
+        "Exact quantities: " +
+          required +
+          (unit ? " " + unit : "") +
+          " required" +
+          (available != null ? "; " + available + " " + unit + " at home" : "") +
+          "; " +
+          toBuy +
+          " " +
+          unit +
+          " to buy",
+      );
+      add(list, add(el("li"), add(el("div", null, "detail"), el("strong", item.name), summary)));
+    });
     add(planned, list);
   }
   const extras = add(
@@ -1424,7 +1467,7 @@ function renderShopping(main) {
   const right = el("div");
   const regular = add(
     el("section", null, "panel"),
-    el("h2", "Your regulars"),
+    el("h2", "Everyday items"),
     el(
       "p",
       "Set a gentle reminder for things you buy often. Add due items when you need them.",
@@ -1513,10 +1556,10 @@ function renderShopping(main) {
   );
   const oda = add(
     el("section", null, "panel"),
-    el("h2", "Oda shopping"),
+    el("h2", "Oda"),
     el(
       "p",
-      "Connect your Oda account to Kitchen from the Buy view. The in-store list works without Oda, and Kitchen does not place orders.",
+      "Connect your Oda account from the Oda tab. In-store checklists work without Oda.",
       "muted",
     ),
   );
@@ -1553,6 +1596,9 @@ function basketProduct(product, packages, alternatives = false) {
     el("h4", product.name),
     product.brand ? el("p", product.brand, "muted") : null,
     product.provider ? el("p", "Source: " + product.provider, "muted") : null,
+    (product.product_id ?? product.id) != null
+      ? el("small", "Oda product ID: " + (product.product_id ?? product.id), "muted")
+      : null,
   );
   const pack =
     product.pack_quantity != null
@@ -1878,12 +1924,13 @@ function odaSearchResultCard(product, need) {
     );
   add(
     details,
-    el("small", "Oda search result · not independently verified", "muted"),
+    el("small", "Suggested match · check product and pack size", "muted"),
   );
   add(card, details);
   return card;
 }
 function odaSearchForNeed(need) {
+  if (!state.oda?.connected) return null;
   const current = state.odaSearch[need.id] || {};
   const form = el("form", null, "oda-search-form");
   const query = field(
@@ -2196,7 +2243,7 @@ function renderOdaProposal(proposal, request) {
   const expiry = Date.parse(proposal.expires_at || "");
   const expired = Number.isFinite(expiry) && expiry <= Date.now();
   const confirm = button(
-    expired ? "Review expired" : "Confirm cart additions",
+    expired ? "Review expired" : "Add these packs to Oda cart",
     async () => confirmOdaCartProposal(proposal, request),
     "primary",
   );
@@ -2365,60 +2412,11 @@ async function createOdaCartProposal(request, trigger) {
 }
 function renderBasket(main) {
   const basket = state.basket || { needs: [], issues: [] };
-  add(
-    main,
-    title(
-      "Shopping with confidence",
-      "Review what to buy.",
-      "Choose Oda or an in-store trip. In-store checkoffs track pickup only; Oda cart additions need a separate review and confirmation.",
-      [button("Refresh basket", refreshView, "quiet")],
-    ),
-  );
-  const purchaseModes = el("div", null, "section-tabs purchase-modes");
-  [
-    ["oda", "Oda"],
-    ["in_store", "In-store"],
-  ].forEach(([mode, label]) => {
-    const option = button(
-      label,
-      async () => {
-        state.purchaseMode = mode;
-        if (mode === "in_store")
-          state.storeTrip = await api("/store-trip" + range());
-        render();
-      },
-      state.purchaseMode === mode ? "primary" : "quiet",
-    );
-    if (state.purchaseMode === mode)
-      option.setAttribute("aria-current", "page");
-    purchaseModes.append(option);
-  });
-  add(main, purchaseModes);
-  if (state.purchaseMode === "in_store") {
-    add(
-      main,
-      el(
-        "p",
-        "This checklist tracks items picked up for this trip. It does not record purchases or change at-home quantities.",
-        "callout",
-      ),
-    );
-    renderInStore(main);
-    return;
-  }
   const odaSetup = add(
-    el("section", null, "panel"),
-    el("h2", "Connect Oda to Kitchen"),
+    el("section", null, "panel oda-connection"),
+    el("h2", state.oda?.connected ? "Oda connected" : "Connect Oda"),
   );
   if (state.oda?.connected) {
-    add(
-      odaSetup,
-      el(
-        "p",
-        "Oda is connected to Kitchen. Search products for each need, choose a package size, then review cart additions before confirming.",
-        "muted",
-      ),
-    );
     add(
       odaSetup,
       button(
@@ -2436,12 +2434,19 @@ function renderBasket(main) {
         "quiet",
       ),
     );
+    const odaInfo = el("details", null, "shopping-info");
+    add(
+      odaInfo,
+      el("summary", "About Oda product choices"),
+      el("p", "Product matches are unverified suggestions. Check the exact product and enter package quantities explicitly. Kitchen never places orders or pays."),
+    );
+    add(odaSetup, odaInfo);
   } else if (state.oda?.configured) {
     add(
       odaSetup,
       el(
         "p",
-        "Connect your Oda account securely to Kitchen. Kitchen will not place an order.",
+        "Connect your Oda account to search products and review cart additions.",
         "muted",
       ),
     );
@@ -2478,7 +2483,7 @@ function renderBasket(main) {
       odaSetup,
       el(
         "p",
-        "Oda connection is not configured for this Kitchen yet. Ask the household administrator to finish setup here.",
+        "Oda setup needs to be completed by your household administrator.",
         "muted",
       ),
     );
@@ -2487,44 +2492,25 @@ function renderBasket(main) {
     add(odaSetup, unavailable);
   }
   add(main, odaSetup);
-  add(
-    main,
-    el(
+  if (basket.needs?.length) {
+    const hasSelections = window.KitchenShoppingView.hasSelectedProducts(basket);
+    const status = el(
       "p",
       basket.ready_for_review
-        ? "Basket needs are ready for review."
-        : "Basket has items that need attention before review.",
-      basket.ready_for_review ? "callout" : "callout offline",
-    ),
-  );
-  if (basket.total_cost != null)
-    add(
-      main,
-      el(
-        "p",
-        "Product total: " +
-          basket.total_cost +
-          (basket.currency ? " " + basket.currency : "") +
-          (basket.price_complete
-            ? ""
-            : " · incomplete because some prices are unknown"),
-        "callout",
-      ),
+        ? "Ready for cart review"
+        : hasSelections
+          ? "Review selected products"
+          : "Choose a product for each need",
+      "basket-status" + (basket.ready_for_review ? "" : " needs-attention"),
     );
-  else if (basket.price_complete === false)
-    add(
-      main,
-      el(
-        "p",
-        "Product total is incomplete because some prices are unknown.",
-        "callout",
-      ),
-    );
+    const priceSummary = window.KitchenShoppingView.basketPriceSummary(basket);
+    if (priceSummary)
+      add(status, el("span", priceSummary.label, "basket-price-summary"));
+    add(main, status);
+  }
   if (basket.issues?.length) {
-    const issues = add(
-      el("section", null, "callout"),
-      el("strong", "Needs attention"),
-    );
+    const issues = el("details", null, "shopping-info basket-issues");
+    add(issues, el("summary", "Review details (" + basket.issues.length + ")"));
     const list = el("ul");
     basket.issues.forEach((issue) =>
       add(
@@ -2544,20 +2530,15 @@ function renderBasket(main) {
     add(
       main,
       empty(
-        "Your basket is empty",
-        "Plan meals or add shopping needs first. Oda product references appear here when the Kitchen connection supports them.",
-        button("Open shopping list", () => navigate("shopping"), "primary"),
-      ),
-    );
-    add(
-      main,
-      add(
-        el("section", null, "panel"),
-        el("h2", "Oda product search"),
-        el(
-          "p",
-          "Connect Oda to Kitchen above, then search products from a shopping need. Kitchen does not place orders.",
-          "muted",
+        "No shopping needs to match yet",
+        "Plan meals or add shopping needs first.",
+        button(
+          "Open shopping needs",
+          () => {
+            state.shoppingPanel = "needs";
+            navigate("shopping");
+          },
+          "primary",
         ),
       ),
     );
@@ -2568,13 +2549,22 @@ function renderBasket(main) {
     const need = entry.need || {};
     const section = el("section", null, "panel need-card");
     const heading = el("div", null, "need-heading");
+    const needQuantity = el(
+      "p",
+      window.KitchenShoppingView.formatQuantityForDisplay(String(need.quantity ?? "")) +
+        (need.unit ? " " + need.unit : ""),
+      "need-quantity",
+    );
+    needQuantity.setAttribute(
+      "aria-label",
+      "Exact quantity: " + String(need.quantity ?? "") + (need.unit ? " " + need.unit : ""),
+    );
     add(
       heading,
       add(
         el("div"),
-        el("p", "NEED", "eyebrow"),
         el("h2", need.name || "Shopping need"),
-        el("p", need.quantity + " " + (need.unit || ""), "need-quantity"),
+        needQuantity,
       ),
     );
     if (need.origins?.length)
@@ -2587,15 +2577,15 @@ function renderBasket(main) {
     ) {
       const allocation = el(
         "p",
-        "Allocated: " +
+        "Covered by selected packs: " +
           (entry.allocated_quantity ?? "0") +
           " " +
           (need.unit || "") +
-          " · Remaining: " +
+          " · Still needed: " +
           (entry.remaining_quantity ?? "unknown") +
           " " +
           (need.unit || "") +
-          " · Extra: " +
+          " · Extra from selected packs: " +
           (entry.overbuy_quantity ?? "unknown") +
           " " +
           (need.unit || ""),
@@ -2604,17 +2594,6 @@ function renderBasket(main) {
       add(section, allocation);
     }
     const selections = entry.selections || [];
-    if (!selections.length)
-      add(
-        section,
-        el(
-          "p",
-          state.oda?.connected
-            ? "No Oda product selected yet. Search below to review product options."
-            : "Connect Oda to Kitchen before searching for products.",
-          "callout",
-        ),
-      );
     add(section, odaSearchForNeed(need));
     selections.forEach((selection) => {
       if (selection.product) {
@@ -2654,16 +2633,14 @@ function renderBasket(main) {
         add(section, alternatives);
       }
     });
-    if (entry.ready === false)
-      add(
-        section,
-        el("p", "This need is not ready for review yet.", "form-error"),
-      );
     add(needs, section);
   });
   add(main, needs);
   const proposalRequest = odaCartProposalRequest(basket);
-  if (proposalRequest.additions.length || proposalRequest.invalidSelections) {
+  if (
+    state.oda?.connected &&
+    (proposalRequest.additions.length || proposalRequest.invalidSelections)
+  ) {
     const cartPanel = add(
       el("section", null, "panel oda-cart-panel"),
       el("h2", "Add selected products to Oda"),
@@ -2693,15 +2670,6 @@ function renderBasket(main) {
           "callout",
         ),
       );
-    else if (!state.oda?.connected)
-      add(
-        cartPanel,
-        el(
-          "p",
-          "Connect Oda to Kitchen before preparing cart additions.",
-          "muted",
-        ),
-      );
     else {
       let review;
       review = button(
@@ -2716,18 +2684,6 @@ function renderBasket(main) {
     }
     add(main, cartPanel);
   }
-  add(
-    main,
-    add(
-      el("section", null, "panel"),
-      el("h2", "Orders and payment"),
-      el(
-        "p",
-        "Kitchen does not place orders or handle payment. Review product references here and complete any purchase on Oda.",
-        "muted",
-      ),
-    ),
-  );
 }
 function feedbackForm(recipe) {
   const root = openDialog(recipe ? "Rate this recipe" : "Share feedback");
@@ -2979,7 +2935,7 @@ function renderSettings(main) {
             (state.integrations.ai?.configured
               ? "configured"
               : "setup required") +
-            ". Oda account connection and setup are managed from Buy in Kitchen.",
+            ". Oda account connection and setup are managed from Shopping.",
           "muted",
         ),
         el(
@@ -3001,11 +2957,14 @@ document
   );
 window.addEventListener("hashchange", () => {
   const view = location.hash.slice(1);
+  const panelChanged = view === "basket" && state.shoppingPanel !== "oda";
+  if (view === "basket") state.shoppingPanel = "oda";
+  const nextView = view === "basket" ? "shopping" : view;
   if (
-    ["week", "recipes", "shopping", "basket", "settings"].includes(view) &&
-    view !== state.view
+    ["week", "recipes", "shopping", "settings"].includes(nextView) &&
+    (nextView !== state.view || panelChanged)
   ) {
-    state.view = view;
+    state.view = nextView;
     refreshView();
   }
 });
@@ -3030,14 +2989,14 @@ async function start() {
       api("/integrations"),
     ]);
     const requested = location.hash.slice(1);
+    if (odaResult || requested === "basket") state.shoppingPanel = "oda";
+    const requestedView = requested === "basket" ? "shopping" : requested;
     state.view = !state.household.name
       ? "settings"
       : odaResult
-        ? "basket"
-        : ["week", "recipes", "shopping", "basket", "settings"].includes(
-              requested,
-            )
-          ? requested
+        ? "shopping"
+        : ["week", "recipes", "shopping", "settings"].includes(requestedView)
+          ? requestedView
           : "week";
     syncPlannerUrl();
     await refreshView();
@@ -3049,7 +3008,7 @@ async function start() {
         "",
         location.pathname +
           (remainingQuery.size ? "?" + remainingQuery.toString() : "") +
-          (state.household.name ? "#basket" : ""),
+          (state.household.name ? "#shopping" : ""),
       );
       if (odaResult === "connected") {
         try {

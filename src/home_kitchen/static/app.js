@@ -651,13 +651,22 @@ function recipeForm(draft = {}, source = "manual") {
   const name = field("Recipe name", "text", draft.title);
   name.input.required = true;
   const servings = field(
-    "Recipe servings",
+    "Recipe servings to save",
     "number",
     draft.servings || state.household.default_servings || 2,
   );
   servings.input.min = 1;
   servings.input.max = 100;
   servings.input.required = true;
+  if (source === "imported" && draft.servings != null)
+    add(
+      form,
+      el(
+        "p",
+        "Source recipe servings: " + draft.servings + ". The value below is what Kitchen will save.",
+        "muted",
+      ),
+    );
   const imageUrl = field(
     "Recipe photo URL (optional)",
     "url",
@@ -665,24 +674,96 @@ function recipeForm(draft = {}, source = "manual") {
     "Use an HTTPS image URL. No photo is added unless you provide one.",
   );
   imageUrl.input.placeholder = "https://…";
-  const ingredientText = (draft.ingredients || [])
-    .map((item) =>
-      typeof item === "string"
-        ? item + " | | | Other"
-        : [item.name, item.quantity, item.unit, item.category || "Other"].join(
-            " | ",
-          ),
-    )
-    .join("\n");
-  const ingredients = field(
-    "Ingredients",
-    "textarea",
-    ingredientText,
-    "One per line: ingredient | quantity | unit | category. For example: Carrots | 3 | item | Produce. Use Other when unsure and a decimal point for quantities, such as 0.5.",
+  const ingredientEditor = el("fieldset", null, "ingredient-editor");
+  add(ingredientEditor, el("legend", "Ingredients"));
+  add(
+    ingredientEditor,
+    el(
+      "p",
+      "Review every ingredient. Source wording stays visible; quantities and units must be explicit before saving.",
+      "muted",
+    ),
   );
-  ingredients.input.required = true;
-  ingredients.input.placeholder =
-    "Carrots | 3 | item | Produce\nOlive oil | 2 | tbsp | Pantry";
+  if (source === "imported" && draft.source_url) {
+    const original = el("a", "Open original recipe", "source-link");
+    original.href = draft.source_url;
+    original.target = "_blank";
+    original.rel = "noopener noreferrer";
+    add(ingredientEditor, original);
+  }
+  const ingredientRows = el("div", null, "ingredient-rows");
+  let rowControllers = (Array.isArray(draft.ingredients) ? draft.ingredients : []).map(
+    (item) => window.KitchenRecipeEditor.rowFromDraft(item),
+  );
+  if (!rowControllers.length) rowControllers.push(window.KitchenRecipeEditor.rowFromDraft({}));
+
+  function updateIngredientRowLabels() {
+    rowControllers.forEach((row, index) => {
+      row.legend.textContent = "Ingredient " + (index + 1);
+      row.remove.setAttribute("aria-label", "Remove ingredient " + (index + 1));
+    });
+  }
+
+  function createIngredientRow(values) {
+    const row = el("fieldset", null, "ingredient-row");
+    const legend = el("legend");
+    const sourceText = values.sourceText
+      ? el("p", "Source text: " + values.sourceText, "ingredient-source")
+      : null;
+    const status = values.parsed === true
+      ? "Quantity and unit parsed from the source. Review both against the original text."
+      : values.parsed === false
+        ? "Quantity or unit is ambiguous. Enter both explicitly; Kitchen will not guess them."
+        : values.sourceText
+          ? "Draft values shown below. Review them against the source text."
+          : "Enter an explicit positive quantity and unit.";
+    const sourceStatus = el("p", status, "ingredient-status");
+    const fields = el("div", null, "ingredient-fields");
+    const ingredientName = field("Name", "text", values.name);
+    const quantity = field(
+      "Quantity",
+      "text",
+      values.quantity,
+      "Positive amount; use a decimal point, such as 0.5.",
+    );
+    quantity.input.inputMode = "decimal";
+    const unit = field("Unit", "text", values.unit, "Use an explicit unit, such as g, ml, item, or tbsp.");
+    const category = field("Category", "text", values.category || "Other");
+    const rowError = el("p", "", "ingredient-error");
+    rowError.setAttribute("role", "alert");
+    const remove = button("Remove", () => {
+      const index = rowControllers.indexOf(controller);
+      if (index < 0) return;
+      rowControllers.splice(index, 1);
+      row.remove();
+      updateIngredientRowLabels();
+    }, "quiet small");
+    const controller = {
+      row,
+      legend,
+      remove,
+      name: ingredientName.input,
+      quantity: quantity.input,
+      unit: unit.input,
+      category: category.input,
+      error: rowError,
+    };
+    add(fields, ingredientName.wrap, quantity.wrap, unit.wrap, category.wrap);
+    add(row, legend, sourceText, sourceStatus, fields, rowError, remove);
+    return controller;
+  }
+
+  rowControllers = rowControllers.map(createIngredientRow);
+  rowControllers.forEach((row) => ingredientRows.append(row.row));
+  updateIngredientRowLabels();
+  const addIngredient = button("+ Add ingredient", () => {
+    const row = createIngredientRow(window.KitchenRecipeEditor.rowFromDraft({}));
+    rowControllers.push(row);
+    ingredientRows.append(row.row);
+    updateIngredientRowLabels();
+    row.name.focus();
+  }, "quiet");
+  add(ingredientEditor, ingredientRows, addIngredient);
   const instructions = field(
     "Instructions",
     "textarea",
@@ -695,37 +776,42 @@ function recipeForm(draft = {}, source = "manual") {
     name.wrap,
     servings.wrap,
     imageUrl.wrap,
-    ingredients.wrap,
+    ingredientEditor,
     instructions.wrap,
   );
   formSubmit(form, "Save recipe", async () => {
     const photo = imageUrl.input.value.trim();
     if (photo && !httpsUrl(photo))
       throw new Error("Recipe photo URL must use HTTPS.");
-    const rows = ingredients.input.value
-      .split("\n")
-      .filter((line) => line.trim())
-      .map((line, index) => {
-        const parts = line.split("|").map((value) => value.trim());
-        if (
-          ![3, 4].includes(parts.length) ||
-          !parts[0] ||
-          !/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(parts[1]) ||
-          Number(parts[1]) <= 0 ||
-          !parts[2]
-        )
-          throw new Error(
-            "Ingredient line " +
-              (index + 1) +
-              " needs a name, positive quantity and unit separated by |.",
-          );
-        return {
-          name: parts[0],
-          quantity: parts[1],
-          unit: parts[2],
-          category: parts[3] || "Other",
-        };
-      });
+    if (!rowControllers.length) throw new Error("Add at least one ingredient before saving.");
+    let hasIngredientErrors = false;
+    const rows = rowControllers.map((row) => {
+      const item = {
+        name: row.name.value.trim(),
+        quantity: row.quantity.value.trim(),
+        unit: row.unit.value.trim(),
+        category: row.category.value.trim() || "Other",
+      };
+      const errors = [];
+      const fieldErrors = {
+        name: !item.name,
+        quantity: !window.KitchenRecipeEditor.isPositiveQuantity(item.quantity),
+        unit: !item.unit,
+      };
+      if (fieldErrors.name) errors.push("Add an ingredient name.");
+      if (fieldErrors.quantity) {
+        errors.push("Enter an exact positive quantity using a decimal point; ambiguous source text needs your review.");
+      }
+      if (fieldErrors.unit) errors.push("Enter the ingredient unit explicitly.");
+      row.error.textContent = errors.join(" ");
+      row.name.setAttribute("aria-invalid", String(fieldErrors.name));
+      row.quantity.setAttribute("aria-invalid", String(fieldErrors.quantity));
+      row.unit.setAttribute("aria-invalid", String(fieldErrors.unit));
+      hasIngredientErrors ||= errors.length > 0;
+      return item;
+    });
+    if (hasIngredientErrors)
+      throw new Error("Fix the ingredient fields marked with an error before saving.");
     await api("/recipes", "POST", {
       title: name.input.value.trim(),
       servings: Number(servings.input.value),

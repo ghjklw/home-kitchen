@@ -408,6 +408,66 @@ h3 {
 .form-grid .field {
   margin-bottom: 0;
 }
+.ingredient-editor {
+  min-width: 0;
+  margin: 0 0 20px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.ingredient-editor > legend,
+.ingredient-row > legend {
+  padding: 0 6px;
+  font-weight: 700;
+}
+.ingredient-editor > .muted {
+  margin-top: 0;
+}
+.ingredient-rows {
+  display: grid;
+  gap: 12px;
+}
+.ingredient-row {
+  min-width: 0;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.ingredient-source,
+.ingredient-status,
+.ingredient-error {
+  margin: 4px 0 10px;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.ingredient-source,
+.ingredient-status {
+  color: var(--muted);
+}
+.ingredient-error {
+  color: #a12424;
+  font-weight: 650;
+}
+.ingredient-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(90px, 0.8fr) minmax(90px, 1fr) minmax(100px, 1fr);
+  gap: 10px;
+}
+.ingredient-fields .field {
+  min-width: 0;
+  margin-bottom: 10px;
+}
+.ingredient-fields .field input[aria-invalid="true"] {
+  border-color: #a12424;
+}
+.ingredient-row > button {
+  min-height: 38px;
+}
+.ingredient-editor > .ingredient-rows + button {
+  margin-top: 12px;
+}
 form > .actions {
   margin-top: 22px;
 }
@@ -888,5 +948,15 @@ button.link {
   }
   .oda-photo-frame .product-image {
     max-height: 110px;
+  }
+  .ingredient-editor {
+    padding: 10px;
+  }
+  .ingredient-row {
+    padding: 11px;
+  }
+  .ingredient-fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
   }
 }

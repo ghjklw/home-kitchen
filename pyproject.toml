@@ -1,0 +1,41 @@
+[project]
+name = "home-kitchen"
+version = "0.1.0"
+description = "Configurable household recipes, meal planning and shopping via REST and MCP"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "fastmcp>=2.14,<3",
+  "httpx>=0.28,<1",
+  "pydantic>=2.11,<3",
+  "pydantic-settings>=2.9,<3",
+  "pydantic-ai-slim[anthropic]>=1,<2",
+  "pyjwt[crypto]>=2.10,<3",
+  "recipe-scrapers>=15,<16",
+  "uvicorn>=0.34,<1",
+]
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "pytest-asyncio>=1,<2", "ruff>=0.14,<1", "ty>=0.0.1", "pre-commit>=4,<5"]
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/home_kitchen"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
+
+[tool.ty.src]
+include = ["src"]

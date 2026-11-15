@@ -22,6 +22,7 @@ from home_kitchen.feature_api import feature_router
 from home_kitchen.feature_mcp import install_feature_tools
 from home_kitchen.features import KitchenFeatures
 from home_kitchen.imports import ImportedDraft
+from home_kitchen.mcp_auth import HouseholdAzureProvider
 from home_kitchen.mcp_server import build_mcp
 from home_kitchen.models import (
     Meal,
@@ -77,7 +78,12 @@ def create_app(
 
     features = KitchenFeatures(service, settings, load_household, ai)
     basket = BasketService(service, features.history)
-    mcp = build_mcp(service, load_household)
+    mcp_auth = (
+        HouseholdAzureProvider(settings, service.store.engine)
+        if settings.mcp_oauth_enabled
+        else None
+    )
+    mcp = build_mcp(service, load_household, auth=mcp_auth)
     install_feature_tools(mcp, features, basket)
     mcp_app = mcp.http_app(path="/", stateless_http=True)
 
@@ -99,6 +105,10 @@ def create_app(
     app.include_router(feature_router(features, basket))
     app.include_router(oda_router(features.oda, features.oda_cart))
     app.state.mcp = mcp
+    if mcp_auth is not None:
+        # Discovery is rooted at the origin even though OAuth lives under /mcp.
+        # Install these before the static application fallback.
+        app.router.routes.extend(mcp_auth.get_well_known_routes(mcp_path="/"))
     access = AccessControl(settings)
     app.state.access = access
     app.middleware("http")(access.middleware)

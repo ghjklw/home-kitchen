@@ -44,6 +44,18 @@ class Settings(BaseSettings):
     entra_audience: str | None = None
     entra_allowed_group: UUID | None = None
     entra_scope: str = "Kitchen.Access"
+    mcp_oauth_enabled: bool = False
+    mcp_public_url: HttpUrl | None = None
+    mcp_client_secret: SecretStr | None = None
+    mcp_signing_key: SecretStr | None = None
+    mcp_encryption_key: SecretStr | None = None
+    mcp_allowed_redirect_uris: list[str] = Field(
+        default_factory=lambda: [
+            "https://claude.ai/api/mcp/auth_callback",
+            "https://chatgpt.com/connector/oauth/*",
+            "https://chatgpt.com/connector_platform_oauth_redirect",
+        ]
+    )
     # Trust these headers only behind the staged NetworkPolicy + Entra forwardAuth.
     trusted_proxy_cidrs: list[str] = Field(default_factory=list)
     ai_model: Text | None = None
@@ -70,6 +82,88 @@ class Settings(BaseSettings):
     @property
     def ai_configured(self) -> bool:
         return bool(self.ai_model and (self.anthropic_api_key or self.anthropic_workload_identity))
+
+    @model_validator(mode="after")
+    def validate_mcp_oauth(self) -> "Settings":
+        configured = [
+            self.mcp_public_url,
+            self.mcp_client_secret,
+            self.mcp_signing_key,
+            self.mcp_encryption_key,
+        ]
+        if not self.mcp_oauth_enabled:
+            if any(configured):
+                raise ValueError("Enable mcp_oauth_enabled explicitly to configure MCP OAuth")
+            return self
+        if (
+            self.local_dev
+            or not all(configured)
+            or not all(
+                [
+                    self.entra_tenant_id,
+                    self.entra_audience,
+                    self.entra_allowed_group,
+                ]
+            )
+        ):
+            raise ValueError(
+                "MCP OAuth requires production Entra identity, URL and all three secrets"
+            )
+        url = self.mcp_public_url
+        if url is None or (
+            url.scheme != "https"
+            or url.port != 443
+            or url.username is not None
+            or url.password is not None
+            or url.query is not None
+            or url.fragment is not None
+            or url.path not in ("/mcp", "/mcp/")
+        ):
+            raise ValueError("mcp_public_url must be a canonical HTTPS URL ending in /mcp")
+        try:
+            UUID(str(self.entra_audience))
+        except ValueError:
+            raise ValueError(
+                "MCP OAuth requires the Kitchen application client ID GUID audience"
+            ) from None
+        secrets = [
+            secret.get_secret_value()
+            for secret in (self.mcp_client_secret, self.mcp_signing_key, self.mcp_encryption_key)
+            if secret is not None
+        ]
+        if any(not secret.strip() for secret in secrets) or len(set(secrets)) != 3:
+            raise ValueError("MCP OAuth secrets must be nonempty and independent")
+        if (
+            self.mcp_signing_key is None
+            or len(self.mcp_signing_key.get_secret_value().encode()) < 32
+        ):
+            raise ValueError("mcp_signing_key must contain at least 32 bytes")
+        try:
+            Fernet(secrets[2].encode())
+        except (ValueError, TypeError):
+            raise ValueError("mcp_encryption_key must be a valid Fernet key") from None
+        if self.oda_encryption_key and self.oda_encryption_key.get_secret_value() in secrets:
+            raise ValueError("MCP OAuth keys must be independent from Oda encryption")
+        if not self.mcp_allowed_redirect_uris:
+            raise ValueError("MCP OAuth requires an explicit client redirect allowlist")
+        for redirect in self.mcp_allowed_redirect_uris:
+            try:
+                parsed = HttpUrl(redirect)
+            except ValueError:
+                raise ValueError("MCP client redirects must be explicit HTTPS URLs") from None
+            if (
+                parsed.scheme != "https"
+                or parsed.port != 443
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.fragment is not None
+                or parsed.query is not None
+                or ("*" in redirect and redirect != "https://chatgpt.com/connector/oauth/*")
+            ):
+                raise ValueError(
+                    "MCP client redirects must be exact HTTPS URLs or the ChatGPT callback pattern"
+                )
+        return self
 
     @model_validator(mode="after")
     def validate_ai_credentials(self) -> "Settings":

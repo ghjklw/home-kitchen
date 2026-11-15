@@ -64,6 +64,18 @@ class AccessControl:
     async def middleware(self, request: Request, call_next):
         if request.url.path == "/healthz":
             return await call_next(request)
+        if self.settings.mcp_oauth_enabled and (
+            request.url.path == "/mcp"
+            or request.url.path.startswith("/mcp/")
+            or request.url.path
+            in {
+                "/.well-known/oauth-authorization-server/mcp",
+                "/.well-known/oauth-protected-resource/mcp/",
+            }
+        ):
+            # The MCP subapp verifies broker tokens and upstream household claims.
+            # Discovery and OAuth protocol routes must be reachable before login.
+            return await call_next(request)
         try:
             peer = ip_address(request.client.host) if request.client else None
         except ValueError:

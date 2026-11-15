@@ -138,3 +138,16 @@ def test_regular_item_api_accepts_interval_and_records_purchase(test_database_ur
         )
         assert purchase.status_code == 200
         assert purchase.json()["last_purchased"] == "2026-01-05"
+
+
+def test_planning_occupied_slot_preserves_existing_meal(test_database_url):
+    with make_client(test_database_url) as client:
+        recipe = client.post("/api/recipes", json=recipe_payload()).json()
+        data = {"date": "2027-01-11", "recipe_id": recipe["id"], "servings": 2}
+        original = client.post("/api/meals", json=data)
+        conflict = client.post("/api/meals", json={**data, "servings": 4})
+        assert conflict.status_code == 409
+        assert "already planned" in conflict.json()["detail"]
+        meals = client.get("/api/meals?start=2027-01-11&end=2027-01-11").json()
+        assert meals == [original.json()]
+        assert client.post("/api/meals", json={**data, "slot": "lunch"}).status_code == 201

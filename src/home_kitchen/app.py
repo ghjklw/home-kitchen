@@ -39,6 +39,7 @@ from home_kitchen.recipes import RecipeDraftRequest
 from home_kitchen.recommendations import PlanDraft
 from home_kitchen.service import KitchenService
 from home_kitchen.settings import Household, Settings
+from home_kitchen.store import MealSlotOccupied
 
 
 class Completion(BaseModel):
@@ -116,6 +117,10 @@ def create_app(
     @app.exception_handler(KeyError)
     async def missing(_request: Request, _exc: Exception):
         return JSONResponse({"detail": "Item not found"}, status_code=404)
+
+    @app.exception_handler(MealSlotOccupied)
+    async def meal_conflict(_request: Request, exc: MealSlotOccupied):
+        return JSONResponse({"detail": str(exc)}, status_code=409)
 
     @app.exception_handler(ValueError)
     async def invalid(_request: Request, exc: Exception):

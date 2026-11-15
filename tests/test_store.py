@@ -8,7 +8,7 @@ from sqlalchemy.exc import IntegrityError
 
 from home_kitchen.models import Ingredient, Meal, RecipeCreate, ShoppingItemCreate
 from home_kitchen.service import KitchenService
-from home_kitchen.store import Store
+from home_kitchen.store import MealSlotOccupied, Store
 
 
 def test_migration_creates_relational_tables(test_database_url):
@@ -42,7 +42,7 @@ def test_concurrent_confirmation_reuses_one_capture(test_database_url):
     assert len(service.list_items()) == 1
 
 
-def test_database_enforces_recipe_reference_and_slot_upsert(test_database_url):
+def test_database_enforces_recipe_reference_and_preserves_occupied_slot(test_database_url):
     service = KitchenService(test_database_url)
     recipe = service.create_recipe(
         RecipeCreate(
@@ -57,14 +57,46 @@ def test_database_enforces_recipe_reference_and_slot_upsert(test_database_url):
     meal = Meal(id=uuid4(), date=date(2026, 1, 1), recipe_id=recipe.id, servings=2)
     service.store.save("meal", meal)
     replacement = meal.model_copy(update={"id": uuid4(), "servings": 4})
-    service.store.save("meal", replacement)
-    assert service.list_meals(meal.date, meal.date) == [replacement]
+    with pytest.raises(ValueError, match="already planned"):
+        service.store.save("meal", replacement)
+    assert service.list_meals(meal.date, meal.date) == [meal]
     with pytest.raises(IntegrityError):
         service.store.delete("recipe", recipe.id)
     with pytest.raises(IntegrityError):
-        service.store.save("meal", meal.model_copy(update={"recipe_id": uuid4()}))
+        service.store.save(
+            "meal", meal.model_copy(update={"recipe_id": uuid4(), "date": date(2026, 1, 2)})
+        )
 
 
 def test_sqlite_database_url_is_rejected():
     with pytest.raises(ValueError, match="postgresql"):
         Store("sqlite:///kitchen.sqlite3")
+
+
+def test_concurrent_meal_creation_preserves_the_winner(test_database_url):
+    service = KitchenService(test_database_url)
+    recipe = service.create_recipe(
+        RecipeCreate(
+            title="Soup",
+            servings=2,
+            ingredients=[Ingredient(name="Carrot", quantity=1)],
+            instructions=["Cook"],
+        )
+    )
+
+    def plan(servings):
+        instance = KitchenService(test_database_url)
+        try:
+            meal = Meal(id=uuid4(), date=date(2027, 1, 11), recipe_id=recipe.id, servings=servings)
+            try:
+                instance.store.save("meal", meal)
+                return meal
+            except MealSlotOccupied:
+                return None
+        finally:
+            instance.store.engine.dispose()
+
+    with ThreadPoolExecutor(max_workers=4) as workers:
+        winners = [meal for meal in workers.map(plan, range(1, 9)) if meal is not None]
+    assert len(winners) == 1
+    assert service.list_meals(date(2027, 1, 11), date(2027, 1, 11)) == winners

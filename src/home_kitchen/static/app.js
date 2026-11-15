@@ -397,6 +397,11 @@ function renderWeek(main) {
                 ? button("View recipe", () => viewRecipe(recipe), "small")
                 : null,
               button(
+                "Cook",
+                () => openPlannedMeal(meal),
+                "small primary",
+              ),
+              button(
                 "Remove",
                 async () => {
                   try {
@@ -625,6 +630,7 @@ function renderRecipes(main) {
       "Recipes worth keeping.",
       "Everyday favourites, new discoveries, and your next good dinner.",
       [
+        button("Find recipes", discoveryForm),
         button("Import link", importForm),
         button("+ Add recipe", () => recipeForm(), "primary"),
       ],
@@ -1070,6 +1076,206 @@ function importForm() {
     recipeForm(response.adapted, "ai");
   });
   add(root, form);
+}
+function discoveryForm() {
+  const root = openDialog("Find a recipe from a source");
+  add(
+    root,
+    el(
+      "p",
+      "Search Oda, Marmiton and Matprat. Choose a result to shape its exact source link into a draft for review.",
+      "muted",
+    ),
+  );
+  const form = el("form");
+  const query = field(
+    "Dish or ingredients",
+    "search",
+    "",
+    "For example: salmon, dill and potatoes.",
+  );
+  query.input.required = true;
+  query.input.maxLength = 200;
+  const sources = el("fieldset", null, "discovery-source-picker");
+  add(sources, el("legend", "Search sources"));
+  const selected = new Set(
+    window.KitchenRecipeDiscovery.SOURCES.map((source) => source.id),
+  );
+  window.KitchenRecipeDiscovery.SOURCES.forEach((source) => {
+    const label = el("label", null, "discovery-source-option");
+    const checkbox = el("input");
+    checkbox.type = "checkbox";
+    checkbox.value = source.id;
+    checkbox.checked = true;
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) selected.add(source.id);
+      else selected.delete(source.id);
+    });
+    add(label, checkbox, el("span", source.label));
+    sources.append(label);
+  });
+  const content = el("div", null, "discovery-content");
+  add(form, query.wrap, sources);
+  formSubmit(form, "Search sources", async () => {
+    const request = window.KitchenRecipeDiscovery.buildRequest(
+      query.input.value,
+      [...selected],
+    );
+    const response = await api("/recipe-discovery", "POST", request);
+    const view = window.KitchenRecipeDiscovery.normalizeResponse(response);
+    const nextContent = el("div", null, "discovery-content");
+    if (view.sources.length) {
+      const statuses = el("section", null, "discovery-statuses");
+      statuses.setAttribute("aria-live", "polite");
+      add(statuses, el("h3", "Source status"));
+      const list = el("ul", null, "discovery-status-list");
+      view.sources.forEach((source) => {
+        const line = el("li");
+        add(line, el("strong", source.label + ": "), el("span", source.status));
+        if (source.detail) add(line, el("span", " — " + source.detail));
+        if (source.status === "Search completed")
+          add(
+            line,
+            el(
+              "span",
+              source.resultCount
+                ? " · " + source.resultCount + " found"
+                : " · No matches",
+            ),
+          );
+        if (source.indexUrl) {
+          const link = el("a", "Browse source");
+          link.href = source.indexUrl;
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+          add(line, link);
+        }
+        list.append(line);
+      });
+      add(statuses, list);
+      nextContent.append(statuses);
+    }
+    if (!view.results.length) {
+      add(
+        nextContent,
+        empty("No recipes found", "See each source’s status above for search availability."),
+      );
+    } else {
+      const grid = el("div", null, "grid discovery-results");
+      view.results.forEach((result) => {
+        const card = el("article", null, "card discovery-card");
+        if (result.imageUrl)
+          add(
+            card,
+            recipeImage({ title: result.title, image_url: result.imageUrl }),
+          );
+        add(card, el("span", result.sourceLabel, "badge"), el("h3", result.title));
+        if (result.sourceAttribution) add(card, el("p", result.sourceAttribution, "muted"));
+        const facts = [result.duration, result.difficulty].filter(Boolean).join(" · ");
+        if (facts) add(card, el("p", facts, "muted"));
+        if (result.detail) add(card, el("p", result.detail, "muted"));
+        const actions = el("div", null, "actions");
+        if (result.url) {
+          const sourceLink = el("a", "View source");
+          sourceLink.href = result.url;
+          sourceLink.target = "_blank";
+          sourceLink.rel = "noopener noreferrer";
+          add(actions, sourceLink);
+        }
+        if (result.importable) {
+          const error = el("p", "", "form-error discovery-import-error");
+          error.setAttribute("role", "alert");
+          const importButton = button(
+            "Import for review",
+            async () => {
+              importButton.disabled = true;
+              error.textContent = "";
+              try {
+                const draft = await api("/recipe-drafts/ai", "POST", {
+                  url: result.url,
+                });
+                if (!draft?.adapted)
+                  throw new Error(
+                    "AI did not return an editable draft. Nothing was saved.",
+                  );
+                if (!importButton.isConnected) return;
+                recipeForm(draft.adapted, "ai");
+              } catch (err) {
+                error.textContent = err.message;
+              } finally {
+                if (importButton.isConnected) importButton.disabled = false;
+              }
+            },
+            "primary small",
+          );
+          add(actions, importButton);
+          add(card, actions, error);
+        } else {
+          add(actions, el("span", "This result cannot be imported yet.", "muted"));
+          add(card, actions);
+        }
+        grid.append(card);
+      });
+      nextContent.append(grid);
+    }
+    content.replaceChildren(...nextContent.childNodes);
+  });
+  add(root, form, content);
+}
+async function openPlannedMeal(meal) {
+  try {
+    const response = await api("/meals/" + encodeURIComponent(meal.id) + "/recipe");
+    plannedMealView(window.KitchenPlannedCooking.buildPlannedCookingView(response));
+  } catch (error) {
+    notify(error.message, true);
+  }
+}
+function plannedMealView(view) {
+  const recipe = view.sourceRecipe;
+  const root = openDialog(recipe.title);
+  const body = el("div", null, "recipe-body planned-cooking-view");
+  add(
+    body,
+    recipeImage(recipe),
+    el(
+      "p",
+      "For " + view.servings + " servings · saved recipe makes " + recipe.servings,
+      "callout",
+    ),
+    el("h3", "Ingredients"),
+  );
+  const ingredients = el("ul");
+  view.ingredients.forEach((item) => {
+    const exact = String(item.quantity);
+    const row = el(
+      "li",
+      window.KitchenShoppingView.formatQuantityForDisplay(exact) +
+        " " +
+        item.unit +
+        " " +
+        item.name,
+    );
+    row.setAttribute("aria-label", exact + " " + item.unit + " " + item.name);
+    add(ingredients, row);
+  });
+  const provenance = recipe.provenance;
+  if (provenance?.original_source)
+    add(body, el("p", "Adapted from " + provenance.original_source + ".", "muted"));
+  if (recipe.source_url) {
+    const url = window.KitchenRecipeDiscovery.safeHttpsUrl(recipe.source_url);
+    if (url) {
+      const link = el("a", "Original recipe", "source-link");
+      link.href = url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      add(body, link);
+    }
+  }
+  const steps = el("ol");
+  recipe.instructions.forEach((step) => add(steps, el("li", step)));
+  add(body, ingredients, el("h3", "Method"), steps);
+  add(body, button("View saved recipe amounts", () => viewRecipe(recipe), "quiet"));
+  add(root, body);
 }
 function shoppingOrigins(origins = []) {
   const labels = new Set();

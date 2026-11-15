@@ -1,5 +1,6 @@
 """Protocol mocks: no Oda login, vault, live basket, or PostgreSQL is needed."""
 
+import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -194,6 +195,55 @@ def test_unconfigured_and_settings_reject_unsafe_urls(oda):
     ):
         with pytest.raises(ValidationError):
             Settings(local_dev=True, public_url=url)
+
+
+@pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "[::1]"])
+def test_local_http_callback_uses_the_configured_loopback_origin(oda, host):
+    service, calls, _ = oda
+    service.settings = Settings(local_dev=True, public_url=f"http://{host}:8000")
+    state = begin(service)
+    expected = f"http://{host}:8000/api/oda/callback"
+    registration = next(call for call in calls if str(call.url) == REGISTER)
+    assert json.loads(registration.content)["redirect_uris"] == [expected]
+    assert service.redirect_uri == expected
+    service.callback("alice", state, "authorization-private")
+    token_request = next(call for call in calls if str(call.url) == TOKEN)
+    assert parse_qs(token_request.content.decode())["redirect_uri"] == [expected]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://kitchen.example:8000",
+        "http://localhost.example:8000",
+        "http://0.0.0.0:8000",
+        "http://127.0.0.2:8000",
+        "http://127.1:8000",
+        "http://2130706433:8000",
+        "http://[::]:8000",
+        "http://localhost:0",
+        "http://localhost:65536",
+        "http://user:pass@localhost:8000",
+        "http://localhost:8000/path",
+        "http://localhost:8000?query=value",
+        "http://localhost:8000#fragment",
+    ],
+)
+def test_local_http_public_url_rejects_non_loopback_and_non_origin_urls(url):
+    with pytest.raises(ValidationError):
+        Settings(local_dev=True, public_url=url)
+
+
+@pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "[::1]"])
+def test_http_loopback_public_url_requires_local_dev(host):
+    with pytest.raises(ValidationError, match="public_url"):
+        Settings(
+            local_dev=False,
+            public_url=f"http://{host}:8000",
+            entra_tenant_id="11111111-1111-1111-1111-111111111111",
+            entra_audience="kitchen",
+            entra_allowed_group="22222222-2222-2222-2222-222222222222",
+        )
 
 
 def test_rest_does_not_expose_oauth_secrets_and_requires_actor(oda):

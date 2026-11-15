@@ -13,6 +13,8 @@ test "$(id -g)" = 999
 test "$HOME" = /tmp
 find /usr -maxdepth 0 | head -n 1
 python3 --version
+# Exercise extension dependencies; Python's version alone does not load these.
+python3 -c 'import binascii, ctypes, ssl, zlib'
 borg --version
 borgmatic --version
 ssh -V
@@ -51,7 +53,7 @@ check(pathlib.Path('/usr'))
 for root, dirs, files in os.walk('/usr', onerror=fail):
     for name in dirs + files:
         check(pathlib.Path(root, name))
-for name in ('/etc/passwd', '/etc/group'):
+for name in ('/lib', '/etc', '/etc/passwd', '/etc/group'):
     check(pathlib.Path(name))
 PY
 SH

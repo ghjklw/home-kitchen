@@ -5,6 +5,9 @@ FROM ghcr.io/borgmatic-collective/borgmatic:2.2.0@sha256:14b70ae1354f9c1fbd5b790
 USER 0:0
 RUN /bin/busybox chown -R 0:0 /usr \
     && /bin/busybox chmod -R a+rX,go-w,u-s,g-s /usr \
+    # musl, NSS and SSH must traverse /etc; leave its contents' modes intact.
+    && /bin/busybox chown 0:0 /etc \
+    && /bin/busybox chmod 0755 /etc \
     && (/bin/busybox awk -F: '$3 == 999 { found=1 } END { exit !found }' /etc/group \
         || echo 'backup:x:999:' >> /etc/group) \
     && (/bin/busybox awk -F: '$3 == 999 { found=1 } END { exit !found }' /etc/passwd \

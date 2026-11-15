@@ -13,6 +13,7 @@ from home_kitchen.history import HistoryEntry, HistoryEntryCreate, RetrievedEvid
 from home_kitchen.inventory import InventoryItem, InventoryItemCreate, PurchasePlan
 from home_kitchen.oda.cart import CartProposalRequest
 from home_kitchen.purchasing import StoreTrip
+from home_kitchen.recipe_feedback import RecipeFeedbackCreate
 from home_kitchen.recipes import RecipeDraft, RecipeDraftRequest, RecipeProviderInfo
 
 
@@ -106,6 +107,11 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
     async def draft_recipe(provider_id: str, request: RecipeDraftRequest) -> RecipeDraft:
         """Draft via manual, web or AI provider. Review before save_recipe; never auto-save."""
         return await features.draft_recipe(provider_id, request)
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
+    def record_recipe_feedback(recipe_id: UUID, data: RecipeFeedbackCreate) -> HistoryEntry:
+        """Save explicit structured feedback for an existing recipe."""
+        return features.recipe_feedback.record(recipe_id, data, channel="mcp")
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
     def record_household_interaction(data: HistoryEntryCreate) -> HistoryEntry:

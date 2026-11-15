@@ -1,0 +1,97 @@
+name: Publish backup image
+
+on:
+  workflow_run:
+    workflows: [Kitchen CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kitchen-backup-publish-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.repository == 'ghjklw/home-kitchen' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      - name: Validate source
+        id: source
+        env:
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          [[ "$sha" =~ ^[0-9a-f]{40}$ && "$sha" == "$EXPECTED_SHA" ]]
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          driver-opts: |
+            memory=6g
+            memory-swap=8g
+            cpu-period=100000
+            cpu-quota=400000
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: containers/backup
+          load: true
+          tags: kitchen-backup:verify
+      - name: Verify restricted runtime and immutable filesystem
+        run: bash containers/backup/verify.sh kitchen-backup:verify
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        id: image
+        with:
+          context: containers/backup
+          push: true
+          tags: ghcr.io/ghjklw/home-kitchen:backup-build-${{ github.run_id }}-${{ github.run_attempt }}
+          provenance: mode=max
+          labels: |
+            org.opencontainers.image.source=https://github.com/ghjklw/home-kitchen
+            org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
+            org.opencontainers.image.version=borgmatic-2.2.0-rootless
+            org.opencontainers.image.base.name=ghcr.io/borgmatic-collective/borgmatic:2.2.0
+            org.opencontainers.image.base.digest=sha256:14b70ae1354f9c1fbd5b790c372b948bc25cb00d45d0e6803916bb83cff6fe3c
+            io.home-kitchen.component=backup
+            io.home-kitchen.run-id=${{ github.run_id }}
+            io.home-kitchen.run-attempt=${{ github.run_attempt }}
+      - name: Record backup image identity
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, re
+          assert re.fullmatch(r"sha256:[0-9a-f]{64}", os.environ["DIGEST"])
+          pathlib.Path("backup-image-metadata.json").write_text(json.dumps({
+            "component": "backup", "source_sha": os.environ["SOURCE_SHA"],
+            "image": "ghcr.io/ghjklw/home-kitchen", "digest": os.environ["DIGEST"],
+            "tag": "backup-build-" + os.environ["GITHUB_RUN_ID"] + "-" + os.environ["GITHUB_RUN_ATTEMPT"],
+            "base_image": "ghcr.io/borgmatic-collective/borgmatic:2.2.0",
+            "base_digest": "sha256:14b70ae1354f9c1fbd5b790c372b948bc25cb00d45d0e6803916bb83cff6fe3c",
+          }))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: backup-image-metadata
+          path: backup-image-metadata.json
+          retention-days: 90

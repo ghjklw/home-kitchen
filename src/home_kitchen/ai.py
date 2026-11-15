@@ -51,6 +51,7 @@ async def draft_recipe(
     source: EditableRecipeDraft,
     evidence_context: str = "",
     actor_id: str | None = None,
+    preserve_source_measures: bool = False,
 ) -> EditableRecipeDraft:
     from home_kitchen.recipes.models import EditableRecipeDraft
 
@@ -72,4 +73,21 @@ async def draft_recipe(
         source_ingredients=[item.model_dump() for item in source.source_ingredients],
         provenance=source.provenance,
     )
-    return EditableRecipeDraft.model_validate(output)
+    adapted = EditableRecipeDraft.model_validate(output)
+    if preserve_source_measures:
+        from home_kitchen.recipes.source_quantities import explicit_source_measure
+
+        source_rows = {item.index: item.text for item in source.source_ingredients}
+        for ingredient in adapted.ingredients:
+            # A merged row has no single scalar measure. Existing model values,
+            # including partially specified values, must not be overwritten.
+            if (
+                ingredient.quantity is not None
+                or ingredient.unit is not None
+                or len(ingredient.source_indices) != 1
+            ):
+                continue
+            measure = explicit_source_measure(source_rows[ingredient.source_indices[0]])
+            if measure is not None:
+                ingredient.quantity, ingredient.unit = measure
+    return adapted

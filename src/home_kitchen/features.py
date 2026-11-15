@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 from pydantic_ai import Agent
 
+from home_kitchen.basket.jobs import BasketMatchJobs
 from home_kitchen.basket.matching import BasketMatchingService, OdaSearchAdapter
 from home_kitchen.catalogue.repository import PostgresFoodCatalogueRepository
 from home_kitchen.catalogue.service import FoodCatalogueService
@@ -18,6 +19,7 @@ from home_kitchen.inventory import InventoryService
 from home_kitchen.models import RecipeCreate
 from home_kitchen.oda import OdaService
 from home_kitchen.oda.cart import OdaCartService
+from home_kitchen.planning_proposals import PlanningProposalService
 from home_kitchen.purchasing import InStoreMode, OdaMode, PurchaseModes, StoreTripService
 from home_kitchen.purchasing_reconciliation import TripCompletionService
 from home_kitchen.recipe_feedback import RecipeFeedbackService
@@ -64,6 +66,10 @@ class KitchenFeatures:
         self.oda_cart = OdaCartService(self.oda)
         self.inventory = InventoryService(kitchen, self.history)
         self.basket_matching = BasketMatchingService(self.inventory, OdaSearchAdapter(self.oda))
+        self.basket_jobs = BasketMatchJobs(
+            self.basket_matching, self.inventory, self.oda.search_cache_context
+        )
+        self.plan_proposals = PlanningProposalService(kitchen, self.history)
         self.store_trip = StoreTripService(self.inventory, self.history)
         self.trip_completion = TripCompletionService(self.inventory, self.history)
         self.purchase_modes = PurchaseModes([OdaMode(self.oda), InStoreMode()])

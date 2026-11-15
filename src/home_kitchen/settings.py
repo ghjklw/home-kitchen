@@ -23,6 +23,21 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+DEFAULT_SHOPPING_CATEGORY_ORDER = (
+    "Produce",
+    "Bakery",
+    "Meat",
+    "Seafood",
+    "Fish",
+    "Dairy",
+    "Chilled",
+    "Pantry",
+    "Spices",
+    "Drinks",
+    "Household",
+    "Frozen",
+    "Other",
+)
 
 
 class Household(BaseModel):
@@ -32,6 +47,24 @@ class Household(BaseModel):
     dietary_preferences: list[Text] = Field(default_factory=list)
     default_servings: int = Field(default=2, ge=1, le=100)
     language: Text = "en"
+    shopping_category_order: list[
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
+    ] = Field(
+        default_factory=lambda: list(DEFAULT_SHOPPING_CATEGORY_ORDER),
+        max_length=64,
+        description=(
+            "Shopping category display order; unlisted categories follow alphabetically. "
+            "An explicit empty list uses alphabetical order for all categories. "
+            "Source category labels are preserved."
+        ),
+    )
+
+    @field_validator("shopping_category_order")
+    @classmethod
+    def unique_shopping_categories(cls, value: list[str]) -> list[str]:
+        if len({category.casefold() for category in value}) != len(value):
+            raise ValueError("Shopping categories must be unique ignoring case")
+        return value
 
 
 class Settings(BaseSettings):

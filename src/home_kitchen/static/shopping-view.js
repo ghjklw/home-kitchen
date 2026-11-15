@@ -15,21 +15,28 @@
     if (!hasSelectedProducts(basket)) return null;
     if (basket.total_cost == null)
       return { label: "Selected product prices are incomplete.", complete: false };
-    const amount = String(basket.total_cost);
+    const exactAmount = normalizeDecimalText(String(basket.total_cost)) || String(basket.total_cost);
+    const amount = formatQuantityForDisplay(exactAmount);
     const currency = String(basket.currency || "").trim();
     if (basket.price_complete === true)
       return {
         label: "Selected product total: " + amount + (currency ? " " + currency : ""),
+        accessibleLabel:
+          "Exact selected product total: " + exactAmount + (currency ? " " + currency : ""),
         complete: true,
       };
-    const knownSubtotal = Number(amount);
-    if (Number.isFinite(knownSubtotal) && knownSubtotal > 0)
+    if (isPositiveDecimal(exactAmount))
       return {
         label:
           "Known subtotal: " +
           amount +
           (currency ? " " + currency : "") +
           " · some prices are unknown",
+        accessibleLabel:
+          "Exact known subtotal: " +
+          exactAmount +
+          (currency ? " " + currency : "") +
+          "; some prices are unknown",
         complete: false,
       };
     return { label: "Selected product prices are incomplete.", complete: false };
@@ -50,25 +57,55 @@
     };
   }
 
-  function formatQuantityForDisplay(value) {
-    if (typeof value !== "string") return "";
-    const match = /^(\d+)(?:\.(\d+))?$/u.exec(value.trim());
-    if (!match) return value;
-    const whole = BigInt(match[1]);
+  function normalizeDecimalText(value) {
+    if (typeof value !== "string" && typeof value !== "number") return null;
+    const text = String(value).trim();
+    const match = /^(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/u.exec(text);
+    if (!match) return null;
     const fraction = match[2] || "";
+    if (match[3] == null) return match[1] + (fraction ? "." + fraction : "");
+    let exponent;
+    try {
+      exponent = BigInt(match[3]);
+    } catch {
+      return null;
+    }
+    if (exponent < -1000n || exponent > 1000n) return null;
+    const digits = match[1] + fraction;
+    const decimalPosition = BigInt(match[1].length) + exponent;
+    if (decimalPosition <= 0n)
+      return "0." + "0".repeat(Number(-decimalPosition)) + digits;
+    if (decimalPosition >= BigInt(digits.length))
+      return digits + "0".repeat(Number(decimalPosition - BigInt(digits.length)));
+    const position = Number(decimalPosition);
+    return digits.slice(0, position) + "." + digits.slice(position);
+  }
+
+  function formatQuantityForDisplay(value) {
+    if (typeof value !== "string" && typeof value !== "number") return "";
+    const exact = normalizeDecimalText(value);
+    if (exact == null) return String(value);
+    const [wholeText, fraction = ""] = exact.split(".");
+    const whole = BigInt(wholeText);
     const scale = 100n;
     let rounded = whole * scale + BigInt(fraction.slice(0, 2).padEnd(2, "0") || "0");
     if (fraction.length > 2 && fraction[2] >= "5") rounded += 1n;
-    if (rounded === 0n && /[1-9]/u.test(value)) return "<0.01";
+    if (rounded === 0n && /[1-9]/u.test(exact)) return "<0.01";
     const wholePart = rounded / scale;
     const decimalPart = String(rounded % scale).padStart(2, "0").replace(/0+$/u, "");
     return String(wholePart) + (decimalPart ? "." + decimalPart : "");
   }
 
   function isPositiveDecimal(value) {
-    if (typeof value !== "string" && typeof value !== "number") return false;
-    const text = String(value).trim();
-    return /^\d+(?:\.\d+)?$/u.test(text) && /[1-9]/u.test(text.replace(".", ""));
+    const text = normalizeDecimalText(value);
+    return text != null && /[1-9]/u.test(text.replace(".", ""));
+  }
+
+  function formatQuantityMentions(value) {
+    return String(value ?? "").replace(
+      /\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/gu,
+      (number) => (/[.eE]/u.test(number) ? formatQuantityForDisplay(number) : number),
+    );
   }
 
   function groupedByCategory(lines, categoryOrder = []) {
@@ -100,9 +137,11 @@
   root.KitchenShoppingView = {
     basketPriceSummary,
     formatQuantityForDisplay,
+    formatQuantityMentions,
     groupedByCategory,
     hasSelectedProducts,
     isPositiveDecimal,
+    normalizeDecimalText,
     pickupProgress,
   };
   if (typeof module !== "undefined" && module.exports) {

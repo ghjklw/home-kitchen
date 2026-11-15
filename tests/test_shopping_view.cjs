@@ -4,9 +4,11 @@ const test = require("node:test");
 const {
   basketPriceSummary,
   formatQuantityForDisplay,
+  formatQuantityMentions,
   groupedByCategory,
   hasSelectedProducts,
   isPositiveDecimal,
+  normalizeDecimalText,
   pickupProgress,
 } = require("../src/home_kitchen/static/shopping-view.js");
 
@@ -24,7 +26,8 @@ test("shows a complete total only for selected products with complete prices", (
   };
   assert.equal(hasSelectedProducts(basket), true);
   assert.deepEqual(basketPriceSummary(basket), {
-    label: "Selected product total: 92.50 NOK",
+    label: "Selected product total: 92.5 NOK",
+    accessibleLabel: "Exact selected product total: 92.50 NOK",
     complete: true,
   });
 });
@@ -38,7 +41,7 @@ test("labels partial price data as a subtotal and suppresses a misleading zero t
       price_complete: false,
       needs: [{ selections: [selected] }],
     }).label,
-    "Known subtotal: 25.00 NOK · some prices are unknown",
+    "Known subtotal: 25 NOK · some prices are unknown",
   );
   assert.equal(
     basketPriceSummary({
@@ -86,12 +89,24 @@ test("rounds display quantities with decimal-string arithmetic only", () => {
   assert.equal(formatQuantityForDisplay("0.004"), "<0.01");
   assert.equal(formatQuantityForDisplay("12345678901234567890.005"), "12345678901234567890.01");
   assert.equal(formatQuantityForDisplay("unknown"), "unknown");
+  assert.equal(formatQuantityForDisplay("1E+3"), "1000");
+  assert.equal(formatQuantityForDisplay("1.25e-3"), "<0.01");
+  assert.equal(normalizeDecimalText("1.25e-3"), "0.00125");
+  assert.equal(normalizeDecimalText("1,000.5"), null);
 });
 
 test("detects positive decimal text without floating-point coercion", () => {
   assert.equal(isPositiveDecimal("0.0001"), true);
   assert.equal(isPositiveDecimal("0.000"), false);
-  assert.equal(isPositiveDecimal("1e2"), false);
+  assert.equal(isPositiveDecimal("1e2"), true);
+  assert.equal(isPositiveDecimal("1,000.5"), false);
+});
+
+test("formats decimal quantities inside basket issue text", () => {
+  assert.equal(
+    formatQuantityMentions("Milk: 233.3333333333333333333333334 g still needed; 1E+3 ml overbuy"),
+    "Milk: 233.33 g still needed; 1000 ml overbuy",
+  );
 });
 
 test("supports a configured category walking order with a stable alphabetical fallback", () => {

@@ -96,6 +96,12 @@ a {
   font-family: Georgia, serif;
   font-size: 27px;
 }
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
 .brand small {
   display: block;
   font-family: system-ui, sans-serif;
@@ -121,11 +127,13 @@ a {
   color: white;
 }
 .secondary-nav {
-  margin-top: auto;
-  text-align: left;
+  flex: 0 0 auto;
+  min-height: 38px;
+  margin: 0;
+  padding: 7px 9px;
+  font-size: 12px;
   border-color: transparent;
   background: transparent;
-  padding-left: 18px;
 }
 .sidebar-note {
   margin-top: auto;
@@ -244,7 +252,7 @@ h3 {
   gap: 6px;
 }
 .shopping-share-actions button {
-  min-height: 38px;
+  min-height: 44px;
   padding: 7px 10px;
   font-size: 12px;
 }
@@ -1070,7 +1078,7 @@ button.link {
   }
   .secondary-nav {
     min-height: 38px;
-    margin: 0 0 5px auto;
+    margin: 0;
     padding: 5px 8px;
     font-size: 12px;
   }
@@ -1081,7 +1089,9 @@ button.link {
     font-size: 30px;
   }
   .trip-toolbar {
-    align-items: end;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
     gap: 8px;
   }
   .trip-progress {
@@ -1089,11 +1099,14 @@ button.link {
     min-width: 100px;
   }
   .shopping-share-actions {
-    flex-wrap: nowrap;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
   }
   .shopping-share-actions button {
     padding: 7px 8px;
-    white-space: nowrap;
+    min-height: 44px;
+    white-space: normal;
   }
   .product-card {
     grid-template-columns: 90px 1fr;

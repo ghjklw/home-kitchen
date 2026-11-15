@@ -20,17 +20,19 @@
   <body>
     <div class="app">
       <aside class="sidebar">
-        <a class="brand" href="#week"
-          ><img src="/static/icon.svg" alt="" width="42" height="42" /><span
-            >Kitchen<small>A little less everyday planning.</small></span
-          ></a
-        >
+        <div class="sidebar-header">
+          <a class="brand" href="#week"
+            ><img src="/static/icon.svg" alt="" width="42" height="42" /><span
+              >Kitchen<small>A little less everyday planning.</small></span
+            ></a
+          >
+          <button class="secondary-nav" data-view="settings" aria-label="Household settings">Settings</button>
+        </div>
         <nav aria-label="Main navigation">
           <button data-view="week">Plan</button
           ><button data-view="recipes">Recipes</button
           ><button data-view="shopping">Shopping</button
         </nav>
-        <button class="secondary-nav" data-view="settings">Household settings</button>
         <p class="sidebar-note">
           Good meals start with<br />a little room to plan.
         </p>

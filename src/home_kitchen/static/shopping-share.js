@@ -9,8 +9,10 @@
 
   function decimalText(value) {
     if (typeof value !== "string") return "";
-    const text = value.trim();
-    if (!/^[0-9]+(?:\.[0-9]+)?$/u.test(text)) return "";
+    const text = root.KitchenShoppingView?.normalizeDecimalText
+      ? root.KitchenShoppingView.normalizeDecimalText(value)
+      : value.trim();
+    if (!text || !/^[0-9]+(?:\.[0-9]+)?$/u.test(text)) return "";
     return /[1-9]/u.test(text.replace(".", "")) ? text : "";
   }
 
@@ -33,8 +35,8 @@
     );
   }
 
-  function formatRemainingShoppingText(title, lines) {
-    const groups = new Map();
+  function formatRemainingShoppingText(title, lines, categoryOrder = []) {
+    const eligible = [];
     (Array.isArray(lines) ? lines : []).forEach((line) => {
       if (!isRemainingShoppingLine(line)) return;
       const name = cleanLine(line.name);
@@ -42,21 +44,35 @@
       const quantity = decimalText(line.to_buy_quantity);
       const unit = cleanLine(line.unit);
       if (!name || !quantity) return;
-      if (!groups.has(category)) groups.set(category, []);
-      groups.get(category).push({ name, quantity, unit });
+      eligible.push({ name, category, to_buy_quantity: quantity, unit });
     });
 
-    const sections = [...groups.entries()]
-      .sort(([a], [b]) => compareText(a, b))
-      .map(([category, items]) => {
+    const grouped = root.KitchenShoppingView?.groupedByCategory
+      ? root.KitchenShoppingView.groupedByCategory(eligible, categoryOrder)
+      : (() => {
+          const groups = new Map();
+          eligible
+            .sort((a, b) => compareText(a.category, b.category))
+            .forEach((item) => {
+              if (!groups.has(item.category)) groups.set(item.category, []);
+              groups.get(item.category).push(item);
+            });
+          return groups;
+        })();
+    const sections = [...grouped.entries()].map(([category, items]) => {
         items.sort(
           (a, b) =>
             compareText(a.name, b.name) ||
             compareText(a.unit, b.unit) ||
-            compareText(a.quantity, b.quantity),
+            compareText(a.to_buy_quantity, b.to_buy_quantity),
         );
         return `${category}:\n${items
-          .map(({ name, quantity, unit }) => `  - ${name} — ${quantity}${unit ? ` ${unit}` : ""}`)
+          .map(({ name, to_buy_quantity, unit }) => {
+            const quantity =
+              root.KitchenShoppingView?.formatQuantityForDisplay?.(to_buy_quantity) ||
+              to_buy_quantity;
+            return `  - ${name} — ${quantity}${unit ? ` ${unit}` : ""}`;
+          })
           .join("\n")}`;
       });
 

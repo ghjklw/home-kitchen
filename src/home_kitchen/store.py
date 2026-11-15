@@ -254,6 +254,18 @@ class Store:
                 select(settings.c.value).where(settings.c.key == key)
             ).scalar()
 
+    def ensure_setting(self, key: str, value: str) -> str:
+        """Initialize a deployment setting once, including concurrent startups."""
+        with self.connection() as connection:
+            connection.execute(
+                insert(settings)
+                .values(key=key, value=value)
+                .on_conflict_do_nothing(index_elements=[settings.c.key])
+            )
+            return connection.execute(
+                select(settings.c.value).where(settings.c.key == key)
+            ).scalar_one()
+
     def set_setting(self, key: str, value: str) -> None:
         statement = insert(settings).values(key=key, value=value)
         with self.connection() as connection:

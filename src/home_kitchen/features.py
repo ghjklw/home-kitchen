@@ -3,10 +3,15 @@
 import json
 from collections.abc import Callable
 from datetime import date
+from uuid import UUID, uuid4
 
 from pydantic_ai import Agent
 
 from home_kitchen.basket.matching import BasketMatchingService, OdaSearchAdapter
+from home_kitchen.catalogue.repository import PostgresFoodCatalogueRepository
+from home_kitchen.catalogue.service import FoodCatalogueService
+from home_kitchen.catalogue.sku_repository import PostgresCatalogueSkuRepository
+from home_kitchen.catalogue.sku_service import CatalogueSkuService
 from home_kitchen.context import history_context
 from home_kitchen.history import HistoryRepository
 from home_kitchen.inventory import InventoryService
@@ -14,6 +19,7 @@ from home_kitchen.models import RecipeCreate
 from home_kitchen.oda import OdaService
 from home_kitchen.oda.cart import OdaCartService
 from home_kitchen.purchasing import InStoreMode, OdaMode, PurchaseModes, StoreTripService
+from home_kitchen.purchasing_reconciliation import TripCompletionService
 from home_kitchen.recipe_feedback import RecipeFeedbackService
 from home_kitchen.recipes import (
     EvidenceSnippet,
@@ -45,6 +51,13 @@ class KitchenFeatures:
         self.kitchen = kitchen
         self.settings = settings
         self.household = household
+        self.catalogue = FoodCatalogueService(PostgresFoodCatalogueRepository(kitchen.store.engine))
+        self.household_id = settings.entra_allowed_group or UUID(
+            kitchen.store.ensure_setting("local_household_id", str(uuid4()))
+        )
+        self.catalogue_skus = CatalogueSkuService(
+            self.catalogue, PostgresCatalogueSkuRepository(kitchen.store.engine)
+        )
         self.history = HistoryRepository(kitchen.store.engine)
         self.recipe_feedback = RecipeFeedbackService(kitchen, self.history)
         self.oda = OdaService(kitchen.store.engine, settings)
@@ -52,6 +65,7 @@ class KitchenFeatures:
         self.inventory = InventoryService(kitchen, self.history)
         self.basket_matching = BasketMatchingService(self.inventory, OdaSearchAdapter(self.oda))
         self.store_trip = StoreTripService(self.inventory, self.history)
+        self.trip_completion = TripCompletionService(self.inventory, self.history)
         self.purchase_modes = PurchaseModes([OdaMode(self.oda), InStoreMode()])
         self.recipe_providers = create_recipe_providers(settings, ai_agent=ai)
         self.recipe_discovery = RecipeDiscoveryRegistry(

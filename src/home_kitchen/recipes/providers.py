@@ -45,7 +45,7 @@ class ManualRecipeProvider:
 
 class WebRecipeProvider:
     provider_id = "web"
-    label = "Recipe website"
+    label = "Public recipe page (Matprat, Marmiton, Oda)"
     capabilities: tuple[str, ...] = ("url",)
 
     async def draft(self, request: RecipeDraftRequest, context: RecipeContext) -> RecipeDraft:

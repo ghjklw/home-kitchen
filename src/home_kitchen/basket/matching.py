@@ -42,6 +42,8 @@ MEDIA_CACHE_MAX_ENTRIES = 256
 SEARCH_CACHE_TTL = timedelta(minutes=5)
 SEARCH_EMPTY_CACHE_TTL = timedelta(seconds=20)
 SEARCH_CACHE_MAX_ENTRIES = 512
+ODA_QUERY_BATCH_SIZE = 5
+ODA_QUERY_EXPANSIONS = {"coffee": ("kaffe",), "tomato": ("tomat",)}
 
 
 class BasketCandidate(BaseModel):
@@ -124,6 +126,10 @@ class SearchProvider(Protocol):
 class OdaSearchAdapter:
     """Normalize the official Oda response to the provider-neutral protocol."""
 
+    # The official endpoint accepts ten queries; reserve room for one localized
+    # expansion per need while keeping the provider request bounded.
+    max_queries = ODA_QUERY_BATCH_SIZE
+
     def __init__(self, service: OdaService):
         self.service = service
 
@@ -135,14 +141,25 @@ class OdaSearchAdapter:
     async def search_products(
         self, actor_id: str, queries: list[str], page: int, size: int
     ) -> list[ProviderSearchGroup]:
-        response = OdaSearchResponse.model_validate(
-            await self.service.search_products(actor_id, queries, page, size)
+        expanded_by_query = {
+            query: tuple(
+                dict.fromkeys(
+                    [query, *ODA_QUERY_EXPANSIONS.get(" ".join(query.casefold().split()), ())]
+                )
+            )
+            for query in queries
+        }
+        provider_queries = list(
+            dict.fromkeys(expanded for query in queries for expanded in expanded_by_query[query])
         )
-        return [
-            ProviderSearchGroup(
-                query=group.query,
-                has_more=group.has_more,
-                products=[
+        response = OdaSearchResponse.model_validate(
+            await self.service.search_products(actor_id, provider_queries, page, size)
+        )
+        groups = {}
+        for group in response.result:
+            groups[" ".join(group.query.casefold().split())] = (
+                group.has_more,
+                [
                     ProviderProduct(
                         provider="oda",
                         product_id=str(product.id),
@@ -160,8 +177,37 @@ class OdaSearchAdapter:
                     for product in group.products
                 ],
             )
-            for group in response.result
-        ]
+
+        def product_is_mismatch(query: str, product: ProviderProduct) -> bool:
+            normalized = " ".join(query.casefold().split())
+            if normalized not in {"coffee", "tomato"}:
+                return False
+            text = " ".join((product.name, product.description, product.brand or "")).casefold()
+            if normalized == "coffee":
+                return re.search(r"\bcoffee[\s-]*mate\b", text) is not None
+            return re.search(r"\b(?:tomato\s+paste|tomatpur[eé])\b", text) is not None
+
+        result = []
+        for query in queries:
+            product_map = OrderedDict()
+            has_more = False
+            for expanded in expanded_by_query[query]:
+                group = groups.get(" ".join(expanded.casefold().split()))
+                if group is None:
+                    continue
+                group_has_more, group_products = group
+                has_more = has_more or group_has_more
+                for product in group_products:
+                    if not product_is_mismatch(query, product):
+                        product_map.setdefault((product.provider, product.product_id), product)
+            result.append(
+                ProviderSearchGroup(
+                    query=query,
+                    has_more=has_more,
+                    products=list(product_map.values()),
+                )
+            )
+        return result
 
 
 MediaFetcher = Callable[[str], Awaitable[ProductMedia]]
@@ -394,8 +440,9 @@ class BasketMatchingService:
                     if self._inflight.get(key) is future:
                         del self._inflight[key]
 
-        for offset in range(0, len(owned), 10):
-            task = asyncio.create_task(fetch(owned[offset : offset + 10]))
+        batch_size = max(1, min(10, int(getattr(self.provider, "max_queries", 10))))
+        for offset in range(0, len(owned), batch_size):
+            task = asyncio.create_task(fetch(owned[offset : offset + batch_size]))
             self._search_tasks.add(task)
             task.add_done_callback(self._search_tasks.discard)
 

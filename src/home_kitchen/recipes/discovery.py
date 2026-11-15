@@ -132,7 +132,7 @@ class _MarmitonParser(HTMLParser):
             return
         attributes = dict(attrs)
         tag = tag.casefold()
-        classes = set((attributes.get("class") or "").split())
+        classes: set[str] = set((attributes.get("class") or "").split())
         if tag not in _VOID_TAGS:
             self._elements.append((tag, classes))
         if tag == "ul" and "search-list" in classes:

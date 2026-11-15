@@ -16,7 +16,9 @@ if TYPE_CHECKING:
     from home_kitchen.recipes.models import EditableRecipeDraft
 
 
-def recipe_agent(settings: Settings, model: Model | None = None) -> Agent[None, EditableRecipeDraft]:
+def recipe_agent(
+    settings: Settings, model: Model | None = None
+) -> Agent[None, EditableRecipeDraft]:
     from home_kitchen.recipes.models import EditableRecipeDraft
 
     if model is None:

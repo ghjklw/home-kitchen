@@ -24,15 +24,23 @@ from home_kitchen.settings import Household, Settings
 
 def source_recipe():
     return {
-        "title": "Adapted soup", "servings": 2, "source": "ai",
+        "title": "Adapted soup",
+        "servings": 2,
+        "source": "ai",
         "source_url": "https://www.matprat.no/soup/",
-        "ingredients": [{
-            "name": "salt", "quantity": "2", "unit": "g", "source_indices": [0],
-        }],
+        "ingredients": [
+            {
+                "name": "salt",
+                "quantity": "2",
+                "unit": "g",
+                "source_indices": [0],
+            }
+        ],
         "instructions": ["Simmer"],
         "source_ingredients": [{"index": 0, "text": "a pinch of salt"}],
         "provenance": {
-            "kind": "ai_adaptation", "original_source": "imported",
+            "kind": "ai_adaptation",
+            "original_source": "imported",
             "source_url": "https://www.matprat.no/soup/",
         },
     }
@@ -61,7 +69,9 @@ def test_explicit_save_edit_restart_retains_original_attribution_and_history(tes
         assert client.put(f"/api/recipes/{saved['id']}", json=unresolved).status_code == 422
         assert client.get(f"/api/recipes/{saved['id']}").json() == expected
         history = HistoryRepository(app.state.service.store.engine).list()
-        latest_save = next(entry for entry in history if entry.structured.get("entity_type") == "recipe")
+        latest_save = next(
+            entry for entry in history if entry.structured.get("entity_type") == "recipe"
+        )
         assert latest_save.structured["data"]["provenance"] == source_recipe()["provenance"]
 
 
@@ -72,13 +82,21 @@ async def test_saved_ai_source_and_repeat_iteration_keep_original_records(test_d
     restarted = KitchenService(test_database_url)
     loaded = restarted.get_recipe(saved.id)
     settings = Settings(local_dev=True)
-    model = TestModel(custom_output_args={
-        **source_recipe(), "title": "Proposed next soup", "servings": 200,
-        "ingredients": [{"name": "salt", "quantity": None, "unit": None, "source_indices": [0]}],
-    })
+    model = TestModel(
+        custom_output_args={
+            **source_recipe(),
+            "title": "Proposed next soup",
+            "servings": 200,
+            "ingredients": [
+                {"name": "salt", "quantity": None, "unit": None, "source_indices": [0]}
+            ],
+        }
+    )
     providers = create_recipe_providers(settings, recipe_agent(settings, model))
     context = RecipeContext(household=Household())
-    first = await providers.draft("ai", RecipeDraftRequest(recipe=loaded, prompt="Simplify"), context)
+    first = await providers.draft(
+        "ai", RecipeDraftRequest(recipe=loaded, prompt="Simplify"), context
+    )
     assert first.adapted.source_ingredients == loaded.source_ingredients
     assert first.adapted.provenance.original_source == "imported"
     assert first.adapted.ingredients[0].source_indices == [0]
@@ -90,12 +108,24 @@ async def test_saved_ai_source_and_repeat_iteration_keep_original_records(test_d
     restarted.store.engine.dispose()
 
 
-@pytest.mark.parametrize("mutation, message", [
-    ({"source_ingredients": [{"index": 0, "text": "salt"}, {"index": 0, "text": "salt"}]}, "unique"),
-    ({"source_ingredients": []}, "must reference"),
-    ({"provenance": {"original_source": "imported", "source_url": "https://wrong.example/"}}, "must match"),
-    ({"ingredients": [{"name": "salt", "quantity": "2", "source_indices": [-1]}]}, "greater than or equal"),
-])
+@pytest.mark.parametrize(
+    "mutation, message",
+    [
+        (
+            {"source_ingredients": [{"index": 0, "text": "salt"}, {"index": 0, "text": "salt"}]},
+            "unique",
+        ),
+        ({"source_ingredients": []}, "must reference"),
+        (
+            {"provenance": {"original_source": "imported", "source_url": "https://wrong.example/"}},
+            "must match",
+        ),
+        (
+            {"ingredients": [{"name": "salt", "quantity": "2", "source_indices": [-1]}]},
+            "greater than or equal",
+        ),
+    ],
+)
 def test_domain_and_draft_validate_source_metadata(mutation, message):
     payload = {**source_recipe(), **mutation}
     for schema in (RecipeCreate, EditableRecipeDraft):
@@ -111,16 +141,21 @@ def test_provenance_migration_preserves_old_rows_without_rewriting_ingredients(t
     old_id = uuid4()
     original_ingredients = [{"name": "carrot", "quantity": "2", "unit": "item"}]
     with service.store.engine.begin() as connection:
-        connection.execute(text("""
+        connection.execute(
+            text("""
             INSERT INTO recipes (id,title,servings,ingredients,instructions,source)
             VALUES (:id,'Old soup',2,CAST(:ingredients AS jsonb),'["Simmer"]'::jsonb,'manual')
-        """), {"id": old_id, "ingredients": json.dumps(original_ingredients)})
+        """),
+            {"id": old_id, "ingredients": json.dumps(original_ingredients)},
+        )
     command.upgrade(config, "head")
     loaded = service.get_recipe(old_id)
     assert loaded.source_ingredients == []
     assert loaded.provenance is None
     assert loaded.ingredients[0].source_indices == []
     with service.store.engine.connect() as connection:
-        stored = connection.execute(text("SELECT ingredients FROM recipes WHERE id=:id"), {"id": old_id}).scalar_one()
+        stored = connection.execute(
+            text("SELECT ingredients FROM recipes WHERE id=:id"), {"id": old_id}
+        ).scalar_one()
     assert stored == original_ingredients
     service.store.engine.dispose()

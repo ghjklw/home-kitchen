@@ -14,7 +14,9 @@ def upgrade() -> None:
     op.add_column(
         "recipes",
         sa.Column(
-            "source_ingredients", postgresql.JSONB, nullable=False,
+            "source_ingredients",
+            postgresql.JSONB,
+            nullable=False,
             server_default=sa.text("'[]'::jsonb"),
         ),
     )

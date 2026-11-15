@@ -121,11 +121,17 @@ def test_ai_unconfigured_is_unavailable_and_does_not_save(test_database_url):
         response = client.post("/api/ai/recipe", json={"prompt": "A simple soup"})
         assert response.status_code == 422
         assert "source" in response.json()["detail"]
-        response = client.post("/api/ai/recipe", json={"recipe": {
-            "title": "Soup", "servings": 2,
-            "ingredients": [{"name": "carrot", "quantity": 2}],
-            "instructions": ["Simmer"],
-        }})
+        response = client.post(
+            "/api/ai/recipe",
+            json={
+                "recipe": {
+                    "title": "Soup",
+                    "servings": 2,
+                    "ingredients": [{"name": "carrot", "quantity": 2}],
+                    "instructions": ["Simmer"],
+                }
+            },
+        )
         assert response.status_code == 503
         assert client.get("/api/recipes").json() == []
 

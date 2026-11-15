@@ -36,11 +36,22 @@ def context():
 
 def registry():
     settings = Settings(local_dev=True)
-    return create_recipe_providers(settings, recipe_agent(settings, TestModel(custom_output_args={
-        "title": "Adapted soup", "servings": 9,
-        "ingredients": [{"name": "salt", "quantity": None, "unit": None, "source_indices": []}],
-        "instructions": ["Simmer"],
-    })))
+    return create_recipe_providers(
+        settings,
+        recipe_agent(
+            settings,
+            TestModel(
+                custom_output_args={
+                    "title": "Adapted soup",
+                    "servings": 9,
+                    "ingredients": [
+                        {"name": "salt", "quantity": None, "unit": None, "source_indices": []}
+                    ],
+                    "instructions": ["Simmer"],
+                }
+            ),
+        ),
+    )
 
 
 async def test_manual_provider_forces_provenance_and_preserves_input(recipe, context):
@@ -70,7 +81,9 @@ async def test_web_provider_preserves_unparsed_ingredients(monkeypatch, context)
 
 async def test_ai_provider_uses_typed_agent_and_tracks_supplied_evidence(recipe, context):
     context.knowledge = [EvidenceSnippet(evidence_id="entry-1", text="Prefer simple soups")]
-    result = await registry().draft("ai", RecipeDraftRequest(recipe=recipe, prompt="Simple soup"), context)
+    result = await registry().draft(
+        "ai", RecipeDraftRequest(recipe=recipe, prompt="Simple soup"), context
+    )
     assert result.adapted is not None
     assert result.adapted.source == "ai"
     assert result.adapted.servings == recipe.servings
@@ -82,10 +95,14 @@ async def test_ai_provider_uses_typed_agent_and_tracks_supplied_evidence(recipe,
 
 async def test_ai_provider_passes_household_and_untrusted_evidence(monkeypatch, recipe, context):
     context.knowledge = [EvidenceSnippet(evidence_id="entry-1", text="Prefer simple soups")]
-    generate = AsyncMock(return_value=EditableRecipeDraft(
-        title="Adapted soup", servings=2, ingredients=[{"name": "carrot"}],
-        instructions=["Simmer"],
-    ))
+    generate = AsyncMock(
+        return_value=EditableRecipeDraft(
+            title="Adapted soup",
+            servings=2,
+            ingredients=[{"name": "carrot"}],
+            instructions=["Simmer"],
+        )
+    )
     monkeypatch.setattr("home_kitchen.recipes.providers.draft_recipe", generate)
     await registry().draft("ai", RecipeDraftRequest(recipe=recipe, prompt="Soup"), context)
     assert generate.await_args.args[1:] == (context.household, "Soup")
@@ -140,21 +157,31 @@ async def test_prompt_only_rejected_before_agent_creation(monkeypatch, context):
 
 async def test_url_shape_keeps_original_words_and_locked_attribution(monkeypatch, context):
     imported = ImportedDraft(
-        title="Soup", servings=2, ingredients=["a pinch of salt"],
-        instructions=["Simmer"], source_url="https://www.matprat.no/soup/",
+        title="Soup",
+        servings=2,
+        ingredients=["a pinch of salt"],
+        instructions=["Simmer"],
+        source_url="https://www.matprat.no/soup/",
     )
     fetch = AsyncMock(return_value=imported)
     monkeypatch.setattr("home_kitchen.recipes.providers.imports.import_recipe", fetch)
     settings = Settings(local_dev=True)
-    model = TestModel(custom_output_args={
-        "title": "Shaped soup", "servings": 20,
-        "ingredients": [{"name": "salt", "quantity": None, "unit": None,
-                         "source_indices": [0]}],
-        "instructions": ["Simmer"],
-        "source_ingredients": [{"index": 0, "text": "model-forged source wording"}],
-        "source_url": "https://model.example/forged/",
-        "provenance": {"original_source": "manual", "source_url": "https://model.example/forged/"},
-    })
+    model = TestModel(
+        custom_output_args={
+            "title": "Shaped soup",
+            "servings": 20,
+            "ingredients": [
+                {"name": "salt", "quantity": None, "unit": None, "source_indices": [0]}
+            ],
+            "instructions": ["Simmer"],
+            "source_ingredients": [{"index": 0, "text": "model-forged source wording"}],
+            "source_url": "https://model.example/forged/",
+            "provenance": {
+                "original_source": "manual",
+                "source_url": "https://model.example/forged/",
+            },
+        }
+    )
     providers = create_recipe_providers(settings, recipe_agent(settings, model))
     result = await providers.draft("ai", RecipeDraftRequest(url=imported.source_url), context)
     adapted = result.adapted
@@ -168,7 +195,9 @@ async def test_url_shape_keeps_original_words_and_locked_attribution(monkeypatch
     assert adapted.provenance.source_url == imported.source_url
     fetch.assert_awaited_once()
     # Iteration consumes the editable draft, without refetching or losing attribution.
-    iteration = await providers.draft("ai", RecipeDraftRequest(draft=adapted, prompt="Simplify"), context)
+    iteration = await providers.draft(
+        "ai", RecipeDraftRequest(draft=adapted, prompt="Simplify"), context
+    )
     assert iteration.adapted.source_ingredients == adapted.source_ingredients
     assert iteration.adapted.source_url == imported.source_url
     fetch.assert_awaited_once()
@@ -178,7 +207,9 @@ async def test_failed_iteration_preserves_previous_draft(monkeypatch, recipe, co
     providers = registry()
     prior = (await providers.draft("ai", RecipeDraftRequest(recipe=recipe), context)).adapted
     before = prior.model_dump_json()
-    monkeypatch.setattr("home_kitchen.recipes.providers.draft_recipe", AsyncMock(side_effect=RuntimeError))
+    monkeypatch.setattr(
+        "home_kitchen.recipes.providers.draft_recipe", AsyncMock(side_effect=RuntimeError)
+    )
     with pytest.raises(RuntimeError):
         await providers.draft("ai", RecipeDraftRequest(draft=prior, prompt="Simplify"), context)
     assert prior.model_dump_json() == before
@@ -187,7 +218,9 @@ async def test_failed_iteration_preserves_previous_draft(monkeypatch, recipe, co
 def test_draft_rejects_invalid_source_references():
     with pytest.raises(ValidationError, match="must reference"):
         EditableRecipeDraft(
-            title="Soup", servings=2,
-            ingredients=[{"name": "salt", "source_indices": [7]}], instructions=["Simmer"],
+            title="Soup",
+            servings=2,
+            ingredients=[{"name": "salt", "source_indices": [7]}],
+            instructions=["Simmer"],
             source_ingredients=[{"index": 0, "text": "a pinch of salt"}],
         )

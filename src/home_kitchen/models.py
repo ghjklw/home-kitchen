@@ -74,8 +74,10 @@ class RecipeCreate(BaseModel):
     @model_validator(mode="after")
     def valid_source_metadata(self) -> "RecipeCreate":
         validate_source_metadata(
-            self.source_ingredients, [item.source_indices for item in self.ingredients],
-            self.source_url, self.provenance,
+            self.source_ingredients,
+            [item.source_indices for item in self.ingredients],
+            self.source_url,
+            self.provenance,
         )
         return self
 

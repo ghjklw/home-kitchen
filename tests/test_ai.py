@@ -25,17 +25,26 @@ def recipe() -> Recipe:
 @pytest.mark.asyncio
 async def test_recipe_agent_returns_typed_draft():
     draft = await draft_recipe(
-        recipe_agent(Settings(local_dev=True), TestModel(custom_output_args={
-            "title": "Soup", "servings": 99,
-            "ingredients": [{"name": "salt", "quantity": None, "unit": None}],
-            "instructions": ["Simmer"],
-            "source_url": "https://model.example/forged",
-        })),
+        recipe_agent(
+            Settings(local_dev=True),
+            TestModel(
+                custom_output_args={
+                    "title": "Soup",
+                    "servings": 99,
+                    "ingredients": [{"name": "salt", "quantity": None, "unit": None}],
+                    "instructions": ["Simmer"],
+                    "source_url": "https://model.example/forged",
+                }
+            ),
+        ),
         Household(),
         "A simple soup",
         source=EditableRecipeDraft(
-            title="Source soup", servings=2, ingredients=[{"name": "salt"}],
-            instructions=["Simmer"], source_url="https://www.matprat.no/soup/",
+            title="Source soup",
+            servings=2,
+            ingredients=[{"name": "salt"}],
+            instructions=["Simmer"],
+            source_url="https://www.matprat.no/soup/",
         ),
     )
     assert isinstance(draft, EditableRecipeDraft)

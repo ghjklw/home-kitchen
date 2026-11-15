@@ -52,8 +52,10 @@ class EditableRecipeDraft(BaseModel):
     @model_validator(mode="after")
     def valid_references(self) -> "EditableRecipeDraft":
         validate_source_metadata(
-            self.source_ingredients, [item.source_indices for item in self.ingredients],
-            self.source_url, self.provenance,
+            self.source_ingredients,
+            [item.source_indices for item in self.ingredients],
+            self.source_url,
+            self.provenance,
         )
         return self
 
@@ -66,8 +68,13 @@ class RecipeDraftRequest(BaseModel):
     draft: EditableRecipeDraft | None = None
 
     def require_ai_source(self) -> None:
-        if sum(value is not None for value in (self.url, self.recipe, self.imported, self.draft)) != 1:
-            raise ValueError("AI adaptation requires exactly one source: recipe, draft, imported or url")
+        if (
+            sum(value is not None for value in (self.url, self.recipe, self.imported, self.draft))
+            != 1
+        ):
+            raise ValueError(
+                "AI adaptation requires exactly one source: recipe, draft, imported or url"
+            )
 
 
 class RecipeDraft(BaseModel):
@@ -81,7 +88,9 @@ class RecipeDraft(BaseModel):
     @model_validator(mode="after")
     def one_payload(self) -> "RecipeDraft":
         if sum(value is not None for value in (self.recipe, self.imported, self.adapted)) != 1:
-            raise ValueError("A recipe draft requires exactly one recipe, imported or adapted payload")
+            raise ValueError(
+                "A recipe draft requires exactly one recipe, imported or adapted payload"
+            )
         return self
 
 

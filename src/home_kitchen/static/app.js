@@ -10,6 +10,7 @@ const state = {
   inventory: [],
   storeTrip: null,
   oda: null,
+  odaStatusError: null,
   odaSearch: {},
   odaMedia: {},
   basketMatchPlanKey: null,
@@ -41,7 +42,9 @@ const state = {
   basket: null,
   items: [],
   regular: [],
-  integrations: {},
+  integrations: [],
+  integrationsError: null,
+  settingsRefreshInFlight: false,
   week: localDate(new Date()),
 };
 let noticeTimer;
@@ -142,6 +145,37 @@ function connectionSettingsButton(label = "Manage connections in Settings") {
     },
     "quiet",
   );
+}
+async function loadConnectionStatus() {
+  state.settingsRefreshInFlight = true;
+  const [integrationsResult, odaResult] = await Promise.allSettled([
+    api("/integrations"),
+    api("/oda/status"),
+  ]);
+  const snapshot = window.KitchenSettingsView.connectionStatusSnapshot(
+    integrationsResult,
+    odaResult,
+  );
+  state.integrations = snapshot.integrations;
+  state.oda = snapshot.oda;
+  state.integrationsError = snapshot.integrationsError;
+  state.odaStatusError = snapshot.odaStatusError;
+  state.settingsRefreshInFlight = false;
+  return snapshot;
+}
+async function refreshConnectionSettings(event) {
+  const control = event?.currentTarget;
+  const section = $(".connection-settings");
+  const keepFocus = document.activeElement === control;
+  if (control) {
+    control.disabled = true;
+    control.textContent = "Refreshing…";
+  }
+  await loadConnectionStatus();
+  const replacement = renderConnectionSettings();
+  if (section) section.replaceWith(replacement);
+  if (keepFocus)
+    replacement.querySelector("#settings-connection-refresh")?.focus({ preventScroll: true });
 }
 function localDate(value) {
   const date = new Date(value);
@@ -411,12 +445,7 @@ async function refreshView() {
   pauseBasketMatchPolling();
   try {
     if (state.view === "week") state.meals = await api("/meals" + range());
-    if (state.view === "settings") {
-      [state.integrations, state.oda] = await Promise.all([
-        api("/integrations"),
-        api("/oda/status"),
-      ]);
-    }
+    if (state.view === "settings") await loadConnectionStatus();
     if (state.view === "shopping") {
       const results = await Promise.all([
         api("/shopping" + range()),
@@ -3891,15 +3920,39 @@ function itemForm(regular = false) {
   );
   add(root, form);
 }
-function renderConnectionSettings(main) {
+function renderConnectionSettings() {
   const section = add(
     el("section", null, "panel connection-settings"),
-    el("h2", "Connections"),
+    add(
+      el("div", null, "connection-settings-heading"),
+      el("h2", "Connections"),
+      button(
+        state.settingsRefreshInFlight ? "Refreshing…" : "Refresh status",
+        refreshConnectionSettings,
+        "quiet small",
+      ),
+    ),
     el("p", "Manage provider access here. Secrets are never shown in Kitchen.", "muted"),
   );
-  const integrations = Array.isArray(state.integrations) ? state.integrations : [];
+  const refresh = section.querySelector("button");
+  refresh.id = "settings-connection-refresh";
+  refresh.dataset.focusKey = "settings-connection-refresh";
+  refresh.disabled = state.settingsRefreshInFlight;
+  refresh.setAttribute(
+    "aria-label",
+    state.settingsRefreshInFlight ? "Refreshing connection status" : "Refresh connection status",
+  );
+  const integrations = Array.isArray(state.integrations) ? [...state.integrations] : [];
+  if (state.oda && !integrations.some((integration) => integration.id === "oda"))
+    integrations.unshift({
+      id: "oda",
+      name: "Oda",
+      status: state.oda.connected ? "connected" : state.oda.configured ? "configured" : "not_configured",
+      supported_auth_modes: [],
+      detail: state.oda.detail || "Oda connection status was loaded independently.",
+    });
   integrations.forEach((integration) => {
-    const status = integration.id === "oda"
+    const status = integration.id === "oda" && state.oda
       ? state.oda?.connected
         ? "connected"
         : state.oda?.configured
@@ -3931,7 +3984,7 @@ function renderConnectionSettings(main) {
       row,
       el(
         "p",
-        integration.id === "oda"
+        integration.id === "oda" && state.oda
           ? state.oda?.detail || integration.detail || "No Oda connection details are available."
           : integration.detail || "No connection details are available.",
         "muted",
@@ -3942,7 +3995,7 @@ function renderConnectionSettings(main) {
         "connection-auth-mode muted",
       ),
     );
-    if (integration.id === "oda") {
+    if (integration.id === "oda" && state.oda) {
       const actions = add(el("div", null, "actions connection-actions"));
       if (state.oda?.connected) {
         add(
@@ -3961,13 +4014,17 @@ function renderConnectionSettings(main) {
     }
     section.append(row);
   });
-  if (!integrations.length)
-    add(section, el("p", "Connection status is unavailable. Refresh Settings to try again.", "muted"));
+  if (state.integrationsError)
+    add(section, el("p", state.integrationsError, "callout"));
+  if (state.odaStatusError)
+    add(section, el("p", state.odaStatusError, "callout"));
+  if (!integrations.length && !state.integrationsError && !state.odaStatusError)
+    add(section, el("p", "No connection status is available yet. Refresh to try again.", "muted"));
   add(
     section,
     el("p", "You can install Kitchen from your browser’s menu on Android. The app shell opens offline; shared recipes and changes need a connection.", "muted"),
   );
-  add(main, section);
+  return section;
 }
 function renderSettings(main) {
   const household = state.household;
@@ -4195,7 +4252,7 @@ function renderSettings(main) {
     if (first) navigate("week");
   });
   add(main, form);
-  renderConnectionSettings(main);
+  main.append(renderConnectionSettings());
 }
 $("#modal").addEventListener("cancel", (event) => {
   if (state.cartConfirming) event.preventDefault();
@@ -4241,11 +4298,11 @@ async function start() {
     const odaResult = new URLSearchParams(location.search).get("oda");
     const requestedDate = parseDate(new URLSearchParams(location.search).get("date"));
     if (requestedDate) state.week = requestedDate;
-    [state.household, state.recipes, state.integrations] = await Promise.all([
+    [state.household, state.recipes] = await Promise.all([
       api("/household"),
       api("/recipes"),
-      api("/integrations"),
     ]);
+    await loadConnectionStatus();
     const requested = location.hash.slice(1);
     if (odaResult || requested === "basket") state.shoppingPanel = "oda";
     const requestedView = requested === "basket" ? "shopping" : requested;
@@ -4257,7 +4314,8 @@ async function start() {
           ? requestedView
           : "week";
     syncPlannerUrl();
-    await refreshView();
+    if (state.view === "settings") render();
+    else await refreshView();
     if (odaResult) {
       const remainingQuery = new URLSearchParams(location.search);
       remainingQuery.delete("oda");

@@ -7,6 +7,8 @@ const {
   integrationStatusLabel,
   moveShoppingCategory,
   normalizeShoppingCategoryOrder,
+  normalizeIntegrationResponse,
+  connectionStatusSnapshot,
   odaNeedsReconnect,
 } = require("../src/home_kitchen/static/settings-view.js");
 
@@ -43,4 +45,47 @@ test("provides connection status and authentication labels without credentials",
   assert.equal(odaNeedsReconnect("This requires you to connect your Oda account first"), true);
   assert.equal(odaNeedsReconnect("Oda product search returned no matches"), false);
   assert.deepEqual(DEFAULT_SHOPPING_CATEGORY_ORDER.slice(0, 3), ["Produce", "Bakery", "Meat"]);
+});
+
+test("accepts typed integration rows and rejects a legacy summary payload", () => {
+  const typed = [{ id: "anthropic", name: "Recipe assistant", status: "configured" }];
+  assert.equal(normalizeIntegrationResponse(typed), typed);
+  assert.equal(normalizeIntegrationResponse({ auth: { mode: "local" } }), null);
+});
+
+test("keeps integration and Oda status independently when one endpoint fails", () => {
+  const integrationRows = [{ id: "anthropic", status: "configured" }];
+  const partialOdaFailure = connectionStatusSnapshot(
+    { status: "fulfilled", value: integrationRows },
+    { status: "rejected", reason: new Error("offline") },
+  );
+  assert.equal(partialOdaFailure.integrations, integrationRows);
+  assert.equal(partialOdaFailure.integrationsError, null);
+  assert.equal(partialOdaFailure.oda, null);
+  assert.match(partialOdaFailure.odaStatusError, /Oda status is unavailable/);
+
+  const partialIntegrationFailure = connectionStatusSnapshot(
+    { status: "rejected", reason: new Error("offline") },
+    { status: "fulfilled", value: { configured: true, connected: true, detail: "Connected" } },
+  );
+  assert.deepEqual(partialIntegrationFailure.integrations, []);
+  assert.match(partialIntegrationFailure.integrationsError, /Integration status is unavailable/);
+  assert.equal(partialIntegrationFailure.oda.connected, true);
+  assert.equal(partialIntegrationFailure.odaStatusError, null);
+});
+
+test("reports malformed successful endpoint payloads as unavailable", () => {
+  const snapshot = connectionStatusSnapshot(
+    { status: "fulfilled", value: { unexpected: true } },
+    { status: "fulfilled", value: [] },
+  );
+  assert.match(snapshot.integrationsError, /Integration status is unavailable/);
+  assert.match(snapshot.odaStatusError, /Oda status is unavailable/);
+
+  const emptyOda = connectionStatusSnapshot(
+    { status: "fulfilled", value: [] },
+    { status: "fulfilled", value: {} },
+  );
+  assert.equal(emptyOda.integrationsError, null);
+  assert.match(emptyOda.odaStatusError, /Oda status is unavailable/);
 });

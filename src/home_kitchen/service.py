@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 from .models import (
     Meal,
     MealCreate,
+    PlannedMealRecipe,
     Recipe,
     RecipeCreate,
     RegularItem,
@@ -15,6 +16,7 @@ from .models import (
 )
 from .shopping import ShoppingBuilder, ShoppingContext, default_shopping_builder
 from .store import Store
+from .units import scale_quantity
 
 
 class KitchenService:
@@ -56,6 +58,25 @@ class KitchenService:
         return sorted(
             (meal for meal in self.store.list("meal", Meal) if start <= meal.date <= end),
             key=lambda meal: (meal.date, meal.slot),
+        )
+
+    def meal_recipe(self, meal_id: UUID) -> PlannedMealRecipe:
+        meal = self.store.get("meal", meal_id, Meal)
+        recipe = self.get_recipe(meal.recipe_id)
+        return PlannedMealRecipe(
+            meal=meal,
+            source_recipe=recipe,
+            servings=meal.servings,
+            ingredients=[
+                ingredient.model_copy(
+                    update={
+                        "quantity": scale_quantity(
+                            ingredient.quantity, meal.servings, recipe.servings
+                        )
+                    }
+                )
+                for ingredient in recipe.ingredients
+            ],
         )
 
     def add_item(self, data: ShoppingItemCreate) -> ShoppingItem:

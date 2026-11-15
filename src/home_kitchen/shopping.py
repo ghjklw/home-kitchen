@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass, field
 from datetime import date
-from decimal import Decimal
 from typing import Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -14,7 +13,7 @@ from home_kitchen.models import (
     ShoppingLine,
     WeekShopping,
 )
-from home_kitchen.units import add_exact, canonical_unit, canonicalize_quantity
+from home_kitchen.units import add_exact, canonical_unit, canonicalize_quantity, scale_quantity
 
 
 def normalize_need_text(value: str) -> str:
@@ -66,9 +65,7 @@ class PlannedRecipes:
             lines.extend(
                 ShoppingLine(
                     name=ingredient.name,
-                    quantity=ingredient.quantity
-                    * Decimal(meal.servings)
-                    / Decimal(recipe.servings),
+                    quantity=scale_quantity(ingredient.quantity, meal.servings, recipe.servings),
                     unit=ingredient.unit,
                     category=ingredient.category,
                     origins=[f"meal:{meal.id}"],

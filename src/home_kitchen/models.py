@@ -104,6 +104,15 @@ class Meal(MealCreate):
     id: UUID
 
 
+class PlannedMealRecipe(BaseModel):
+    """Cooking quantities for one meal, alongside its unchanged source recipe."""
+
+    meal: Meal
+    source_recipe: Recipe
+    servings: int = Field(gt=0)
+    ingredients: list[Ingredient]
+
+
 class ShoppingItemCreate(BaseModel):
     name: NonBlank
     quantity: Quantity = Decimal("1")

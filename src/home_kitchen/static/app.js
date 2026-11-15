@@ -932,6 +932,76 @@ function renderInStore(main) {
     checked_count: 0,
     total_count: 0,
   };
+  const remaining = trip.lines.filter(
+    window.KitchenShoppingShare.isRemainingShoppingLine,
+  );
+  const rangeTitle =
+    dateLabel(day(0), { month: "short", day: "numeric" }) +
+    " – " +
+    dateLabel(day(6), { month: "short", day: "numeric", year: "numeric" });
+  const shareTitle = "Kitchen shopping list · " + rangeTitle;
+  const sharedText = () =>
+    window.KitchenShoppingShare.formatRemainingShoppingText(shareTitle, remaining);
+  const copyDialog = (text, explanation) => {
+    const root = openDialog("Copy shopping list");
+    add(root, el("p", explanation, "muted"));
+    const content = el("textarea");
+    content.setAttribute("aria-label", "Remaining shopping list text");
+    content.readOnly = true;
+    content.rows = Math.min(16, Math.max(6, text.split("\n").length));
+    content.value = text;
+    add(root, content);
+    content.focus();
+    content.select();
+  };
+  const copyRemaining = async (forShare = false) => {
+    const text = sharedText();
+    if (typeof navigator.clipboard?.writeText !== "function") {
+      copyDialog(
+        text,
+        forShare
+          ? "Sharing and clipboard access are unavailable here. Select the text and copy it into another app."
+          : "Clipboard access is unavailable here. Select the text and copy it into another app.",
+      );
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      notify(
+        forShare
+          ? "Share sheet unavailable; shopping list copied. Paste it into the app you choose."
+          : "Remaining shopping list copied.",
+      );
+    } catch {
+      copyDialog(
+        text,
+        forShare
+          ? "Sharing and clipboard access are unavailable here. Select the text and copy it into another app."
+          : "Clipboard access was blocked. Select the text and copy it into another app.",
+      );
+    }
+  };
+  const shareRemaining = async () => {
+    const text = sharedText();
+    if (typeof navigator.share !== "function") {
+      await copyRemaining(true);
+      return;
+    }
+    try {
+      await navigator.share({ title: shareTitle, text });
+      notify("Shopping list shared.");
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+      notify("Could not open the share sheet. Use Copy remaining list instead.", true);
+    }
+  };
+  const share = button("Share remaining list", shareRemaining, "quiet");
+  const copy = button("Copy remaining list", () => copyRemaining(), "quiet");
+  share.disabled = copy.disabled = remaining.length === 0;
+  add(
+    main,
+    add(el("div", null, "actions shopping-share-actions"), share, copy),
+  );
   add(
     main,
     el(

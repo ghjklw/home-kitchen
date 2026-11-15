@@ -48,4 +48,8 @@ jobs:
       - run: uv run python -m ty check
       - run: uv run python -m pytest -q
       - run: node --test tests/*.cjs
-      - run: node --check src/home_kitchen/static/app.js && node --check src/home_kitchen/static/sw.js && node --check src/home_kitchen/static/shopping-share.js
+      - name: Check maintained frontend JavaScript syntax
+        run: |
+          for script in src/home_kitchen/static/*.js; do
+            node --check "$script"
+          done

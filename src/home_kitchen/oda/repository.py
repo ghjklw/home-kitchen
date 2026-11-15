@@ -133,6 +133,15 @@ class OdaRepository:
                 is not None
             )
 
+    def connection_generation(self, actor: str) -> int | None:
+        """Read a non-secret cache fence only while this actor is connected."""
+        with self.engine.connect() as connection:
+            return connection.execute(
+                select(lifecycles.c.generation)
+                .join(connections, connections.c.actor_id == lifecycles.c.actor_id)
+                .where(lifecycles.c.actor_id == actor)
+            ).scalar_one_or_none()
+
     def disconnect(self, actor: str) -> dict | None:
         # Fence in-flight Connect and callback HTTP operations before deletion.
         # Also wait for a concurrent refresh to finish, then revoke its new token.

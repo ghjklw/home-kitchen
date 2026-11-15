@@ -214,6 +214,63 @@ h3 {
 .section-tabs [aria-current="page"] {
   box-shadow: 0 0 0 2px var(--green);
 }
+.discovery-source-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin: 0 0 18px;
+}
+.discovery-source-picker legend {
+  padding: 0 5px;
+  font-weight: 650;
+}
+.discovery-source-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+}
+.discovery-source-option input {
+  accent-color: var(--green);
+  width: 18px;
+  height: 18px;
+}
+.discovery-statuses {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #f2f1e9;
+  padding: 14px 18px;
+  margin: 8px 0 18px;
+}
+.discovery-statuses h3 {
+  margin-bottom: 8px;
+}
+.discovery-status-list {
+  padding-left: 20px;
+  margin: 0;
+}
+.discovery-status-list li {
+  line-height: 1.7;
+}
+.discovery-status-list a {
+  margin-left: 6px;
+}
+.discovery-results {
+  margin-top: 18px;
+}
+.discovery-card .recipe-image-frame {
+  margin: -18px -18px 14px;
+  width: calc(100% + 36px);
+}
+.discovery-import-error {
+  margin: 8px 0 0;
+}
+.planned-cooking-view .callout {
+  margin-top: 14px;
+}
 .purchase-modes {
   margin-top: -8px;
 }

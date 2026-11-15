@@ -38,8 +38,8 @@ Recipe ingredients, instructions, household interaction structure, and saved bas
 Recipe acquisition uses an explicit `RecipeProvider` protocol and registry. The current adapters are:
 
 - `manual`, which validates a supplied recipe;
-- `web`, which imports supported public Matprat and Marmiton pages into a draft; and
-- `ai`, which uses an explicitly configured Anthropic model to draft a recipe.
+- `web`, which imports supported public Matprat, Marmiton and Oda pages into a draft; and
+- `ai`, which uses an explicitly configured Anthropic model to adapt a supplied source recipe, URL or prior draft. Prompt-only generation is rejected.
 
 Provider drafts are typed and marked `requires_review`. They do not write to the recipe store. A person reviews a draft and saves it through the recipe API. Imported ingredient text is retained for review instead of guessing missing quantities. A recipe can have an optional HTTPS `image_url` from an imported source or a person. An image URL returned as part of AI output is unverified and must be checked before saving. Kitchen does not create placeholder or generated recipe photos.
 
@@ -73,6 +73,14 @@ The complete request and response schemas are generated in `/openapi.json`; `/do
 
 | Route | Purpose |
 | --- | --- |
+| `GET/POST /api/catalogue/foods/{food_id}/products` | Read or remember exact household SKU options; selection never means preference or purchase. |
+| `PUT/DELETE /api/catalogue/products/{option_id}/preferred` | Change an explicit exact-product preference. |
+| `GET /api/store-trip/completion-review` | Review actual quantities and traced quick-add/regular sources before confirming purchase. |
+| `POST /api/store-trip/completions` | Atomically record confirmed actual purchases with idempotency and selective source reconciliation; no stock inference. |
+| `GET /api/catalogue/foods?q=…` | Find distinct, source-attributed generic food vocabulary; no household behavior is inferred. |
+| `POST /api/recipe-discovery` | Find genuine source links with explicit independent provider statuses. |
+| `GET /api/meals/{meal_id}/recipe` | Read planned-serving ingredients alongside the unchanged saved source recipe. |
+| `GET /api/basket/matches?start=…&end=…` | Read bounded candidate products, images, alternatives and package estimates for net needs; never select or buy. |
 | `GET /api/recipe-providers` | List registered recipe draft adapters and their accepted inputs. |
 | `POST /api/recipe-drafts/{provider_id}` | Request a typed manual, web, or AI recipe draft for review. |
 | `POST /api/ai/recipe` | Compatibility route for an AI recipe draft; it never saves the result. |
@@ -91,7 +99,7 @@ The existing recipe, meal, shopping-list, regular-item, and household routes are
 
 Settings are loaded from `KITCHEN_`-prefixed environment variables. `KITCHEN_DATABASE_URL` is always required. Local development requires `KITCHEN_LOCAL_DEV=true` and is accepted only when the request peer is loopback. Otherwise startup requires Entra tenant, audience, and allowed-group configuration. Forwarded proxy headers are disabled in Uvicorn by default; a deployment must explicitly configure trusted proxy networks before relying on identity headers from a proxy.
 
-The application does not include a public OAuth broker or ingress configuration. An authenticated remote MCP deployment requires those deployment components and a real connection test; the presence of `/mcp/` in source does not establish remote availability.
+Remote MCP optionally uses the encrypted PostgreSQL-backed Entra OAuth broker. Enable it with its independent signing/encryption keys and canonical public URL; private deployment manifests own ingress. Discovery and authentication challenge checks do not establish successful phone-client login, which remains a separate acceptance test.
 
 ## Current limits and decisions to revisit
 

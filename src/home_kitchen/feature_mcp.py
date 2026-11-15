@@ -8,12 +8,19 @@ from fastmcp import FastMCP
 from home_kitchen.basket import BasketReview, SelectedProduct
 from home_kitchen.basket.matching import BasketMatchResult
 from home_kitchen.basket.repository import BasketService
+from home_kitchen.catalogue.models import FoodCatalogueItem
+from home_kitchen.catalogue.sku_models import RetailerProductOption, RetailerProductSnapshot
 from home_kitchen.context import history_context
 from home_kitchen.features import KitchenFeatures
 from home_kitchen.history import HistoryEntry, HistoryEntryCreate, RetrievedEvidence
 from home_kitchen.inventory import InventoryItem, InventoryItemCreate, PurchasePlan
 from home_kitchen.oda.cart import CartProposalRequest
 from home_kitchen.purchasing import StoreTrip
+from home_kitchen.purchasing_reconciliation import (
+    CompletedTrip,
+    TripCompletionCreate,
+    TripCompletionReview,
+)
 from home_kitchen.recipe_feedback import RecipeFeedbackCreate
 from home_kitchen.recipes import RecipeDraft, RecipeDraftRequest, RecipeProviderInfo
 from home_kitchen.recipes.discovery import RecipeDiscoveryRequest, RecipeDiscoveryResponse
@@ -99,6 +106,60 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
     def check_store_trip_item(start: date, end: date, need_id: UUID, checked: bool) -> StoreTrip:
         """Record picking progress. This never asserts payment or alters home stock."""
         return features.store_trip.check(start, end, need_id, checked)
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
+    def find_foods(query: str, limit: int = 10) -> list[FoodCatalogueItem]:
+        """Find generic foods with attribution and distinct variants.
+
+        A generic food is not an exact retailer product. Do not infer that a
+        household selected, prefers or purchased a food from this catalogue.
+        """
+        return features.catalogue.autocomplete(query, limit)
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
+    def list_food_products(food_id: UUID) -> list[RetailerProductOption]:
+        """List explicitly remembered exact products and preferences for this generic food."""
+        return features.catalogue_skus.list_options(features.household_id, food_id)
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
+    def remember_food_product(
+        food_id: UUID, snapshot: RetailerProductSnapshot
+    ) -> RetailerProductOption:
+        """Remember a user-selected exact SKU for a food. This records selection, never purchase or preference."""
+        return features.catalogue_skus.remember_selection(
+            features.household_id, food_id, snapshot, actor_id=actor()
+        )
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
+    def set_food_product_preference(option_id: UUID, preferred: bool) -> RetailerProductOption:
+        """Set or remove a user's explicit exact-product preference. Never infer it from selection."""
+        action = (
+            features.catalogue_skus.set_preferred
+            if preferred
+            else features.catalogue_skus.unset_preferred
+        )
+        return action(features.household_id, option_id, actor_id=actor())
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
+    def review_store_trip_completion(start: date, end: date) -> TripCompletionReview:
+        """Review actual purchases separately from picking; no purchase is recorded here."""
+        return features.trip_completion.review(start, end)
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
+    def complete_store_trip(data: TripCompletionCreate) -> CompletedTrip:
+        """Record ONLY purchases the user explicitly confirms actually happened.
+
+        Show actual quantities and exact source captures/regulars to reconcile.
+        reviewed=True requires explicit confirmation. Use a fresh review_token and
+        stable idempotency_key for retries. Does not infer stock or payment from picking.
+        """
+        actor()
+        return features.trip_completion.complete(data)
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
+    def list_completed_store_trips(limit: int = 30) -> list[CompletedTrip]:
+        """Read explicit past purchases; picking and cart selection are not purchase evidence."""
+        return features.trip_completion.list(limit)
 
     @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
     async def find_recipes(request: RecipeDiscoveryRequest) -> RecipeDiscoveryResponse:

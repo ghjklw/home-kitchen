@@ -93,6 +93,12 @@ class OdaService:
     def redirect_uri(self) -> str:
         return str(self.settings.public_url).rstrip("/") + "/api/oda/callback"
 
+    def search_cache_context(self, actor_id: str) -> int | None:
+        """Fence cached search results across disconnects and new connections."""
+        if not self.configured or self.repository is None:
+            return None
+        return self.repository.connection_generation(actor_id)
+
     def status(self, actor_id: str) -> dict:
         connected = (
             self.repository.has_connection(actor_id)
@@ -106,7 +112,12 @@ class OdaService:
             if connected
             else "Not connected"
             if self.configured
-            else "Configure the public HTTPS URL and Oda encryption key to connect",
+            else (
+                "Configure the public URL (HTTP loopback is allowed in local development) "
+                "and Oda encryption key to connect"
+                if self.settings.local_dev
+                else "Configure the public HTTPS URL and Oda encryption key to connect"
+            ),
         }
 
     def _json(self, method: str, url: str, **kwargs) -> dict:

@@ -3,6 +3,7 @@
 from ipaddress import ip_network
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from cryptography.fernet import Fernet
@@ -14,6 +15,7 @@ from pydantic import (
     PrivateAttr,
     SecretStr,
     StringConstraints,
+    field_validator,
     model_validator,
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -82,6 +84,16 @@ class Settings(BaseSettings):
     @property
     def ai_configured(self) -> bool:
         return bool(self.ai_model and (self.anthropic_api_key or self.anthropic_workload_identity))
+
+    @field_validator("public_url", mode="before")
+    @classmethod
+    def validate_http_loopback_hostname(cls, value):
+        # HttpUrl normalizes abbreviated/numeric IPv4 hosts; require explicit loopback names.
+        if isinstance(value, str):
+            parsed = urlsplit(value)
+            if parsed.scheme == "http" and parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
+                raise ValueError("HTTP public_url must use localhost, 127.0.0.1 or [::1]")
+        return value
 
     @model_validator(mode="after")
     def validate_mcp_oauth(self) -> "Settings":
@@ -203,15 +215,26 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_auth(self) -> "Settings":
+        local_http_origin = (
+            self.local_dev
+            and self.public_url is not None
+            and self.public_url.scheme == "http"
+            and self.public_url.host in ("localhost", "127.0.0.1", "[::1]")
+            and self.public_url.port is not None
+            and 1 <= self.public_url.port <= 65535
+        )
         if self.public_url is not None and (
-            self.public_url.scheme != "https"
+            (self.public_url.scheme != "https" and not local_http_origin)
             or self.public_url.username is not None
             or self.public_url.password is not None
             or self.public_url.query is not None
             or self.public_url.fragment is not None
             or self.public_url.path not in (None, "/")
         ):
-            raise ValueError("public_url must be an HTTPS origin without credentials or a path")
+            raise ValueError(
+                "public_url must be an HTTPS origin (or HTTP loopback with local_dev) "
+                "without credentials or a path"
+            )
         if self.oda_encryption_key is not None:
             try:
                 Fernet(self.oda_encryption_key.get_secret_value().encode())

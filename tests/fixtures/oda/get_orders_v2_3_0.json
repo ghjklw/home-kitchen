@@ -1,0 +1,242 @@
+{
+  "name": "get_orders",
+  "input_schema": {
+    "additionalProperties": false,
+    "properties": {
+      "page": {
+        "default": 1,
+        "description": "Page number for orders.",
+        "maximum": 50,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "size": {
+        "default": 10,
+        "description": "Maximum number of orders to return per page.",
+        "maximum": 20,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "intent": {
+        "description": "In one short sentence, third person, what the user is trying to accomplish by calling this tool, e.g. 'wants to restock milk for the week'. Used only for MCP usage analytics.",
+        "maxLength": 300,
+        "type": "string"
+      }
+    },
+    "type": "object"
+  },
+  "output_schema": {
+    "description": "Paginated orders for the current user.",
+    "properties": {
+      "hasMore": {
+        "description": "Whether more orders are available on the next page.",
+        "type": "boolean"
+      },
+      "orders": {
+        "description": "The orders on this page.",
+        "items": {
+          "description": "An order for the current user.",
+          "properties": {
+            "orderNumber": {
+              "description": "The order number.",
+              "type": "string"
+            },
+            "deliveryDate": {
+              "description": "Delivery date in ISO 8601 format (YYYY-MM-DD), e.g. '2026-05-30'.",
+              "format": "date",
+              "type": "string"
+            },
+            "deliverySlotDisplay": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Human-readable delivery slot for the order, including date and time window. Available for all orders with a delivery slot, including completed orders."
+            },
+            "currency": {
+              "description": "The currency of the order.",
+              "type": "string"
+            },
+            "grossAmount": {
+              "description": "The total gross amount for the order.",
+              "type": "number"
+            },
+            "products": {
+              "description": "The products in the order, excluding fees and discounts.",
+              "items": {
+                "description": "A product together with its quantity in a cart or order context.",
+                "properties": {
+                  "product": {
+                    "description": "The product.",
+                    "properties": {
+                      "id": {
+                        "type": "integer"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "description": {
+                        "type": "string"
+                      },
+                      "price": {
+                        "description": "The price of the product",
+                        "type": "string"
+                      },
+                      "unitPrice": {
+                        "description": "The unit price of the product",
+                        "type": "string"
+                      },
+                      "unitName": {
+                        "description": "The name of the unit price",
+                        "type": "string"
+                      },
+                      "brand": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "The brand of the product, if available"
+                      },
+                      "brandId": {
+                        "anyOf": [
+                          {
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "The ID of the brand of the product, if available"
+                      },
+                      "url": {
+                        "anyOf": [
+                          {
+                            "format": "uri",
+                            "maxLength": 2083,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "The URL to the product's page"
+                      },
+                      "availability": {
+                        "anyOf": [
+                          {
+                            "description": "Product availability",
+                            "properties": {
+                              "isAvailable": {
+                                "description": "Whether the product can be purchased right now.",
+                                "type": "boolean"
+                              },
+                              "description": {
+                                "description": "Human-readable explanation of the availability status.",
+                                "type": "string"
+                              },
+                              "code": {
+                                "enum": [
+                                  "available",
+                                  "available_later",
+                                  "available_weekdays",
+                                  "not_for_sale",
+                                  "restricted_item_user_policy",
+                                  "sold_out",
+                                  "sold_out_partial",
+                                  "sold_out_supplier",
+                                  "unavailable_alcohol_time",
+                                  "unavailable_date",
+                                  "unavailable_time",
+                                  "unavailable_in_area",
+                                  "unavailable_temporarily",
+                                  "unavailable_unattended",
+                                  "unavailable_weekday",
+                                  "unknown"
+                                ],
+                                "type": "string",
+                                "description": "Machine-readable availability status code."
+                              }
+                            },
+                            "required": [
+                              "isAvailable",
+                              "description",
+                              "code"
+                            ],
+                            "type": "object"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Product availability. Omitted for historical order lines."
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "name",
+                      "description",
+                      "price",
+                      "unitPrice",
+                      "unitName"
+                    ],
+                    "type": "object"
+                  },
+                  "quantity": {
+                    "description": "The number of units of this product.",
+                    "type": "number"
+                  },
+                  "totalGrossAmount": {
+                    "description": "The total gross price for this item, including quantity",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "product",
+                  "quantity",
+                  "totalGrossAmount"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "orderNumber",
+            "deliveryDate",
+            "currency",
+            "grossAmount",
+            "products"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "hasMore",
+      "orders"
+    ],
+    "type": "object"
+  },
+  "annotations": {
+    "title": "List user orders",
+    "readOnlyHint": true,
+    "destructiveHint": null,
+    "idempotentHint": null,
+    "openWorldHint": null
+  }
+}

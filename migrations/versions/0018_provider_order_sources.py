@@ -19,6 +19,7 @@ def upgrade() -> None:
         sa.Column("external_id", sa.String(512), nullable=False),
         sa.Column("revision_id", sa.String(512), nullable=False),
         sa.Column("source_updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("observed_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("payload", postgresql.JSONB(), nullable=False),
         sa.UniqueConstraint(
             "provider",
@@ -32,7 +33,7 @@ def upgrade() -> None:
         "provider_order_checkpoints",
         sa.Column("provider", sa.String(100), primary_key=True),
         sa.Column("account_id", sa.String(255), primary_key=True),
-        sa.Column("cursor", sa.String(2048), nullable=True),
+        sa.Column("cursor", sa.String(2048), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     )
 

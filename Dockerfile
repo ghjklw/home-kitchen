@@ -4,7 +4,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 COPY src ./src
 ARG APP_VERSION=0.1.0
-ENV UV_DYNAMIC_VERSIONING_BYPASS=\${APP_VERSION}
+ENV UV_DYNAMIC_VERSIONING_BYPASS=${APP_VERSION}
 RUN uv sync --frozen --no-dev --no-editable --compile-bytecode
 
 FROM python:3.12-slim

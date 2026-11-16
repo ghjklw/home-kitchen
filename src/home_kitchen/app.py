@@ -1,9 +1,9 @@
 """Shared household actions for the PWA, REST clients and AI assistants."""
 
 import asyncio
-from importlib.metadata import PackageNotFoundError, version as package_version
 from contextlib import asynccontextmanager, suppress
 from datetime import date
+from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 from typing import Annotated
 from uuid import UUID

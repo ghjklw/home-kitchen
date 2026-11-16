@@ -1,5 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -8,12 +8,15 @@ from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
+from home_kitchen.basket.models import ProductSnapshot, SelectedProduct
+from home_kitchen.basket.repository import BasketService
 from home_kitchen.context import HistoryContext, history_context
 from home_kitchen.history import HistoryRepository
 from home_kitchen.inventory import InventoryService
 from home_kitchen.models import ShoppingItemCreate
 from home_kitchen.purchasing_reconciliation import (
     PurchasedLineCreate,
+    PurchasedProductCreate,
     TripCompletionCreate,
     TripCompletionService,
 )
@@ -48,6 +51,28 @@ def request(service, purchases=None, **kwargs):
         ],
         **kwargs,
     )
+
+
+def select_coffee_package(kitchen, history, quantity):
+    today = date.today()
+    capture = kitchen.add_item(ShoppingItemCreate(name="Coffee", quantity=quantity, unit="pack"))
+    basket = BasketService(kitchen, history)
+    target = basket.review(today, today).needs[0].need
+    coffee = ProductSnapshot(
+        provider="oda",
+        product_id="coffee-500g",
+        name="Coffee 500 g",
+        url="https://oda.com/no/products/coffee-500g",
+        pack_quantity=Decimal("500"),
+        pack_unit="g",
+        observed_at=datetime.now(UTC),
+    )
+    basket.select(
+        today,
+        today,
+        SelectedProduct(need_id=target.id, product=coffee, packages=int(quantity)),
+    )
+    return capture, target
 
 
 def test_explicit_completion_closes_only_selected_capture_and_records_actual(services):
@@ -120,6 +145,120 @@ def test_partial_incompatible_or_untraced_sources_roll_back_all_lines(services):
     assert not kitchen.list_items()[0].completed
     assert service.list() == []
     assert not [entry for entry in history.list() if entry.kind == "purchase"]
+
+
+def _product_purchase(service, need_id, packages, *, close_capture_ids=()):
+    today = date.today()
+    review = service.review(today, today)
+    return TripCompletionCreate(
+        start=today,
+        end=today,
+        review_token=review.review_token,
+        reviewed=True,
+        idempotency_key=uuid4(),
+        purchased_on=today,
+        purchases=[
+            PurchasedLineCreate(
+                need_id=need_id,
+                product=PurchasedProductCreate(
+                    provider="oda", product_id="coffee-500g", packages=packages
+                ),
+                close_capture_ids=list(close_capture_ids),
+            )
+        ],
+    )
+
+
+def test_explicit_sku_package_purchase_closes_pack_need_and_keeps_physical_amount(services):
+    kitchen, service, history = services
+    today = date.today()
+    capture, need = select_coffee_package(kitchen, history, 1)
+    result = service.complete(
+        _product_purchase(service, need.id, 1, close_capture_ids=[capture.id])
+    )
+
+    line = result.lines[0]
+    assert line.actual_quantity == Decimal("500")
+    assert line.actual_unit == "g"
+    assert line.product_snapshot.pack_quantity == Decimal("500")
+    assert line.product_snapshot.pack_unit == "g"
+    assert line.purchase.product.packages == 1
+    assert service.inventory.list() == []
+    assert kitchen.list_items()[0].completed is True
+    with kitchen.store.engine.connect() as connection:
+        closure = connection.execute(
+            text(
+                "SELECT resolution FROM kitchen_trip_source_closures "
+                "WHERE week_start=:start AND week_end=:end AND need_id=:need "
+                "AND source_kind='capture' AND source_id=:source"
+            ),
+            {"start": today, "end": today, "need": need.id, "source": capture.id},
+        ).scalar_one()
+    assert closure == "purchased"
+
+
+def test_pack_purchase_cannot_close_more_sources_than_packages_and_no_closure_is_allowed(
+    services,
+):
+    kitchen, service, history = services
+    capture, need = select_coffee_package(kitchen, history, 2)
+
+    insufficient = _product_purchase(service, need.id, 1, close_capture_ids=[capture.id])
+    with pytest.raises(ValueError, match="fully cover"):
+        service.complete(insufficient)
+    assert service.list() == []
+    assert kitchen.list_items()[0].completed is False
+
+    no_closure = service.complete(_product_purchase(service, need.id, 1))
+    assert no_closure.lines[0].actual_quantity == Decimal("500")
+    assert no_closure.lines[0].actual_unit == "g"
+    assert no_closure.lines[0].purchase.product.packages == 1
+    assert no_closure.source_closures == []
+    assert kitchen.list_items()[0].completed is False
+    assert service.inventory.list() == []
+
+
+def test_pack_need_manual_units_stay_strict_and_unknown_purchase_remains_unknown(services):
+    kitchen, service, history = services
+    capture, need = select_coffee_package(kitchen, history, 1)
+    review = service.review(date.today(), date.today())
+    data = TripCompletionCreate(
+        start=date.today(),
+        end=date.today(),
+        review_token=review.review_token,
+        reviewed=True,
+        idempotency_key=uuid4(),
+        purchased_on=date.today(),
+        purchases=[
+            PurchasedLineCreate(
+                need_id=need.id,
+                quantity=500,
+                unit="g",
+                close_capture_ids=[capture.id],
+            )
+        ],
+    )
+    with pytest.raises(ValueError, match="unit family"):
+        service.complete(data)
+    assert service.list() == []
+
+    unknown = service.complete(
+        TripCompletionCreate(
+            start=date.today(),
+            end=date.today(),
+            review_token=service.review(date.today(), date.today()).review_token,
+            reviewed=True,
+            idempotency_key=uuid4(),
+            purchased_on=date.today(),
+            purchases=[PurchasedLineCreate(need_id=need.id, close_capture_ids=[capture.id])],
+        )
+    )
+    assert unknown.lines[0].actual_quantity is None
+    assert unknown.lines[0].actual_unit is None
+    assert kitchen.list_items()[0].completed is True
+    assert service.inventory.list() == []
+    assert service.list() == [unknown]
+    assert len([entry for entry in history.list() if entry.kind == "purchase"]) == 1
 
 
 def test_confirmed_regular_requires_explicit_trace_and_coverage(services):

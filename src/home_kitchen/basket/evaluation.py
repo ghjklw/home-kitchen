@@ -3,9 +3,36 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from home_kitchen.units import add_exact, canonicalize_quantity, multiply_integer_exact
+from home_kitchen.units import (
+    add_exact,
+    canonicalize_quantity,
+    multiply_integer_exact,
+    normalize_unit,
+)
 
 from .models import BasketNeedStatus, BasketReview, PurchaseNeed, SelectedProduct
+
+
+def selection_allocation(need: PurchaseNeed, selection: SelectedProduct) -> Decimal:
+    """Return allocation in the need's unit, without converting across dimensions.
+
+    ``pack`` is a count of selected SKU packages. Physical package measurements
+    remain on the product snapshot and are used only for compatible mass/volume
+    needs.
+    """
+    _, need_unit = canonicalize_quantity(need.quantity, need.unit)
+    if normalize_unit(need_unit) == "pack":
+        return Decimal(selection.packages)
+
+    pack_quantity, pack_unit = canonicalize_quantity(
+        selection.product.pack_quantity, selection.product.pack_unit
+    )
+    if pack_unit != need_unit:
+        raise ValueError(
+            f"incompatible units for {selection.product.name}: "
+            f"{selection.product.pack_unit} cannot satisfy {need.unit}"
+        )
+    return multiply_integer_exact(pack_quantity, selection.packages)
 
 
 def evaluate_basket(
@@ -37,14 +64,6 @@ def evaluate_basket(
         if selection.need_id not in grouped:
             raise ValueError(f"selection references unknown need: {selection.need_id}")
         need = by_id[selection.need_id]
-        _, pack_unit = canonicalize_quantity(
-            selection.product.pack_quantity, selection.product.pack_unit
-        )
-        if pack_unit != need.unit:
-            raise ValueError(
-                f"incompatible units for {selection.product.name}: "
-                f"{selection.product.pack_unit} cannot satisfy {need.unit}"
-            )
         grouped[selection.need_id].append(selection)
 
     issues: list[str] = []
@@ -59,10 +78,7 @@ def evaluate_basket(
         selected = grouped[need.id]
         allocated = Decimal(0)
         for entry in selected:
-            pack_quantity, _ = canonicalize_quantity(
-                entry.product.pack_quantity, entry.product.pack_unit
-            )
-            allocated = add_exact(allocated, multiply_integer_exact(pack_quantity, entry.packages))
+            allocated = add_exact(allocated, selection_allocation(need, entry))
         remaining = max(add_exact(need.quantity, -allocated), Decimal(0))
         overbuy = max(add_exact(allocated, -need.quantity), Decimal(0))
         need_ready = remaining == 0

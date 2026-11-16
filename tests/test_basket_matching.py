@@ -213,7 +213,7 @@ async def test_description_pack_recommendations_recompute_with_cached_search_and
     )
     first = await service.find_products("household-1", date(2026, 11, 16), date(2026, 11, 22))
     candidates = [need.candidates[0] for need in first.needs]
-    assert [candidate.recommended_packages for candidate in candidates] == [1, 1, None, None]
+    assert [candidate.recommended_packages for candidate in candidates] == [1, 1, 1, None]
     assert candidates[1].pack_description == "0,5% fett, 1,75 l"
     assert candidates[1].pack_metadata_source == "oda_description"
     assert candidates[1].pack_metadata_status == "unverified"
@@ -758,3 +758,33 @@ async def test_supplied_plan_snapshot_does_not_read_inventory_again():
     )
     inventory.plan.assert_not_called()
     assert result.needs[0].candidates[0].recommended_packages == 2
+
+
+@pytest.mark.asyncio
+async def test_pack_count_recommends_whole_sku_packages_and_preserves_item_estimate_evidence():
+    coffee = line("coffee", quantity="1.2", unit="pack", index=1)
+    tomato = line("tomato", quantity="1.333", unit="item", index=2)
+    tomato.approximate = True
+    tomato.provenance = "recipe-derived estimate"
+    tomato.source_url = "https://example.test/recipe/tomato"
+    service = BasketMatchingService(
+        FakeInventory([coffee, tomato]),
+        FakeProvider(),
+        media_fetcher=lambda _: _media("500 g"),
+    )
+
+    result = await service.find_products("household-1", date(2026, 11, 16), date(2026, 11, 22))
+
+    coffee_match, tomato_match = result.needs
+    coffee_candidate = coffee_match.candidates[0]
+    tomato_candidate = tomato_match.candidates[0]
+    assert coffee_candidate.pack_quantity == Decimal("500")
+    assert coffee_candidate.pack_unit == "g"
+    assert coffee_candidate.recommended_packages == 2
+    assert coffee_candidate.recommended_fulfillment_quantity == Decimal("2")
+    assert tomato_candidate.pack_quantity == Decimal("500")
+    assert tomato_candidate.pack_unit == "g"
+    assert tomato_candidate.recommended_packages is None
+    assert tomato_match.approximate is True
+    assert tomato_match.provenance == "recipe-derived estimate"
+    assert str(tomato_match.source_url) == "https://example.test/recipe/tomato"

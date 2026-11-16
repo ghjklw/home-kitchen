@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
@@ -11,6 +12,8 @@ from home_kitchen.basket import (
     SelectedProduct,
     evaluate_basket,
 )
+from home_kitchen.basket.matching import NeedMatchResult
+from home_kitchen.basket.repository import BasketService
 
 NOW = datetime(2026, 11, 15, 12, tzinfo=UTC)
 
@@ -159,6 +162,76 @@ def test_explicit_mass_volume_packages_convert_only_for_basket_arithmetic():
             [SelectedProduct(need_id=incompatible.id, product=bottle, packages=2)],
             now=NOW,
         )
+
+
+def test_pack_needs_allocate_sku_package_count_without_rewriting_physical_size():
+    target = need("1", unit="pack")
+    product_500g = product(
+        "coffee-500g",
+        "Coffee",
+        pack_quantity="500",
+        pack_unit="g",
+        evidence_status="unverified",
+    )
+    review = evaluate_basket(
+        [target],
+        [SelectedProduct(need_id=target.id, product=product_500g, packages=1)],
+        now=NOW,
+    )
+
+    status = review.needs[0]
+    assert status.allocated_quantity == Decimal("1")
+    assert status.remaining_quantity == Decimal("0")
+    assert status.selections[0].product.pack_quantity == Decimal("500")
+    assert status.selections[0].product.pack_unit == "g"
+
+
+def test_item_need_cannot_be_fulfilled_by_mass_package_without_count_evidence():
+    target = need("1.333", unit="item")
+    tomato_500g = product("tomato-500g", "Tomatoes", pack_quantity="500", pack_unit="g")
+
+    with pytest.raises(ValueError, match="incompatible units"):
+        evaluate_basket(
+            [target],
+            [SelectedProduct(need_id=target.id, product=tomato_500g, packages=1)],
+            now=NOW,
+        )
+
+
+def test_batch_rejects_mass_only_tomato_before_loading_or_persisting_any_selection():
+    coffee_need = need("1", unit="pack")
+    tomato_need = need("1.333", unit="item")
+    coffee_selection = SelectedProduct(
+        need_id=coffee_need.id,
+        product=product("coffee-500g", "Coffee", pack_quantity="500", pack_unit="g"),
+        packages=1,
+    )
+    tomato_selection = SelectedProduct(
+        need_id=tomato_need.id,
+        product=product("tomato-500g", "Tomatoes", pack_quantity="500", pack_unit="g"),
+        packages=1,
+    )
+    evidence = {
+        need.id: NeedMatchResult(
+            need_id=need.id,
+            name=need.name,
+            quantity=need.quantity,
+            unit=need.unit,
+            page=1,
+            has_more=False,
+            candidates=[],
+        )
+        for need in (coffee_need, tomato_need)
+    }
+    service = object.__new__(BasketService)
+    service._week = lambda start, end: None
+    service._needs = lambda week, start, end: [coffee_need, tomato_need]
+    service._load = Mock(side_effect=AssertionError("invalid batch must not reach persistence"))
+
+    with pytest.raises(ValueError, match="incompatible units"):
+        service.select_batch(NOW.date(), NOW.date(), [coffee_selection, tomato_selection], evidence)
+
+    service._load.assert_not_called()
 
 
 def test_product_snapshots_enforce_links_and_timezone():

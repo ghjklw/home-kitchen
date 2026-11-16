@@ -268,6 +268,8 @@ class TripCompletionService:
                 product_snapshot = None
                 actual_quantity = purchase.quantity
                 actual_unit = purchase.unit
+                source_coverage_quantity = actual_quantity
+                source_coverage_unit = actual_unit
                 if purchase.product is not None:
                     selected = next(
                         (
@@ -285,8 +287,19 @@ class TripCompletionService:
                     product_snapshot = selected
                     actual_quantity = selected.pack_quantity * purchase.product.packages
                     actual_unit = selected.pack_unit
+                    _, need_unit = canonicalize_quantity(need.to_buy_quantity, need.unit)
+                    if need_unit == "pack":
+                        # A selected SKU package count can cover a pack-count need,
+                        # while the recorded purchase remains in its physical unit.
+                        source_coverage_quantity = Decimal(purchase.product.packages)
+                        source_coverage_unit = "pack"
                 self._validate_purchase_sources(
-                    purchase, need, actual_quantity=actual_quantity, actual_unit=actual_unit
+                    purchase,
+                    need,
+                    actual_quantity=actual_quantity,
+                    actual_unit=actual_unit,
+                    source_coverage_quantity=source_coverage_quantity,
+                    source_coverage_unit=source_coverage_unit,
                 )
                 snapshots.append(
                     CompletedTripLine(
@@ -462,6 +475,8 @@ class TripCompletionService:
         *,
         actual_quantity: Decimal | None,
         actual_unit: str | None,
+        source_coverage_quantity: Decimal | None = None,
+        source_coverage_unit: str | None = None,
     ) -> None:
         refs = [
             (kind, source_id)
@@ -472,7 +487,10 @@ class TripCompletionService:
         if actual_quantity is None:
             return
         assert actual_unit is not None
-        actual, unit = canonicalize_quantity(actual_quantity, actual_unit)
+        coverage_quantity, unit = canonicalize_quantity(
+            source_coverage_quantity if source_coverage_quantity is not None else actual_quantity,
+            source_coverage_unit if source_coverage_unit is not None else actual_unit,
+        )
         if unit != need.unit:
             raise ValueError("Purchased unit must match the need's explicit unit family")
 
@@ -504,7 +522,7 @@ class TripCompletionService:
                 continue
             counted_sources.add(quantity_key)
             selected_due = add_exact(selected_due, due_by_source[quantity_key])
-        if selected_due > actual:
+        if selected_due > coverage_quantity:
             raise ValueError("Actual purchase does not fully cover the selected sources")
 
     def list(self, limit: int = 30) -> builtins.list[CompletedTrip]:

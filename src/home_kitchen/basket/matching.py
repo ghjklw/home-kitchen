@@ -432,6 +432,11 @@ def _package_recommendation(
         return None
     pack_quantity, pack_unit = pack
     need_quantity, need_unit = canonicalize_quantity(need_quantity, need_unit)
+    if need_unit == "pack" and pack_quantity > 0:
+        packages = int(need_quantity.to_integral_value(rounding=ROUND_CEILING))
+        if packages > 99:
+            return None
+        return packages, Decimal(packages)
     if need_unit not in compatible_units(pack_unit):
         return None
     if need_unit != pack_unit:

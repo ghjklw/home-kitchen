@@ -39,13 +39,13 @@ class Ingredient(BaseModel):
     source_indices: list[SourceIndex] = Field(default_factory=list)
     purchase_estimate: PurchaseEstimate | None = None
 
-    @model_validator(mode="before")
+    @model_validator(mode="wrap")
     @classmethod
-    def retain_source_unit_expression(cls, value: Any) -> Any:
+    def retain_source_unit_expression(cls, value: Any, handler: Any) -> Any:
+        ingredient = handler(value)
         if isinstance(value, dict) and "source_unit_expression" not in value:
-            value = dict(value)
-            value["source_unit_expression"] = value.get("unit")
-        return value
+            object.__setattr__(ingredient, "source_unit_expression", value.get("unit"))
+        return ingredient
 
     @field_validator("unit")
     @classmethod

@@ -112,3 +112,23 @@ def test_history_search_matches_structured_content_filters_kind_and_indexes(test
     with pytest.raises(ValueError):
         repository.search("word", limit=21)
     engine.dispose()
+
+
+def test_history_search_boosts_phrase_matches_over_scattered_terms(test_database_url):
+    engine = create_engine(test_database_url)
+    repository = HistoryRepository(engine)
+    repository.record(
+        HistoryEntryCreate(
+            kind="chat",
+            message="We liked quick meals, but dinners can take time",
+        )
+    )
+    repository.record(
+        HistoryEntryCreate(kind="preference", message="The household prefers quick dinners")
+    )
+
+    matches = repository.search("quick dinners", limit=2)
+
+    assert [match.kind for match in matches] == ["preference", "chat"]
+    assert matches[0].score > matches[1].score
+    engine.dispose()

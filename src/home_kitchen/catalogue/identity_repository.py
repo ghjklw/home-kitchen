@@ -12,8 +12,10 @@ class PostgresIdentityRepository:
     def __init__(self, engine: Engine):
         self.engine = engine
 
-    def product(self, canonical_name: str, variant: str) -> CanonicalProduct:
-        identity_id = uuid4()
+    def product(
+        self, canonical_name: str, variant: str, identity_id: UUID | None = None
+    ) -> CanonicalProduct:
+        target_id = identity_id or uuid4()
         with self.engine.begin() as connection:
             row = (
                 connection.execute(
@@ -21,14 +23,15 @@ class PostgresIdentityRepository:
                     VALUES (:id, :name, :variant)
                     ON CONFLICT (canonical_name, variant) DO UPDATE SET canonical_name = EXCLUDED.canonical_name
                     RETURNING id, canonical_name, variant"""),
-                    {"id": identity_id, "name": canonical_name, "variant": variant},
+                    {"id": target_id, "name": canonical_name, "variant": variant},
                 )
                 .mappings()
                 .one()
             )
         return CanonicalProduct.model_validate(dict(row))
 
-    def unit(self, canonical_name: str) -> CanonicalUnit:
+    def unit(self, canonical_name: str, identity_id: UUID | None = None) -> CanonicalUnit:
+        target_id = identity_id or uuid4()
         with self.engine.begin() as connection:
             row = (
                 connection.execute(
@@ -36,7 +39,7 @@ class PostgresIdentityRepository:
                     VALUES (:id, :name)
                     ON CONFLICT (canonical_name) DO UPDATE SET canonical_name = EXCLUDED.canonical_name
                     RETURNING id, canonical_name"""),
-                    {"id": uuid4(), "name": canonical_name},
+                    {"id": target_id, "name": canonical_name},
                 )
                 .mappings()
                 .one()
@@ -51,7 +54,11 @@ class PostgresIdentityRepository:
             self._require_identity(connection, kind, identity_id)
             connection.execute(
                 text(f"""INSERT INTO {table} (locale, context, normalized_alias, alias, {fk}, reviewed)
-                    VALUES (:locale, :context, :normalized, :alias, :identity_id, false)
+                    SELECT :locale, :context, :normalized, :alias, :identity_id, false
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM {table}
+                        WHERE locale=:locale AND context=:context AND normalized_alias=:normalized AND reviewed=true
+                    )
                     ON CONFLICT DO NOTHING"""),
                 {
                     "locale": locale,
@@ -61,6 +68,21 @@ class PostgresIdentityRepository:
                     "identity_id": identity_id,
                 },
             )
+
+    def has_reviewed_alias(self, kind: str, locale: str, context: str, alias: str) -> bool:
+        table, _ = self._table(kind)
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                text(f"""SELECT 1 FROM {table}
+                WHERE locale=:locale AND context IN (:context, '') AND normalized_alias=:normalized AND reviewed=true
+                LIMIT 1"""),
+                {
+                    "locale": normalize_identity_text(locale),
+                    "context": normalize_identity_text(context),
+                    "normalized": normalize_identity_text(alias),
+                },
+            ).first()
+            return row is not None
 
     def correct_alias(
         self, kind: str, locale: str, context: str, alias: str, identity_id: UUID

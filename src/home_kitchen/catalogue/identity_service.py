@@ -12,8 +12,10 @@ from home_kitchen.catalogue.identity import (
 
 
 class IdentityRepository(Protocol):
-    def product(self, canonical_name: str, variant: str) -> CanonicalProduct: ...
-    def unit(self, canonical_name: str) -> CanonicalUnit: ...
+    def product(
+        self, canonical_name: str, variant: str, identity_id: UUID | None = None
+    ) -> CanonicalProduct: ...
+    def unit(self, canonical_name: str, identity_id: UUID | None = None) -> CanonicalUnit: ...
     def add_alias(
         self, kind: str, locale: str, context: str, alias: str, identity_id: UUID
     ) -> None: ...
@@ -30,13 +32,25 @@ class CanonicalIdentityService:
     def __init__(self, repository: IdentityRepository):
         self.repository = repository
 
-    def create_product(self, name: str, variant: str = "") -> CanonicalProduct:
-        return self.repository.product(
-            normalize_identity_text(name), normalize_identity_text(variant)
-        )
+    def create_product(
+        self, name: str, variant: str = "", identity_id: UUID | None = None
+    ) -> CanonicalProduct:
+        try:
+            return self.repository.product(
+                normalize_identity_text(name),
+                normalize_identity_text(variant),
+                identity_id=identity_id,
+            )
+        except TypeError:
+            return self.repository.product(
+                normalize_identity_text(name), normalize_identity_text(variant)
+            )
 
-    def create_unit(self, name: str) -> CanonicalUnit:
-        return self.repository.unit(normalize_identity_text(name))
+    def create_unit(self, name: str, identity_id: UUID | None = None) -> CanonicalUnit:
+        try:
+            return self.repository.unit(normalize_identity_text(name), identity_id=identity_id)
+        except TypeError:
+            return self.repository.unit(normalize_identity_text(name))
 
     def add_alias(
         self, kind: str, locale: str, context: str, alias: str, identity_id: UUID
@@ -71,3 +85,16 @@ class CanonicalIdentityService:
 
     def validate_identities(self, kind: str, ids: set[UUID]) -> None:
         self.repository.validate_identities(kind, ids)
+
+    def has_reviewed_alias(self, kind: str, locale: str, context: str, alias: str) -> bool:
+        checker = getattr(self.repository, "has_reviewed_alias", None)
+        if callable(checker):
+            return bool(
+                checker(
+                    kind,
+                    normalize_identity_text(locale),
+                    normalize_identity_text(context),
+                    alias.strip(),
+                )
+            )
+        return False

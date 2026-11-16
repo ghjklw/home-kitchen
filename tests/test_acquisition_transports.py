@@ -342,6 +342,13 @@ def test_unconfigured_photo_upload_retains_private_image_for_safe_manual_fixture
             assert decoded.size == (12, 8)
             assert decoded.convert("RGB").getpixel((0, 0)) == (0, 128, 0)
 
+        retried = client.post(f"/api/recipe-photos/{photo_id}/redraft")
+        assert retried.status_code == 200
+        assert retried.json()["status"] == "extraction_failed"
+        assert retried.json()["draft"] is None
+        assert retried.json()["photo_source"] == result["photo_source"]
+        assert client.get(f"/api/recipe-photos/{photo_id}").status_code == 200
+
         discarded = client.delete(f"/api/recipe-photos/{photo_id}")
         assert discarded.status_code == 200
         assert discarded.json() == {"deleted": True}

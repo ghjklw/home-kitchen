@@ -30,7 +30,7 @@ from home_kitchen.inventory import InventoryService
 from home_kitchen.models import RecipeCreate
 from home_kitchen.oda import OdaService
 from home_kitchen.oda.cart import OdaCartService
-from home_kitchen.planning_proposals import PlanningProposalService
+from home_kitchen.planning import create_planning_proposal_service
 from home_kitchen.purchasing import InStoreMode, OdaMode, PurchaseModes, StoreTripService
 from home_kitchen.purchasing_reconciliation import TripCompletionService
 from home_kitchen.recipe_feedback import RecipeFeedbackService
@@ -100,7 +100,7 @@ class KitchenFeatures:
         self.basket_jobs = BasketMatchJobs(
             self.basket_matching, self.inventory, self.oda.search_cache_context
         )
-        self.plan_proposals = PlanningProposalService(kitchen, self.history)
+        self.plan_proposals = create_planning_proposal_service(kitchen, self.history)
         self.store_trip = StoreTripService(self.inventory, self.history)
         self.trip_completion = TripCompletionService(self.inventory, self.history)
         self.purchase_modes = PurchaseModes([OdaMode(self.oda), InStoreMode()])

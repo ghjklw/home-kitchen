@@ -45,6 +45,13 @@ Provider drafts are typed and marked `requires_review`. They do not write to the
 
 The weekly planner receives household settings, the requested date range, the recipe catalog, and selected retrieved evidence. Its typed result contains proposed meals, notes, and evidence IDs. It can only refer to recipes in the supplied catalog; dates, servings, and duplicate slots are validated. The result is still a draft. The user saves individual meals deliberately. No recipe or meal is written as a side effect of model generation.
 
+Reviewable meal plan proposals (`home_kitchen.planning`) establish the application's incremental vertical slice convention:
+- **Interfaces**: REST routes (`/api/plan-proposals`) and FastMCP tools (`create_plan_proposal`, `confirm_plan_proposal`) invoke application services without direct storage coupling.
+- **Application**: `PlanningProposalService` coordinates input bounds, recipe state fingerprinting, expiry checks, and atomic confirmation workflows.
+- **Domain and Ports**: Pure models (`ProposalRead`), exceptions (`ProposalConflict`, `ProposalExpired`), and invariants (`fingerprint_recipe`, `validate_proposal_bounds`) define the core rules; explicit Protocols (`ProposalRepository`, `RecipeReader`, `MealWriter`, `HistoryRecorder`, `PlanningUnitOfWork`) define secondary port contracts.
+- **Adapters**: Secondary adapters implement the ports (`PostgresPlanningUnitOfWork` with row-level locks and transactional savepoints; `MemoryPlanningUnitOfWork` for pure in-memory unit tests without database or network dependencies).
+- **Bootstrap**: Factory wiring (`create_planning_proposal_service`) connects storage adapters to application services during feature composition.
+
 AI configuration is optional and uses `KITCHEN_AI_MODEL` plus `KITCHEN_ANTHROPIC_API_KEY`. Without both, the AI endpoints return a setup response. Automated tests use controlled model doubles; they do not prove live Anthropic connectivity, current model behavior, or operating cost.
 
 ## Shopping needs and basket review

@@ -1173,6 +1173,7 @@ async function suggestWeek() {
       "muted",
     ),
   );
+  add(root, recentFeedbackPanel().node);
   const result = el("div", null, "loading");
   result.setAttribute("aria-live", "polite");
   result.textContent = "Lager forslag …";
@@ -2743,6 +2744,13 @@ function discoveryForm() {
   );
   query.input.required = true;
   query.input.maxLength = 200;
+  add(root, recentFeedbackPanel((preference) => {
+    query.input.value = [query.input.value.trim(), preference].filter(Boolean).join(" ");
+    query.input.focus();
+    return query.input.value.length > 200
+      ? "Matpreferansen er lagt til. Kort ned søket til høyst 200 tegn før du søker i kildene."
+      : "Matpreferansen er lagt til. Se over søket og velg «Søk i kildene» når du er klar.";
+  }).node);
   const sources = el("fieldset", null, "discovery-source-picker");
   add(sources, el("legend", "Søkekilder"));
   const selected = new Set(
@@ -5451,23 +5459,94 @@ function renderBasket(main) {
     add(main, cartPanel);
   }
 }
+function recentFeedbackPanel(onPreference = null) {
+  const node = el("section", null, "callout");
+  const status = el("p", "", "muted");
+  status.setAttribute("role", "status");
+  const list = el("ul");
+  let sequence = 0;
+  const reload = button("Oppdater lagrede tilbakemeldinger", () => refresh(), "quiet small");
+  add(
+    node,
+    el("h3", "Lagrede tilbakemeldinger og matpreferanser"),
+    el("p", "Dette er det dere uttrykkelig har lagret. Det kan gi kontekst til KI-forslag, men visningen bekrefter ikke at et bestemt forslag brukte opplysningene. Ingen kjøp eller matlaging utledes av notatene.", "muted"),
+    el("p", "Viser opptil 10 tilbakemeldinger og matpreferanser blant de siste 100 historikkoppføringene. Eksterne chatsamtaler vises ikke.", "muted"),
+    status,
+    list,
+    reload,
+  );
+  async function refresh() {
+    const current = ++sequence;
+    reload.disabled = true;
+    status.textContent = "Henter lagrede tilbakemeldinger …";
+    try {
+      const entries = await api("/interactions?limit=100");
+      if (current !== sequence) return;
+      if (!Array.isArray(entries)) throw new Error("Ugyldig historikksvar");
+      const kinds = {
+        feedback: "Tilbakemelding",
+        preference: "Matpreferanse",
+        recipe_rating: "Oppskriftsvurdering",
+      };
+      const recent = entries.filter((entry) => Object.hasOwn(kinds, entry.kind)).slice(0, 10);
+      list.replaceChildren();
+      recent.forEach((entry) => {
+        const row = el("li");
+        const recipe = state.recipes.find((item) => item.id === entry.recipe_id);
+        add(row, el("strong", kinds[entry.kind] + (recipe ? " · " + recipe.title : entry.recipe_id ? " · Tidligere oppskrift" : "")));
+        const data = entry.structured || {};
+        const typedRating = entry.kind === "recipe_rating" &&
+          (Number.isInteger(data.rating) || typeof data.would_make_again === "boolean" || typeof data.notes === "string");
+        if (typedRating) {
+          if (Number.isInteger(data.rating)) add(row, el("p", "Vurdering: " + data.rating + " av 5"));
+          if (typeof data.would_make_again === "boolean")
+            add(row, el("p", "Vil lage igjen: " + (data.would_make_again ? "Ja" : "Nei")));
+          if (data.notes) add(row, el("p", data.notes));
+        } else {
+          add(row, el("p", entry.message));
+        }
+        if (entry.kind === "preference" && onPreference) {
+          add(row, button("Legg matpreferansen til i søket", () => {
+            status.textContent = onPreference(entry.message);
+          }, "quiet small"));
+        }
+        const recorded = new Date(entry.occurred_at);
+        const channel = { app: "appen", api: "API", mcp: "MCP" }[entry.channel] || "ukjent kanal";
+        add(row, el("small", "Lagret fra " + channel + (Number.isNaN(recorded.valueOf()) ? "" : " · " + dateLabel(recorded, { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }))));
+        list.append(row);
+      });
+      status.textContent = recent.length
+        ? "Lagrede opplysninger er hentet."
+        : "Ingen tilbakemeldinger eller matpreferanser blant de siste 100 historikkoppføringene.";
+    } catch {
+      if (current === sequence)
+        status.textContent = "Kunne ikke hente lagrede tilbakemeldinger. Eventuelle tidligere viste opplysninger kan være utdaterte. Prøv å oppdatere igjen.";
+    } finally {
+      if (current === sequence) reload.disabled = false;
+    }
+  }
+  void refresh();
+  return { node, refresh };
+}
 function feedbackForm(recipe) {
-    const root = openDialog(recipe ? "Vurder oppskriften" : "Gi tilbakemelding");
+  const root = openDialog(recipe ? "Vurder oppskriften" : "Gi tilbakemelding");
+  const history = recentFeedbackPanel();
+  add(root, history.node);
   if (recipe) {
     add(
       root,
       el(
         "p",
-        "Vurderingen eller notatet lagres som husholdningskontekst for framtidige anbefalinger. Her lagres bare tilbakemeldingen du skriver inn, ikke en hel samtale.",
+        "Vurderingen eller notatet lagres som husholdningskontekst for framtidige forslag. Bare det du skriver inn her, blir lagret.",
         "muted",
       ),
     );
     const form = el("form");
-    const rating = field("Vurdering (valgfritt)", "number", "", "Velg et helt tall fra 1 til 5.");
+    const rating = field("Vurdering (valgfritt)", "number", "", "Velg et heltall fra 1 til 5.");
     rating.input.min = "1";
     rating.input.max = "5";
     rating.input.step = "1";
-    const wouldMakeAgain = field("Lager du denne retten igjen? (valgfritt)", "select");
+    const wouldMakeAgain = field("Vil dere lage dette igjen? (valgfritt)", "select");
     [
       ["", "Ikke besvart"],
       ["true", "Ja"],
@@ -5477,7 +5556,7 @@ function feedbackForm(recipe) {
       option.value = value;
       add(wouldMakeAgain.input, option);
     });
-    const notes = field("Notater (valgfritt)", "textarea", "", "Hva fungerte bra, eller hva bør endres neste gang?");
+    const notes = field("Notater (valgfritt)", "textarea", "", "Hva fungerte bra, og hva bør endres neste gang?");
     notes.input.maxLength = 2000;
     notes.input.rows = 4;
     add(form, rating.wrap, wouldMakeAgain.wrap, notes.wrap);
@@ -5489,8 +5568,11 @@ function feedbackForm(recipe) {
       }
       if (notes.input.value.trim()) payload.notes = notes.input.value.trim();
       await api(`/recipes/${recipe.id}/feedback`, "POST", payload);
-      $("#modal").close();
-      notify("Tilbakemeldingen er lagret for framtidige anbefalinger.");
+      rating.input.value = "";
+      wouldMakeAgain.input.value = "";
+      notes.input.value = "";
+      notify("Tilbakemeldingen er lagret for framtidige forslag.");
+      await history.refresh();
     });
     add(root, form);
     return;
@@ -5499,7 +5581,7 @@ function feedbackForm(recipe) {
     root,
     el(
       "p",
-      "Notatet lagres som husholdningskontekst for framtidige anbefalinger. Her lagres bare tilbakemeldingen du skriver inn, ikke en hel samtale.",
+      "Notatet lagres som husholdningskontekst for framtidige forslag. Bare det du skriver inn her, blir lagret.",
       "muted",
     ),
   );
@@ -5523,7 +5605,7 @@ function feedbackForm(recipe) {
     "textarea",
     "",
     recipe
-      ? "Hva fungerte bra, eller hva bør endres neste gang?"
+      ? "Hva fungerte bra, og hva bør endres neste gang?"
       : "Et kort notat som kan brukes i framtidige anbefalinger.",
   );
   message.input.required = true;
@@ -5538,8 +5620,9 @@ function feedbackForm(recipe) {
       structured: {},
       ...(recipe ? { recipe_id: recipe.id } : {}),
     });
-    $("#modal").close();
-      notify("Tilbakemeldingen er lagret for framtidige anbefalinger.");
+    message.input.value = "";
+    notify("Tilbakemeldingen er lagret for framtidige forslag.");
+    await history.refresh();
   });
   add(root, form);
 }

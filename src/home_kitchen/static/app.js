@@ -5484,6 +5484,7 @@ window.addEventListener("hashchange", () => {
     (nextView !== state.view || panelChanged)
   ) {
     state.view = nextView;
+    window.scrollTo(0, 0);
     refreshView();
   }
 });

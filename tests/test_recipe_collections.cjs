@@ -1,7 +1,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { canSelect, entryStatus, importPayload, normalizeJob, progress } = require("../src/home_kitchen/static/recipe-collections.js");
+const { canSelect, completionCounts, entryStatus, importPayload, normalizeJob, progress } = require("../src/home_kitchen/static/recipe-collections.js");
 
 const fixture = {
   job_id: "job-1",
@@ -42,4 +42,18 @@ test("builds an explicit reviewed import request from unique selected source IDs
 test("rejects malformed jobs instead of showing misleading collection state", () => {
   assert.throws(() => normalizeJob({ ...fixture, status: "unknown" }), /ugyldig importstatus/);
   assert.throws(() => normalizeJob({ ...fixture, entries: [{ id: "1", title: "No status" }] }), /ugyldig oppskriftsrad/);
+});
+
+test("reports completed, pre-existing, and failed recipes separately after partial cancellation", () => {
+  const job = normalizeJob({
+    ...fixture,
+    status: "cancelled",
+    entries: [
+      { id: "1", title: "A", status: "imported" },
+      { id: "2", title: "B", status: "already_imported" },
+      { id: "3", title: "C", status: "failed" },
+      { id: "4", title: "D", status: "pending" },
+    ],
+  });
+  assert.deepEqual(completionCounts(job), { imported: 1, already: 1, failed: 1 });
 });

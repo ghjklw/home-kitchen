@@ -58,6 +58,15 @@
     return LABELS[job.status] || "Importstatus ikke tilgjengelig";
   }
 
+  function completionCounts(job) {
+    return (job?.entries || []).reduce((counts, entry) => {
+      if (entry.status === "imported") counts.imported += 1;
+      if (entry.status === "already_imported") counts.already += 1;
+      if (entry.status === "failed") counts.failed += 1;
+      return counts;
+    }, { imported: 0, already: 0, failed: 0 });
+  }
+
   function importPayload(jobId, selectedIds) {
     const unique = [...new Set(selectedIds)];
     if (!jobId || !unique.length || unique.length !== selectedIds.length)
@@ -65,6 +74,6 @@
     return { path: `/recipe-collections/${encodeURIComponent(jobId)}/import`, body: { selected_ids: unique, reviewed: true } };
   }
 
-  root.KitchenRecipeCollections = { canSelect, entryStatus, importPayload, normalizeJob, progress };
+  root.KitchenRecipeCollections = { canSelect, completionCounts, entryStatus, importPayload, normalizeJob, progress };
   if (typeof module !== "undefined" && module.exports) module.exports = root.KitchenRecipeCollections;
 })(globalThis);

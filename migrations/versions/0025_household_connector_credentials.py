@@ -4,7 +4,7 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision = "0025_household_connector_credentials"
+revision = "0025_connector_credentials"
 down_revision = "0024_merge_cat_translations"
 branch_labels = None
 depends_on = None

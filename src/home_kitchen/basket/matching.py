@@ -686,6 +686,8 @@ class BasketCandidate(BaseModel):
     match_query: str
     match_reason: str
     identity_status: Literal["compatible", "unverified"] = "unverified"
+    is_preferred: bool = False
+    preference_rank: int | None = Field(default=None, ge=1)
     recommended_packages: int | None = Field(default=None, gt=0)
     recommended_fulfillment_quantity: Decimal | None = Field(
         default=None, ge=0, allow_inf_nan=False

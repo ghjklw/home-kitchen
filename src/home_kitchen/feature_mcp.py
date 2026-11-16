@@ -17,6 +17,7 @@ from home_kitchen.basket.matching import BasketMatchResult
 from home_kitchen.basket.repository import BasketService
 from home_kitchen.catalogue.identity import MapIngredientInput, UnmappedIngredient
 from home_kitchen.catalogue.models import FoodCatalogueItem
+from home_kitchen.catalogue.overview_models import ProductOverview, ProductPreferencesUpdate
 from home_kitchen.catalogue.sku_models import RetailerProductOption, RetailerProductSnapshot
 from home_kitchen.context import history_context
 from home_kitchen.features import KitchenFeatures
@@ -351,6 +352,34 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
             else features.catalogue_skus.unset_preferred
         )
         return action(features.household_id, option_id, actor_id=actor())
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
+    def get_catalogue_overview(
+        query: str | None = None, locale: str = "nb"
+    ) -> list[ProductOverview]:
+        """Browse and search the household product overview with translations, stock, purchase frequency and Oda preferences."""
+        return features.product_overview.get_overview(query=query, locale=locale)
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
+    def get_catalogue_product_overview(product_id: UUID, locale: str = "nb") -> ProductOverview:
+        """Inspect one canonical product's complete overview including localized display name, stock, frequency and preferences."""
+        return features.product_overview.get_product_overview(product_id, locale=locale)
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
+    def set_catalogue_product_preferences(
+        product_id: UUID,
+        preferred_oda_skus: list[str] | None = None,
+        excluded_oda_skus: list[str] | None = None,
+    ) -> ProductOverview:
+        """Manage ordered preferred Oda SKUs and explicit exclusions for a canonical product. Exclusions strictly take precedence."""
+        return features.product_overview.update_preferences(
+            product_id,
+            ProductPreferencesUpdate(
+                preferred_oda_skus=preferred_oda_skus or [],  # type: ignore[arg-type]
+                excluded_oda_skus=excluded_oda_skus or [],  # type: ignore[arg-type]
+            ),
+            actor_id=actor(),
+        )
 
     @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
     def review_store_trip_completion(start: date, end: date) -> TripCompletionReview:

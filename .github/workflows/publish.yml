@@ -59,6 +59,9 @@ jobs:
         with:
           version: '0.12.10'
           python-version: '3.12'
+      - name: Resolve app version from Git tags
+        id: version
+        run: echo "value=$(uvx --from uv-dynamic-versioning uv-dynamic-versioning)" >> "$GITHUB_OUTPUT"
       - run: uv sync --locked && uv run python -m ruff check . && uv run python -m ruff format --check . && uv run python -m ty check && uv run python -m pytest -q
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
@@ -71,6 +74,7 @@ jobs:
         with:
           context: .
           push: true
+          build-args: APP_VERSION=${{ steps.version.outputs.value }}
           tags: |
             ghcr.io/ghjklw/home-kitchen:sha-${{ steps.source.outputs.sha }}
             ghcr.io/ghjklw/home-kitchen:beta
@@ -79,7 +83,7 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/ghjklw/home-kitchen
             org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
-            org.opencontainers.image.version=
+            org.opencontainers.image.version=${{ steps.version.outputs.value }}
             io.home-kitchen.run-id=${{ github.run_id }}
             io.home-kitchen.run-attempt=${{ github.run_attempt }}
       - name: Record verified image identity for the deployment repository

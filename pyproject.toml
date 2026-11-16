@@ -1,6 +1,6 @@
 [project]
 name = "home-kitchen"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Configurable household recipes, meal planning and shopping via REST and MCP"
 requires-python = ">=3.12,<3.14"
 dependencies = [
@@ -27,8 +27,16 @@ dependencies = [
 dev = ["httpx2>=2,<3", "pytest>=8,<10", "pytest-asyncio>=1,<2", "ruff>=0.14,<1", "ty>=0.0.1", "pre-commit>=4,<5"]
 
 [build-system]
-requires = ["hatchling>=1.27,<2"]
+requires = ["hatchling>=1.27,<2", "uv-dynamic-versioning>=0.11,<1"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "uv-dynamic-versioning"
+
+[tool.uv-dynamic-versioning]
+vcs = "git"
+fallback-version = "0.1.0"
+style = "pep440"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/home_kitchen"]

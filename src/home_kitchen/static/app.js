@@ -6832,4 +6832,11 @@ async function start() {
 }
 if ("serviceWorker" in navigator)
   navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(() => {});
+fetch("/api/version")
+  .then((response) => response.json())
+  .then((data) => {
+    const element = $("#app-version");
+    if (element) element.textContent = data.version + " · " + data.channel;
+  })
+  .catch(() => {});
 start();

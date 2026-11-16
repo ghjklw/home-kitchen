@@ -95,6 +95,7 @@ def test_batch_api_resolves_only_job_candidates_and_rejects_unknown_packages(tes
             pack_metadata_status="unverified",
             match_query="Pasta",
             match_reason="Search result",
+            identity_status="compatible",
         )
         job_id = seed(safe)
         old_selection = client.put(
@@ -255,6 +256,7 @@ def test_batch_api_counts_known_mass_sku_as_pack_but_rejects_tomato_item_guess(t
             pack_metadata_status="unverified",
             match_query="coffee",
             match_reason="Search result",
+            identity_status="compatible",
         )
         tomato = BasketCandidate(
             id="oda:tomato-500g",

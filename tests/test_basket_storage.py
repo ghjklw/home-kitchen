@@ -190,6 +190,38 @@ def test_unknown_need_and_incompatible_unit_leave_storage_unchanged(test_databas
     kitchen.store.engine.dispose()
 
 
+def test_legacy_select_reads_existing_rows_on_its_locked_transaction_connection(
+    test_database_url,
+):
+    kitchen = KitchenService(test_database_url)
+    kitchen.add_item(ShoppingItemCreate(name="Yoghurt", quantity=2, unit="item"))
+    basket = BasketService(kitchen, HistoryRepository(kitchen.store.engine))
+    start, end = date(2026, 5, 4), date(2026, 5, 10)
+    need = basket.review(start, end).needs[0].need
+    picked = ProductSnapshot(
+        provider="oda",
+        product_id="yoghurt",
+        name="Yoghurt",
+        pack_quantity=1,
+        pack_unit="item",
+        observed_at=datetime.now(UTC),
+    )
+    original_load = basket._load
+    connections = []
+
+    def track_load(load_start, load_end, *, connection=None):
+        connections.append(connection)
+        return original_load(load_start, load_end, connection=connection)
+
+    basket._load = track_load
+    basket.select(start, end, SelectedProduct(need_id=need.id, product=picked, packages=2))
+
+    assert connections[0] is not None
+    # The returned review is read after commit and may use a normal checkout.
+    assert connections[-1] is None
+    kitchen.store.engine.dispose()
+
+
 def test_removal_is_persisted_and_logged(test_database_url):
     kitchen = KitchenService(test_database_url)
     kitchen.add_item(ShoppingItemCreate(name="Yoghurt", quantity=8, unit="cup"))

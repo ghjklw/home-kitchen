@@ -6,7 +6,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import TypeAdapter
 from sqlalchemy import text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 
 from home_kitchen.history import HistoryChannel, HistoryEntryCreate, HistoryRepository
 from home_kitchen.inventory import InventoryService
@@ -125,7 +125,7 @@ class BasketService:
                 text("SELECT pg_advisory_xact_lock(:lock_key)"),
                 {"lock_key": _selection_lock_key(start, end, selection.need_id)},
             )
-            existing_rows = self._load(start, end)
+            existing_rows = self._load(start, end, connection=connection)
             valid_ids = set(need_by_id)
             existing = []
             for row in existing_rows:
@@ -404,14 +404,15 @@ class BasketService:
             for line in week.lines
         ]
 
-    def _load(self, start: date, end: date) -> list[dict]:
-        with self.engine.connect() as connection:
-            rows = connection.execute(
-                text(
-                    "SELECT id, need_id, provider, product_id, payload "
-                    "FROM kitchen_basket_selections "
-                    "WHERE week_start = :week_start AND week_end = :week_end"
-                ),
-                {"week_start": start, "week_end": end},
-            ).mappings()
+    def _load(self, start: date, end: date, *, connection: Connection | None = None) -> list[dict]:
+        query = text(
+            "SELECT id, need_id, provider, product_id, payload "
+            "FROM kitchen_basket_selections "
+            "WHERE week_start = :week_start AND week_end = :week_end"
+        )
+        params = {"week_start": start, "week_end": end}
+        if connection is not None:
+            return [dict(row) for row in connection.execute(query, params).mappings()]
+        with self.engine.connect() as owned_connection:
+            rows = owned_connection.execute(query, params).mappings()
             return [dict(row) for row in rows]

@@ -312,6 +312,42 @@ def test_photo_and_collection_rest_routes_are_bounded_scoped_and_reviewed(test_d
         assert cancelled.json()["entries"][0]["status"] == "imported"
 
 
+def test_unconfigured_photo_upload_retains_private_image_for_safe_manual_fixture(test_database_url):
+    app = app_for(test_database_url)
+    photo_service = app.state.features.recipe_photos
+    photo_service.settings = Settings(local_dev=True, database_url=test_database_url)
+    photo_service.agent = None
+    image = png_bytes()
+    body = {
+        "mime_type": "image/png",
+        "data_base64": base64.b64encode(image).decode(),
+        "book_title": "Synthetic QA fixture",
+        "page": "1",
+    }
+    with TestClient(app, client=("127.0.0.1", 5000)) as client:
+        uploaded = client.post("/api/recipe-photos", json=body)
+        assert uploaded.status_code == 201, uploaded.text
+        result = uploaded.json()
+        assert result["status"] == "extraction_failed"
+        assert result["draft"] is None
+        assert result["photo_source"]["book_title"] == "Synthetic QA fixture"
+        assert result["photo_source"]["page"] == "1"
+        assert "provider" not in uploaded.text.lower()
+
+        photo_id = result["photo_source"]["id"]
+        original = client.get(f"/api/recipe-photos/{photo_id}")
+        assert original.status_code == 200
+        assert original.headers["content-type"] == "image/png"
+        with Image.open(BytesIO(original.content)) as decoded:
+            assert decoded.size == (12, 8)
+            assert decoded.convert("RGB").getpixel((0, 0)) == (0, 128, 0)
+
+        discarded = client.delete(f"/api/recipe-photos/{photo_id}")
+        assert discarded.status_code == 200
+        assert discarded.json() == {"deleted": True}
+        assert client.get(f"/api/recipe-photos/{photo_id}").status_code == 404
+
+
 @pytest.mark.asyncio
 async def test_mcp_acquisition_tools_are_registered_actor_scoped_and_never_return_photo_bytes(
     test_database_url,

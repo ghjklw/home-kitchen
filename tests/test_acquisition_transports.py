@@ -432,7 +432,9 @@ def test_photo_discard_rest_contract_preserves_saved_sources(test_database_url):
             json={
                 "title": "Soup",
                 "servings": 2,
-                "ingredients": [{"name": "Tomato", "source_indices": [0]}],
+                "ingredients": [
+                    {"name": "Tomato", "quantity": "1", "unit": "item", "source_indices": [0]}
+                ],
                 "instructions": ["Simmer"],
                 "source_ingredients": [{"index": 0, "text": "tomato"}],
                 "photo_source": source,

@@ -1,5 +1,6 @@
 """Household recipes, meal planning, and deliberate shopping suggestions."""
 
+from collections import Counter
 from datetime import date, time
 from uuid import UUID, uuid4
 
@@ -47,12 +48,48 @@ class KitchenService:
         existing = self.get_recipe(recipe_id)
         self._validate_canonical_identities(data)
         values = self._recipe_values(data, exclude={"image_attribution"})
+        values["ingredients"] = self._retain_omitted_ingredient_identity_fields(
+            data, existing, values["ingredients"]
+        )
         values["image_attribution"] = (
             existing.image_attribution if data.image_url == existing.image_url else None
         )
         recipe = Recipe(id=recipe_id, **values)
         self.store.save("recipe", recipe)
         return recipe
+
+    @staticmethod
+    def _retain_omitted_ingredient_identity_fields(
+        data: RecipeCreate, existing: Recipe, current_values: list[dict]
+    ) -> list[dict]:
+        """Keep metadata through old-client edits only for the same positional ingredient."""
+        preserved = [dict(values) for values in current_values]
+        existing_signatures = Counter((item.name, item.unit) for item in existing.ingredients)
+        incoming_signatures = Counter((item.name, item.unit) for item in data.ingredients)
+        for index, ingredient in enumerate(data.ingredients):
+            if index >= len(existing.ingredients):
+                continue
+
+            values = preserved[index]
+            prior = existing.ingredients[index]
+            signature = (ingredient.name, ingredient.unit)
+            same_ingredient = (
+                signature == (prior.name, prior.unit)
+                and existing_signatures[signature] == 1
+                and incoming_signatures[signature] == 1
+            )
+            if same_ingredient:
+                for field in ("canonical_product_id", "canonical_unit_id"):
+                    if field not in ingredient.model_fields_set:
+                        values[field] = getattr(prior, field)
+                # Older clients echo the normalized unit as their only unit field.
+                # An explicit null clears the source expression; a changed value replaces it.
+                if ingredient.source_unit_expression is None:
+                    if "source_unit_expression" not in ingredient.model_fields_set:
+                        values["source_unit_expression"] = prior.source_unit_expression
+                elif ingredient.source_unit_expression == ingredient.unit:
+                    values["source_unit_expression"] = prior.source_unit_expression
+        return preserved
 
     def _validate_canonical_identities(self, data: RecipeCreate) -> None:
         product_ids = {

@@ -149,7 +149,7 @@ def test_pkce_start_generates_valid_s256_challenge(sqlite_engine, cipher):
 
     parsed_url = urllib.parse.urlsplit(data["authorize_url"])
     assert parsed_url.netloc == "id.rema.no"
-    assert parsed_url.path == "/connect/authorize"
+    assert parsed_url.path == "/authorization"
 
     query = urllib.parse.parse_qs(parsed_url.query)
     assert query["response_type"] == ["code"]
@@ -190,7 +190,7 @@ def test_pkce_complete_exchanges_code_and_stores_encrypted_tokens(sqlite_engine,
 
     def mock_handler(request: httpx.Request) -> httpx.Response:
         captured_requests.append(request)
-        if request.url.path == "/connect/token":
+        if request.url.path == "/token":
             return httpx.Response(
                 200,
                 json={
@@ -233,7 +233,7 @@ def test_pkce_complete_exchanges_code_and_stores_encrypted_tokens(sqlite_engine,
     assert len(captured_requests) == 1
     req = captured_requests[0]
     assert req.method == "POST"
-    assert req.url.path == "/connect/token"
+    assert req.url.path == "/token"
     body = urllib.parse.parse_qs(req.read().decode())
     assert body["grant_type"] == ["authorization_code"]
     assert body["code"] == ["auth-code-789"]

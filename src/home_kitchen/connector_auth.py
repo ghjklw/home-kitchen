@@ -28,17 +28,18 @@ if TYPE_CHECKING:
     from home_kitchen.integrations import IntegrationInfo, IntegrationRegistry
     from home_kitchen.settings import Settings
 
-DEFAULT_REMA1000_AUTHORIZE_URL = "https://id.rema.no/connect/authorize"
-DEFAULT_REMA1000_TOKEN_URL = "https://id.rema.no/connect/token"
-DEFAULT_REMA1000_REDIRECT_URI = "https://id.rema.no/connect/callback"
-DEFAULT_REMA1000_CLIENT_ID = "rema-app"
-DEFAULT_REMA1000_SCOPE = "openid profile offline_access"
+DEFAULT_REMA1000_AUTHORIZE_URL = "https://id.rema.no/authorization"
+DEFAULT_REMA1000_TOKEN_URL = "https://id.rema.no/token"
+DEFAULT_REMA1000_REDIRECT_URI = "https://ae-appen.appspot.com/redirect/redirect.html"
+DEFAULT_REMA1000_CLIENT_ID = "c886192e-2ac2-11e9-b210-d663bd873d93"
+DEFAULT_REMA1000_SCOPE = "all"
 
 DEFAULT_COOP_AUTHORIZE_URL = "https://login.coop.no/authorize"
 DEFAULT_COOP_TOKEN_URL = "https://login.coop.no/oauth/token"
-DEFAULT_COOP_REDIRECT_URI = "https://login.coop.no/oauth/callback"
-DEFAULT_COOP_CLIENT_ID = "coop-member-app"
-DEFAULT_COOP_SCOPE = "openid profile offline_access"
+DEFAULT_COOP_REDIRECT_URI = "https://minside.coop.no/api/auth/callback/auth0/"
+DEFAULT_COOP_CLIENT_ID = "RdbMJKxmpiqvlYR1DPAwrE1y5D3wJvXj"
+DEFAULT_COOP_SCOPE = "openid profile email offline_access"
+DEFAULT_COOP_AUDIENCE = "https://api.coop.no"
 
 DEFAULT_COOKIDOO_BASE_URL = "https://ciam.prod.cookidoo.vorwerk-digital.com"
 DEFAULT_COOKIDOO_CLIENT_ID = "cookidoo-app"
@@ -247,6 +248,8 @@ class ConnectorAuthService:
             "code_challenge": challenge,
             "code_challenge_method": "S256",
         }
+        if provider_id == "coop":
+            params["audience"] = DEFAULT_COOP_AUDIENCE
         authorize_url = f"{auth_url}?{urllib.parse.urlencode(params)}"
 
         now = datetime.now(UTC)

@@ -1,6 +1,8 @@
 """Actor-scoped Oda connection routes; OAuth secrets are never returned to the UI."""
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from typing import Annotated
+
+from fastapi import APIRouter, HTTPException, Path, Query, Request, Response
 from pydantic import BaseModel, Field
 from starlette.responses import RedirectResponse
 
@@ -88,6 +90,33 @@ def oda_router(service: OdaService, cart_service: OdaCartService | None = None) 
     async def cart(request: Request) -> dict:
         try:
             return await service.get_cart(actor(request))
+        except OdaError as error:
+            raise failure(error) from None
+
+    @router.get("/orders")
+    async def orders(
+        request: Request,
+        response: Response,
+        page: Annotated[int, Query(ge=1, le=50)] = 1,
+        size: Annotated[int, Query(ge=1, le=20)] = 20,
+    ) -> dict:
+        """Read one provider page; orders are not confirmed Kitchen purchases."""
+        response.headers.update(private_headers)
+        try:
+            return await service.list_orders(actor(request), page, size)
+        except OdaError as error:
+            raise failure(error) from None
+
+    @router.get("/orders/{order_number}/tracking")
+    async def track_order(
+        request: Request,
+        response: Response,
+        order_number: Annotated[str, Path(min_length=1, max_length=512)],
+    ) -> dict:
+        """Read the exact provider lifecycle status without recording a purchase."""
+        response.headers.update(private_headers)
+        try:
+            return await service.track_order(actor(request), order_number)
         except OdaError as error:
             raise failure(error) from None
 

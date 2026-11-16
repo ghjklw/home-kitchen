@@ -44,6 +44,7 @@ SEARCH_CACHE_TTL = timedelta(minutes=5)
 SEARCH_EMPTY_CACHE_TTL = timedelta(seconds=20)
 SEARCH_CACHE_MAX_ENTRIES = 512
 ODA_QUERY_BATCH_SIZE = 5
+SEARCH_CACHE_VERSION = 2
 # Search-only expansions for legacy aliases not yet covered by the reviewed
 # identity table. These never establish product compatibility.
 _LEGACY_SEARCH_EXPANSIONS = {
@@ -149,12 +150,14 @@ _QUALIFIER_WORDS = re.compile(
 )
 _TRAILING_FORM_QUALIFIER = re.compile(
     r"^(.*?)(?:,\s*|\s+)(hakket|finhakket|terninger|malt|hel|fryst|hermetisk|tørket|røkt|"
-    r"for dusting|plus extra for greasing|separated|to taste|as needed)$",
+    r"for dusting|plus extra for greasing|separated|to taste|as needed|"
+    r"at room temperature|room temperature|melted|softened|divided|beaten)$",
     re.I,
 )
 _RECIPE_INSTRUCTION_SUFFIX = re.compile(
     r"(?:,\s*|\s+)(?:plus\s+extra\s+for\s+greasing|for\s+greasing|for\s+dusting|"
-    r"separated|to\s+taste|as\s+needed)\s*$",
+    r"separated|to\s+taste|as\s+needed|at\s+room\s+temperature|room\s+temperature|"
+    r"melted|softened|divided|beaten)\s*$",
     re.I,
 )
 
@@ -198,6 +201,8 @@ _IDENTITY_FAMILIES = (
         (
             ("large eggs", "large", "egg L"),
             ("large egg", "large", "egg L"),
+            ("egg l", "large", None),
+            ("store egg", "large", None),
             ("eggs", None, "egg"),
             ("egg", None, "egg"),
         ),
@@ -261,7 +266,7 @@ _IDENTITY_FAMILIES = (
             ("melis", "powdered", None),
         ),
         (
-            ("caster", r"\bcaster sugar\b"),
+            ("caster", r"\b(?:caster sugar|finsukker|finkornet sukker)\b"),
             ("powdered", r"\b(?:powdered sugar|icing sugar|melis)\b"),
             ("granulated", r"\b(?:granulated sugar|white sugar|sukker|sugar)\b"),
         ),
@@ -411,14 +416,20 @@ _IDENTITY_FAMILIES = (
         ("unspecified",),
         20,
     ),
-    _IdentityFamily("chocolate", (), (("unspecified", r"\b(?:chocolate|sjokolade)\b"),), (), 100),
+    _IdentityFamily(
+        "chocolate",
+        (),
+        (("unspecified", r"\b(?:chocolate|sjokolade|melkesjokolade)\b|\britter\s*sport\b"),),
+        (),
+        100,
+    ),
     _IdentityFamily(
         "personal-care",
         (),
         (
             (
                 "unspecified",
-                r"\b(?:shower\s+(?:gel|oil)|dusjgel[eé]|body\s+wash|shampoo|såpe|soap|lotion)\b",
+                r"\b(?:shower\s+(?:gel|oil)|dusj(?:gel[eé]|olje)|body\s+wash|shampoo|såpe|soap|lotion)\b",
             ),
         ),
         (),
@@ -430,15 +441,26 @@ _IDENTITY_FAMILIES = (
         (
             (
                 "unspecified",
-                r"\b(?:sugar\s+(?:decoration|decorations|faces)|sukkerpynt|dekorstrøssel|sprinkles)\b",
+                r"\b(?:sugar\s+(?:decoration|decorations|faces)|sukkerpynt|kakepynt|dekorstrøssel|kakestrøssel|sprinkles)\b",
             ),
         ),
         (),
         100,
     ),
     _IdentityFamily("tortilla", (), (("unspecified", r"\b(?:tortillas?|wraps?)\b"),), (), 100),
-    _IdentityFamily("diaper", (), (("unspecified", r"\b(?:diapers?|nappies|bleier)\b"),), (), 100),
-    _IdentityFamily("nicotine", (), (("unspecified", r"\b(?:nicotine|tobacco|snus)\b"),), (), 100),
+    _IdentityFamily("diaper", (), (("unspecified", r"\b(?:diapers?|nappies|bleier?)\b"),), (), 100),
+    _IdentityFamily(
+        "nicotine",
+        (),
+        (
+            (
+                "unspecified",
+                r"\b(?:nicotine|nikotin|tobacco|tobakk|snus|all[\s-]+white|allwhite|super[\s-]+white|helhvit|porsjonssnus)\b|\b(?:loop|zyn|epok|velo)\b",
+            ),
+        ),
+        (),
+        100,
+    ),
     _IdentityFamily(
         "produce-box", (), (("unspecified", r"\b(?:fruit\s+(?:box|basket)|fruktkasse)\b"),), (), 100
     ),
@@ -524,6 +546,13 @@ _ALLOWED_QUERY_QUALIFIERS = frozenset(
         "taste",
         "as",
         "needed",
+        "at",
+        "room",
+        "temperature",
+        "melted",
+        "softened",
+        "divided",
+        "beaten",
     }
 )
 
@@ -971,7 +1000,15 @@ class BasketMatchingService:
             normalized = " ".join(query.casefold().split())
             if normalized in pending:
                 continue
-            key = (actor_id, id(self.provider), context, normalized, page, size)
+            key = (
+                actor_id,
+                id(self.provider),
+                context,
+                normalized,
+                page,
+                size,
+                SEARCH_CACHE_VERSION,
+            )
             cached = self._search_cache.get(key) if context is not None else None
             if cached is not None and cached[0] > self.clock() and not force_refresh:
                 self._search_cache.move_to_end(key)

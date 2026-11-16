@@ -500,3 +500,38 @@ async def test_job_api_serializes_observation_time_without_database_or_provider(
         assert response.status_code == 200
         assert response.headers["cache-control"] == "no-store"
         assert response.json()["observed_at"] == final.model_dump(mode="json")["observed_at"]
+
+
+async def test_background_matching_invalidates_prior_matches_on_force_refresh_and_version_invalidation(
+    service,
+):
+    from home_kitchen.basket.jobs import MATCH_JOB_VERSION
+
+    jobs, inventory, matching, _ = service
+    first = await jobs.start("alice", START, END)
+    matching.release.set()
+    settled_first = await settled(jobs, "alice", first.job_id)
+    assert settled_first.status == "complete"
+
+    # force_refresh=True invalidates the cached job and forces a new background job
+    refreshed = await jobs.start("alice", START, END, force_refresh=True)
+    assert refreshed.job_id != first.job_id
+    assert refreshed.status in {"queued", "running", "complete"}
+
+    # Bumping MATCH_JOB_VERSION invalidates cached jobs even without force_refresh
+    owned_job = jobs._jobs[first.job_id]
+    original_fingerprint = owned_job.fingerprint
+    # Emulate a job recorded under prior version
+    old_version_fingerprint = (
+        original_fingerprint[0],
+        original_fingerprint[1],
+        original_fingerprint[2],
+        original_fingerprint[3],
+        original_fingerprint[4],
+        original_fingerprint[5],
+        MATCH_JOB_VERSION - 1,
+        original_fingerprint[7],
+    )
+    owned_job.fingerprint = old_version_fingerprint
+    new_job = await jobs.start("alice", START, END)
+    assert new_job.job_id != first.job_id

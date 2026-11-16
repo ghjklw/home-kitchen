@@ -507,7 +507,7 @@ async def test_oda_adapter_localizes_imported_ingredients_and_rejects_weak_ident
             assert queries == expected[self.calls]
             self.calls += 1
             values = {
-                "all-purpose flour": ["Loop No12 nicotine", "Almond flour"],
+                "all-purpose flour": ["Loop No12 The Red S8 All White", "Almond flour"],
                 "hvetemel": ["Siktet hvetemel"],
                 "large eggs, separated": ["Old El Paso Large tortillas"],
                 "egg L": ["Frittgående egg M/L"],
@@ -705,6 +705,17 @@ async def test_oda_adapter_rejects_tonic_as_hot_water_but_keeps_original_query()
         ("powdered sugar", "Powdered Sugar", True),
         ("powdered sugar", "Caster Sugar", False),
         ("sugar", "Caster Sugar", True),
+        ("all-purpose flour", "Loop No12 The Red S8 All White", False),
+        ("large eggs", "Old El Paso Large tortillas", False),
+        ("large eggs, separated", "Old El Paso Large tortillas", False),
+        ("unsalted butter, plus extra for greasing", "R Lev Vel diapers", False),
+        ("whole milk", "Ritter Sport whole-hazelnut chocolate", False),
+        ("vegetable oil", "Nivea shower oil", False),
+        ("hot water", "Raspberry tonic water", False),
+        ("granulated sugar", "Dr. Oetker Unicorn Sugar Faces", False),
+        ("caster sugar", "Dr. Oetker Unicorn Sugar Faces", False),
+        ("vanilla extract", "Mövenpick vanilla ice cream", False),
+        ("cocoa powder, for dusting", "Gluten-free spaghetti", False),
     ],
 )
 def test_ingredient_identity_handles_bokmal_compounds_and_product_classes(
@@ -898,6 +909,205 @@ async def test_search_cache_only_reuses_semantically_eligible_oda_products():
         assert result.needs[0].candidates[0].identity_status == "unverified"
         assert result.needs[0].candidates[1].identity_status == "compatible"
     assert oda.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_offline_synthetic_uat_failure_regression_pack():
+    """Verify all 9 observed UAT failures, positive Norwegian queries, coffee/tomato variants, and non-food searches."""
+
+    class FakeOdaBackend:
+        def __init__(self):
+            self.calls = 0
+
+        async def search_products(self, actor_id, queries, page, size):
+            self.calls += 1
+            # Mock provider returns synthetic products for each query
+            product_catalog = {
+                "all-purpose flour": ["Loop No12 The Red S8 All White", "Almond flour"],
+                "hvetemel": ["Siktet hvetemel"],
+                "large eggs": ["Old El Paso Large tortillas"],
+                "large eggs, separated": ["Old El Paso Large tortillas"],
+                "egg L": ["Frittgående egg M/L"],
+                "unsalted butter, plus extra for greasing": ["R Lev Vel diapers"],
+                "usaltet smør": ["Usaltet smør"],
+                "whole milk": ["Ritter Sport whole-hazelnut chocolate"],
+                "helmelk": ["Helmelk"],
+                "vegetable oil": ["Nivea shower oil"],
+                "matolje": ["Rapsolje"],
+                "hot water": ["Raspberry tonic water"],
+                "varmt vann": ["Raspberry tonic water"],
+                "granulated sugar": ["Dr. Oetker Unicorn Sugar Faces"],
+                "caster sugar": ["Dr. Oetker Unicorn Sugar Faces", "Caster sugar"],
+                "sukker": ["Sukker"],
+                "vanilla extract": ["Mövenpick vanilla ice cream"],
+                "vaniljeekstrakt": ["Vaniljeekstrakt"],
+                "cocoa powder, for dusting": ["Gluten-free spaghetti"],
+                "kakaopulver": ["Kakaopulver"],
+                "coffee": ["Filterkaffe", "Coffee Whitener", "Coffee Mate"],
+                "fresh tomatoes": ["Tomater, ferske", "Tomatpuré", "Fresh fruit box"],
+                "tomato paste": ["Tomatpuré", "Tomater, ferske"],
+                "dish soap": ["Dish soap"],
+                "olive oil shower gel": ["Olive Oil Shower Gel"],
+            }
+            return {
+                "result": [
+                    {
+                        "query": query,
+                        "hasMore": False,
+                        "products": [
+                            {
+                                "id": hash((query, name)) % 100000,
+                                "name": name,
+                                "description": name,
+                                "price": "10",
+                                "unitPrice": "10",
+                                "unitName": "per item",
+                                "url": f"https://oda.com/no/products/{hash((query, name)) % 100000}-item",
+                            }
+                            for name in product_catalog.get(query, [])
+                        ],
+                    }
+                    for query in queries
+                ]
+            }
+
+    backend = FakeOdaBackend()
+    adapter = OdaSearchAdapter(backend)
+
+    # 1. Test all 9 observed UAT failure queries against adapter (in bounded batches of at most adapter.max_queries)
+    uat_queries = [
+        "all-purpose flour",
+        "large eggs, separated",
+        "unsalted butter, plus extra for greasing",
+        "whole milk",
+        "vegetable oil",
+        "hot water",
+        "granulated sugar",
+        "vanilla extract",
+        "cocoa powder, for dusting",
+    ]
+    groups = []
+    for offset in range(0, len(uat_queries), adapter.max_queries):
+        groups.extend(
+            await adapter.search_products(
+                "household-1", uat_queries[offset : offset + adapter.max_queries], 1, 5
+            )
+        )
+    results_by_query = {group.query: [p.name for p in group.products] for group in groups}
+
+    # 1: All-purpose flour must reject snus and almond flour, keep hvetemel
+    assert results_by_query["all-purpose flour"] == ["Siktet hvetemel"]
+    # 2: Large eggs, separated must reject tortillas, keep Frittgående egg M/L
+    assert results_by_query["large eggs, separated"] == ["Frittgående egg M/L"]
+    # 3: Unsalted butter, plus extra for greasing must reject diapers, keep Usaltet smør
+    assert results_by_query["unsalted butter, plus extra for greasing"] == ["Usaltet smør"]
+    # 4: Whole milk must reject hazelnut chocolate, keep Helmelk
+    assert results_by_query["whole milk"] == ["Helmelk"]
+    # 5: Vegetable oil must reject shower oil, keep Rapsolje
+    assert results_by_query["vegetable oil"] == ["Rapsolje"]
+    # 6: Hot water must reject raspberry tonic water and remain honestly unresolved (empty)
+    assert results_by_query["hot water"] == []
+    # 7: Granulated sugar must reject sugar faces, keep Sukker
+    assert results_by_query["granulated sugar"] == ["Sukker"]
+    # 8: Vanilla extract must reject vanilla ice cream, keep Vaniljeekstrakt
+    assert results_by_query["vanilla extract"] == ["Vaniljeekstrakt"]
+    # 9: Cocoa powder, for dusting must reject spaghetti, keep Kakaopulver
+    assert results_by_query["cocoa powder, for dusting"] == ["Kakaopulver"]
+
+    # Also verify Large eggs (without separated) and caster sugar variants
+    extra_uat = await adapter.search_products("household-1", ["large eggs", "caster sugar"], 1, 5)
+    extra_results = {group.query: [p.name for p in group.products] for group in extra_uat}
+    assert extra_results["large eggs"] == ["Frittgående egg M/L"]
+    assert extra_results["caster sugar"] == ["Caster sugar"]
+
+    # 2. Positive Norwegian queries/matches
+    no_queries = [
+        "hvetemel",
+        "egg L",
+        "usaltet smør",
+        "helmelk",
+        "matolje",
+        "sukker",
+        "vaniljeekstrakt",
+        "kakaopulver",
+    ]
+    no_groups = []
+    for offset in range(0, len(no_queries), adapter.max_queries):
+        no_groups.extend(
+            await adapter.search_products(
+                "household-1", no_queries[offset : offset + adapter.max_queries], 1, 5
+            )
+        )
+    no_results = {g.query: [p.name for p in g.products] for g in no_groups}
+    assert no_results["hvetemel"] == ["Siktet hvetemel"]
+    assert no_results["egg L"] == ["Frittgående egg M/L"]
+    assert no_results["usaltet smør"] == ["Usaltet smør"]
+    assert no_results["helmelk"] == ["Helmelk"]
+    assert no_results["matolje"] == ["Rapsolje"]
+    assert no_results["sukker"] == ["Sukker"]
+    assert no_results["vaniljeekstrakt"] == ["Vaniljeekstrakt"]
+    assert no_results["kakaopulver"] == ["Kakaopulver"]
+
+    # 3. Prior coffee and tomato cases
+    prior_groups = await adapter.search_products(
+        "household-1", ["coffee", "fresh tomatoes", "tomato paste"], 1, 5
+    )
+    prior_results = {g.query: [p.name for p in g.products] for g in prior_groups}
+    assert prior_results["coffee"] == ["Filterkaffe"]
+    assert prior_results["fresh tomatoes"] == ["Tomater, ferske"]
+    assert prior_results["tomato paste"] == ["Tomatpuré"]
+
+    # 4. Valid manual non-food searches
+    non_food_groups = await adapter.search_products(
+        "household-1", ["dish soap", "olive oil shower gel"], 1, 5
+    )
+    non_food_results = {g.query: [p.name for p in g.products] for g in non_food_groups}
+    assert non_food_results["dish soap"] == ["Dish soap"]
+    assert non_food_results["olive oil shower gel"] == ["Olive Oil Shower Gel"]
+    assert all(p.identity_status == "unverified" for g in non_food_groups for p in g.products)
+
+
+@pytest.mark.asyncio
+async def test_search_cache_version_invalidation(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    import home_kitchen.basket.matching as matching
+
+    provider = AsyncMock()
+    provider.cache_context.return_value = 1
+    provider.search_products.return_value = [
+        ProviderSearchGroup(
+            query="all-purpose flour",
+            has_more=False,
+            products=[
+                ProviderProduct(
+                    provider="oda",
+                    product_id="1",
+                    name="Siktet hvetemel",
+                    description="",
+                    identity_status="compatible",
+                )
+            ],
+        )
+    ]
+    service = BasketMatchingService(
+        FakeInventory([line("all-purpose flour")]),
+        provider,
+        media_fetcher=lambda _: _media(None),
+    )
+
+    # First call fills the cache under current SEARCH_CACHE_VERSION
+    await service.find_products("household-1", date(2026, 11, 16), date(2026, 11, 22))
+    assert provider.search_products.await_count == 1
+
+    # Second identical call hits the cache
+    await service.find_products("household-1", date(2026, 11, 16), date(2026, 11, 22))
+    assert provider.search_products.await_count == 1
+
+    # Simulating a version bump invalidates prior cache entries
+    monkeypatch.setattr(matching, "SEARCH_CACHE_VERSION", matching.SEARCH_CACHE_VERSION + 1)
+    await service.find_products("household-1", date(2026, 11, 16), date(2026, 11, 22))
+    assert provider.search_products.await_count == 2
 
 
 async def _media(pack_description):

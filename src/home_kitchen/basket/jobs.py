@@ -24,6 +24,7 @@ from home_kitchen.basket.matching import (
 from home_kitchen.inventory import InventoryService, PurchasePlan
 
 SAFE_ERROR = "Product matching could not finish. Please try again."
+MATCH_JOB_VERSION = 2
 
 
 class BasketMatchJob(BasketMatchResult):
@@ -138,6 +139,7 @@ class BasketMatchJobs:
             end,
             page,
             size,
+            MATCH_JOB_VERSION,
             tuple(
                 (
                     line.id,

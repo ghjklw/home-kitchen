@@ -11,6 +11,7 @@ from home_kitchen.basket.matching import (
     ProviderSearchGroup,
     _explicit_pack,
     _oda_description_pack,
+    _product_matches_ingredient,
 )
 from home_kitchen.oda.media import ProductMedia
 
@@ -628,6 +629,29 @@ async def test_oda_adapter_rejects_tonic_as_hot_water_but_keeps_original_query()
     groups = await OdaSearchAdapter(Oda()).search_products("household-1", ["hot water"], 1, 5)
     assert groups[0].query == "hot water"
     assert groups[0].products == []
+
+
+@pytest.mark.parametrize(
+    ("query", "product_name", "matches"),
+    [
+        ("sukker", "Unicorn Sugar Faces", False),
+        ("hvetemel", "Loop No12 Red S8 All White", False),
+        ("usaltet smør", "R Lev Vel diapers", False),
+        ("granulated sugar", "Sugar Decorations", False),
+        ("whole milk", "Whole Milk Chocolate", False),
+        ("olive oil", "Olive Oil Shower Gel", False),
+        ("milk", "Tine Lettmelk", True),
+        ("unsalted butter", "Tine Meierismør Usaltet", True),
+        ("rice", "Basmatiris", True),
+    ],
+)
+def test_ingredient_identity_handles_bokmal_compounds_and_product_classes(
+    query, product_name, matches
+):
+    product = ProviderProduct(
+        provider="oda", product_id="1", name=product_name, description=product_name
+    )
+    assert _product_matches_ingredient(query, product) is matches
 
 
 @pytest.mark.asyncio

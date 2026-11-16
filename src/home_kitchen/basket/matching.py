@@ -114,6 +114,16 @@ _BOKMAL_INGREDIENTS = {
     "egg whites": "eggehvite",
     "powdered sugar": "melis",
     "icing sugar": "melis",
+    # Recognize canonical Bokmål terms as identity queries too. Mapping them
+    # to themselves leaves search expansion unchanged.
+    "hvetemel": "hvetemel",
+    "usaltet smør": "usaltet smør",
+    "helmelk": "helmelk",
+    "lettmelk": "lettmelk",
+    "sukker": "sukker",
+    "ris": "ris",
+    "basmatiris": "basmatiris",
+    "olivenolje": "olivenolje",
 }
 _BOKMAL_QUALIFIERS = {
     "fresh": "ferske",
@@ -163,6 +173,33 @@ _INGREDIENT_ALIAS_FAMILIES = {
     "chicken thigh": ("chicken thighs",),
     "chicken thighs": ("chicken thigh",),
 }
+_IDENTITY_CANONICAL = {
+    "all-purpose flour": "all-purpose flour",
+    "all purpose flour": "all-purpose flour",
+    "plain flour": "all-purpose flour",
+    "hvetemel": "all-purpose flour",
+    "flour": "flour",
+    "large egg": "large egg",
+    "large eggs": "large egg",
+    "egg": "egg",
+    "eggs": "egg",
+    "unsalted butter": "unsalted butter",
+    "usaltet smør": "unsalted butter",
+    "whole milk": "whole milk",
+    "helmelk": "whole milk",
+    "milk": "milk",
+    "lettmelk": "milk",
+    "granulated sugar": "granulated sugar",
+    "caster sugar": "granulated sugar",
+    "sugar": "granulated sugar",
+    "sukker": "granulated sugar",
+    "olive oil": "olive oil",
+    "olivenolje": "olive oil",
+    "vegetable oil": "vegetable oil",
+    "rice": "rice",
+    "ris": "rice",
+    "basmatiris": "rice",
+}
 _FOOD_IDENTITY_RULES: dict[str, tuple[re.Pattern[str], re.Pattern[str] | None]] = {
     "all-purpose flour": (
         re.compile(r"\b(?:hvetemel|wheat flour|all[- ]purpose flour|plain flour)\b", re.I),
@@ -191,12 +228,22 @@ _FOOD_IDENTITY_RULES: dict[str, tuple[re.Pattern[str], re.Pattern[str] | None]] 
     "eggs": (re.compile(r"\b(?:egg|eggs)\b", re.I), None),
     "egg": (re.compile(r"\b(?:egg|eggs)\b", re.I), None),
     "unsalted butter": (
-        re.compile(r"(?=.*\b(?:smør|butter)\b)(?=.*\b(?:usaltet|unsalted)\b)", re.I),
-        None,
+        re.compile(r"(?=.*\b(?:[\wæøå]*smør|butter)\b)(?=.*\b(?:usaltet|unsalted)\b)", re.I),
+        re.compile(r"\b(?:margarine|margarin|butter[- ]?flavou?red spread)\b", re.I),
     ),
-    "butter": (re.compile(r"\b(?:smør|butter)\b", re.I), None),
-    "whole milk": (re.compile(r"\b(?:helmelk|whole milk|wholemilk)\b", re.I), None),
-    "milk": (re.compile(r"\b(?:melk|milk)\b", re.I), None),
+    "butter": (re.compile(r"\b(?:[\wæøå]*smør|butter)\b", re.I), None),
+    "whole milk": (
+        re.compile(r"\b(?:helmelk|whole\s+milk)\b", re.I),
+        re.compile(r"\b(?:chocolate|sjokolade|ice\s?cream|gelato|milkshake)\b", re.I),
+    ),
+    "milk": (
+        re.compile(r"\b(?:[\wæøå]*melk|milk)\b", re.I),
+        re.compile(r"\b(?:chocolate|sjokolade|ice\s?cream|gelato|milkshake|rice\s?drink)\b", re.I),
+    ),
+    "olive oil": (
+        re.compile(r"\b(?:olivenolje|olive\s+oil)\b", re.I),
+        re.compile(r"\b(?:shower|dusj|body|hud|hair|hår|massage|gel|soap|såpe)\b", re.I),
+    ),
     "vegetable oil": (
         re.compile(
             r"\b(?:matolje|planteolje|rapsolje|solsikkeolje|olivenolje|maisolje|"
@@ -208,7 +255,9 @@ _FOOD_IDENTITY_RULES: dict[str, tuple[re.Pattern[str], re.Pattern[str] | None]] 
     "granulated sugar": (
         re.compile(r"\b(?:sukker|sugar|granulated sugar|caster sugar|white sugar)\b", re.I),
         re.compile(
-            r"\b(?:candy|candies|sweets|godteri|gummy|gummies|face|faces|sjokolade)\b", re.I
+            r"\b(?:candy|candies|sweets|godteri|gummy|gummies|face|faces|sjokolade|"
+            r"decoration|decorations|decorative|dekor|pynt|strøssel|sprinkles)\b",
+            re.I,
         ),
     ),
     "caster sugar": (
@@ -242,6 +291,10 @@ _FOOD_IDENTITY_RULES: dict[str, tuple[re.Pattern[str], re.Pattern[str] | None]] 
         None,
     ),
     "hot water": (re.compile(r"\b(?:varmt vann|hot water)\b", re.I), None),
+    "rice": (
+        re.compile(r"\b(?:[\wæøå]*ris|rice)\b", re.I),
+        re.compile(r"\b(?:rismelk|risdrikk|rice\s+milk|rice\s+drink|grits)\b", re.I),
+    ),
 }
 
 
@@ -277,6 +330,7 @@ def _product_matches_ingredient(query: str, product: ProviderProduct) -> bool:
     alias_match = _INGREDIENT_PHRASES.search(_clean_ingredient_query(query))
     assert alias_match is not None
     alias = alias_match.group(0).casefold()
+    alias = _IDENTITY_CANONICAL.get(alias, alias)
     text = " ".join((product.name, product.brand or "")).casefold()
     rule = _FOOD_IDENTITY_RULES.get(alias)
     if rule is not None:

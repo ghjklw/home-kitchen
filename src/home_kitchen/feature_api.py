@@ -35,6 +35,11 @@ from home_kitchen.integrations import IntegrationInfo
 from home_kitchen.inventory import InventoryItem, InventoryItemCreate, PurchasePlan
 from home_kitchen.models import MealCreate, Recipe
 from home_kitchen.planning_proposals import ProposalConflict, ProposalRead
+from home_kitchen.purchase_sync import (
+    PurchaseHistoryStatusResponse,
+    PurchaseHistorySyncRequest,
+    PurchaseHistorySyncResponse,
+)
 from home_kitchen.purchasing import PurchaseModeInfo, StoreTrip
 from home_kitchen.purchasing_reconciliation import (
     CompletedTrip,
@@ -313,6 +318,26 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
     @router.get("/purchase-modes")
     def purchase_modes() -> list[PurchaseModeInfo]:
         return features.purchase_modes.catalog()
+
+    @router.get("/purchase-history/status")
+    def purchase_history_status(request: Request) -> PurchaseHistoryStatusResponse:
+        actor = getattr(request.state, "actor_id", None) or "default"
+        return features.purchase_sync.get_status(account_id=actor)
+
+    @router.post("/purchase-history/sync")
+    async def purchase_history_sync(
+        request: Request,
+        data: PurchaseHistorySyncRequest | None = None,
+    ) -> PurchaseHistorySyncResponse:
+        actor = getattr(request.state, "actor_id", None) or "default"
+        provider = data.provider if data else None
+        max_pages = data.max_pages if data else 50
+        return await run_in_threadpool(
+            features.purchase_sync.sync,
+            account_id=actor,
+            provider=provider,
+            max_pages=max_pages,
+        )
 
     @router.get("/store-trip")
     def store_trip(start: date, end: date) -> StoreTrip:

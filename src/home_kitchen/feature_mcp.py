@@ -5,7 +5,7 @@ import base64
 import binascii
 from datetime import date
 from decimal import Decimal, InvalidOperation
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastmcp import FastMCP
@@ -27,6 +27,10 @@ from home_kitchen.inventory import InventoryItem, InventoryItemCreate, PurchaseP
 from home_kitchen.models import MealCreate, Recipe
 from home_kitchen.oda.cart import CartProposalRequest
 from home_kitchen.planning_proposals import ProposalRead
+from home_kitchen.purchase_sync import (
+    PurchaseHistoryStatusResponse,
+    PurchaseHistorySyncResponse,
+)
 from home_kitchen.purchasing import StoreTrip
 from home_kitchen.purchasing_reconciliation import (
     CompletedTrip,
@@ -403,6 +407,35 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
     def list_completed_store_trips(limit: int = 30) -> list[CompletedTrip]:
         """Read explicit past purchases; picking and cart selection are not purchase evidence."""
         return features.trip_completion.list(limit)
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
+    def get_purchase_history_sync_status() -> PurchaseHistoryStatusResponse:
+        """Check freshness, delays, coverage window, and sync status for grocery providers.
+
+        Covers Oda, Coop, Trumf, and Rema 1000. Strictly read-only status;
+        does not assert kitchen inventory stock or cooked recipes.
+        """
+        actor_id = history_context.get().actor_id or "default"
+        return features.purchase_sync.get_status(account_id=actor_id)
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
+    async def sync_purchase_history(
+        provider: Literal["oda", "coop", "trumf", "rema1000"] | None = None,
+        max_pages: int = 50,
+    ) -> PurchaseHistorySyncResponse:
+        """Trigger bounded sync of completed purchase history from grocery providers.
+
+        Coordinates registered providers (Oda, Coop, Trumf, Rema 1000) using durable
+        checkpoints, idempotent retries, and overlap deduplication. Provider-reported
+        orders/receipts are strictly kept separate from confirmed kitchen stock/cooking.
+        """
+        actor_id = history_context.get().actor_id or "default"
+        return await asyncio.to_thread(
+            features.purchase_sync.sync,
+            account_id=actor_id,
+            provider=provider,
+            max_pages=max_pages,
+        )
 
     @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
     async def find_recipes(request: RecipeDiscoveryRequest) -> RecipeDiscoveryResponse:

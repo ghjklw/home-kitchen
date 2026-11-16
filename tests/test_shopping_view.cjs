@@ -6,6 +6,8 @@ const {
   actionableGroups,
   formatQuantityForDisplay,
   formatQuantityForAccessibility,
+  formatNeedQuantity,
+  categoryLabel,
   formatQuantityMentions,
   groupedByCategory,
   hasSelectedProducts,
@@ -143,6 +145,16 @@ test("formats accessible quantities compactly without hiding small positive amou
   assert.equal(formatQuantityForAccessibility("1E+3"), "1000");
   assert.equal(formatQuantityForAccessibility("0.0001"), "<0,01");
   assert.equal(formatQuantityForAccessibility("not-a-number"), "not-a-number");
+});
+
+test("formats Oda units and curated category labels for Bokmål display only", () => {
+  assert.equal(formatNeedQuantity("1.333333333333333333333", "item"), "1,33 stk.");
+  assert.equal(formatNeedQuantity("1", "pack"), "1 pakke");
+  assert.equal(formatNeedQuantity("2.5", "pack", true), "2,5 pakker");
+  assert.equal(categoryLabel("Produce"), "Frukt og grønt");
+  assert.equal(categoryLabel("Chilled"), "Kjølevarer");
+  assert.equal(categoryLabel("Pantry"), "Tørrvarer");
+  assert.equal(categoryLabel("Min egen kategori"), "Min egen kategori");
 });
 
 test("detects positive decimal text without floating-point coercion", () => {

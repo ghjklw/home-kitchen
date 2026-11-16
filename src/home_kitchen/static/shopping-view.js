@@ -100,6 +100,28 @@
     return formatQuantityForDisplay(value);
   }
 
+  function displayUnit(unit, accessible = false, quantity = "") {
+    const normalized = String(unit ?? "").trim().toLowerCase();
+    if (normalized === "item") return accessible ? "stykk" : "stk.";
+    if (normalized === "pack") {
+      const amount = normalizeDecimalText(quantity);
+      const singular = amount === "1";
+      return accessible ? (singular ? "pakke" : "pakker") : (singular ? "pakke" : "pakker");
+    }
+    return String(unit ?? "").trim();
+  }
+
+  function formatNeedQuantity(quantity, unit, accessible = false) {
+    const amount = (accessible ? formatQuantityForAccessibility : formatQuantityForDisplay)(String(quantity ?? "0"));
+    const label = displayUnit(unit, accessible, quantity);
+    return [amount, label].filter(Boolean).join(" ");
+  }
+
+  function categoryLabel(category) {
+    const value = String(category ?? "").trim();
+    return ({ Produce: "Frukt og grønt", Chilled: "Kjølevarer", Pantry: "Tørrvarer", Other: "Annet" })[value] || value || "Annet";
+  }
+
   function isPositiveDecimal(value) {
     const text = normalizeDecimalText(value);
     return text != null && /[1-9]/u.test(text.replace(".", ""));
@@ -194,6 +216,9 @@
     basketPriceSummary,
     formatQuantityForDisplay,
     formatQuantityForAccessibility,
+    formatNeedQuantity,
+    displayUnit,
+    categoryLabel,
     formatQuantityMentions,
     groupedByCategory,
     hasSelectedProducts,

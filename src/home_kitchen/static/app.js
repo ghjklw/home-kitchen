@@ -2868,7 +2868,7 @@ function shoppingOrigins(origins = []) {
   return [...labels].join(", ");
 }
 function categoryLabel(category) {
-  return category === "Other" || !category ? "Annet" : category;
+  return window.KitchenShoppingView.categoryLabel(category);
 }
 function shoppingSections() {
   const nav = el("div", null, "section-tabs");
@@ -3585,7 +3585,7 @@ function renderSingleShoppingList(main) {
     state.recipes,
   );
   for (const [groupName, entries] of groups) {
-    const section = add(el("section", null, "panel category-section actionable-shopping-group"), el("h2", groupName));
+    const section = add(el("section", null, "panel category-section actionable-shopping-group"), el("h2", categoryLabel(groupName)));
     const list = el("ul", null, "list single-shopping-list");
     entries.forEach(({ line, match }) => {
       const row = el("li", null, line.checked ? "completed actionable-shopping-item" : "actionable-shopping-item");
@@ -3612,9 +3612,10 @@ function renderSingleShoppingList(main) {
       const amount = window.KitchenBasketMatchView.formatNeedQuantity(
         { quantity: String(line.to_buy_quantity ?? "0"), unit: line.unit, approximate: line.approximate === true },
         (quantity) => window.KitchenShoppingView.formatQuantityForDisplay(quantity),
+        (unit, quantity) => window.KitchenShoppingView.displayUnit(unit, false, quantity),
       );
       const summary = el("small", amount + " å kjøpe" + (line.category ? " · " + categoryLabel(line.category) : ""));
-      summary.setAttribute("aria-label", (line.approximate ? "Omtrentlig mengde: ca. " : "Nøyaktig mengde: ") + String(line.to_buy_quantity ?? "0") + (line.unit ? " " + line.unit : "") + " å kjøpe");
+      summary.setAttribute("aria-label", (line.approximate ? "Omtrentlig mengde: ca. " : "Nøyaktig mengde: ") + window.KitchenShoppingView.formatNeedQuantity(line.to_buy_quantity, line.unit, true) + " å kjøpe");
       add(detail, summary);
       const mealOrigins = window.KitchenShoppingView.mealOriginNames(line.origins, state.meals, state.recipes);
       const extraOrigins = (line.origins || []).filter((origin) => typeof origin === "string" && !origin.startsWith("meal:"));
@@ -4834,12 +4835,12 @@ function renderBasketMatchNeed(need) {
   if (busy) {
     add(panel, el("p", busy.page > currentPage ? "Laster side " + formatUiCount(busy.page) + " …" : "Søker hos Oda …", "muted"));
   } else if (error) {
-    const errorText = el("p", error, "form-error");
+    const errorText = el("p", "Produktsøket kunne ikke fullføres. Prøv igjen.", "form-error");
     errorText.setAttribute("role", "alert");
     add(panel, errorText);
   } else if (result) {
     add(panel, el("p", window.KitchenBasketMatchView.statusLabel(result.status), "muted"));
-    if (result.detail) add(panel, el("p", result.detail, "muted"));
+    if (result.detail && !["search_failed", "search_unavailable"].includes(result.status)) add(panel, el("p", result.detail, "muted"));
   } else {
     add(panel, el("p", "Venter på automatisk produktsøk …", "muted"));
   }

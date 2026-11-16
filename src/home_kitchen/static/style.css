@@ -298,6 +298,52 @@ h3 {
   max-height: 70dvh;
   object-fit: contain;
 }
+.collection-picker {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin: 0 0 16px;
+}
+.collection-picker legend {
+  padding: 0 5px;
+  font-weight: 650;
+}
+.collection-option,
+.collection-choice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+}
+.collection-option input,
+.collection-choice input {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--green);
+}
+.collection-errors {
+  color: var(--danger, #8b2d22);
+}
+.collection-entries {
+  display: grid;
+  gap: 12px;
+  margin: 16px 0;
+}
+.collection-entry-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.collection-entry-heading .collection-choice {
+  flex: 1;
+}
+.collection-entry .recipe-image-frame {
+  margin-top: 12px;
+}
 .planned-cooking-view .callout {
   margin-top: 14px;
 }

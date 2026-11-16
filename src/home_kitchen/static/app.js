@@ -1762,6 +1762,7 @@ function addRecipeForm() {
       button("Finn oppskrifter fra kilder", discoveryForm),
       button("Importer fra en lenke", importForm),
       button("Fotografer en oppskriftsside", recipePhotoForm),
+      button("Importer oppskrifter fra Oda", recipeCollectionForm),
       button("Skriv inn selv", () => recipeForm(), "quiet"),
     ),
   );
@@ -1833,6 +1834,266 @@ function recipePhotoForm() {
     showPhotoDraft(result);
   });
   add(form, image.wrap, book.wrap, page.wrap, status, retry);
+  add(root, form);
+}
+function recipeCollectionForm() {
+  const root = openDialog("Importer oppskrifter fra Oda");
+  add(
+    root,
+    el(
+      "p",
+      "Velg samlingene du vil hente til gjennomgang. Oda kan vise likerklikk og oppskrifter med bestilte ingredienser; et kjøp betyr ikke at retten er laget.",
+      "muted",
+    ),
+    el("p", "Oda viser inntil 50 sider à 20 oppskrifter per samling (maks 1 000). Importen leser kildeoppskriften og legger til nye oppskrifter etter at du har valgt dem.", "muted"),
+  );
+  if (!state.oda?.connected) {
+    add(
+      root,
+      add(
+        el("section", null, "callout connection-prompt"),
+        el("p", "Koble til Oda i innstillingene for å hente dine oppskriftssamlinger."),
+        connectionSettingsButton("Åpne Oda-innstillinger"),
+      ),
+    );
+    return;
+  }
+  const form = el("form");
+  const picker = el("fieldset", null, "collection-picker");
+  add(picker, el("legend", "Oda-samlinger"));
+  const selectedKinds = new Set(["liked", "purchased"]);
+  for (const [kind, label] of [["liked", "Oppskrifter jeg liker"], ["purchased", "Oppskrifter med ingredienser jeg har bestilt"]]) {
+    const option = el("label", null, "collection-option");
+    const checkbox = el("input");
+    checkbox.type = "checkbox";
+    checkbox.value = kind;
+    checkbox.checked = true;
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) selectedKinds.add(kind);
+      else selectedKinds.delete(kind);
+    });
+    add(option, checkbox, el("span", label));
+    picker.append(option);
+  }
+  const status = el("p", "Velg én eller begge samlinger, og hent en liste til gjennomgang.", "muted");
+  status.setAttribute("role", "status");
+  const errors = el("ul", null, "collection-errors");
+  errors.setAttribute("role", "alert");
+  const entries = el("div", null, "collection-entries");
+  const actions = el("div", null, "actions");
+  let job = null;
+  let generation = 0;
+  let previewStarting = false;
+  const selectedIds = new Set();
+  let pollTimer = null;
+  const importButton = button("Importer valgte oppskrifter", async () => {
+    if (!job || !["ready", "completed"].includes(job.status)) return;
+    let request;
+    try {
+      request = window.KitchenRecipeCollections.importPayload(job.job_id, [...selectedIds]);
+    } catch (error) {
+      status.textContent = error.message;
+      return;
+    }
+    importButton.disabled = true;
+    clearTimeout(pollTimer);
+    const importGeneration = ++generation;
+    const importJobId = job.job_id;
+    try {
+      const nextJob = window.KitchenRecipeCollections.normalizeJob(await api(request.path, "POST", request.body));
+      if (importGeneration !== generation || nextJob.job_id !== importJobId) return;
+      job = nextJob;
+      draw(job);
+      schedulePoll();
+    } catch (error) {
+      if (importGeneration !== generation || job?.job_id !== importJobId) return;
+      status.textContent = error.message;
+      importButton.disabled = selectedIds.size === 0 || !["ready", "completed"].includes(job.status);
+    }
+  }, "primary");
+  importButton.disabled = true;
+  const retryPreview = button("Hent samlingene på nytt", async () => {
+    if (job && ["previewing", "importing"].includes(job.status)) {
+      schedulePoll();
+      return;
+    }
+    await startPreview();
+  }, "quiet");
+  retryPreview.hidden = true;
+  const cancelJob = button("Avbryt innhenting/import", async () => {
+    if (!job?.job_id) return;
+    clearTimeout(pollTimer);
+    const cancelGeneration = ++generation;
+    const cancelJobId = job.job_id;
+    cancelJob.disabled = true;
+    try {
+      job = window.KitchenRecipeCollections.normalizeJob(
+        await api("/recipe-collections/" + encodeURIComponent(cancelJobId) + "/cancel", "POST", {}),
+      );
+      if (cancelGeneration !== generation || job.job_id !== cancelJobId) return;
+      draw(job);
+      if (job.status === "cancelled") {
+        state.recipes = await api("/recipes");
+        if (state.view === "recipes") await refreshView();
+      }
+    } catch (error) {
+      status.textContent = error.message;
+    } finally {
+      cancelJob.disabled = false;
+    }
+  }, "quiet");
+  cancelJob.hidden = true;
+  const previewButton = button("Hent Oda-samlinger", () => startPreview().catch((error) => { status.textContent = error.message; }), "primary");
+  previewButton.dataset.collectionFocus = "preview";
+  function draw(nextJob) {
+    job = window.KitchenRecipeCollections.normalizeJob(nextJob);
+    const entriesById = new Map(job.entries.map((entry) => [entry.id, entry]));
+    for (const id of selectedIds) {
+      const entry = entriesById.get(id);
+      const importingSelection = job.status === "importing" && entry?.status === "importing";
+      if (!entry || (!window.KitchenRecipeCollections.canSelect(entry) && !importingSelection)) selectedIds.delete(id);
+    }
+    const focusKey = document.activeElement?.dataset?.collectionFocus;
+    status.textContent = window.KitchenRecipeCollections.progress(job);
+    errors.replaceChildren(...job.errors.map(() => el("li", "Oda avbrøt innhentingen. Kontroller tilkoblingen og hent samlingene på nytt.")));
+    if (job.truncated)
+      errors.append(el("li", "Oda-resultatet nådde sidegrensen. Listen kan være ufullstendig; hent på nytt senere."));
+    entries.replaceChildren();
+    if (["ready", "importing", "completed", "cancelled", "failed"].includes(job.status)) {
+      if (!job.entries.length) {
+        add(entries, empty(
+          job.errors.length ? "Oda kunne ikke hente oppskriftene" : "Ingen oppskrifter i samlingen",
+          "Kontroller Oda-tilkoblingen, eller prøv å hente samlingen på nytt.",
+        ));
+      }
+      job.entries.forEach((entry) => {
+        const card = el("article", null, "card collection-entry");
+        const heading = el("div", null, "collection-entry-heading");
+        if (window.KitchenRecipeCollections.canSelect(entry)) {
+          const choice = el("label", null, "collection-choice");
+          const checkbox = el("input");
+          checkbox.type = "checkbox";
+          checkbox.checked = selectedIds.has(entry.id);
+          checkbox.dataset.collectionFocus = "entry-" + entry.id;
+          checkbox.setAttribute("aria-label", "Velg oppskriften " + entry.title + " for import");
+          checkbox.addEventListener("change", () => {
+            if (checkbox.checked) selectedIds.add(entry.id);
+            else selectedIds.delete(entry.id);
+            importButton.disabled = selectedIds.size === 0 || !["ready", "completed"].includes(job.status);
+            selectedCount.textContent = `${selectedIds.size} valgte oppskrifter`;
+          });
+          add(choice, checkbox, el("span", entry.title));
+          heading.append(choice);
+        } else add(heading, el("strong", entry.title));
+        const badges = entry.badges.map((badge) => badge === "Liked on Oda" ? "Likt på Oda" : badge === "Ingredients bought on Oda" ? "Ingredienser bestilt på Oda" : badge);
+        badges.forEach((badge) => heading.append(el("span", badge, "badge")));
+        const details = el("p", window.KitchenRecipeCollections.entryStatus(entry.status), "muted");
+        if (typeof entry.metadata?.deliveriesCount === "number" && Number.isFinite(entry.metadata.deliveriesCount) && entry.metadata.deliveriesCount >= 0)
+          details.textContent += " · Bestilt " + formatUiCount(entry.metadata.deliveriesCount) + " ganger";
+        if (entry.status === "failed") details.textContent += " · Kontroller kildelenken eller prøv importen på nytt.";
+        add(card, heading, details);
+        if (entry.source_url) {
+          try {
+            const sourceUrl = new URL(entry.source_url);
+            if (["https:", "http:"].includes(sourceUrl.protocol)) {
+              const link = el("a", "Vis oppskriften hos Oda", "source-link");
+              link.href = sourceUrl.href;
+              link.target = "_blank";
+              link.rel = "noopener noreferrer";
+              add(card, link);
+            }
+          } catch {}
+        }
+        if (entry.image_url) add(card, recipeImage({ title: entry.title, image_url: entry.image_url }));
+        entries.append(card);
+      });
+    }
+    selectedCount.textContent = `${selectedIds.size} valgte oppskrifter`;
+    importButton.disabled = selectedIds.size === 0 || !["ready", "completed"].includes(job.status);
+    retryPreview.hidden = !["failed", "cancelled", "completed", "ready"].includes(job.status);
+    retryPreview.textContent = ["previewing", "importing"].includes(job.status) ? "Hent status på nytt" : "Hent samlingene på nytt";
+    retryPreview.disabled = false;
+    cancelJob.hidden = !["previewing", "importing"].includes(job.status);
+    previewButton.hidden = Boolean(job);
+    if (focusKey) entries.querySelector(`[data-collection-focus="${CSS.escape(focusKey)}"]`)?.focus();
+  }
+  async function startPreview() {
+    if (previewStarting) return;
+    if (!selectedKinds.size) throw new Error("Velg minst én Oda-samling.");
+    const requestedKinds = [...selectedKinds];
+    if (job && JSON.stringify([...job.kinds].sort()) !== JSON.stringify([...requestedKinds].sort()) && selectedIds.size) {
+      selectedIds.clear();
+      status.textContent = "Samlingene er endret, så tidligere valg er fjernet. Velg oppskrifter fra den nye listen.";
+    }
+    clearTimeout(pollTimer);
+    previewStarting = true;
+    const requestGeneration = ++generation;
+    previewButton.disabled = true;
+    retryPreview.disabled = true;
+    importButton.disabled = true;
+    try {
+      const nextJob = window.KitchenRecipeCollections.normalizeJob(
+        await api("/recipe-collections", "POST", { kinds: requestedKinds }),
+      );
+      if (requestGeneration !== generation) return;
+      job = nextJob;
+      draw(job);
+      schedulePoll();
+    } catch (error) {
+      if (requestGeneration !== generation) return;
+      status.textContent = error.message;
+      retryPreview.hidden = false;
+      retryPreview.disabled = false;
+    } finally {
+      previewStarting = false;
+      previewButton.disabled = false;
+    }
+  }
+  function schedulePoll() {
+    clearTimeout(pollTimer);
+    if (!job || !["previewing", "importing"].includes(job.status)) return;
+    const watchedGeneration = generation;
+    const watchedJobId = job.job_id;
+    pollTimer = setTimeout(async () => {
+      if (!root.isConnected || watchedGeneration !== generation) return;
+      try {
+        const nextJob = window.KitchenRecipeCollections.normalizeJob(
+          await api("/recipe-collections/" + encodeURIComponent(watchedJobId)),
+        );
+        if (watchedGeneration !== generation || job?.job_id !== watchedJobId) return;
+        job = nextJob;
+        draw(job);
+        if (job.status === "completed" || job.status === "cancelled") {
+          state.recipes = await api("/recipes");
+          if (state.view === "recipes") await refreshView();
+        }
+      } catch (error) {
+        if (watchedGeneration !== generation || job?.job_id !== watchedJobId) return;
+        status.textContent = error.message + " Valgene dine er beholdt.";
+        retryPreview.hidden = false;
+        retryPreview.disabled = false;
+        return;
+      }
+      schedulePoll();
+    }, 800);
+  }
+  const selectedCount = el("p", "0 valgte oppskrifter", "muted");
+  add(
+    form,
+    picker,
+    status,
+    errors,
+    entries,
+    selectedCount,
+    el("p", "Oppskrifter som allerede finnes, mangler offentlig kilde eller ikke kan valideres, vises uten valg. Eksisterende oppskrifter blir aldri overskrevet.", "muted"),
+    actions,
+  );
+  add(actions, retryPreview, cancelJob, importButton);
+  add(actions, previewButton);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    startPreview().catch((error) => { status.textContent = error.message; });
+  });
   add(root, form);
 }
 function importForm() {

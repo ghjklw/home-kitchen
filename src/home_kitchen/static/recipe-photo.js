@@ -32,6 +32,20 @@
     return true;
   }
 
-  root.KitchenRecipePhoto = { applyIfActive, buildUpload, MAX_PHOTO_BYTES };
+  async function applyDiscardIfActive(promise, isActive, actions) {
+    const result = await promise;
+    if (!isActive()) return false;
+    if (result?.deleted === true) actions.deleted();
+    else if (result?.deleted === false) actions.retained();
+    else actions.unconfirmed();
+    return true;
+  }
+
+  root.KitchenRecipePhoto = {
+    applyDiscardIfActive,
+    applyIfActive,
+    buildUpload,
+    MAX_PHOTO_BYTES,
+  };
   if (typeof module !== "undefined" && module.exports) module.exports = root.KitchenRecipePhoto;
 })(globalThis);

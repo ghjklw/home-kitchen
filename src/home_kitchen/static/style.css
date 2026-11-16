@@ -344,6 +344,16 @@ h3 {
 .photo-source-evidence p {
   margin: 0 0 6px;
 }
+.photo-discard-confirmation {
+  border-inline-start: 3px solid var(--color-warning, #9b5d13);
+  margin: 10px 0;
+  padding: 8px 12px;
+}
+.photo-discard-confirmation .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
 .recipe-photo-original {
   display: block;
   width: 100%;

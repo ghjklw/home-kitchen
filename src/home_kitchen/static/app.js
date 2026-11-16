@@ -226,6 +226,9 @@ function formatServings(value) {
 function formatUiQuantity(value) {
   return window.KitchenShoppingView.formatQuantityForDisplay(String(value ?? ""));
 }
+function formatUiExactQuantity(value) {
+  return window.KitchenShoppingView.formatExactQuantityForAccessibility(String(value ?? ""));
+}
 function ingredientQuantityText(item) {
   const quantity = formatUiQuantity(item.quantity);
   return [quantity, item.unit, item.name].filter(Boolean).join(" ");

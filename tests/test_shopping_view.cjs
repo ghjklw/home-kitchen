@@ -4,6 +4,7 @@ const test = require("node:test");
 const {
   basketPriceSummary,
   formatQuantityForDisplay,
+  formatExactQuantityForAccessibility,
   formatQuantityMentions,
   groupedByCategory,
   hasSelectedProducts,
@@ -93,6 +94,13 @@ test("rounds display quantities with decimal-string arithmetic only", () => {
   assert.equal(formatQuantityForDisplay("1.25e-3"), "<0,01");
   assert.equal(normalizeDecimalText("1.25e-3"), "0.00125");
   assert.equal(normalizeDecimalText("1,000.5"), null);
+});
+
+test("formats accessible exact quantities without rounding", () => {
+  assert.equal(formatExactQuantityForAccessibility("233.3333333333333333333333334"), "233,3333333333333333333333334");
+  assert.equal(formatExactQuantityForAccessibility("1.2300"), "1,23");
+  assert.equal(formatExactQuantityForAccessibility("1E+3"), "1000");
+  assert.equal(formatExactQuantityForAccessibility("not-a-number"), "not-a-number");
 });
 
 test("detects positive decimal text without floating-point coercion", () => {

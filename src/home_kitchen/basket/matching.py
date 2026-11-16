@@ -288,18 +288,25 @@ class OdaSearchAdapter:
             )
             tomato_need = re.search(r"\b(?:tomato(?:es)?|tomat(?:er)?)\b", normalized) is not None
             tomato_paste_need = re.search(r"\b(?:paste|pur[eé]e|pur[eé])\b", normalized) is not None
-            if coffee_need and re.search(
-                r"\bcoffee[\s-]*mate\b|\bkaffe(?:fløte|melk|krem)\b", text
-            ):
-                return True
-            return (
-                tomato_need
-                and not tomato_paste_need
-                and re.search(
-                    r"\b(?:tomato\s+(?:paste|pur[eé]e)|tomatpur[eé]|tomatkonsentrat)\b", text
+            if coffee_need:
+                return (
+                    re.search(
+                        r"\bcoffee[\s-]*mate\b|\bkaffe(?:\w*)fløte\b|\bkaffemelk\b|\bkaffekrem\b",
+                        text,
+                    )
+                    is not None
+                    or re.search(r"coffee|kaffe\w*", text) is None
                 )
-                is not None
-            )
+            if tomato_need and not tomato_paste_need:
+                return (
+                    re.search(
+                        r"\b(?:tomato\s+(?:paste|pur[eé]e)|tomatpur[eé]|tomatkonsentrat)\b",
+                        text,
+                    )
+                    is not None
+                    or re.search(r"(?:tomato|tomat)\w*", text) is None
+                )
+            return False
 
         result = []
         for query in queries:

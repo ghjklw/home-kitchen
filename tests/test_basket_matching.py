@@ -435,10 +435,10 @@ async def test_oda_adapter_rejects_bokmal_coffee_cream_and_tomato_puree():
         async def search_products(self, actor_id, queries, page, size):
             assert queries == ["kaffe", "Coffee Mate", "tomater", "tomatoes"]
             groups = {
-                "kaffe": ["Kaffefløte", "Filterkaffe"],
+                "kaffe": ["Kaffefløte", "Filterkaffe", "Fresh fruit box"],
                 "Coffee Mate": ["Coffee Mate Original"],
-                "tomater": ["Tomatpuré", "Tomater, ferske"],
-                "tomatoes": ["Tomato paste", "Fresh tomatoes"],
+                "tomater": ["Tomatpuré", "Tomater, ferske", "Fresh fruit box"],
+                "tomatoes": ["Tomato paste", "Fresh tomatoes", "Fresh fruit box"],
             }
             return {
                 "result": [

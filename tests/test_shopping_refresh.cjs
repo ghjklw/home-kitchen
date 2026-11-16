@@ -8,6 +8,20 @@ const appSource = fs.readFileSync(
   path.join(__dirname, "../src/home_kitchen/static/app.js"),
   "utf8",
 );
+const exactFormatter = appSource.match(/function formatUiExactQuantity\(value\) \{[\s\S]*?\n\}/u);
+assert.ok(exactFormatter, "the exact accessible quantity formatter is defined");
+const quantityContext = {
+  window: {
+    KitchenShoppingView: {
+      formatExactQuantityForAccessibility: (value) => String(value).replace(".", ","),
+    },
+  },
+};
+vm.runInNewContext(
+  exactFormatter[0] + "\nglobalThis.formatUiExactQuantity = formatUiExactQuantity;",
+  quantityContext,
+);
+assert.equal((appSource.match(/formatUiExactQuantity\(/gu) || []).length, 6);
 const helper = appSource.match(
   /function shouldRefreshShopping\([\s\S]*?\n\}/,
 );
@@ -24,4 +38,8 @@ test("refreshes only the visible shopping view when no edit is open", () => {
   assert.equal(context.shouldRefreshShopping("shopping", "hidden", false, false), false);
   assert.equal(context.shouldRefreshShopping("shopping", "visible", true, false), false);
   assert.equal(context.shouldRefreshShopping("shopping", "visible", false, true), false);
+});
+
+test("exposes exact accessible quantities without rounding", () => {
+  assert.equal(quantityContext.formatUiExactQuantity("233.3333333333333333333333334"), "233,3333333333333333333333334");
 });

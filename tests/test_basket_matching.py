@@ -14,6 +14,7 @@ from home_kitchen.basket.matching import (
     _identity_status,
     _oda_description_pack,
     _product_matches_ingredient,
+    _query_expansions,
 )
 from home_kitchen.oda.media import ProductMedia
 
@@ -747,6 +748,65 @@ def test_identity_table_localizes_supported_aliases():
     assert _bokmal_ingredient_query("whole milk") == "helmelk"
     assert _bokmal_ingredient_query("olive oil") == "olivenolje"
     assert _bokmal_ingredient_query("basmati rice") == "basmatiris"
+
+
+@pytest.mark.parametrize(
+    ("query", "localized", "product_name"),
+    [
+        ("fresh tomatoes", "ferske tomater", "Tomater, ferske"),
+        ("chopped tomatoes", "hakket tomater", "Tomater, ferske"),
+        ("diced tomatoes", "terninger tomater", "Tomater, ferske"),
+        ("minced tomatoes", "finhakket tomater", "Tomater, ferske"),
+        ("ground coffee", "malt kaffe", "Filterkaffe"),
+        ("whole milk", "helmelk", "Tine Helmelk"),
+    ],
+)
+def test_declared_supported_form_qualifiers_share_query_and_product_identity(
+    query, localized, product_name
+):
+    product = ProviderProduct(
+        provider="oda", product_id="form", name=product_name, description=product_name
+    )
+    assert _bokmal_ingredient_query(query) == localized
+    assert _identity_status(query, product) == "compatible"
+    assert _query_expansions(query)[0] == query
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "malt coffee",  # unsupported localization is deliberately not inferred
+        "frozen tomatoes",
+        "canned tomatoes",
+        "dried tomatoes",
+        "smoked tomatoes",
+        "salted tomatoes",
+    ],
+)
+def test_unmodeled_semantic_form_qualifiers_stay_unverified_and_untranslated(query):
+    product = ProviderProduct(
+        provider="oda", product_id="fresh", name="Tomater, ferske", description=""
+    )
+    assert _bokmal_ingredient_query(query) is None
+    assert _identity_status(query, product) == "unverified"
+    assert _query_expansions(query) == (query,)
+
+
+@pytest.mark.parametrize(
+    ("query", "product_name", "expected"),
+    [
+        ("ground coffee", "Kaffebønner", None),
+        ("ground coffee", "Filterkaffe", "compatible"),
+        ("malt kaffe", "Kaffebønner", None),
+        ("dried tomatoes", "Tomater, ferske", "unverified"),
+        ("canned tomatoes", "Tomater, ferske", "unverified"),
+    ],
+)
+def test_semantic_forms_do_not_collapse_to_generic_family(query, product_name, expected):
+    product = ProviderProduct(
+        provider="oda", product_id="form", name=product_name, description=product_name
+    )
+    assert _identity_status(query, product) == expected
 
 
 @pytest.mark.parametrize(

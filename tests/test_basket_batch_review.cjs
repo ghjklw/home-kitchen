@@ -40,6 +40,7 @@ function fixture({ api } = {}) {
   const unclearNeed = { id: "need-unclear", name: "Tomat", quantity: "3", unit: "stk" };
   const safeCandidate = {
     id: "oda:101",
+    identity_status: "compatible",
     provider: "oda",
     product_id: "101",
     name: "Yoghurt 500 g",
@@ -90,6 +91,7 @@ function fixture({ api } = {}) {
         selectionRecommendation: (candidate, unit) => candidate.recommended_packages && candidate.pack_unit === unit
           ? { packages: candidate.recommended_packages, fulfillment: candidate.recommended_fulfillment_quantity }
           : null,
+        identityStatus: (candidate) => candidate?.identity_status === "compatible" ? "compatible" : "unverified",
         formatNeedQuantity: (need) => `${need.quantity} ${need.unit}`,
         statusLabel: (status) => status,
       },
@@ -134,6 +136,9 @@ function fixture({ api } = {}) {
   };
   const functions = [
     "basketBatchRecommendation",
+    "basketBatchIdentityStatus",
+    "basketBatchSelectableCandidate",
+    "clearStaleBasketBatchIdentityConfirmations",
     "basketBatchSkipReason",
     "toggleBasketBatchChoice",
     "renderBasketMatchCandidate",
@@ -183,9 +188,67 @@ test("selecting a recommendation stays local until one explicit batch approval",
     start: "2026-11-16",
     end: "2026-11-22",
     job_id: "job-current",
-    selections: [{ need_id: "need-safe", candidate_id: "oda:101", packages: 2 }],
+    selections: [{ need_id: "need-safe", candidate_id: "oda:101", packages: 2, confirm_identity: false }],
   });
   assert.equal(value.state.basketBatchChoices["need-safe"], undefined);
+});
+
+test("an unverified product requires explicit identity confirmation before batch selection", async () => {
+  const value = fixture();
+  const candidate = {
+    ...value.safeCandidate,
+    id: "oda:unverified-yoghurt",
+    identity_status: "unverified",
+    name: "Yoghurt uten bekreftet identitet",
+  };
+  value.state.basketMatchPages[value.safeNeed.id][1].candidates = [candidate];
+  value.context.openBasketBatchReview();
+  const confirm = value.modal.root.find((node) => node.tagName === "button" && node.textContent === "Dette er riktig produkt");
+  assert.ok(confirm);
+  confirm.action();
+  assert.equal(value.requests.length, 0);
+  assert.equal(value.state.basketBatchChoices[value.safeNeed.id].confirm_identity, true);
+  assert.match(value.modal.root.text, /Du har bekreftet at dette er riktig produkt/u);
+  await value.context.saveBasketBatchChoices();
+  assert.equal(value.requests.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(value.requests[0][2].selections)), [{
+    need_id: "need-safe",
+    candidate_id: "oda:unverified-yoghurt",
+    packages: 2,
+    confirm_identity: true,
+  }]);
+});
+
+test("identity confirmation cannot make a candidate with unknown package facts selectable", () => {
+  const value = fixture();
+  value.state.basketMatchPages[value.safeNeed.id][1].candidates = [{
+    id: "oda:unverified-no-pack",
+    identity_status: "unverified",
+    available: true,
+    name: "Produkt uten pakningsstørrelse",
+  }];
+  value.context.openBasketBatchReview();
+  assert.equal(value.modal.root.find((node) => node.tagName === "button" && node.textContent === "Dette er riktig produkt"), null);
+  assert.match(value.modal.root.text, /Pakningsstørrelse, måleenhet/u);
+  assert.equal(value.state.basketBatchChoices[value.safeNeed.id], undefined);
+  assert.equal(value.requests.length, 0);
+});
+
+test("changing shopping period invalidates a staged identity confirmation", async () => {
+  const value = fixture();
+  value.state.basketMatchPages[value.safeNeed.id][1].candidates = [{
+    ...value.safeCandidate,
+    identity_status: "unverified",
+  }];
+  value.context.openBasketBatchReview();
+  value.modal.root.find((node) => node.tagName === "button" && node.textContent === "Dette er riktig produkt").action();
+  value.context.currentBasketMatchDates = () => ({ start: "2026-11-23", end: "2026-11-29" });
+  await value.context.saveBasketBatchChoices();
+  assert.equal(value.requests.length, 0);
+  assert.equal(value.state.basketBatchChoices[value.safeNeed.id].confirm_identity, false);
+  value.context.openBasketBatchReview();
+  assert.match(value.modal.root.text, /Tidligere valgt/u);
+  assert.equal(value.modal.root.find((node) => node.tagName === "button" && node.textContent === "Bruk 0 produktforslag").disabled, true);
 });
 
 test("a stale-job response preserves staged choices and requires explicit re-review", async () => {
@@ -196,7 +259,7 @@ test("a stale-job response preserves staged choices and requires explicit re-rev
   } });
   value.state.basketBatchChoices["need-safe"] = {
     need_id: "need-safe", candidate_id: "oda:101", packages: 2,
-    name: "Yoghurt 500 g", match_job_id: "job-current",
+    name: "Yoghurt 500 g", match_job_id: "job-current", unit: "beger", start: "2026-11-16", end: "2026-11-22",
   };
   await value.context.saveBasketBatchChoices();
   assert.equal(value.requests.length, 1);
@@ -214,7 +277,7 @@ test("422 keeps choices but blocks identical retry until a correction", async ()
   } });
   value.state.basketBatchChoices["need-safe"] = {
     need_id: "need-safe", candidate_id: "oda:101", packages: 2,
-    name: "Yoghurt 500 g", match_job_id: "job-current",
+    name: "Yoghurt 500 g", match_job_id: "job-current", unit: "beger", start: "2026-11-16", end: "2026-11-22",
   };
   await value.context.saveBasketBatchChoices();
   assert.equal(value.state.basketBatchChoices["need-safe"].candidate_id, "oda:101");
@@ -232,7 +295,7 @@ test("a network error keeps the exact request available for an idempotent retry"
   } });
   value.state.basketBatchChoices["need-safe"] = {
     need_id: "need-safe", candidate_id: "oda:101", packages: 2,
-    name: "Yoghurt 500 g", match_job_id: "job-current",
+    name: "Yoghurt 500 g", match_job_id: "job-current", unit: "beger", start: "2026-11-16", end: "2026-11-22",
   };
   await value.context.saveBasketBatchChoices();
   assert.equal(value.state.basketBatchChoices["need-safe"].candidate_id, "oda:101");
@@ -252,7 +315,7 @@ test("a late response for an old period cannot clear choices from the new period
   const value = fixture({ api: () => new Promise((resolve) => { resolveApi = resolve; }) });
   value.state.basketBatchChoices["need-safe"] = {
     need_id: "need-safe", candidate_id: "oda:101", packages: 2,
-    name: "Yoghurt 500 g", match_job_id: "job-current",
+    name: "Yoghurt 500 g", match_job_id: "job-current", unit: "beger", start: "2026-11-16", end: "2026-11-22",
   };
   const saving = value.context.saveBasketBatchChoices();
   value.state.basketMatchPlanEpoch += 1;
@@ -294,6 +357,7 @@ test("collective summary counts actionable needs once and reports eligible alter
       id: `oda:${index}:${candidateIndex}`,
       name: `Produkt ${index}:${candidateIndex}`,
       pack_unit: "ml",
+      identity_status: "compatible",
       recommended_packages: 1,
       recommended_fulfillment_quantity: "250",
       available: true,
@@ -305,7 +369,7 @@ test("collective summary counts actionable needs once and reports eligible alter
   value.context.currentBasketMatchNeeds = () => needs;
   const root = new Node("main");
   value.context.renderBasketBatchReview(root);
-  assert.match(root.text, /18 varer har forslag som kan velges samlet/u);
+  assert.match(root.text, /18 varer har forslag som kan velges direkte/u);
   assert.match(root.text, /7 varer må stå over eller avklares/u);
   assert.match(root.text, /44 ekstra valgbare alternativer/u);
   assert.equal(value.requests.length, 0);
@@ -360,12 +424,12 @@ test("busy and stale matches do not count as actionable needs", () => {
   value.state.basketMatchBusy[value.safeNeed.id] = { page: 1 };
   let root = new Node("main");
   value.context.renderBasketBatchReview(root);
-  assert.match(root.text, /0 varer har forslag som kan velges samlet/u);
+  assert.match(root.text, /0 varer har forslag som kan velges direkte/u);
   assert.match(root.text, /2 varer må stå over eller avklares/u);
   value.state.basketBatchNeedsRefresh = true;
   root = new Node("main");
   value.context.renderBasketBatchReview(root);
-  assert.match(root.text, /0 varer har forslag som kan velges samlet/u);
+  assert.match(root.text, /0 varer har forslag som kan velges direkte/u);
   assert.doesNotMatch(root.text, /ekstra valgbare alternativer/u);
   assert.equal(value.requests.length, 0);
 });

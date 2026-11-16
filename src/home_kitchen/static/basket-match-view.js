@@ -75,6 +75,10 @@
     };
   }
 
+  function identityStatus(candidate) {
+    return candidate?.identity_status === "compatible" ? "compatible" : "unverified";
+  }
+
   function formatNeedQuantity(
     need,
     formatQuantity = (value) => String(value ?? ""),
@@ -106,6 +110,7 @@
   root.KitchenBasketMatchView = {
     formatDuration,
     formatNeedQuantity,
+    identityStatus,
     mergeNeedPages,
     planKey,
     selectionRecommendation,

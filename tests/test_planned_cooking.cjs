@@ -46,6 +46,21 @@ test("uses readable quantities and a spoken label at the same precision", () => 
   assert.ok(!line.accessibleLabel.includes("233.3333333333333333333333333"));
 });
 
+test("localizes known source units in cooking, accessibility, and copied ingredients", () => {
+  assert.deepEqual(formatPlannedIngredient({ name: "egg", quantity: "2", unit: "item" }), {
+    text: "2 stk. egg",
+    accessibleLabel: "Mengde: 2 stykk egg",
+    copyText: "2 stk. egg",
+  });
+  assert.deepEqual(formatPlannedIngredient({ name: "salt", quantity: "1", unit: "tsp" }), {
+    text: "1 ts salt",
+    accessibleLabel: "Mengde: 1 teskje salt",
+    copyText: "1 ts salt",
+  });
+  assert.equal(formatPlannedIngredient({ name: "salt", quantity: "2", unit: "pinches" }).text, "2 klyper salt");
+  assert.equal(formatPlannedIngredient({ name: "beans", quantity: "2", unit: "custom-unit" }).text, "2 custom-unit beans");
+});
+
 test("keeps very small positive and zero cooking quantities truthful", () => {
   const format = (value) => value === "0.004" ? "<0.01" : value;
   assert.deepEqual(

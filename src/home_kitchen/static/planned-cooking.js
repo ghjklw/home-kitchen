@@ -20,8 +20,8 @@
 
   function formatPlannedIngredient(item, formatQuantity = (value) => value) {
     const name = String(item?.name || "Ingrediens").trim();
-    const unit = String(item?.unit || "").trim();
-    if (item?.quantity == null || !unit) {
+    const sourceUnit = String(item?.unit || "").trim();
+    if (item?.quantity == null || !sourceUnit) {
       const text = "Mengde ikke oppgitt · " + name;
       return {
         text,
@@ -31,26 +31,22 @@
     }
     const exact = String(item.quantity);
     const displayQuantity = String(formatQuantity(exact));
-    const text = displayQuantity + " " + unit + " " + name;
-    const spokenUnit =
-      {
-        g: "gram",
-        kg: "kilogram",
-        mg: "milligram",
-        ml: "milliliter",
-        cl: "centiliter",
-        dl: "desiliter",
-        l: "liter",
-        tsp: "teskjeer",
-        tbsp: "spiseskjeer",
-        item: "stk.",
-        items: "stk.",
-        pc: "stk.",
-        pcs: "stk.",
-        stk: "stk.",
-        pinch: "klype",
-        pinches: "klyper",
-      }[unit.toLowerCase()] || unit;
+    const unitKey = sourceUnit.toLowerCase();
+    const singular = /^(?:1|1\.0+)$/u.test(exact);
+    const displayUnit = ({
+      item: "stk.", items: "stk.", pc: "stk.", pcs: "stk.", stk: "stk.",
+      tsp: "ts", teaspoon: "ts", teaspoons: "ts",
+      tbsp: "ss", tablespoon: "ss", tablespoons: "ss",
+      pinch: "klype", pinches: "klyper",
+    })[unitKey] || sourceUnit;
+    const spokenUnit = ({
+      g: "gram", kg: "kilogram", mg: "milligram", ml: "milliliter", cl: "centiliter", dl: "desiliter", l: "liter",
+      tsp: singular ? "teskje" : "teskjeer", teaspoon: singular ? "teskje" : "teskjeer", teaspoons: "teskjeer",
+      tbsp: singular ? "spiseskje" : "spiseskjeer", tablespoon: singular ? "spiseskje" : "spiseskjeer", tablespoons: "spiseskjeer",
+      item: "stykk", items: "stykk", pc: "stykk", pcs: "stykk", stk: "stykk",
+      pinch: singular ? "klype" : "klyper", pinches: "klyper",
+    })[unitKey] || sourceUnit;
+    const text = displayQuantity + " " + displayUnit + " " + name;
     return {
       text,
       accessibleLabel: "Mengde: " + displayQuantity + " " + spokenUnit + " " + name,

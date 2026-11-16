@@ -3051,13 +3051,16 @@ function shoppingSections() {
     }, "quiet small")));
     add(more, actions);
     nav.append(more);
+    nav.append(button("Registrer handletur", async () => {
+      state.shoppingPanel = "complete_trip";
+      await refreshView();
+    }, "primary"));
   } else {
     [
       ["single", "Handleliste"],
       ["needs", "Behov og forslag"],
       ["oda", "Oda-handlekurv"],
       ["in_store", "Del og plukk"],
-      ["complete_trip", "Registrer handletur"],
       ["pantry", "Hjemme"],
     ].forEach(([key, label]) => {
       const tab = button(
@@ -3301,8 +3304,8 @@ function renderTripCompletion(main) {
     const unit = el("input"); unit.placeholder = line.unit || "Enhet"; unit.setAttribute("aria-label", `Enhet for faktisk kjøp: ${line.name}`);
     add(section, el("label", "Faktisk mengde (valgfritt)"), quantity, el("label", "Enhet (valgfritt)"), unit);
     const exact = el("input"); exact.type = "checkbox"; exact.setAttribute("aria-label", `Kjøp eksakt produkt for ${line.name}`);
-    add(section, add(el("label"), exact, el("span", "Jeg kjøpte et av de viste produktene")));
     const productSelect = el("select");
+    productSelect.setAttribute("aria-label", `Velg vist produkt for ${line.name}`);
     productSelect.append(new Option("Velg vist produkt", ""));
     (line.selected_products || []).forEach((entry, index) => {
       const p = entry.product;
@@ -3320,7 +3323,18 @@ function renderTripCompletion(main) {
       add(productDetails, el("p", `${p.name} · ${p.provider} / ${p.product_id} · ${p.pack_quantity} ${p.pack_unit} per pakke`));
       if (p.url) { const link = el("a", "Åpne produktreferanse"); link.href = p.url; link.rel = "noopener noreferrer"; link.target = "_blank"; productDetails.append(link); }
     });
-    add(section, productSelect, packCount, productDetails);
+    const hasExactProduct = state.oda?.connected === true && (line.selected_products || []).length > 0;
+    if (hasExactProduct) {
+      add(section, add(el("label"), exact, el("span", "Jeg kjøpte et av de viste produktene")));
+      add(section, productSelect, packCount, productDetails);
+    } else {
+      const explanation = !state.oda
+        ? "Oda-status er ikke tilgjengelig. Oppgi faktisk mengde, eller la den stå ukjent."
+        : !state.oda.connected
+          ? "Oda er ikke tilkoblet. Oppgi faktisk mengde, eller la den stå ukjent."
+          : "Ingen valgte Oda-produkter for denne varen. Oppgi faktisk mengde, eller la den stå ukjent.";
+      add(section, el("p", explanation, "muted"));
+    }
     const sourceChecks = [];
     (line.source_quantities || []).forEach((source) => {
       const input = el("input"); input.type = "checkbox";

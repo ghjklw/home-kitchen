@@ -11,17 +11,15 @@ from pydantic import SecretStr
 from sqlalchemy import create_engine, select
 from sqlalchemy.pool import StaticPool
 
-from home_kitchen.app import create_app
 from home_kitchen.connector_store import (
     ConnectorStore,
     connector_credentials,
-    metadata as connector_metadata,
     resolve_connector_cipher,
 )
-from home_kitchen.integrations import IntegrationInfo
-from home_kitchen.service import KitchenService
+from home_kitchen.connector_store import (
+    metadata as connector_metadata,
+)
 from home_kitchen.settings import Settings
-from home_kitchen.store import metadata as store_metadata
 
 
 @pytest.fixture
@@ -203,6 +201,7 @@ def test_cipher_missing_in_production_returns_none():
 # API integration tests using app with SQLite engine
 def build_test_app(sqlite_engine, cipher, actor_id="malo"):
     from types import SimpleNamespace
+
     from home_kitchen.feature_api import feature_router
     from home_kitchen.integrations import (
         AIIntegration,

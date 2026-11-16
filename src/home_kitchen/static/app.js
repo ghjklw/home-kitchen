@@ -1081,6 +1081,7 @@ function render() {
       recipes: renderRecipes,
       shopping: renderShopping,
       settings: renderSettings,
+      catalogue: renderCatalogue,
     })[state.view] || renderWeek
   )(main);
   if (focusKey) {
@@ -2093,7 +2094,6 @@ function viewRecipe(recipe) {
     body,
     recipeImage(recipe),
     el("p", formatUiCount(recipe.servings) + " porsjoner", "muted"),
-    el("h3", "Ingredienser"),
   );
   if (recipe.photo_source) {
     const citation = [
@@ -2109,17 +2109,43 @@ function viewRecipe(recipe) {
     );
   }
   if (recipe.image_attribution) add(body, recipeImageCredit(recipe.image_attribution));
+  const translationContainer = el("div", null, "recipe-translation-section-wrapper");
+  add(body, translationContainer);
+  add(body, el("h3", "Ingredienser"));
   const ingredients = el("ul");
-  recipe.ingredients.forEach((item) => {
-    const row = el("li");
-    add(row, el("span", ingredientQuantityText(item)));
-    const estimate = purchaseEstimateText(item.purchase_estimate);
-    if (estimate) add(row, el("small", estimate, "muted purchase-estimate"));
-    add(ingredients, row);
-  });
+  function renderIngredientsList(items) {
+    ingredients.replaceChildren();
+    (items || []).forEach((item) => {
+      const row = el("li");
+      add(row, el("span", ingredientQuantityText(item)));
+      const estimate = purchaseEstimateText(item.purchase_estimate);
+      if (estimate) add(row, el("small", estimate, "muted purchase-estimate"));
+      add(ingredients, row);
+    });
+  }
+  renderIngredientsList(recipe.ingredients);
+
   const steps = el("ol");
-  recipe.instructions.forEach((step) => add(steps, el("li", step)));
+  function renderInstructionsList(items) {
+    steps.replaceChildren();
+    (items || []).forEach((step) => add(steps, el("li", step)));
+  }
+  renderInstructionsList(recipe.instructions);
   add(body, ingredients, el("h3", "Fremgangsmåte"), steps);
+
+  if (window.KitchenRecipeTranslationsView) {
+    window.KitchenRecipeTranslationsView.attachRecipeTranslation(translationContainer, recipe, {
+      api,
+      notify,
+      locale: state.household?.language || "nb",
+      onContentChange: (content) => {
+        const titleNode = $("#dialog-title");
+        if (titleNode && content.title) titleNode.textContent = content.title;
+        renderIngredientsList(content.ingredients);
+        renderInstructionsList(content.instructions);
+      },
+    });
+  }
   if (recipe.source_url) {
     try {
       const url = new URL(recipe.source_url);
@@ -6669,9 +6695,19 @@ function renderSettings(main) {
       "muted",
     ),
     button("Gjennomgå ukartlagte råvarer", () => unmappedIngredientsDialog(), "quiet"),
+    button("Åpne råvareoversikt og preferanser", () => navigate("catalogue"), "quiet"),
   );
   add(main, unmappedSection);
   main.append(renderConnectionSettings());
+}
+function renderCatalogue(main) {
+  if (window.KitchenProductOverviewView) {
+    window.KitchenProductOverviewView.renderProductOverview(main, {
+      api,
+      notify,
+      locale: state.household?.language || "nb",
+    });
+  }
 }
 $("#modal").addEventListener("cancel", (event) => {
   if (state.cartConfirming) event.preventDefault();
@@ -6697,7 +6733,7 @@ window.addEventListener("hashchange", () => {
   if (nextView === "shopping" && view !== "basket" && nextView !== state.view)
     state.shoppingPanel = "single";
   if (
-    ["week", "recipes", "shopping", "settings"].includes(nextView) &&
+    ["week", "recipes", "shopping", "settings", "catalogue"].includes(nextView) &&
     (nextView !== state.view || panelChanged)
   ) {
     state.view = nextView;

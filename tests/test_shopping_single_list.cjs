@@ -9,6 +9,8 @@ const basketView = require("../src/home_kitchen/static/basket-match-view.js");
 const shareView = require("../src/home_kitchen/static/shopping-share.js");
 
 const source = fs.readFileSync(path.join(__dirname, "../src/home_kitchen/static/app.js"), "utf8");
+const compactMatch = source.match(/function renderCompactShoppingMatch\(line, match\) \{[\s\S]*?\n\}/u);
+assert.ok(compactMatch, "the compact shopping match renderer exists");
 const screen = source.match(/function renderSingleShoppingList\(main\) \{[\s\S]*?\n\}(?=\nfunction renderShopping\()/u);
 assert.ok(screen, "the unified shopping screen renderer exists");
 
@@ -27,11 +29,20 @@ class Node {
   setAttribute(key, value) { this.attributes[key] = value; }
   addEventListener(type, callback) { this.listeners[type] = callback; }
   get text() { return this.textContent + this.children.map((child) => child.text).join(" "); }
+  find(predicate) {
+    if (predicate(this)) return this;
+    for (const child of this.children) {
+      const found = child.find?.(predicate);
+      if (found) return found;
+    }
+    return null;
+  }
 }
 
 function renderFixture(overrides = {}) {
   const requests = [];
   let refreshes = 0;
+  let openedReviewTarget = undefined;
   const line = {
     id: "need-123",
     name: "Melk",
@@ -52,6 +63,10 @@ function renderFixture(overrides = {}) {
     household: { shopping_category_order: ["Meieri"] },
     shoppingGrouping: "meal",
     basket: { needs: [] },
+    basketMatchPages: {},
+    basketMatchBusy: {},
+    basketMatchErrors: {},
+    basketBatchChoices: {},
     oda: { configured: false, connected: false },
     meals: [{ id: "meal-1", recipe_id: "recipe-1" }, { id: "meal-2", recipe_id: "recipe-2" }],
     recipes: [{ id: "recipe-1", title: "Grøt" }, { id: "recipe-2", title: "Pannekaker" }],
@@ -86,12 +101,18 @@ function renderFixture(overrides = {}) {
     range: () => "?start=2026-11-16&end=2026-11-22",
     refreshView: async () => { refreshes += 1; },
     queuePendingShoppingRefresh: () => {},
+    openBasketBatchReview: (needId) => { openedReviewTarget = needId; },
+    basketBatchSelectableCandidate: (candidate) => candidate?.available !== false,
+    basketBatchIdentityStatus: (candidate) => candidate?.identity_status === "compatible" ? "compatible" : "unverified",
   };
   Object.assign(state, overrides);
-  vm.runInNewContext(screen[0] + "\nglobalThis.renderSingleShoppingList = renderSingleShoppingList;", context);
+  vm.runInNewContext(
+    compactMatch[0] + "\n" + screen[0] + "\nglobalThis.renderSingleShoppingList = renderSingleShoppingList; globalThis.renderCompactShoppingMatch = renderCompactShoppingMatch;",
+    context,
+  );
   const main = new Node("main");
   context.renderSingleShoppingList(main);
-  return { context, line, main, requests, refreshes: () => refreshes };
+  return { context, line, main, requests, refreshes: () => refreshes, openedReviewTarget: () => openedReviewTarget };
 }
 
 test("renders one checked net-quantity row for a need shared by multiple recipes", () => {
@@ -247,4 +268,130 @@ test("Oda proposal confirmation and package count modal use clear Bokmål copy a
     source,
     /Oppgi hvor mange [\s\S]*?det er i én pakke/,
   );
+});
+
+function allNodes(root) {
+  const list = [];
+  function walk(node) {
+    if (!node) return;
+    list.push(node);
+    (node.children || []).forEach(walk);
+  }
+  walk(root);
+  return list;
+}
+
+test("main shopping list keeps item rows compact without full inline match cards or inflated selectable controls", () => {
+  const lineMilk = {
+    id: "need-milk",
+    name: "Melk",
+    unit: "ml",
+    category: "Meieri",
+    to_buy_quantity: "1000",
+    checked: false,
+    origins: ["meal:meal-1"],
+  };
+  const lineEggs = {
+    id: "need-eggs",
+    name: "Egg",
+    unit: "item",
+    category: "Meieri",
+    to_buy_quantity: "12",
+    checked: false,
+    origins: ["meal:meal-1"],
+  };
+  const lineFlour = {
+    id: "need-flour",
+    name: "Hvetemel",
+    unit: "g",
+    category: "Bakevarer",
+    to_buy_quantity: "500",
+    checked: false,
+    origins: ["meal:meal-2"],
+  };
+
+  const fixture = renderFixture({
+    storeTrip: {
+      lines: [lineMilk, lineEggs, lineFlour],
+      checked_count: 0,
+      total_count: 3,
+      unquantified: [],
+    },
+    household: { shopping_category_order: ["Meieri", "Bakevarer"] },
+    shoppingGrouping: "category",
+    oda: { configured: true, connected: true },
+    basket: {
+      needs: [
+        {
+          need: { id: "need-milk", name: "Melk", unit: "ml" },
+          selections: [],
+        },
+        {
+          need: { id: "need-eggs", name: "Egg", unit: "item" },
+          selections: [{ product: { name: "Prior Egg 12pk", product_id: "oda-egg" }, packages: 1 }],
+        },
+        {
+          need: { id: "need-flour", name: "Hvetemel", unit: "g" },
+          selections: [],
+        },
+      ],
+    },
+    basketMatchPages: {
+      "need-milk": {
+        1: {
+          match_job_id: "job-1",
+          status: "matched",
+          candidates: [
+            { id: "c1", name: "Tine Helmelk 1L", recommended_packages: 1, identity_status: "compatible", available: true },
+            { id: "c2", name: "Tine Lettmelk 1L", recommended_packages: 1, identity_status: "compatible", available: true },
+            { id: "c3", name: "Q Helmelk 1L", recommended_packages: 1, identity_status: "compatible", available: true },
+          ],
+        },
+      },
+      "need-flour": {
+        1: { match_job_id: "job-1", status: "no_results", candidates: [] },
+      },
+    },
+  });
+
+  // Actionable shopping items must equal the 3 needs, not inflated by candidate alternatives
+  const groups = fixture.main.children.filter((node) => node.className.includes("actionable-shopping-group"));
+  const allRows = groups.flatMap((g) => g.children[1].children);
+  assert.equal(allRows.length, 3, "renders exactly 3 actionable need rows, never multiplied by candidates");
+
+  // Total checkboxes across all needs must be 3 (one per need line, no candidate selection checkboxes)
+  const totalCheckboxes = allNodes(fixture.main).filter((node) => node.tagName === "input" && (node.attributes?.type === "checkbox" || node.type === "checkbox"));
+  assert.equal(totalCheckboxes.length, 3);
+
+  // Must not contain full inline candidate articles, accordions or full search forms
+  assert.equal(allNodes(fixture.main).some((node) => node.className?.includes?.("basket-match-need")), false);
+  assert.equal(allNodes(fixture.main).some((node) => node.className?.includes?.("basket-match-alternatives")), false);
+  assert.equal(allNodes(fixture.main).some((node) => node.className?.includes?.("oda-manual-search")), false);
+
+  // Row 1 (Milk): shows candidate proposal badge and 'Se forslag' compact action
+  const milkRow = allRows.find((r) => r.text.includes("Melk"));
+  assert.ok(milkRow);
+  assert.match(milkRow.text, /Forslag: Tine Helmelk 1L · 1 pk/u);
+  const milkButton = milkRow.find((n) => n.tagName === "button" && n.textContent === "Se forslag");
+  assert.ok(milkButton);
+  milkButton.action();
+  assert.equal(fixture.openedReviewTarget(), "need-milk");
+
+  // Row 2 (Eggs): shows selected product title/pack badge and 'Endre' compact action
+  const eggsRow = allRows.find((r) => r.text.includes("Egg"));
+  assert.ok(eggsRow);
+  assert.match(eggsRow.text, /Prior Egg 12pk · 1 pk/u);
+  const eggsButton = eggsRow.find((n) => n.tagName === "button" && n.textContent === "Endre");
+  assert.ok(eggsButton);
+  eggsButton.action();
+  assert.equal(fixture.openedReviewTarget(), "need-eggs");
+
+  // Row 3 (Flour): shows unresolved indicator 'Ingen treff' and 'Se over' compact action
+  const flourRow = allRows.find((r) => r.text.includes("Hvetemel"));
+  assert.ok(flourRow);
+  assert.match(flourRow.text, /Ingen treff/u);
+  const flourButton = flourRow.find((n) => n.tagName === "button" && n.textContent === "Se over");
+  assert.ok(flourButton);
+  flourButton.action();
+  assert.equal(fixture.openedReviewTarget(), "need-flour");
 });

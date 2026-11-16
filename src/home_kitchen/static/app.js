@@ -3485,6 +3485,7 @@ function renderTripCompletion(main) {
     if (sources.length) {
       const sourceDetails = el("details", null, "trip-source-details");
       add(sourceDetails, el("summary", `Behovskilder (${sources.length})`));
+      add(sourceDetails, el("p", "Velg hvilke måltider eller tillegg som dekkes og lukkes nå. Uavkryssede bidrag forblir åpne på handlelisten.", "muted trip-source-help"));
       sources.forEach((source) => {
         const input = el("input"); input.type = "checkbox";
         const kindLabel = source.kind === "meal" ? "Lukk måltidsbehov" : source.kind === "capture" ? "Lukk hurtigtillegg" : "Lukk fast vare";
@@ -3501,14 +3502,17 @@ function renderTripCompletion(main) {
           context = "Fast vare";
         }
         const sourceUnit = source.unit ? window.KitchenShoppingView.displayUnit(source.unit, false, source.quantity) : "";
-        const detailLabel = `${kindLabel} · ${context} · ${formatUiQuantity(source.quantity)}${sourceUnit ? " " + sourceUnit : ""}`;
-        add(sourceDetails, add(el("label"), input, el("span", detailLabel)));
+        const formattedQty = `${formatUiQuantity(source.quantity)}${sourceUnit ? " " + sourceUnit : ""}`;
+        const detailLabel = `${kindLabel} · ${context} · ${formattedQty}`;
+        input.setAttribute("aria-label", `${kindLabel}: ${context} (${formattedQty})`);
+        add(sourceDetails, add(el("label", null, "trip-source-choice"), input, el("span", detailLabel)));
         let regularPurchase = null;
         if (source.kind === "capture") {
           const capture = (line.captures || []).find((item) => item.id === source.source_id);
           if (capture?.regular_id) {
             regularPurchase = el("input"); regularPurchase.type = "checkbox";
-            add(sourceDetails, add(el("label"), regularPurchase, el("span", "Oppdater sist kjøpt for den tilknyttede hverdagsvaren")));
+            regularPurchase.setAttribute("aria-label", `Oppdater sist kjøpt for hverdagsvare: ${context}`);
+            add(sourceDetails, add(el("label", null, "trip-source-choice"), regularPurchase, el("span", "Oppdater sist kjøpt for den tilknyttede hverdagsvaren")));
           }
         }
         sourceChecks.push({ source, input, regularPurchase });
@@ -3814,7 +3818,7 @@ function basketBatchSkipReason(need, result) {
     return "Pakningsstørrelse, måleenhet eller anbefalt antall kan ikke brukes samlet. Oppdater søket eller hopp over varen.";
   return "";
 }
-function openBasketBatchReview() {
+function openBasketBatchReview(targetNeedId = null) {
   clearStaleBasketBatchIdentityConfirmations();
   const root = openDialog("Se over produktforslag");
   $("#modal").dataset.kind = "basket-batch-review";
@@ -3840,6 +3844,7 @@ function openBasketBatchReview() {
     ),
   );
   const list = el("div", null, "basket-batch-needs");
+  let targetSection = null;
   needs.forEach((need) => {
     const result = state.basketMatchPages[String(need.id)]?.[1];
     const entry = (state.basket?.needs || []).find(
@@ -3852,13 +3857,30 @@ function openBasketBatchReview() {
       el("h3", need.name),
       el("p", formatUiNeedQuantity(need) + " å dekke", "muted"),
     );
+    section.dataset.needId = String(need.id);
+    if (targetNeedId && String(need.id) === String(targetNeedId)) {
+      targetSection = section;
+    }
     if (saved.length) {
       const current = el("details", null, "basket-batch-existing");
       current.open = Boolean(staged);
       add(current, el("summary", formatUiCount(saved.length) + " lagrede produktvalg beholdes"));
       saved.forEach((selection) => {
-        if (selection.product)
-          add(current, basketProduct(selection.product, selection.packages));
+        if (selection.product) {
+          const chosen = add(el("div", null, "selected-product"), basketProduct(selection.product, selection.packages));
+          add(chosen, button("Fjern produktvalg", async () => {
+            try {
+              const urlRange = typeof range === "function" ? range() : "";
+              await api("/basket/selections/" + encodeURIComponent(need.id) + "/" + encodeURIComponent(selection.product.product_id) + urlRange, "DELETE");
+              state.cartProposalHandled = false;
+              if (typeof refreshView === "function") await refreshView();
+              openBasketBatchReview(need.id);
+            } catch (error) {
+              if (typeof notify === "function") notify(error.message, true);
+            }
+          }, "quiet small"));
+          current.append(chosen);
+        }
       });
       add(section, current);
     }
@@ -3950,6 +3972,30 @@ function openBasketBatchReview() {
     list.append(section);
   });
   add(root, list);
+  if (targetSection) {
+    if (typeof targetSection.scrollIntoView === "function") {
+      targetSection.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+    const findFocusable = (element) => {
+      if (!element) return null;
+      if (typeof element.querySelector === "function") {
+        return element.querySelector("button, input, summary");
+      }
+      if (typeof element.find === "function") {
+        return element.find((node) => ["button", "input", "summary"].includes(node.tagName?.toLowerCase()));
+      }
+      for (const child of element.children || []) {
+        if (["button", "input", "summary"].includes(child.tagName?.toLowerCase())) return child;
+        const nested = findFocusable(child);
+        if (nested) return nested;
+      }
+      return null;
+    };
+    const focusable = findFocusable(targetSection);
+    if (focusable && typeof focusable.focus === "function") {
+      focusable.focus();
+    }
+  }
   const total = el("p", activeChoices.length
     ? formatUiCount(activeChoices.length) + " forslag er valgt. Kontroller varer som erstatter lagrede valg før du fortsetter."
     : choices.length
@@ -4122,6 +4168,95 @@ async function saveBasketBatchChoices() {
     }
   }
 }
+function renderCompactShoppingMatch(line, match) {
+  const container = el("div", null, "inline-basket-match compact-basket-match");
+  const need = match?.need;
+  const needId = need?.id;
+  const selections = (match?.selections || []).filter((s) => s.product);
+
+  let badgeText = "";
+  let badgeClass = "badge compact-match-badge";
+  let buttonLabel = "Se over";
+  let buttonAria = "Se over produktforslag for " + line.name;
+
+  if (selections.length > 0) {
+    const first = selections[0];
+    const p = first.product;
+    const packText = first.packages ? " · " + formatUiCount(first.packages) + " pk" : "";
+    badgeText = selections.length > 1
+      ? formatUiCount(selections.length) + " Oda-valg"
+      : (p.name || "Valgt produkt") + packText;
+    badgeClass += " match-selected";
+    buttonLabel = "Endre";
+    buttonAria = "Endre produktvalg for " + line.name;
+  } else if (needId) {
+    const id = String(needId);
+    const staged = state.basketBatchChoices?.[id];
+    if (staged?.name) {
+      const packText = staged.packages ? " · " + formatUiCount(staged.packages) + " pk" : "";
+      badgeText = "Klargjort: " + staged.name + packText;
+      badgeClass += " match-staged";
+      buttonLabel = "Endre";
+      buttonAria = "Endre klargjort produktforslag for " + line.name;
+    } else {
+      const busy = state.basketMatchBusy?.[id];
+      const error = state.basketMatchErrors?.[id];
+      const page = state.basketMatchCurrentPage?.[id] || 1;
+      const result = state.basketMatchPages?.[id]?.[page] || state.basketMatchPages?.[id]?.[1];
+      if (busy) {
+        badgeText = "Søker hos Oda …";
+        badgeClass += " match-busy";
+      } else if (error) {
+        badgeText = "Søk feilet";
+        badgeClass += " match-error";
+      } else if (result?.candidates?.length) {
+        const candidates = result.candidates;
+        const selectable = typeof basketBatchSelectableCandidate === "function"
+          ? candidates.filter((c) => basketBatchSelectableCandidate(c, need?.unit))
+          : candidates;
+        const compatible = typeof basketBatchIdentityStatus === "function"
+          ? selectable.filter((c) => basketBatchIdentityStatus(c) === "compatible")
+          : selectable;
+        const unverified = typeof basketBatchIdentityStatus === "function"
+          ? selectable.filter((c) => basketBatchIdentityStatus(c) === "unverified")
+          : [];
+        if (compatible.length) {
+          const primary = compatible[0];
+          const packText = primary.recommended_packages ? " · " + formatUiCount(primary.recommended_packages) + " pk" : "";
+          badgeText = "Forslag: " + primary.name + packText;
+          badgeClass += " match-candidate";
+          buttonLabel = "Se forslag";
+          buttonAria = "Se over produktforslag for " + line.name;
+        } else if (unverified.length) {
+          badgeText = "Må bekreftes";
+          badgeClass += " match-unverified";
+          buttonLabel = "Se forslag";
+          buttonAria = "Se over uavklart produktforslag for " + line.name;
+        } else {
+          badgeText = "Uavklart treff";
+          badgeClass += " match-unresolved";
+        }
+      } else if (result && result.status === "no_results") {
+        badgeText = "Ingen treff";
+        badgeClass += " match-unresolved";
+      } else {
+        badgeText = "Venter på treff";
+        badgeClass += " match-pending";
+      }
+    }
+  }
+
+  const badge = el("span", badgeText || "Oda", badgeClass);
+  const actionBtn = button(buttonLabel, () => {
+    if (typeof openBasketBatchReview === "function") {
+      openBasketBatchReview(needId);
+    }
+  }, "quiet small compact-match-action");
+  actionBtn.setAttribute("aria-label", buttonAria);
+
+  add(container, badge, actionBtn);
+  return container;
+}
 function renderSingleShoppingList(main) {
   const trip = state.storeTrip || { lines: [], checked_count: 0, total_count: 0, unquantified: [] };
   const lines = trip.lines || [];
@@ -4247,30 +4382,7 @@ function renderSingleShoppingList(main) {
       if (evidence) add(detail, evidence);
       add(row, check, detail);
       if (state.oda?.connected && match?.need) {
-        const matchView = renderBasketMatchNeed(match.need);
-        matchView.classList.add("inline-basket-match");
-        if (match.selections?.length) {
-          const selected = el("details", null, "shopping-selected-products");
-          add(selected, el("summary", formatUiCount(match.selections.length) + " lagrede Oda-valg"));
-          match.selections.forEach((selection) => {
-            if (!selection.product) return;
-            const chosen = add(el("div", null, "selected-product"), basketProduct(selection.product, selection.packages));
-            add(chosen, button("Fjern produktvalg", async () => {
-              try {
-                await api("/basket/selections/" + encodeURIComponent(match.need.id) + "/" + encodeURIComponent(selection.product.product_id) + range(), "DELETE");
-                state.cartProposalHandled = false;
-                await refreshView();
-              } catch (error) {
-                notify(error.message, true);
-              }
-            }, "quiet small"));
-            selected.append(chosen);
-          });
-          matchView.append(selected);
-        }
-        const refine = el("details", null, "oda-manual-search");
-        add(refine, el("summary", "Søk eller juster hos Oda"), odaSearchForNeed(match.need));
-        matchView.append(refine);
+        const matchView = renderCompactShoppingMatch(line, match);
         add(row, matchView);
       }
       list.append(row);

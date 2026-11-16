@@ -18,6 +18,7 @@ from home_kitchen.catalogue.repository import PostgresFoodCatalogueRepository
 from home_kitchen.catalogue.service import FoodCatalogueService
 from home_kitchen.catalogue.sku_repository import PostgresCatalogueSkuRepository
 from home_kitchen.catalogue.sku_service import CatalogueSkuService
+from home_kitchen.connector_auth import ConnectorAuthService
 from home_kitchen.connector_store import ConnectorStore, resolve_connector_cipher
 from home_kitchen.context import history_context
 from home_kitchen.history import HistoryRepository
@@ -97,6 +98,12 @@ class KitchenFeatures:
                 TrumfIntegration(self.connector_store, self.household_id),
                 CookidooIntegration(self.connector_store, self.household_id),
             ]
+        )
+        self.connector_auth = ConnectorAuthService(
+            store=self.connector_store,
+            integrations=self.integrations,
+            household_id=self.household_id,
+            settings=settings,
         )
         self.inventory = InventoryService(kitchen, self.history)
         if kitchen.store.engine is not None:

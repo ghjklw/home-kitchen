@@ -169,7 +169,7 @@ class Rema1000Integration(StoredConnectorIntegration):
         super().__init__(
             provider_id="rema1000",
             name="Rema 1000",
-            supported_auth_modes=["session_token"],
+            supported_auth_modes=["oauth_pkce", "session_token"],
             capabilities=["purchase_history", "receipt_sync"],
             detail="Koble til Rema 1000 Æ med sesjonstoken for automatisk synkronisering av kjøpshistorikk og rabatter.",
             store=store,
@@ -187,7 +187,7 @@ class CoopIntegration(StoredConnectorIntegration):
         super().__init__(
             provider_id="coop",
             name="Coop",
-            supported_auth_modes=["session_token", "session_cookie"],
+            supported_auth_modes=["oauth_pkce", "session_token", "session_cookie"],
             capabilities=["purchase_history", "receipt_sync"],
             detail="Koble til Coop med sesjonstoken eller informasjonskapsel for automatisk kvitterings- og kjøpshistorikk.",
             store=store,
@@ -205,7 +205,7 @@ class TrumfIntegration(StoredConnectorIntegration):
         super().__init__(
             provider_id="trumf",
             name="Trumf",
-            supported_auth_modes=["session_cookie"],
+            supported_auth_modes=["interactive_otp", "session_cookie"],
             capabilities=["purchase_history", "receipt_sync"],
             detail="Koble til Trumf med sesjonsinformasjonskapsel for automatisk kvitterings- og kjøpshistorikk.",
             store=store,
@@ -223,7 +223,7 @@ class CookidooIntegration(StoredConnectorIntegration):
         super().__init__(
             provider_id="cookidoo",
             name="Cookidoo / Thermomix TM6",
-            supported_auth_modes=["session_cookie", "credentials"],
+            supported_auth_modes=["oauth_password", "session_cookie", "credentials"],
             capabilities=["recipe_import", "meal_planning"],
             detail="Uoffisiell tilkobling til Cookidoo / TM6 for oppskriftsimport og ukeplansynkronisering.",
             store=store,

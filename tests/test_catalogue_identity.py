@@ -97,6 +97,55 @@ def test_unmapped_legacy_ingredient_remains_valid_and_source_quantity_is_unchang
     assert recipe.ingredients[0].unit == "handfuls"
 
 
+def test_old_client_update_does_not_guess_between_duplicate_ingredient_signatures():
+    from home_kitchen.models import Recipe, RecipeCreate
+    from home_kitchen.service import KitchenService
+
+    first_product, second_product, unit = uuid4(), uuid4(), uuid4()
+    existing = Recipe.model_validate(
+        {
+            "id": uuid4(),
+            "title": "Soup",
+            "servings": 2,
+            "ingredients": [
+                {
+                    "name": "pepper",
+                    "quantity": "1",
+                    "unit": "tsp",
+                    "canonical_product_id": first_product,
+                    "canonical_unit_id": unit,
+                    "source_unit_expression": "Teaspoons",
+                },
+                {
+                    "name": "pepper",
+                    "quantity": "2",
+                    "unit": "tsp",
+                    "canonical_product_id": second_product,
+                    "canonical_unit_id": unit,
+                    "source_unit_expression": "tsp",
+                },
+            ],
+            "instructions": ["Cook"],
+        }
+    )
+    old_payload = RecipeCreate.model_validate(
+        {
+            "title": "Soup edited",
+            "servings": 2,
+            "ingredients": [
+                {"name": "pepper", "quantity": "2", "unit": "tsp"},
+                {"name": "pepper", "quantity": "1", "unit": "tsp"},
+            ],
+            "instructions": ["Cook"],
+        }
+    )
+    updated = KitchenService._retain_omitted_ingredient_identity_fields(
+        old_payload, existing, [item.model_dump() for item in old_payload.ingredients]
+    )
+    assert all(item["canonical_product_id"] is None for item in updated)
+    assert all(item["canonical_unit_id"] is None for item in updated)
+
+
 @pytest.mark.skipif(
     not os.environ.get("KITCHEN_TEST_DATABASE_URL"),
     reason="requires the explicitly configured disposable PostgreSQL test database",
@@ -199,6 +248,7 @@ def test_identity_api_reuses_products_resolves_aliases_and_preserves_recipe_payl
                         "quantity": "1.25",
                         "unit": "Handfuls",
                         "canonical_product_id": first.json()["id"],
+                        "canonical_unit_id": unit.json()["id"],
                     }
                 ],
                 "instructions": ["Cook"],
@@ -209,6 +259,49 @@ def test_identity_api_reuses_products_resolves_aliases_and_preserves_recipe_payl
         assert recipe.json()["ingredients"][0]["unit"] == "handfuls"
         assert recipe.json()["ingredients"][0]["source_unit_expression"] == "Handfuls"
         assert recipe.json()["ingredients"][0]["canonical_product_id"] == first.json()["id"]
+        assert recipe.json()["ingredients"][0]["canonical_unit_id"] == unit.json()["id"]
+
+        old_client_update = client.put(
+            f"/api/recipes/{recipe.json()['id']}",
+            json={
+                "title": "Legacy edited",
+                "servings": 1,
+                "ingredients": [
+                    {"name": "Old unmatched phrase", "quantity": "2.5", "unit": "handfuls"}
+                ],
+                "instructions": ["Cook slowly"],
+            },
+        )
+        assert old_client_update.status_code == 200
+        edited_ingredient = old_client_update.json()["ingredients"][0]
+        assert edited_ingredient["quantity"] == "2.5"
+        assert edited_ingredient["canonical_product_id"] == first.json()["id"]
+        assert edited_ingredient["canonical_unit_id"] == unit.json()["id"]
+        assert edited_ingredient["source_unit_expression"] == "Handfuls"
+
+        explicitly_cleared = client.put(
+            f"/api/recipes/{recipe.json()['id']}",
+            json={
+                "title": "Legacy edited",
+                "servings": 1,
+                "ingredients": [
+                    {
+                        "name": "Old unmatched phrase",
+                        "quantity": "2.5",
+                        "unit": "handfuls",
+                        "canonical_product_id": None,
+                        "canonical_unit_id": None,
+                        "source_unit_expression": None,
+                    }
+                ],
+                "instructions": ["Cook slowly"],
+            },
+        )
+        assert explicitly_cleared.status_code == 200
+        cleared_ingredient = explicitly_cleared.json()["ingredients"][0]
+        assert cleared_ingredient["canonical_product_id"] is None
+        assert cleared_ingredient["canonical_unit_id"] is None
+        assert cleared_ingredient["source_unit_expression"] is None
         invalid_recipe = client.post(
             "/api/recipes",
             json={

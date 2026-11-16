@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import create_engine, func, select, text
+from sqlalchemy import create_engine, func, inspect, select, text
 
 from home_kitchen.purchase_sync import (
     CheckpointConflict,
@@ -87,6 +87,43 @@ def test_backfill_overlap_dedupe_and_next_poll_resumes_terminal_cursor(engine):
         expected_cursor="watermark-3",
     )
     assert count_sources(engine) == 3
+
+
+def test_missing_provider_timestamp_is_nullable_and_replay_is_idempotent(engine):
+    record_without_provider_time = ProviderOrderRecord(
+        external_id="coop-summary-1",
+        revision_id="sha256:fixture-revision",
+        source_updated_at=None,
+        payload={"summaryId": "coop-summary-1"},
+    )
+    first = page([record_without_provider_time], "page-2", True)
+    persist_page(engine, "coop", "account-a", first, expected_cursor=None)
+    persist_page(
+        engine,
+        "coop",
+        "account-a",
+        page([record_without_provider_time], "terminal", False),
+        expected_cursor="page-2",
+    )
+
+    assert count_sources(engine) == 1
+    with engine.connect() as connection:
+        row = connection.execute(select(provider_order_sources)).mappings().one()
+    assert row["source_updated_at"] is None
+    assert checkpoint(engine, "coop", "account-a") == "terminal"
+
+
+def test_migration_allows_unknown_provider_updated_timestamp(test_database_url):
+    engine = create_engine(test_database_url)
+    try:
+        source_updated_at = next(
+            column
+            for column in inspect(engine).get_columns("provider_order_sources")
+            if column["name"] == "source_updated_at"
+        )
+        assert source_updated_at["nullable"] is True
+    finally:
+        engine.dispose()
 
 
 def test_page_failure_rolls_back_source_and_checkpoint(engine):

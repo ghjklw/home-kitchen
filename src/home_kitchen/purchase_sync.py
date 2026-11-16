@@ -39,7 +39,7 @@ provider_order_sources = Table(
     Column("account_id", String(255), nullable=False),
     Column("external_id", String(512), nullable=False),
     Column("revision_id", String(512), nullable=False),
-    Column("source_updated_at", DateTime(timezone=True), nullable=False),
+    Column("source_updated_at", DateTime(timezone=True), nullable=True),
     Column("observed_at", DateTime(timezone=True), nullable=False),
     Column("payload", JSON().with_variant(JSONB, "postgresql"), nullable=False),
     UniqueConstraint(
@@ -71,7 +71,7 @@ class ProviderOrderRecord(BaseModel):
 
     external_id: str
     revision_id: str
-    source_updated_at: datetime
+    source_updated_at: datetime | None = None
     payload: dict[str, object]
 
     @field_validator("external_id", "revision_id")
@@ -83,7 +83,9 @@ class ProviderOrderRecord(BaseModel):
 
     @field_validator("source_updated_at")
     @classmethod
-    def timestamp_must_be_aware(cls, value: datetime) -> datetime:
+    def timestamp_must_be_aware(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("source_updated_at must include a timezone")
         return value.astimezone(UTC)
@@ -137,7 +139,9 @@ def checkpoint(engine: Engine, provider: str, account_id: str) -> str | None:
     return row[0] if row else None
 
 
-def _utc(value: datetime) -> datetime:
+def _utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 

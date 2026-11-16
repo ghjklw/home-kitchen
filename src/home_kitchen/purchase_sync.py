@@ -141,7 +141,9 @@ def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
-def _persist_record(connection, provider: str, account_id: str, record, observed_at: datetime) -> None:
+def _persist_record(
+    connection, provider: str, account_id: str, record, observed_at: datetime
+) -> None:
     payload = record.model_dump(mode="json")["payload"]
     values = {
         "id": uuid4(),
@@ -216,7 +218,9 @@ def persist_page(
             .with_for_update()
         ).one()
         if cursor_row.cursor != (expected_cursor or ""):
-            raise CheckpointConflict("account checkpoint advanced while provider page was in flight")
+            raise CheckpointConflict(
+                "account checkpoint advanced while provider page was in flight"
+            )
 
         for record in page.records:
             _persist_record(connection, provider, account_id, record, now)
@@ -247,9 +251,7 @@ def sync_account(engine: Engine, provider: str, account_id: str, adapter: Provid
         page = adapter.fetch_page(account_id, cursor)
         if page.has_more and page.next_cursor == cursor:
             raise ValueError("provider returned a non-advancing continuation cursor")
-        persist_page(
-            engine, provider, account_id, page, expected_cursor=cursor
-        )
+        persist_page(engine, provider, account_id, page, expected_cursor=cursor)
         count += len(page.records)
         if not page.has_more:
             return count

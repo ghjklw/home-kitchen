@@ -50,7 +50,9 @@ def page(records, cursor, has_more):
 
 def count_sources(engine):
     with engine.connect() as connection:
-        return connection.execute(select(func.count()).select_from(provider_order_sources)).scalar_one()
+        return connection.execute(
+            select(func.count()).select_from(provider_order_sources)
+        ).scalar_one()
 
 
 def test_backfill_overlap_dedupe_and_next_poll_resumes_terminal_cursor(engine):
@@ -70,9 +72,7 @@ def test_backfill_overlap_dedupe_and_next_poll_resumes_terminal_cursor(engine):
         assert row["observed_at"] is not None
         assert row["source_updated_at"] != row["observed_at"]
 
-    incremental = PagedAdapter(
-        {"watermark-2": page([record("o3", "r1")], "watermark-3", False)}
-    )
+    incremental = PagedAdapter({"watermark-2": page([record("o3", "r1")], "watermark-3", False)})
     assert sync_account(engine, "provider-a", "account-a", incremental) == 1
     assert incremental.calls == [("account-a", "watermark-2")]
     assert checkpoint(engine, "provider-a", "account-a") == "watermark-3"

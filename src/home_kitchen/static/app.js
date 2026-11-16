@@ -1748,6 +1748,7 @@ function recipeForm(draft = {}, source = "manual") {
     },
   );
   if (!rowControllers.length) rowControllers.push(window.KitchenRecipeEditor.rowFromDraft({}));
+  let ingredientRowSequence = 0;
 
   function updateIngredientRowLabels() {
     rowControllers.forEach((row, index) => {
@@ -1772,6 +1773,7 @@ function recipeForm(draft = {}, source = "manual") {
     const estimateNode = estimateText ? el("p", estimateText, "muted purchase-estimate") : null;
     const rowError = el("p", "", "ingredient-error");
     rowError.setAttribute("role", "alert");
+    rowError.id = "recipe-ingredient-errors-" + (++ingredientRowSequence);
     const remove = button("Fjern", () => {
       const index = rowControllers.indexOf(controller);
       if (index < 0) return;
@@ -1840,6 +1842,7 @@ function recipeForm(draft = {}, source = "manual") {
       throw new Error("Lenken til oppskriftsbildet må bruke HTTPS.");
     if (!rowControllers.length) throw new Error("Legg til minst én ingrediens før du lagrer.");
     let hasIngredientErrors = false;
+    let firstInvalidField = null;
     const rows = rowControllers.map((row) => {
       const { item, errors: fieldErrors } = window.KitchenRecipeEditor.recipeIngredientForSave({
         name: row.name.value,
@@ -1854,21 +1857,34 @@ function recipeForm(draft = {}, source = "manual") {
         canonical_unit_id: row.canonical_unit_id,
         source_unit_expression: row.source_unit_expression,
       });
-      const errors = [];
-      if (fieldErrors.name) errors.push("Oppgi navnet på ingrediensen.");
-      if (fieldErrors.quantity) {
-        errors.push("Oppgi en gyldig positiv mengde med komma eller punktum, eller la feltet stå tomt.");
-      }
-      if (fieldErrors.unit) errors.push("Oppgi enheten når du har oppgitt en mengde.");
-      row.error.textContent = errors.join(" ");
+      const errors = {};
+      if (fieldErrors.name) errors.name = "Oppgi navnet på ingrediensen.";
+      if (fieldErrors.quantity)
+        errors.quantity = "Oppgi en gyldig positiv mengde med komma eller punktum, eller la feltet stå tomt.";
+      if (fieldErrors.unit) errors.unit = "Oppgi enheten når du har oppgitt en mengde.";
+      row.error.replaceChildren();
+      Object.entries(errors).forEach(([key, message]) => {
+        const messageNode = el("span", message);
+        messageNode.id = row.error.id + "-" + key;
+        row.error.append(messageNode, el("span", " "));
+        row[key].setAttribute("aria-describedby", messageNode.id);
+      });
+      ["name", "quantity", "unit"].forEach((key) => {
+        if (!errors[key]) row[key].removeAttribute("aria-describedby");
+      });
       row.name.setAttribute("aria-invalid", String(fieldErrors.name));
       row.quantity.setAttribute("aria-invalid", String(fieldErrors.quantity));
       row.unit.setAttribute("aria-invalid", String(fieldErrors.unit));
-      hasIngredientErrors ||= errors.length > 0;
+      if (Object.keys(errors).length) {
+        hasIngredientErrors = true;
+        if (!firstInvalidField) firstInvalidField = row[Object.keys(errors)[0]];
+      }
       return item;
     });
-    if (hasIngredientErrors)
+    if (hasIngredientErrors) {
+      firstInvalidField?.focus();
       throw new Error("Rett ingrediensfeltene som er markert med feil før du lagrer.");
+    }
     const payload = {
       title: name.input.value.trim(),
       servings: Number(servings.input.value),
@@ -3469,6 +3485,7 @@ function renderTripCompletion(main) {
       add(section, sourceDetails);
     }
     const reason = el("select");
+    reason.setAttribute("aria-label", "Lukk uten å registrere kjøp");
     [["", "Velg hvorfor dette behovet lukkes"], ["already_have", "Hadde den allerede"], ["not_needed", "Trengte den ikke"], ["unavailable", "Var utilgjengelig"], ["other", "Annet"]].forEach(([value, label]) => reason.append(new Option(label, value)));
     add(section, el("label", "Lukk uten å registrere kjøp"), reason);
     lineForms.push({ line, bought, quantity, unit, exact, productSelect, packCount, sourceChecks, reason });
@@ -3679,6 +3696,11 @@ function renderInventory(main) {
 }
 function toggleBasketBatchChoice(candidate, need, matchJobId, confirmIdentity = false) {
   if (state.basketBatchSaving) return;
+  const modalContent = $("#modal-content");
+  const activeElement = document.activeElement;
+  const focusKey = $("#modal").open && modalContent.contains(activeElement)
+    ? activeElement?.dataset?.focusKey
+    : null;
   if (!matchJobId || matchJobId !== state.basketBatchReviewJobId) {
     notify("Produktforslagene er endret. Oppdater listen før du godkjenner dem.", true);
     return;
@@ -3706,6 +3728,10 @@ function toggleBasketBatchChoice(candidate, need, matchJobId, confirmIdentity = 
   state.basketBatchSaveError = "";
   state.basketBatchNeedsCorrection = false;
   openBasketBatchReview();
+  if (focusKey?.startsWith("basket-batch-candidate:"))
+    [...$("#modal-content").querySelectorAll("[data-focus-key]")]
+      .find((node) => node.dataset.focusKey === focusKey)
+      ?.focus({ preventScroll: true });
 }
 function basketBatchRecommendation(candidate, unit) {
   if (typeof candidate?.id !== "string" || candidate.id.length > 200) return null;
@@ -3859,6 +3885,7 @@ function openBasketBatchReview() {
         select.setAttribute("aria-pressed", String(
           selected && (!identityUnverified || staged?.confirm_identity === true),
         ));
+        select.dataset.focusKey = `basket-batch-candidate:${need.id}:${candidate.id}`;
         select.disabled = state.basketBatchSaving || state.basketBatchNeedsRefresh;
         add(card, select);
       }

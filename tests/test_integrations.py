@@ -1,9 +1,15 @@
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
+
 from pydantic import SecretStr
 
 from home_kitchen.integrations import (
     AIIntegration,
     CookidooIntegration,
+    CoopIntegration,
     OdaIntegration,
+    Rema1000Integration,
+    TrumfIntegration,
 )
 
 
@@ -98,12 +104,67 @@ def test_unconfigured_ai_does_not_report_an_auth_mode():
     assert result.auth_mode is None
 
 
-def test_cookidoo_is_explicitly_unavailable_without_supported_auth_or_capabilities():
+def test_cookidoo_unconnected_reports_not_configured_with_supported_modes():
     result = CookidooIntegration().describe("member-1")
 
-    assert result.status == "unavailable"
+    assert result.status == "not_configured"
     assert result.auth_mode is None
-    assert result.supported_auth_modes == []
-    assert result.capabilities == []
-    assert "official supported third-party connection path" in result.detail
-    assert "native" not in result.detail.lower()
+    assert result.supported_auth_modes == ["session_cookie", "credentials"]
+    assert "recipe_import" in result.capabilities
+    assert "Cookidoo" in result.name
+
+
+def test_connector_integrations_unconnected_report_not_configured():
+    rema = Rema1000Integration().describe("actor-1")
+    assert rema.id == "rema1000"
+    assert rema.status == "not_configured"
+    assert rema.supported_auth_modes == ["session_token"]
+    assert "purchase_history" in rema.capabilities
+
+    coop = CoopIntegration().describe("actor-1")
+    assert coop.id == "coop"
+    assert coop.status == "not_configured"
+    assert coop.supported_auth_modes == ["session_token", "session_cookie"]
+
+    trumf = TrumfIntegration().describe("actor-1")
+    assert trumf.id == "trumf"
+    assert trumf.status == "not_configured"
+    assert trumf.supported_auth_modes == ["session_cookie"]
+
+
+def test_connector_integrations_connected_and_expired_states():
+    class MockConnectorStatus:
+        def __init__(self, auth_mode, expires_at, is_expired):
+            self.auth_mode = auth_mode
+            self.expires_at = expires_at
+            self.is_expired = is_expired
+
+    class MockStore:
+        def __init__(self, statuses):
+            self.statuses = statuses
+
+        def get_connection_metadata(self, household_id, provider_id):
+            return self.statuses.get(provider_id)
+
+    future = datetime.now(UTC) + timedelta(days=30)
+    past = datetime.now(UTC) - timedelta(days=1)
+    household_id = uuid4()
+
+    store = MockStore(
+        {
+            "rema1000": MockConnectorStatus("session_token", future, False),
+            "trumf": MockConnectorStatus("session_cookie", past, True),
+        }
+    )
+
+    rema = Rema1000Integration(store, household_id).describe("actor-1")
+    assert rema.status == "connected"
+    assert rema.auth_mode == "session_token"
+    assert rema.expires_at == future
+    assert rema.expiry_prompt is None
+
+    trumf = TrumfIntegration(store, household_id).describe("actor-1")
+    assert trumf.status == "expired"
+    assert trumf.auth_mode == "session_cookie"
+    assert trumf.expires_at == past
+    assert "utløpt" in trumf.expiry_prompt.lower()

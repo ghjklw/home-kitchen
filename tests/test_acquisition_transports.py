@@ -255,6 +255,9 @@ def test_photo_and_collection_rest_routes_are_bounded_scoped_and_reviewed(test_d
         assert {item["id"] for item in integrations.json()} == {
             "oda",
             "anthropic",
+            "rema1000",
+            "coop",
+            "trumf",
             "cookidoo",
         }
         body = {"mime_type": "image/png", "data_base64": "%%%bad%%%"}

@@ -5,6 +5,7 @@ const {
   DEFAULT_SHOPPING_CATEGORY_ORDER,
   integrationAuthLabel,
   integrationStatusLabel,
+  integrationExpiryNotice,
   moveShoppingCategory,
   normalizeShoppingCategoryOrder,
   createShoppingCategoryRow,
@@ -111,4 +112,79 @@ test("reports malformed successful endpoint payloads as unavailable", () => {
   );
   assert.equal(emptyOda.integrationsError, null);
   assert.match(emptyOda.odaStatusError, /Oda-status er ikke tilgjengelig/);
+});
+
+test("provides status labels for expired connectors", () => {
+  assert.equal(integrationStatusLabel("expired"), "Sesjon utløpt");
+});
+
+test("provides authentication labels for session token, cookie, and credentials without revealing secrets", () => {
+  assert.equal(integrationAuthLabel("session_token"), "Sesjonstoken");
+  assert.equal(
+    integrationAuthLabel("session_token", true),
+    "Sesjonstoken er lagret (hemmeligheten er skjult)",
+  );
+  assert.equal(integrationAuthLabel("session_cookie"), "Sesjonsinformasjonskapsel");
+  assert.equal(
+    integrationAuthLabel("session_cookie", true),
+    "Sesjonsinformasjonskapsel er lagret (hemmeligheten er skjult)",
+  );
+  assert.equal(integrationAuthLabel("credentials"), "Brukernavn og passord");
+  assert.equal(
+    integrationAuthLabel("credentials", true),
+    "Brukernavn og passord er lagret (hemmeligheten er skjult)",
+  );
+});
+
+test("calculates expiry notices for expired and upcoming expiry states", () => {
+  const expiredIntegration = {
+    id: "trumf",
+    status: "expired",
+    expiry_prompt: "Sesjonen for Trumf har utløpt. Oppdater informasjonskapselen for å fortsette synkronisering.",
+  };
+  assert.equal(
+    integrationExpiryNotice(expiredIntegration),
+    "Sesjonen for Trumf har utløpt. Oppdater informasjonskapselen for å fortsette synkronisering.",
+  );
+
+  const nowMs = 1700000000000;
+  // 3 days in the future
+  const expiringSoon = {
+    id: "rema1000",
+    status: "connected",
+    expires_at: new Date(nowMs + 3 * 86400000).toISOString(),
+  };
+  assert.equal(
+    integrationExpiryNotice(expiringSoon, nowMs),
+    "Sesjonen utløper om 3 dager. Vurder å fornye tilkoblingen snart.",
+  );
+
+  // 30 days in the future (no warning needed)
+  const farFuture = {
+    id: "rema1000",
+    status: "connected",
+    expires_at: new Date(nowMs + 30 * 86400000).toISOString(),
+  };
+  assert.equal(integrationExpiryNotice(farFuture, nowMs), null);
+});
+
+test("app.js source includes connector controls and password-masked inputs", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const appSource = fs.readFileSync(path.join(__dirname, "../src/home_kitchen/static/app.js"), "utf8");
+
+  // Verify connect and disconnect routes
+  assert.match(appSource, /\/integrations\/\$\{providerId\}\/connection/);
+  assert.match(appSource, /\/integrations\/\$\{integration\.id\}\/connect/);
+
+  // Verify Bokmål controls
+  assert.match(appSource, /Koble til/);
+  assert.match(appSource, /Oppdater tilkobling/);
+  assert.match(appSource, /Forny tilkobling/);
+  assert.match(appSource, /Koble fra/);
+
+  // Verify password masking for secret inputs in openConnectorModal
+  assert.match(appSource, /field\(\s*"Sesjonstoken \(token\)",\s*"password"/);
+  assert.match(appSource, /field\(\s*"Informasjonskapsel \(cookie\)",\s*"password"/);
+  assert.match(appSource, /field\(\s*"Passord",\s*"password"/);
 });

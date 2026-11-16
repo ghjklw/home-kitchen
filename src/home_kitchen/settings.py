@@ -113,6 +113,7 @@ class Settings(BaseSettings):
     _ai_runtime: object | None = PrivateAttr(default=None)
     public_url: HttpUrl | None = None
     oda_encryption_key: SecretStr | None = None
+    connector_encryption_key: SecretStr | None = None
 
     @property
     def ai_configured(self) -> bool:
@@ -189,6 +190,11 @@ class Settings(BaseSettings):
             raise ValueError("mcp_encryption_key must be a valid Fernet key") from None
         if self.oda_encryption_key and self.oda_encryption_key.get_secret_value() in secrets:
             raise ValueError("MCP OAuth keys must be independent from Oda encryption")
+        if (
+            self.connector_encryption_key
+            and self.connector_encryption_key.get_secret_value() in secrets
+        ):
+            raise ValueError("MCP OAuth keys must be independent from connector encryption")
         if not self.mcp_allowed_redirect_uris:
             raise ValueError("MCP OAuth requires an explicit client redirect allowlist")
         for redirect in self.mcp_allowed_redirect_uris:
@@ -273,6 +279,11 @@ class Settings(BaseSettings):
                 Fernet(self.oda_encryption_key.get_secret_value().encode())
             except (ValueError, TypeError):
                 raise ValueError("oda_encryption_key must be a valid Fernet key") from None
+        if self.connector_encryption_key is not None:
+            try:
+                Fernet(self.connector_encryption_key.get_secret_value().encode())
+            except (ValueError, TypeError):
+                raise ValueError("connector_encryption_key must be a valid Fernet key") from None
         try:
             driver = make_url(self.database_url.get_secret_value()).drivername
         except ArgumentError:

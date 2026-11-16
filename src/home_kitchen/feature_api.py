@@ -3,13 +3,13 @@
 import base64
 import binascii
 import json
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from starlette.concurrency import run_in_threadpool
 
 from home_kitchen.basket import BasketReview, ProductSnapshot, SelectedProduct
@@ -128,6 +128,83 @@ class ExplicitReview(BaseModel):
 
 class TripCheck(BaseModel):
     checked: bool
+
+
+class ConnectorConnectRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    auth_mode: str | None = None
+    session_token: SecretStr | None = None
+    session_cookie: SecretStr | None = None
+    token: SecretStr | None = None
+    cookie: SecretStr | None = None
+    username: str | None = None
+    password: SecretStr | None = None
+    raw_payload: SecretStr | None = None
+    expires_at: datetime | None = None
+
+
+def _extract_credentials(
+    provider_id: str, data: ConnectorConnectRequest
+) -> tuple[str, dict[str, str]]:
+    if provider_id not in {"rema1000", "coop", "trumf", "cookidoo"}:
+        raise HTTPException(404, f"Ukjent leverandør: {provider_id}")
+
+    auth_mode = data.auth_mode
+    credentials: dict[str, str] = {}
+
+    if provider_id == "rema1000":
+        token = data.session_token or data.token or data.raw_payload
+        if not token or not token.get_secret_value().strip():
+            raise HTTPException(422, "Rema 1000 krever et gyldig sesjonstoken")
+        auth_mode = "session_token"
+        credentials["session_token"] = token.get_secret_value().strip()
+
+    elif provider_id == "trumf":
+        cookie = data.session_cookie or data.cookie or data.raw_payload
+        if not cookie or not cookie.get_secret_value().strip():
+            raise HTTPException(422, "Trumf krever en gyldig sesjonsinformasjonskapsel")
+        auth_mode = "session_cookie"
+        credentials["session_cookie"] = cookie.get_secret_value().strip()
+
+    elif provider_id == "coop":
+        token = data.session_token or data.token
+        cookie = data.session_cookie or data.cookie or data.raw_payload
+        if auth_mode == "session_cookie" or (cookie and not token):
+            if not cookie or not cookie.get_secret_value().strip():
+                raise HTTPException(
+                    422, "Coop krever en gyldig informasjonskapsel for denne innloggingsmetoden"
+                )
+            auth_mode = "session_cookie"
+            credentials["session_cookie"] = cookie.get_secret_value().strip()
+        else:
+            cand = token or cookie
+            if not cand or not cand.get_secret_value().strip():
+                raise HTTPException(
+                    422, "Coop krever et gyldig sesjonstoken eller informasjonskapsel"
+                )
+            auth_mode = "session_token"
+            credentials["session_token"] = cand.get_secret_value().strip()
+
+    elif provider_id == "cookidoo":
+        if auth_mode == "credentials" or (data.username and data.password):
+            if not data.username or not data.username.strip():
+                raise HTTPException(422, "Cookidoo krever et brukernavn")
+            if not data.password or not data.password.get_secret_value().strip():
+                raise HTTPException(422, "Cookidoo krever et passord")
+            auth_mode = "credentials"
+            credentials["username"] = data.username.strip()
+            credentials["password"] = data.password.get_secret_value().strip()
+        else:
+            cookie = data.session_cookie or data.cookie or data.raw_payload
+            if not cookie or not cookie.get_secret_value().strip():
+                raise HTTPException(
+                    422, "Cookidoo krever en informasjonskapsel eller brukernavn/passord"
+                )
+            auth_mode = "session_cookie"
+            credentials["session_cookie"] = cookie.get_secret_value().strip()
+
+    return auth_mode, credentials
 
 
 def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRouter:
@@ -292,6 +369,51 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
     def integrations(request: Request, response: Response) -> list[IntegrationInfo]:
         response.headers["Cache-Control"] = "no-store"
         return features.integrations.describe(authenticated_actor(request))
+
+    @router.post("/integrations/{provider_id}/connect")
+    def connect_integration(
+        provider_id: str,
+        data: ConnectorConnectRequest,
+        request: Request,
+        response: Response,
+    ) -> IntegrationInfo:
+        actor = authenticated_actor(request)
+        response.headers["Cache-Control"] = "no-store"
+        if provider_id == "oda":
+            raise HTTPException(400, "Oda bruker OAuth PKCE-flyt via /api/oda/connect")
+        if provider_id == "anthropic":
+            raise HTTPException(
+                400, "Oppskriftsassistenten konfigureres i miljøet av administratoren"
+            )
+        auth_mode, credentials = _extract_credentials(provider_id, data)
+        try:
+            features.connector_store.save_connection(
+                household_id=features.household_id,
+                provider_id=provider_id,
+                auth_mode=auth_mode,
+                credentials=credentials,
+                expires_at=data.expires_at,
+                actor_id=actor,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc)) from None
+
+        try:
+            return features.integrations.describe_one(provider_id, actor)
+        except KeyError:
+            raise HTTPException(404, f"Ukjent leverandør: {provider_id}") from None
+
+    @router.delete("/integrations/{provider_id}/connection", status_code=204)
+    def disconnect_integration(provider_id: str, request: Request, response: Response) -> Response:
+        actor = authenticated_actor(request)
+        response.headers["Cache-Control"] = "no-store"
+        if provider_id == "oda":
+            features.oda.disconnect(actor)
+            return Response(status_code=204)
+        if provider_id not in {"rema1000", "coop", "trumf", "cookidoo"}:
+            raise HTTPException(404, f"Ukjent leverandør: {provider_id}")
+        features.connector_store.delete_connection(features.household_id, provider_id)
+        return Response(status_code=204)
 
     @router.get("/inventory")
     def inventory() -> list[InventoryItem]:

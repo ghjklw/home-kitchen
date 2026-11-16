@@ -205,5 +205,6 @@ def settings_database_url(monkeypatch):
     # Pure configuration/AI tests do not connect; database tests pass the schema URL.
     monkeypatch.setenv(
         "KITCHEN_DATABASE_URL",
-        os.environ.get("KITCHEN_TEST_DATABASE_URL", "postgresql+psycopg://localhost/kitchen_test"),
+        os.environ.get("KITCHEN_TEST_DATABASE_URL")
+        or "postgresql+psycopg://localhost/kitchen_test",
     )

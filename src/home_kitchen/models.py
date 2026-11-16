@@ -1,6 +1,6 @@
 """Validated household kitchen data."""
 
-from datetime import date, time
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Any, Literal
@@ -131,6 +131,7 @@ class RecipeCreate(BaseModel):
     provenance: AdaptationProvenance | None = None
     photo_source: PhotoSource | None = None
     image_attribution: RecipeImageAttribution | None = None
+    source_language: NonBlank | None = None
 
     @model_validator(mode="after")
     def valid_source_metadata(self) -> "RecipeCreate":
@@ -156,6 +157,36 @@ class RecipeCreate(BaseModel):
 
 class Recipe(RecipeCreate):
     id: UUID
+    source_language: NonBlank | None = "und"
+
+    @model_validator(mode="before")
+    @classmethod
+    def default_source_language(cls, data: Any) -> Any:
+        if isinstance(data, dict) and data.get("source_language") is None:
+            data = dict(data)
+            data["source_language"] = "und"
+        return data
+
+
+class RecipeTranslation(BaseModel):
+    """Stored and versioned translation for a specific recipe and locale."""
+
+    id: UUID
+    recipe_id: UUID
+    target_locale: NonBlank
+    recipe_version: NonBlank
+    title: NonBlank
+    instructions: list[NonBlank]
+    ingredients: list[Ingredient]
+    provider: NonBlank
+    model: NonBlank
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    is_stale: bool = False
+
+
+class RecipeTranslationRequest(BaseModel):
+    target_locale: NonBlank
+    force: bool = False
 
 
 class MealCreate(BaseModel):

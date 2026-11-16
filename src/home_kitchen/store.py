@@ -1,5 +1,8 @@
 """Transactional PostgreSQL storage for kitchen records."""
 
+from __future__ import annotations
+
+import builtins
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -13,6 +16,7 @@ from sqlalchemy import (
     Boolean,
     Column,
     Date,
+    DateTime,
     ForeignKey,
     Identity,
     Integer,
@@ -21,6 +25,7 @@ from sqlalchemy import (
     Table,
     Text,
     Time,
+    UniqueConstraint,
     Uuid,
     create_engine,
     select,
@@ -32,7 +37,7 @@ from sqlalchemy.engine import Connection, make_url
 
 from .context import history_context
 from .history import HistoryEntryCreate, HistoryRepository
-from .models import Meal, Recipe, RegularItem, ShoppingItem
+from .models import Meal, Recipe, RecipeTranslation, RegularItem, ShoppingItem
 
 Model = TypeVar("Model", bound=BaseModel)
 metadata = MetaData()
@@ -53,6 +58,24 @@ recipes = Table(
     Column("photo_source", JSONB),
     Column("photo_source_id", Uuid, ForeignKey("recipe_photos.id")),
     Column("image_attribution", JSONB),
+    Column("source_language", Text, nullable=False, server_default="und"),
+)
+recipe_translations = Table(
+    "kitchen_recipe_translations",
+    metadata,
+    Column("id", Uuid, primary_key=True),
+    Column("recipe_id", Uuid, ForeignKey("recipes.id", ondelete="CASCADE"), nullable=False),
+    Column("target_locale", Text, nullable=False),
+    Column("recipe_version", Text, nullable=False),
+    Column("title", Text, nullable=False),
+    Column("instructions", JSON().with_variant(JSONB, "postgresql"), nullable=False),
+    Column("ingredients", JSON().with_variant(JSONB, "postgresql"), nullable=False),
+    Column("provider", Text, nullable=False),
+    Column("model", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    UniqueConstraint(
+        "recipe_id", "target_locale", "recipe_version", name="uq_recipe_translation_version"
+    ),
 )
 meals = Table(
     "meals",
@@ -255,7 +278,7 @@ class Store:
             raise KeyError(str(entity_id))
         return model.model_validate(dict(row))
 
-    def list(self, kind: str, model: type[Model]) -> list[Model]:
+    def list(self, kind: str, model: type[Model]) -> builtins.list[Model]:
         with self.connection() as connection:
             rows = (
                 connection.execute(select(TABLES[kind]).order_by(TABLES[kind].c.position))
@@ -335,3 +358,69 @@ class Store:
                     index_elements=[settings.c.key], set_={"value": value}
                 )
             )
+
+    def save_recipe_translation(self, translation: RecipeTranslation) -> None:
+        values = translation.model_dump()
+        values["ingredients"] = [ing.model_dump(mode="json") for ing in translation.ingredients]
+        values.pop("is_stale", None)
+        statement = insert(recipe_translations).values(**values)
+        conflict = [
+            recipe_translations.c.recipe_id,
+            recipe_translations.c.target_locale,
+            recipe_translations.c.recipe_version,
+        ]
+        update_set = {
+            "title": values["title"],
+            "instructions": values["instructions"],
+            "ingredients": values["ingredients"],
+            "provider": values["provider"],
+            "model": values["model"],
+            "created_at": values["created_at"],
+        }
+        with self.connection() as connection:
+            connection.execute(
+                statement.on_conflict_do_update(index_elements=conflict, set_=update_set)
+            )
+            HistoryRepository(self.engine).record(
+                HistoryEntryCreate(
+                    channel=history_context.get().channel,
+                    kind="domain_event",
+                    message=f"Saved {translation.target_locale} translation for recipe",
+                    recipe_id=translation.recipe_id,
+                    structured={
+                        "entity_type": "recipe_translation",
+                        "entity_id": str(translation.id),
+                        "target_locale": translation.target_locale,
+                        "recipe_version": translation.recipe_version,
+                        "provider": translation.provider,
+                        "model": translation.model,
+                    },
+                ),
+                connection=connection,
+            )
+
+    def get_recipe_translation(
+        self, recipe_id: UUID, target_locale: str, recipe_version: str | None = None
+    ) -> RecipeTranslation | None:
+        query = select(recipe_translations).where(
+            recipe_translations.c.recipe_id == recipe_id,
+            recipe_translations.c.target_locale == target_locale,
+        )
+        if recipe_version is not None:
+            query = query.where(recipe_translations.c.recipe_version == recipe_version)
+        query = query.order_by(recipe_translations.c.created_at.desc())
+        with self.connection() as connection:
+            row = connection.execute(query).mappings().first()
+        if row is None:
+            return None
+        return RecipeTranslation.model_validate(dict(row))
+
+    def list_recipe_translations(self, recipe_id: UUID) -> builtins.list[RecipeTranslation]:
+        query = (
+            select(recipe_translations)
+            .where(recipe_translations.c.recipe_id == recipe_id)
+            .order_by(recipe_translations.c.created_at.desc())
+        )
+        with self.connection() as connection:
+            rows = connection.execute(query).mappings().all()
+        return [RecipeTranslation.model_validate(dict(row)) for row in rows]

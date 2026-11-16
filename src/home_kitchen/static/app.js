@@ -4886,7 +4886,7 @@ function renderBasketMatchNeed(need) {
   add(panel, actions);
   return panel;
 }
-function renderBasketMatchCandidate(candidate, need) {
+function renderBasketMatchCandidate(candidate, need, matchJobId = null) {
   const card = el("article", null, "basket-match-candidate");
   const media = candidate.media || {};
   const imageUrl = safeImageUrl(media.image_url);

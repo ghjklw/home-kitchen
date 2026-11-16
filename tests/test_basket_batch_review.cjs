@@ -109,7 +109,12 @@ function fixture({ api } = {}) {
       return node;
     },
     basketProduct: (product, packages) => new Node("article", `${product.name} ${packages || ""}`),
-    renderBasketMatchCandidate: (candidate) => new Node("article", candidate.name || "unlabelled candidate"),
+    renderBasketMatchCandidate: undefined,
+    safeImageUrl: () => null,
+    recipeImage: (recipe, className) => new Node("img", recipe.title, className),
+    officialOdaProductUrl: () => null,
+    formatUiQuantity: String,
+    toggleBasketBatchChoice: () => {},
     formatUiCount: String,
     api: async (...args) => { requests.push(args); return api ? api(...args) : {}; },
     currentBasketMatchDates: () => ({ start: "2026-11-16", end: "2026-11-22" }),
@@ -122,6 +127,7 @@ function fixture({ api } = {}) {
     "basketBatchRecommendation",
     "basketBatchSkipReason",
     "toggleBasketBatchChoice",
+    "renderBasketMatchCandidate",
     "openBasketBatchReview",
     "saveBasketBatchChoices",
   ].map(functionSource).join("\n");
@@ -137,6 +143,9 @@ test("opening and closing review makes no write, shows retained choices and unre
   assert.match(value.modal.root.text, /Second Saved Yoghurt/u);
   assert.match(value.modal.root.text, /Pakningsstørrelse/u);
   assert.match(value.modal.root.text, /Uavklarte varer kan stå over/u);
+  assert.match(value.modal.root.text, /Yoghurt 500 g/u);
+  assert.match(value.modal.root.text, /Kan stå over/u);
+  assert.ok(value.modal.root.find((node) => node.tagName === "button" && node.textContent === "Bruk 0 produktforslag"));
   value.modal.close();
   assert.equal(value.requests.length, 0);
   assert.equal(value.state.basketBatchChoices["need-safe"], undefined);

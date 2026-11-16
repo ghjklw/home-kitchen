@@ -1,7 +1,6 @@
 name: Publish image
 
-# Releases promote this main image by its verified digest in the deployment repository.
-# Publishing a release must not rebuild the tested image or change its OCI labels.
+# Publish the tested main image for UAT; releases promote that same image for production.
 on:
   workflow_run:
     workflows: [Kitchen CI]
@@ -74,6 +73,7 @@ jobs:
           push: true
           tags: |
             ghcr.io/ghjklw/home-kitchen:sha-${{ steps.source.outputs.sha }}
+            ghcr.io/ghjklw/home-kitchen:beta
             ghcr.io/ghjklw/home-kitchen:build-${{ github.run_id }}-${{ github.run_attempt }}
           provenance: mode=max
           labels: |

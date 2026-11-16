@@ -14,11 +14,13 @@ from home_kitchen.oda.repository import metadata
 from home_kitchen.settings import Settings
 
 
-def recipe_tool(name, *, read_only=True, bad_schema=False):
+def recipe_tool(name, *, read_only=True, bad_schema=False, with_intent=False):
     properties = {
         "page": {"type": "integer", "minimum": 1, "maximum": 50},
         "size": {"type": "integer", "minimum": 1, "maximum": 20},
     }
+    if with_intent:
+        properties["intent"] = {"type": "string", "maxLength": 300}
     item_properties = {
         "id": {"type": "integer"},
         "title": {"type": "string"},
@@ -76,11 +78,18 @@ def oda():
     engine.dispose()
 
 
-def client_mock(tool_name, payload, *, read_only=True, bad_schema=False):
+def client_mock(tool_name, payload, *, read_only=True, bad_schema=False, with_intent=False):
     call_tool = AsyncMock(return_value=SimpleNamespace(structured_content=payload))
     client = SimpleNamespace(
         list_tools=AsyncMock(
-            return_value=[recipe_tool(tool_name, read_only=read_only, bad_schema=bad_schema)]
+            return_value=[
+                recipe_tool(
+                    tool_name,
+                    read_only=read_only,
+                    bad_schema=bad_schema,
+                    with_intent=with_intent,
+                )
+            ]
         ),
         call_tool=call_tool,
     )
@@ -173,3 +182,55 @@ async def test_recipe_collection_uses_exact_actor_and_rejects_unknown_read_tool(
     access_token.assert_called_once_with("alice")
     with pytest.raises(OdaError, match="not supported"):
         await service._read("alice", "get_recipe_ingredients", {})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "tool_name"),
+    [
+        ("list_liked_recipes", "get_liked_recipes"),
+        ("list_purchased_recipes", "get_purchased_recipes"),
+    ],
+)
+async def test_recipe_collection_accepts_intent_property(oda, method, tool_name):
+    service, _ = oda
+    payload = {"hasMore": False, "recipes": []}
+    context, client = client_mock(tool_name, payload, with_intent=True)
+    with patch("home_kitchen.oda.service.Client", return_value=context):
+        result = await getattr(service, method)("alice")
+    assert result == payload
+    client.call_tool.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_recipe_collection_refreshes_token_on_unauthorized(oda):
+    import httpx
+
+    service, _ = oda
+    tokens = ["expired-token", "refreshed-token"]
+
+    def fake_access_token(actor, force_refresh=False):
+        return tokens.pop() if force_refresh else tokens[0]
+
+    service.access_token = fake_access_token
+
+    req = httpx.Request("POST", "https://oda.com/mcp")
+    resp_401 = httpx.Response(401, request=req)
+    error_401 = httpx.HTTPStatusError("401 Unauthorized", request=req, response=resp_401)
+
+    payload = {"hasMore": False, "recipes": []}
+    call_mock = AsyncMock(side_effect=[error_401, SimpleNamespace(structured_content=payload)])
+
+    tool = recipe_tool("get_liked_recipes", with_intent=True)
+    client = SimpleNamespace(
+        list_tools=AsyncMock(return_value=[tool]),
+        call_tool=call_mock,
+    )
+    context = AsyncMock()
+    context.__aenter__.return_value = client
+
+    with patch("home_kitchen.oda.service.Client", return_value=context):
+        result = await service.list_liked_recipes("alice")
+
+    assert result == payload
+    assert call_mock.await_count == 2

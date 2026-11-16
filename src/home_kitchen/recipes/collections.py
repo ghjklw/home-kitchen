@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -22,6 +23,7 @@ from home_kitchen.recipes.source_quantities import source_ingredient_parts
 from home_kitchen.service import KitchenService
 from home_kitchen.store import entity_values, metadata, recipes
 
+_LOG = logging.getLogger(__name__)
 CollectionKind = Literal["liked", "purchased"]
 LABELS = {"liked": "Liked on Oda", "purchased": "Ingredients bought on Oda"}
 source_links = Table(
@@ -292,8 +294,19 @@ class CollectionService:
                             if number == self.MAX_PAGES:
                                 job.view.truncated = True
                                 job.view.truncated_kinds.append(kind)
-                    except Exception:
+                    except Exception as error:
+                        _LOG.warning("Could not finish collection %s: %s", kind, error)
                         await asyncio.to_thread(self._fence, job)
+                        if (
+                            getattr(error, "status_code", None) == 409
+                            or "expired" in str(error).lower()
+                            or "connect" in str(error).lower()
+                        ):
+                            job.view.errors.append(
+                                getattr(error, "detail", str(error))
+                                or f"Could not finish {LABELS[kind]}; preview again to retry."
+                            )
+                            break
                         job.view.errors.append(
                             f"Could not finish {LABELS[kind]}; preview again to retry."
                         )
@@ -465,6 +478,14 @@ class CollectionService:
                     except asyncio.CancelledError:
                         entry.status = "pending"
                         raise
+                    except (ValueError, KeyError) as error:
+                        if "connection changed" in str(error) or "expired" in str(error):
+                            entry.status = "pending"
+                            raise
+                        entry.status, entry.error = (
+                            "failed",
+                            "Could not import this source. Review the source URL and explicitly retry.",
+                        )
                     except Exception:
                         entry.status, entry.error = (
                             "failed",

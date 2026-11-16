@@ -83,6 +83,31 @@
     })[guidance] || "Oda-tilkoblingen kunne ikke bekreftes.";
   }
 
+  function collectionErrorMessage(error) {
+    if (!error || typeof error !== "string")
+      return "Oda-innhentingen kunne ikke fullføres. Kontroller tilkoblingen og prøv på nytt.";
+    const clean = error.trim();
+    if (/could not finish liked on oda/i.test(clean))
+      return "Kunne ikke hente likte oppskrifter fra Oda. Prøv å hente på nytt.";
+    if (/could not finish ingredients bought on oda/i.test(clean))
+      return "Kunne ikke hente oppskrifter med bestilte ingredienser fra Oda. Prøv å hente på nytt.";
+    if (/collection connection changed.*completed/i.test(clean))
+      return "Oda-tilkoblingen ble endret. Allerede importerte oppskrifter er beholdt. Hent samlingene på nytt.";
+    if (/collection connection changed|became unavailable/i.test(clean))
+      return "Oda-tilkoblingen ble endret eller er utilgjengelig. Hent samlingene på nytt.";
+    if (/connect your oda account|connect oda before/i.test(clean))
+      return "Koble til Oda-kontoen din før du henter oppskriftsamlinger.";
+    if (/connection expired|authorization expired/i.test(clean))
+      return "Oda-tilkoblingen utløp. Koble til på nytt i Innstillinger.";
+    return clean;
+  }
+
+  function errorMessages(job) {
+    const raw = Array.isArray(job?.errors) ? job.errors : [];
+    const translated = raw.map(collectionErrorMessage);
+    return [...new Set(translated.filter(Boolean))];
+  }
+
   function importPayload(jobId, selectedIds) {
     const unique = [...new Set(selectedIds)];
     if (!jobId || !unique.length || unique.length !== selectedIds.length)
@@ -90,6 +115,6 @@
     return { path: `/recipe-collections/${encodeURIComponent(jobId)}/import`, body: { selected_ids: unique, reviewed: true } };
   }
 
-  root.KitchenRecipeCollections = { canSelect, completionCounts, connectionGuidance, connectionMessage, entryStatus, importPayload, normalizeJob, progress };
+  root.KitchenRecipeCollections = { canSelect, collectionErrorMessage, completionCounts, connectionGuidance, connectionMessage, entryStatus, errorMessages, importPayload, normalizeJob, progress };
   if (typeof module !== "undefined" && module.exports) module.exports = root.KitchenRecipeCollections;
 })(globalThis);

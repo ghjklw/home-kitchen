@@ -5,6 +5,7 @@ import base64
 import binascii
 from datetime import date
 from decimal import Decimal, InvalidOperation
+from typing import Annotated
 from uuid import UUID
 
 from fastmcp import FastMCP
@@ -233,6 +234,29 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
     async def get_oda_cart() -> dict:
         """Read the connected member's current Oda cart without changing it."""
         return await features.oda.get_cart(actor())
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
+    async def list_oda_orders(
+        page: Annotated[int, Field(ge=1, le=50)] = 1,
+        size: Annotated[int, Field(ge=1, le=20)] = 20,
+    ) -> dict:
+        """Read one page of this member's Oda orders; follow hasMore within page 50.
+
+        Provider orders and dates do not prove payment or final receipt contents.
+        This does not create Kitchen purchase evidence, history or inventory.
+        """
+        return await features.oda.list_orders(actor(), page, size)
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
+    async def track_oda_order(
+        order_number: Annotated[str, Field(min_length=1, max_length=512)],
+    ) -> dict:
+        """Read the exact Oda order number's lifecycle status for this member.
+
+        Preserve the provider status; even delivered is not final receipt evidence.
+        This does not create Kitchen purchase evidence, history or inventory.
+        """
+        return await features.oda.track_order(actor(), order_number)
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True})
     async def propose_oda_cart_additions(request: CartProposalRequest) -> dict:

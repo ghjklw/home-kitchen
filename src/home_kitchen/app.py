@@ -3,6 +3,8 @@
 import asyncio
 from contextlib import asynccontextmanager, suppress
 from datetime import date
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as package_version
 from pathlib import Path
 from typing import Annotated
 from uuid import UUID
@@ -113,10 +115,23 @@ def create_app(
                 features.oda.close()
                 service.store.engine.dispose()
 
-    app = FastAPI(title="Home Kitchen", version="0.1.0", lifespan=lifespan)
+    try:
+        app_version = package_version("home-kitchen")
+    except PackageNotFoundError:
+        app_version = "0.1.0"
+    app = FastAPI(title="Home Kitchen", version=app_version, lifespan=lifespan)
     app.state.features = features
     app.state.service = service
     app.include_router(feature_router(features, basket))
+    app.add_api_route(
+        "/api/version",
+        lambda: {
+            "version": app_version,
+            "channel": "beta" if ".dev" in app_version else "release",
+        },
+        methods=["GET"],
+        include_in_schema=False,
+    )
     app.include_router(oda_router(features.oda, features.oda_cart))
     app.state.mcp = mcp
     if mcp_auth is not None:

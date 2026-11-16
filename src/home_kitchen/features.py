@@ -31,6 +31,7 @@ from home_kitchen.models import RecipeCreate
 from home_kitchen.oda import OdaService
 from home_kitchen.oda.cart import OdaCartService
 from home_kitchen.planning import create_planning_proposal_service
+from home_kitchen.purchase_sync import PurchaseHistorySyncService
 from home_kitchen.purchasing import InStoreMode, OdaMode, PurchaseModes, StoreTripService
 from home_kitchen.purchasing_reconciliation import TripCompletionService
 from home_kitchen.recipe_feedback import RecipeFeedbackService
@@ -104,6 +105,11 @@ class KitchenFeatures:
         self.store_trip = StoreTripService(self.inventory, self.history)
         self.trip_completion = TripCompletionService(self.inventory, self.history)
         self.purchase_modes = PurchaseModes([OdaMode(self.oda), InStoreMode()])
+        self.purchase_sync = PurchaseHistorySyncService(
+            engine=kitchen.store.engine,
+            settings=settings,
+            oda_service=self.oda,
+        )
         self.recipe_providers = create_recipe_providers(settings, ai_agent=ai)
         self.recipe_photos = PhotoRecipeService(
             settings, self.household_id, kitchen.store.engine, household

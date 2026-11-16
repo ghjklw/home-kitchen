@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+from base64 import b64decode, urlsafe_b64encode
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal, Protocol, runtime_checkable
+from uuid import UUID, uuid4
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
-from home_kitchen.purchase_sync import ProviderOrderRecord
+from home_kitchen.purchase_sync import ProviderOrderRecord, ProviderPage
 
 COOP_SCHEMA_SOURCE = "https://gist.github.com/HelgeSverre/80a7f34f874336324184a0c513c2e6a2"
 COOP_SCHEMA_VERSION = "4.17.3"
@@ -133,3 +135,188 @@ def to_provider_order_record(receipt: CoopReceipt) -> ProviderOrderRecord:
         source_updated_at=None,
         payload=receipt.model_dump(mode="json", by_alias=True),
     )
+
+
+COOP_AUTH_METHOD = "oidc_pkce"
+COOP_LIMITATIONS = (
+    "Coop purchase history is derived from Android APK 4.17.3 OpenAPI reverse engineering. "
+    "Auth uses Auth0 OIDC with PKCE S256 and offline_access. "
+    "The continuation response schema is undocumented, and no source update timestamp is reported."
+)
+
+
+class CoopAdapterStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["coop"] = "coop"
+    auth_method: Literal["oidc_pkce"] = "oidc_pkce"
+    read_only: bool = True
+    live_calls_enabled: bool = False
+    limitations: str = COOP_LIMITATIONS
+
+
+class _CoopScanCursor(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    version: Literal[1]
+    mode: Literal["full_rescan"]
+    account_id: str
+    scan_id: str
+    next_page: int = Field(ge=1, le=50)
+    state: Literal["scanning", "complete", "incomplete"]
+
+
+def _encode_coop_cursor(cursor: _CoopScanCursor) -> str:
+    return "coop-scan-v1." + urlsafe_b64encode(cursor.model_dump_json().encode()).decode()
+
+
+def _decode_coop_cursor(value: str) -> _CoopScanCursor:
+    try:
+        prefix, encoded = value.split(".", 1)
+        if prefix != "coop-scan-v1" or len(value) > 2048:
+            raise ValueError
+        cursor = _CoopScanCursor.model_validate_json(
+            b64decode(encoded, altchars=b"-_", validate=True)
+        )
+        UUID(cursor.scan_id)
+        if cursor.state != "scanning" and cursor.next_page != 1:
+            raise ValueError
+        return cursor
+    except (ValueError, TypeError):
+        raise ValueError("Invalid Coop history scan cursor") from None
+
+
+@runtime_checkable
+class CoopSource(Protocol):
+    """Protocol for reading Coop purchases and receipts without network coupling."""
+
+    def get_purchases(self, account_id: str) -> list[CoopPurchaseStub]: ...
+
+    def get_receipt(self, account_id: str, summary_id: str) -> CoopReceipt | None: ...
+
+
+class CoopFixtureSource:
+    """Fixture-backed offline source for Coop purchases and receipts."""
+
+    def __init__(
+        self,
+        purchases: list[dict[str, Any]] | list[CoopPurchaseStub],
+        receipts: dict[str, dict[str, Any] | CoopReceipt] | None = None,
+        *,
+        failure: Exception | None = None,
+    ) -> None:
+        self._failure = failure
+        self._purchases: list[CoopPurchaseStub] = [
+            p if isinstance(p, CoopPurchaseStub) else CoopPurchaseStub.model_validate(p)
+            for p in purchases
+        ]
+        self._receipts: dict[str, dict[str, Any] | CoopReceipt] = receipts or {}
+        self.purchase_calls = 0
+        self.receipt_calls: list[str] = []
+
+    def get_purchases(self, account_id: str) -> list[CoopPurchaseStub]:
+        self.purchase_calls += 1
+        if self._failure is not None:
+            raise self._failure
+        return list(self._purchases)
+
+    def get_receipt(self, account_id: str, summary_id: str) -> CoopReceipt | None:
+        self.receipt_calls.append(summary_id)
+        if self._failure is not None:
+            raise self._failure
+        raw = self._receipts.get(summary_id)
+        if raw is None:
+            return None
+        if isinstance(raw, CoopReceipt):
+            return raw
+        return parse_receipt_detail(raw)
+
+
+class CoopPurchaseHistoryAdapter:
+    """Read-only adapter for Coop receipt and purchase history."""
+
+    def __init__(
+        self,
+        source: CoopSource,
+        account_id: str,
+        *,
+        page_size: int = 20,
+        max_pages: int = 50,
+    ) -> None:
+        trimmed = account_id.strip()
+        if not trimmed or trimmed != account_id:
+            raise ValueError("Coop account_id must be non-empty and trimmed")
+        if page_size < 1:
+            raise ValueError("page_size must be at least 1")
+        if max_pages < 1 or max_pages > 50:
+            raise ValueError("max_pages must be between 1 and 50")
+
+        self.source = source
+        self.account_id = account_id
+        self.page_size = page_size
+        self.max_pages = max_pages
+
+    def status(self) -> CoopAdapterStatus:
+        return CoopAdapterStatus()
+
+    def fetch_page(self, account_id: str, cursor: str | None) -> ProviderPage:
+        if account_id != self.account_id:
+            raise ValueError("Coop history adapter account mismatch")
+
+        scan = _decode_coop_cursor(cursor) if cursor is not None else None
+        if scan is not None and scan.account_id != account_id:
+            raise ValueError("Coop history cursor account mismatch")
+
+        if scan is None or scan.state != "scanning":
+            scan = _CoopScanCursor(
+                version=1,
+                mode="full_rescan",
+                account_id=account_id,
+                scan_id=str(uuid4()),
+                next_page=1,
+                state="scanning",
+            )
+
+        purchases = self.source.get_purchases(account_id)
+
+        page_num = scan.next_page
+        start_idx = (page_num - 1) * self.page_size
+        end_idx = start_idx + self.page_size
+        page_purchases = purchases[start_idx:end_idx]
+
+        has_more_records = end_idx < len(purchases)
+        truncated = page_num == self.max_pages and has_more_records
+        has_more = has_more_records and not truncated
+
+        records: list[ProviderOrderRecord] = []
+        for p in page_purchases:
+            summary_id = p.summary_id
+            if summary_id:
+                receipt = self.source.get_receipt(account_id, summary_id)
+                if receipt is not None:
+                    records.append(to_provider_order_record(receipt))
+
+        next_cursor = _encode_coop_cursor(
+            scan.model_copy(
+                update={
+                    "next_page": page_num + 1 if has_more else 1,
+                    "state": (
+                        "incomplete" if truncated else "scanning" if has_more else "complete"
+                    ),
+                }
+            )
+        )
+
+        incomplete_reason = (
+            f"Coop history scan truncated at page {self.max_pages}; backfill is incomplete; "
+            f"available records captured and next poll restarts at page 1"
+            if truncated
+            else None
+        )
+
+        return ProviderPage(
+            records=records,
+            next_cursor=next_cursor,
+            has_more=has_more,
+            incomplete_reason=incomplete_reason,
+        )

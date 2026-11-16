@@ -136,6 +136,56 @@ def test_old_client_update_preserves_exact_unchanged_unique_ingredient_subdocume
     assert updated[0]["source_unit_expression"] == "Teaspoons"
 
 
+def test_old_client_update_signature_supports_nested_purchase_estimates():
+    from home_kitchen.models import PurchaseEstimate, Recipe, RecipeCreate
+    from home_kitchen.service import KitchenService
+
+    product, unit = uuid4(), uuid4()
+    estimate = PurchaseEstimate(
+        quantity="100", unit="g", approximate=False, provenance="source estimate"
+    )
+    existing = Recipe.model_validate(
+        {
+            "id": uuid4(),
+            "title": "Soup",
+            "servings": 2,
+            "ingredients": [
+                {
+                    "name": "pepper",
+                    "quantity": "1",
+                    "unit": "tsp",
+                    "purchase_estimate": estimate.model_dump(),
+                    "canonical_product_id": product,
+                    "canonical_unit_id": unit,
+                    "source_unit_expression": "Teaspoons",
+                }
+            ],
+            "instructions": ["Cook"],
+        }
+    )
+    old_payload = RecipeCreate.model_validate(
+        {
+            "title": "Soup edited",
+            "servings": 2,
+            "ingredients": [
+                {
+                    "name": "pepper",
+                    "quantity": "1",
+                    "unit": "tsp",
+                    "purchase_estimate": estimate.model_dump(),
+                }
+            ],
+            "instructions": ["Cook"],
+        }
+    )
+    current_values = [item.model_dump() for item in old_payload.ingredients]
+    updated = KitchenService._retain_omitted_ingredient_identity_fields(
+        old_payload, existing, current_values
+    )
+    assert updated[0]["canonical_product_id"] == product
+    assert updated[0]["canonical_unit_id"] == unit
+
+
 @pytest.mark.parametrize(
     "incoming_ingredients",
     [

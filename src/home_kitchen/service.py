@@ -66,11 +66,15 @@ class KitchenService:
         preserved = [dict(values) for values in current_values]
         fields = ("name", "quantity", "unit", "category", "source_indices", "purchase_estimate")
 
+        def freeze(value):
+            if isinstance(value, dict):
+                return tuple((key, freeze(item)) for key, item in sorted(value.items()))
+            if isinstance(value, list):
+                return tuple(freeze(item) for item in value)
+            return value
+
         def signature(values: dict) -> tuple:
-            return tuple(
-                tuple(values.get(field, [])) if field == "source_indices" else values.get(field)
-                for field in fields
-            )
+            return tuple(freeze(values.get(field)) for field in fields)
 
         existing_values = [item.model_dump() for item in existing.ingredients]
         existing_signatures = Counter(signature(item) for item in existing_values)

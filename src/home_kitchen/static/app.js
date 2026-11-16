@@ -122,7 +122,9 @@ async function api(path, method = "GET", body) {
     });
   } catch {
     throw new Error(
-      "Fikk ikke kontakt med kjøkkenet. Sjekk tilkoblingen og prøv igjen. Endringene dine er ikke lagret.",
+      /^\/meal-plan-proposals\/[^/]+\/confirm$/.test(path)
+        ? "Fikk ikke svar på bekreftelsen. Sjekk tilkoblingen og prøv igjen."
+        : "Fikk ikke kontakt med kjøkkenet. Sjekk tilkoblingen og prøv igjen. Endringene dine er ikke lagret.",
     );
   }
   if (!response.ok) {
@@ -1123,7 +1125,7 @@ async function suggestWeek() {
     root,
     el(
       "p",
-      "Ber om middagsforslag fra KI. Ingenting legges til før du lagrer det enkelte måltidet.",
+      "Se over nye måltidsforslag fra KI og velg hvilke du vil legge til. De valgte måltidene legges til samlet når du bekrefter. Eksisterende måltider beholdes.",
       "muted",
     ),
   );
@@ -1160,7 +1162,64 @@ async function suggestWeek() {
       add(result, notes);
     }
     const list = el("div", null, "draft-meals");
-    draft.meals.forEach((meal, index) => {
+    const selections = [];
+    let proposalId = null;
+    let applying = false;
+    let applied = false;
+    const status = el("p", "", "draft-status");
+    status.setAttribute("role", "status");
+    const updateApply = () => {
+      const count = selections.filter(({ input }) => input.checked).length;
+      apply.disabled = applying || applied || !count;
+      apply.textContent = applied
+        ? "Lagt til i ukeplanen"
+        : proposalId
+          ? "Prøv å bekrefte de valgte måltidene igjen"
+          : `Legg til valgte måltider (${count})`;
+      selections.forEach(({ input, available }) => {
+        input.disabled = !available || applying || applied || Boolean(proposalId);
+      });
+    };
+    const apply = button("", async () => {
+      if (applying || applied || !selections.some(({ input }) => input.checked)) return;
+      applying = true;
+      updateApply();
+      status.textContent = "Legger til valgte måltider samlet …";
+      try {
+        if (!proposalId) {
+          const proposal = await api("/meal-plan-proposals", "POST", {
+            meals: selections.filter(({ input }) => input.checked).map(({ meal }) => meal),
+          });
+          if (!proposal?.id) throw new Error("Fikk ikke en gyldig bekreftelse på forslaget.");
+          proposalId = proposal.id;
+        }
+        await api("/meal-plan-proposals/" + encodeURIComponent(proposalId) + "/confirm", "POST", {
+          reviewed: true,
+        });
+        applied = true;
+        status.textContent = "De valgte måltidene er lagt til i ukeplanen.";
+      } catch (error) {
+        if (error.status === 409) {
+          proposalId = null;
+          status.textContent = "Forslaget er utdatert eller utløpt. Se over utvalget og bekreft på nytt for å opprette et nytt forslag.";
+        } else {
+          status.textContent = error.message + (proposalId
+            ? " Bekreftelsen kunne ikke avklares. Prøv igjen med det samme utvalget; måltidene legges ikke til to ganger."
+            : " Se over utvalget og prøv igjen.");
+        }
+      } finally {
+        applying = false;
+        updateApply();
+      }
+      if (applied) {
+        try {
+          await refreshView();
+        } catch {
+          status.textContent = "Måltidene er lagt til, men ukevisningen kunne ikke oppdateres. Last siden på nytt for å se dem.";
+        }
+      }
+    }, "primary");
+    draft.meals.forEach((meal) => {
       const recipe = state.recipes.find((item) => item.id === meal.recipe_id);
       const date = new Date(meal.date + "T12:00:00");
       const row = el("article", null, "draft-meal");
@@ -1168,37 +1227,31 @@ async function suggestWeek() {
       const mealDate = Number.isNaN(date.valueOf())
         ? meal.date
         : dateLabel(date, { weekday: "long", month: "short", day: "numeric" });
+      const input = el("input");
+      input.type = "checkbox";
+      input.checked = Boolean(recipe);
+      selections.push({ input, meal, available: Boolean(recipe) });
+      input.addEventListener("change", () => {
+        status.textContent = "";
+        updateApply();
+      });
       add(
         info,
-        el("h3", recipe?.title || "Oppskriften er ikke tilgjengelig", "meal-title"),
+        add(
+          el("label"),
+          input,
+          el("span", "Legg til: " + (recipe?.title || "Oppskriften er ikke tilgjengelig"), "meal-title"),
+        ),
         el("p", [mealDate, mealAgendaMetadata(meal)].filter(Boolean).join(" · "), "muted"),
       );
-      const status = el("p", "", "draft-status");
-      status.setAttribute("role", "status");
-      const save = button("Legg til i ukeplanen", async () => {
-        save.disabled = true;
-        status.textContent = "Lagrer …";
-        try {
-          await api("/meals", "POST", meal);
-          status.textContent = "Lagt til i ukeplanen.";
-          save.textContent = "Lagt til";
-          save.className = "small";
-          await refreshView();
-        } catch (error) {
-          save.disabled = false;
-          status.textContent = error.message + " Du kan prøve å legge til måltidet igjen.";
-        }
-      });
-      save.classList.add("small", "primary");
       if (!recipe) {
-        save.disabled = true;
-        status.textContent =
-          "Oppskriften finnes ikke lenger i samlingen din, og kan derfor ikke legges til.";
+        add(info, el("p", "Oppskriften finnes ikke lenger i samlingen din, og kan derfor ikke legges til.", "muted"));
       }
-      add(row, info, save, status);
+      add(row, info);
       list.append(row);
     });
-    add(result, list);
+    updateApply();
+    add(result, list, apply, status);
   } catch (error) {
     result.className = "";
     result.replaceChildren();

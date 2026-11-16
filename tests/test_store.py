@@ -1,4 +1,3 @@
-import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
@@ -8,7 +7,6 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
-from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 
 from home_kitchen.models import Ingredient, Meal, RecipeCreate, ShoppingItemCreate
@@ -30,21 +28,15 @@ def test_migration_creates_relational_tables(test_database_url):
     assert store.get_setting("missing") is None
 
 
-def test_flexible_meal_migration_preserves_rows_and_translates_labels():
-    base_url = os.environ["KITCHEN_TEST_DATABASE_URL"]
-    schema = "test_legacy_" + uuid4().hex
-    admin = create_engine(base_url)
-    with admin.begin() as connection:
-        connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-    url = make_url(base_url).update_query_dict({"options": f"-csearch_path={schema}"})
-    database_url = url.render_as_string(hide_password=False)
+@pytest.mark.integration
+def test_flexible_meal_migration_preserves_rows_and_translates_labels(test_database_url):
     config = Config(str(Path(__file__).parents[1] / "alembic.ini"))
-    config.attributes["database_url"] = database_url
+    config.attributes["database_url"] = test_database_url
+    command.downgrade(config, "0016_recipe_image_attribution")
+    recipe_id = uuid4()
+    first_id, second_id = uuid4(), uuid4()
+    engine = create_engine(test_database_url)
     try:
-        command.upgrade(config, "0016_recipe_image_attribution")
-        recipe_id = uuid4()
-        first_id, second_id = uuid4(), uuid4()
-        engine = create_engine(database_url)
         with engine.begin() as connection:
             connection.execute(
                 text("""
@@ -118,11 +110,8 @@ def test_flexible_meal_migration_preserves_rows_and_translates_labels():
             )
         with pytest.raises(RuntimeError, match="duplicate legacy date/slot"):
             command.downgrade(config, "0016_recipe_image_attribution")
-        engine.dispose()
     finally:
-        with admin.begin() as connection:
-            connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
-        admin.dispose()
+        engine.dispose()
 
 
 def test_concurrent_confirmation_reuses_one_capture(test_database_url):

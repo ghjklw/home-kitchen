@@ -127,6 +127,19 @@ def pytest_runtest_makereport(item, call):
     _redact_pytest_report(outcome.get_result(), _database_password_replacements())
 
 
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "integration: DB-backed or disposable infrastructure integration tests",
+    )
+
+
+def pytest_collection_modifyitems(items):
+    for item in items:
+        if "test_database_url" in getattr(item, "fixturenames", ()):
+            item.add_marker(pytest.mark.integration)
+
+
 @pytest.fixture
 def test_database_url():
     base_url = os.environ.get("KITCHEN_TEST_DATABASE_URL")
@@ -192,5 +205,6 @@ def settings_database_url(monkeypatch):
     # Pure configuration/AI tests do not connect; database tests pass the schema URL.
     monkeypatch.setenv(
         "KITCHEN_DATABASE_URL",
-        os.environ.get("KITCHEN_TEST_DATABASE_URL", "postgresql+psycopg://localhost/kitchen_test"),
+        os.environ.get("KITCHEN_TEST_DATABASE_URL")
+        or "postgresql+psycopg://localhost/kitchen_test",
     )

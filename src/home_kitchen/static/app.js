@@ -3324,15 +3324,16 @@ function openBasketBatchReview() {
     const candidates = !state.basketBatchNeedsRefresh && result?.match_job_id === state.basketBatchReviewJobId
       ? result.candidates || []
       : [];
-    candidates.forEach((candidate) => {
+    const eligible = reason ? [] : candidates.filter((candidate) =>
+      candidate.available !== false && basketBatchRecommendation(candidate, need.unit),
+    );
+    const primary = eligible.find((candidate) =>
+      staged?.candidate_id === candidate.id && staged?.match_job_id === state.basketBatchReviewJobId,
+    ) || eligible[0];
+    const renderOption = (candidate) => {
       const card = el("article", null, "basket-batch-option");
       add(card, renderBasketMatchCandidate(candidate, need));
-      const recommendation = basketBatchRecommendation(candidate, need.unit);
-      if (!recommendation || candidate.available === false) {
-        add(card, el("p", candidate.available === false
-          ? "Kan ikke velges samlet: Oda oppgir at varen ikke er tilgjengelig."
-          : "Kan ikke velges samlet fordi pakningsforslaget mangler eller er uklart. Oppdater søket eller hopp over varen uten å angi en mengde her.", "muted"));
-      } else {
+      if (eligible.includes(candidate)) {
         const selected = staged?.candidate_id === candidate.id &&
           staged?.match_job_id === state.basketBatchReviewJobId;
         const select = button(
@@ -3344,8 +3345,16 @@ function openBasketBatchReview() {
         select.disabled = state.basketBatchSaving || state.basketBatchNeedsRefresh;
         add(card, select);
       }
-      add(section, card);
-    });
+      return card;
+    };
+    if (primary) add(section, renderOption(primary));
+    const others = candidates.filter((candidate) => candidate !== primary);
+    if (others.length) {
+      const alternatives = el("details", null, "basket-batch-alternatives");
+      add(alternatives, el("summary", (primary ? "Flere treff (" : "Vis uavklarte treff (") + formatUiCount(others.length) + ")"));
+      others.forEach((candidate) => add(alternatives, renderOption(candidate)));
+      add(section, alternatives);
+    }
     if (staged) {
       const remove = button("Fjern dette forslaget", () => {
         delete state.basketBatchChoices[String(need.id)];
@@ -3393,19 +3402,21 @@ function openBasketBatchReview() {
 function renderBasketBatchReview(main) {
   if (!state.oda?.connected || !state.basketBatchReviewJobId) return;
   const eligibility = state.basketBatchNeedsRefresh
-    ? { safe: 0, skipped: currentBasketMatchNeeds().length }
+    ? { safe: 0, alternatives: 0, skipped: currentBasketMatchNeeds().length }
     : currentBasketMatchNeeds().reduce((summary, need) => {
       const result = state.basketMatchPages[String(need.id)]?.[1];
-      const safe = result?.match_job_id === state.basketBatchReviewJobId
+      const safe = !basketBatchSkipReason(need, result)
         ? (result.candidates || []).filter((candidate) =>
             candidate.available !== false &&
             basketBatchRecommendation(candidate, need.unit),
           ).length
         : 0;
-      summary.safe += safe;
-      if (!safe) summary.skipped += 1;
+      if (safe) {
+        summary.safe += 1;
+        summary.alternatives += safe - 1;
+      } else summary.skipped += 1;
       return summary;
-    }, { safe: 0, skipped: 0 });
+    }, { safe: 0, alternatives: 0, skipped: 0 });
   const panel = add(
     el("section", null, "panel basket-batch-review"),
     el("h2", "Samlet Oda-gjennomgang"),
@@ -3415,7 +3426,9 @@ function renderBasketBatchReview(main) {
       "muted",
     ),
   );
-  add(panel, el("p", formatUiCount(eligibility.safe) + " forslag kan velges samlet · " + formatUiCount(eligibility.skipped) + " varer må stå over eller avklares.", "muted"));
+  add(panel, el("p", formatUiCount(eligibility.safe) + " varer har forslag som kan velges samlet · " + formatUiCount(eligibility.skipped) + " varer må stå over eller avklares.", "muted"));
+  if (eligibility.alternatives)
+    add(panel, el("p", formatUiCount(eligibility.alternatives) + " ekstra valgbare alternativer finnes under «Flere treff».", "muted"));
   if (state.basketBatchSaveError) {
     const error = el("p", state.basketBatchSaveError, "form-error");
     error.setAttribute("role", "alert");
@@ -3436,7 +3449,7 @@ function renderBasketBatchReview(main) {
     ));
   }
   if (!eligibility.safe) {
-    add(panel, el("p", "Ingen forslag kan godkjennes automatisk ennå. Oppdater produkttreffene eller hopp over uavklarte varer.", "muted"));
+    add(panel, el("p", "Ingen varer har forslag som kan velges samlet ennå. Oppdater produkttreffene eller hopp over uavklarte varer.", "muted"));
     if (!state.basketBatchNeedsRefresh)
       add(panel, button(
         state.basketMatchGlobalRefreshing ? "Oppdaterer produkttreff …" : "Oppdater produkttreff",
@@ -4840,7 +4853,9 @@ function renderBasketMatchNeed(need) {
     add(panel, errorText);
   } else if (result) {
     add(panel, el("p", window.KitchenBasketMatchView.statusLabel(result.status), "muted"));
-    if (result.detail && !["search_failed", "search_unavailable"].includes(result.status)) add(panel, el("p", result.detail, "muted"));
+    if (result.detail) add(panel, el("p", result.detail === "More provider results are available on the next page."
+      ? "Flere treff fra leverandøren er tilgjengelige på neste side."
+      : result.detail, "muted"));
   } else {
     add(panel, el("p", "Venter på automatisk produktsøk …", "muted"));
   }

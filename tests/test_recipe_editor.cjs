@@ -9,6 +9,7 @@ const {
   rowFromDraft,
   recipeIngredientForSave,
   prepareAIRevisionForEditor,
+  applyRevisionIfActive,
 } = require("../src/home_kitchen/static/recipe-editor.js");
 
 test("saves unknown source quantities without inventing an amount", () => {
@@ -192,6 +193,41 @@ test("AI revision keeps source wording for an unmapped unchanged measure without
     canonical_unit_id: null,
     source_unit_expression: "Teaspoons",
   });
+});
+
+test("late AI response cannot replace a different recipe editor opened after the request", async () => {
+  let resolveResponse;
+  const response = new Promise((resolve) => { resolveResponse = resolve; });
+  const modal = { open: true, editor: null };
+  const editorA = { reviseButton: { isConnected: true }, draft: { title: "Recipe A" } };
+  modal.editor = editorA;
+  const applying = applyRevisionIfActive(
+    response,
+    () => modal.open && editorA.reviseButton.isConnected,
+    (result) => { modal.editor.draft = result.adapted; },
+  );
+
+  editorA.reviseButton.isConnected = false;
+  modal.open = false;
+  const editorB = { reviseButton: { isConnected: true }, draft: { title: "Recipe B" } };
+  modal.editor = editorB;
+  modal.open = true;
+  resolveResponse({ adapted: { title: "Late Recipe A" } });
+
+  assert.equal(await applying, false);
+  assert.equal(modal.editor, editorB);
+  assert.deepEqual(editorB.draft, { title: "Recipe B" });
+});
+
+test("AI response still applies to the active recipe editor", async () => {
+  const modal = { open: true, editor: { draft: { title: "Recipe A" } } };
+  const applied = await applyRevisionIfActive(
+    Promise.resolve({ adapted: { title: "Revised Recipe A" } }),
+    () => modal.open,
+    (result) => { modal.editor.draft = result.adapted; },
+  );
+  assert.equal(applied, true);
+  assert.deepEqual(modal.editor.draft, { title: "Revised Recipe A" });
 });
 
 test("parses a leading exact decimal and recognized explicit unit", () => {

@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from starlette.concurrency import run_in_threadpool
 
@@ -176,7 +177,13 @@ def _extract_credentials(
         credentials["session_token"] = token.get_secret_value().strip()
 
     elif provider_id == "trumf":
-        cookie = data.session_cookie or data.cookie or data.raw_payload
+        cookie = (
+            data.session_cookie
+            or data.cookie
+            or data.session_token
+            or data.token
+            or data.raw_payload
+        )
         if not cookie or not cookie.get_secret_value().strip():
             raise HTTPException(422, "Trumf krever en gyldig sesjonsinformasjonskapsel")
         auth_mode = "session_cookie"
@@ -480,6 +487,24 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
             state=data.state,
             redirect_url=data.redirect_url,
         )
+
+    @router.get("/integrations/{provider_id}/pkce/callback")
+    def pkce_callback(
+        provider_id: str,
+        request: Request,
+        code: str | None = None,
+        state: str | None = None,
+    ) -> RedirectResponse:
+        actor = authenticated_actor(request)
+        get_connector_auth().complete_pkce(
+            provider_id=provider_id,
+            household_id=features.household_id,
+            actor_id=actor,
+            code=code,
+            state=state,
+            redirect_url=str(request.url),
+        )
+        return RedirectResponse(url="/#settings", status_code=302)
 
     @router.post("/integrations/cookidoo/login")
     def cookidoo_login(

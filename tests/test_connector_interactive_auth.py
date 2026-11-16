@@ -143,6 +143,7 @@ def test_pkce_start_generates_valid_s256_challenge(sqlite_engine, cipher):
 
     assert data["provider_id"] == "rema1000"
     assert "state" in data and len(data["state"]) > 16
+    assert data["state"].isalnum()
     assert "redirect_uri" in data
     assert "instructions" in data
     assert "authorize_url" in data
@@ -295,6 +296,42 @@ def test_pkce_complete_parses_redirect_url_query_and_fragment(sqlite_engine, cip
     assert resp2.json()["status"] == "connected"
 
 
+def test_pkce_callback_redirects_and_completes_flow(sqlite_engine, cipher):
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/token":
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "rema-token-callback-123",
+                    "refresh_token": "rema-refresh-callback-456",
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                },
+            )
+        return httpx.Response(404)
+
+    mock_transport = httpx.MockTransport(mock_handler)
+    app, _, store, household_id = create_test_app(
+        sqlite_engine, cipher, mock_transport=mock_transport
+    )
+    client = TestClient(app, follow_redirects=False)
+
+    start_resp = client.post("/api/integrations/rema1000/pkce/start")
+    assert start_resp.status_code == 200
+    state = start_resp.json()["state"]
+
+    callback_resp = client.get(
+        f"/api/integrations/rema1000/pkce/callback?code=auto-code-123&state={state}"
+    )
+    assert callback_resp.status_code == 302
+    assert callback_resp.headers["location"] == "/#settings"
+
+    creds = store.get_credentials(household_id, "rema1000")
+    assert creds is not None
+    assert creds["access_token"] == "rema-token-callback-123"
+    assert creds["refresh_token"] == "rema-refresh-callback-456"
+
+
 def test_pkce_security_replay_and_state_mismatch_rejection(sqlite_engine, cipher):
     def mock_handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
@@ -425,8 +462,8 @@ def test_cookidoo_login_success_and_no_password_stored_invariant(sqlite_engine, 
     assert "cidaas-bearer-refresh-token" not in resp_str
 
     # Request validation: sent to Cidaas token endpoint
-    assert len(received_requests) == 1
-    req = received_requests[0]
+    assert len(received_requests) in (1, 2)
+    req = received_requests[-1]
     assert req.method == "POST"
     assert req.url.path == "/token-srv/token"
     data = urllib.parse.parse_qs(req.read().decode())
@@ -461,6 +498,85 @@ def test_cookidoo_login_success_and_no_password_stored_invariant(sqlite_engine, 
         # Raw password must not be in ciphertext or plaintext metadata
         assert plain_password not in enc_creds
         assert plain_password not in json.dumps(meta)
+
+
+def test_cookidoo_login_cidaas_pkce_flow(sqlite_engine, cipher):
+    captured_requests = []
+    plain_password = "my-secret-thermomix-password"
+    stored_state = None
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal stored_state
+        captured_requests.append(request)
+        if request.url.path == "/authz-srv/authz":
+            # CIAM authorize page returns HTML with hidden requestId input
+            qs = urllib.parse.parse_qs(request.url.query.decode("ascii"))
+            stored_state = qs.get("state", [None])[0]
+            html = (
+                "<html><body>"
+                '<input type="hidden" name="requestId" value="cidaas-req-12345" />'
+                "</body></html>"
+            )
+            return httpx.Response(200, text=html)
+        if request.url.path == "/login-srv/login":
+            # CIAM login service returns 302 redirect to app scheme with code & state
+            data = urllib.parse.parse_qs(request.read().decode())
+            assert data["requestId"] == ["cidaas-req-12345"]
+            assert data["username"] == ["chef@example.com"]
+            assert data["password"] == [plain_password]
+            redirect_location = (
+                f"com.vorwerk.cookidoo://code-grant?code=cidaas-code-999&state={stored_state}"
+            )
+            return httpx.Response(302, headers={"Location": redirect_location})
+        if request.url.path == "/token-srv/token":
+            data = urllib.parse.parse_qs(request.read().decode())
+            assert data["grant_type"] == ["authorization_code"]
+            assert data["code"] == ["cidaas-code-999"]
+            assert data["client_id"] == ["mobile-android"]
+            assert "code_verifier" in data
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "cidaas-pkce-access-token-001",
+                    "refresh_token": "cidaas-pkce-refresh-token-002",
+                    "token_type": "Bearer",
+                    "expires_in": 43200,
+                },
+            )
+        return httpx.Response(404)
+
+    mock_transport = httpx.MockTransport(mock_handler)
+    app, _, store, household_id = create_test_app(
+        sqlite_engine, cipher, mock_transport=mock_transport
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/integrations/cookidoo/login",
+        json={
+            "email": "chef@example.com",
+            "password": plain_password,
+            "country": "no",
+        },
+    )
+    assert response.status_code == 200
+    info = response.json()
+    assert info["id"] == "cookidoo"
+    assert info["status"] == "connected"
+
+    # Redaction checks
+    resp_str = json.dumps(info)
+    assert plain_password not in resp_str
+    assert "cidaas-pkce-access-token" not in resp_str
+
+    # Store verification
+    creds = store.get_credentials(household_id, "cookidoo")
+    assert creds is not None
+    assert creds["access_token"] == "cidaas-pkce-access-token-001"
+    assert creds["refresh_token"] == "cidaas-pkce-refresh-token-002"
+    assert "password" not in creds
+    for val in creds.values():
+        assert val != plain_password
 
 
 def test_cookidoo_login_invalid_credentials_returns_401(sqlite_engine, cipher):

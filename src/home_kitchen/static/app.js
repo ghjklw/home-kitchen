@@ -163,8 +163,9 @@ async function api(path, method = "GET", body) {
         }).join("; ");
       }
     } catch {}
+    const isIntegration = path.startsWith("/integrations") || path.startsWith("/api/integrations");
     const error = new Error(
-      response.status === 401 || response.status === 403
+      (response.status === 401 || response.status === 403) && !isIntegration
         ? "Logg inn via husholdningens godkjente tilgangslenke, og prøv igjen."
         : response.status === 409 && path === "/meals"
           ? "Dette måltidstidspunktet er allerede brukt. Velg et annet tidspunkt, eller fjern det eksisterende måltidet først. Skjemaet er fortsatt åpent."
@@ -175,7 +176,9 @@ async function api(path, method = "GET", body) {
               : "Denne tjenesten må settes opp før den kan brukes."
             : response.status === 422 && path === "/ai/plan"
               ? "Det finnes ingen oppskrifter å planlegge med. Legg til en oppskrift og prøv igjen."
-              : "Forespørselen kunne ikke fullføres. Prøv igjen."),
+              : isIntegration && (response.status === 401 || response.status === 403)
+                ? "Ugyldig påloggingsinformasjon eller manglende tilgang. Vennligst sjekk detaljene og prøv igjen."
+                : "Forespørselen kunne ikke fullføres. Prøv igjen."),
     );
     error.status = response.status;
     error.detail = detail;
@@ -6093,114 +6096,56 @@ function openConnectorModal(integration) {
       container,
       el(
         "p",
-        "Koble til Trumf med mobilnummer og engangskode på SMS for automatisk synkronisering av kjøpshistorikk og kvitteringer.",
+        "Trumf benytter nettleserinnlogging for tilgang til kjøpshistorikk og kvitteringer. Logg inn på Trumf og lim inn sesjonsinformasjonskapselen eller tokenet under.",
         "muted",
       ),
     );
 
     const flow = el("div", null, "connector-guided-flow stack");
-    let sessionId = null;
 
-    // Step 1: Send SMS code
-    const step1 = el("form", null, "connector-step connector-step-1 stack");
-    step1.autocomplete = "off";
-    add(step1, el("h3", "Trinn 1: Send engangskode"));
-    const phoneField = field(
-      "Mobilnummer",
-      "tel",
-      "",
-      "Norsk mobilnummer (8 siffer)",
-    );
-    add(step1, phoneField.wrap);
-    const step1Notice = el("p", "", "callout info");
-    step1Notice.hidden = true;
-
-    formSubmit(step1, "Send engangskode", async () => {
-      const phone = phoneField.input.value.trim();
-      if (!phone) {
-        throw new Error("Vennligst oppgi mobilnummer.");
-      }
-      const res = await api("/integrations/trumf/login/start", "POST", { phone });
-      sessionId = res?.session_id || res?.sessionId || res?.id || "";
-      step1Notice.textContent = `Engangskode er sendt på SMS til ${phone}. Skriv inn koden under.`;
-      step1Notice.hidden = false;
-      step2.hidden = false;
-      step2.style.display = "";
-      otpField.input.focus();
-    });
-    add(step1, step1Notice);
-    add(flow, step1);
-
-    // Step 2: Verify OTP
-    const step2 = el("form", null, "connector-step connector-step-2 stack");
-    step2.autocomplete = "off";
-    step2.hidden = true;
-    step2.style.display = "none";
-    add(step2, el("h3", "Trinn 2: Bekreft engangskode"));
-    const otpField = field(
-      "Engangskode",
-      "text",
-      "",
-      "Lim inn eller skriv inn engangskoden mottatt på SMS",
-    );
-    add(step2, otpField.wrap);
-
-    formSubmit(step2, "Bekreft kode", async () => {
-      const otp = otpField.input.value.trim();
-      if (!otp) {
-        throw new Error("Vennligst oppgi engangskoden.");
-      }
-      if (!sessionId) {
-        throw new Error("Mangler sesjons-ID. Vennligst send en ny engangskode først.");
-      }
-      const payload = (typeof window.KitchenSettingsView?.buildTrumfVerifyPayload === "function")
-        ? window.KitchenSettingsView.buildTrumfVerifyPayload(sessionId, otp)
-        : { session_id: sessionId, otp };
-      await api("/integrations/trumf/login/verify", "POST", payload);
-      const modal = $("#modal");
-      if (modal && modal.open) modal.close();
-      await loadConnectionStatus();
-      await refreshView();
-      notify(`${integration.name || integration.id} er tilkoblet.`);
-    });
-    add(flow, step2);
-    add(container, flow);
-
-    // Manual fallback <details>
-    const details = el("details", null, "connector-manual-details");
-    const summary = el("summary", "Avansert: lim inn informasjonskapsel manuelt");
-    add(details, summary);
-
-    const manualForm = el("form", null, "stack");
-    manualForm.autocomplete = "off";
+    // Step 1: Open Trumf in a new tab
+    const step1 = el("div", null, "connector-step connector-step-1 stack");
+    add(step1, el("h3", "Trinn 1: Logg inn på Trumf"));
     add(
-      manualForm,
+      step1,
       el(
         "p",
-        "Hvis du foretrekker å bruke en sesjonsinformasjonskapsel fra Trumf, kan du lime den inn her. Hemmeligheten krypteres og vises aldri.",
+        "Åpne Trumf i en ny fane, logg inn med BankID eller SMS, og kopier deretter sesjonsinformasjonskapselen (f.eks. trumf_session eller __Secure-authjs.session-token).",
         "muted",
       ),
     );
+    const openBtn = button("Åpne Trumf-innlogging", () => {
+      window.open("https://www.trumf.no/logg-inn", "_blank", "noopener,noreferrer");
+    });
+    add(step1, openBtn);
+    add(flow, step1);
+
+    // Step 2: Paste session cookie or token
+    const form = el("form", null, "connector-step connector-step-2 stack");
+    form.autocomplete = "off";
+    add(form, el("h3", "Trinn 2: Lim inn sesjon"));
     const cookieField = field(
       "Informasjonskapsel (cookie)",
       "password",
       "",
       "Lim inn Trumf-informasjonskapsel fra en innlogget nettleser",
     );
-    const manualExpiryField = field("Utløpsdato (valgfritt)", "date", "");
-    add(manualForm, cookieField.wrap, manualExpiryField.wrap);
+    const expiryField = field("Utløpsdato (valgfritt)", "date", "");
+    add(form, cookieField.wrap, expiryField.wrap);
 
-    formSubmit(manualForm, "Lagre og koble til", async () => {
+    formSubmit(form, "Lagre og koble til", async () => {
       const cookieVal = cookieField.input.value.trim();
       if (!cookieVal) {
         throw new Error("Vennligst oppgi informasjonskapsel for Trumf.");
       }
-      const payload = {
-        auth_mode: "session_cookie",
-        session_cookie: cookieVal,
-      };
-      if (manualExpiryField.input.value) {
-        payload.expires_at = new Date(manualExpiryField.input.value + "T23:59:59Z").toISOString();
+      const payload = (typeof window.KitchenSettingsView?.buildTrumfConnectPayload === "function")
+        ? window.KitchenSettingsView.buildTrumfConnectPayload(cookieVal, expiryField.input.value)
+        : {
+            auth_mode: "session_cookie",
+            session_cookie: cookieVal,
+          };
+      if (expiryField.input.value && !payload.expires_at) {
+        payload.expires_at = new Date(expiryField.input.value + "T23:59:59Z").toISOString();
       }
       await api(`/integrations/${integration.id}/connect`, "POST", payload);
       const modal = $("#modal");
@@ -6209,8 +6154,8 @@ function openConnectorModal(integration) {
       await refreshView();
       notify(`${integration.name || integration.id} er tilkoblet.`);
     });
-    add(details, manualForm);
-    add(container, details);
+    add(flow, form);
+    add(container, flow);
 
   } else {
     const form = el("form", null, "stack");

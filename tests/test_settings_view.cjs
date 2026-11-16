@@ -16,6 +16,7 @@ const {
   parsePkceCompletionPayload,
   buildCookidooLoginPayload,
   buildTrumfVerifyPayload,
+  buildTrumfConnectPayload,
 } = require("../src/home_kitchen/static/settings-view.js");
 
 test("moves a category without mutating the saved order", () => {
@@ -234,6 +235,23 @@ test("buildTrumfVerifyPayload handles session_id and OTP code", () => {
   assert.equal(buildTrumfVerifyPayload("", "123456"), null);
   assert.equal(buildTrumfVerifyPayload("sess-1", ""), null);
   assert.equal(buildTrumfVerifyPayload(null, null), null);
+});
+
+test("buildTrumfConnectPayload handles cookie and optional expiry date", () => {
+  assert.deepEqual(
+    buildTrumfConnectPayload("  trumf_session=test12345  "),
+    { auth_mode: "session_cookie", session_cookie: "trumf_session=test12345" },
+  );
+  assert.deepEqual(
+    buildTrumfConnectPayload("trumf_session=test12345", "2026-12-31"),
+    {
+      auth_mode: "session_cookie",
+      session_cookie: "trumf_session=test12345",
+      expires_at: "2026-12-31T23:59:59.000Z",
+    },
+  );
+  assert.equal(buildTrumfConnectPayload("", null), null);
+  assert.equal(buildTrumfConnectPayload(null, null), null);
 });
 
 // --- DOM Test Harness for openConnectorModal ---
@@ -665,12 +683,9 @@ test("Cookidoo manual cookie fallback details form calls connect endpoint", asyn
   assert.deepEqual(harness.notices, ["Cookidoo / Thermomix TM6 er tilkoblet."]);
 });
 
-test("Trumf interactive SMS / OTP 2-step flow requests code, stores session_id, and verifies OTP", async () => {
+test("Trumf guided browser sign-in opens login link and saves session cookie", async () => {
   const harness = setupModalHarness(async (path, method, body) => {
-    if (path === "/integrations/trumf/login/start") {
-      return { session_id: "trumf-sess-abc-777" };
-    }
-    if (path === "/integrations/trumf/login/verify") {
+    if (path === "/integrations/trumf/connect") {
       return { status: "connected" };
     }
     throw new Error("Unexpected endpoint " + path);
@@ -678,83 +693,20 @@ test("Trumf interactive SMS / OTP 2-step flow requests code, stores session_id, 
 
   harness.openConnectorModal({ id: "trumf", name: "Trumf" });
 
-  const phoneInput = harness.findInput("Mobilnummer");
-  assert.ok(phoneInput, "Phone number input is present");
-
-  const sendBtn = harness.findButton("Send engangskode");
-  assert.ok(sendBtn, "Button 'Send engangskode' is present");
-
-  const forms = harness.modalContent.querySelectorAll("form");
-  const step2 = forms.find((f) => f.className && f.className.includes("connector-step-2"));
-  assert.ok(step2, "Step 2 form is present");
-  assert.equal(step2.hidden, true, "Step 2 is initially hidden");
-
-  // Step 1: Submit phone number
-  phoneInput.value = "91234567";
-  const step1Form = forms.find((f) => f.className && f.className.includes("connector-step-1"));
-  await step1Form.submit();
-
-  assert.equal(harness.calls.length, 1);
-  assert.deepEqual(harness.calls[0], {
-    path: "/integrations/trumf/login/start",
-    method: "POST",
-    body: { phone: "91234567" },
-  });
-  assert.equal(step2.hidden, false, "Step 2 is revealed after sending code");
-
-  // Step 2: OTP code input and Bekreft kode button
-  const otpInput = harness.findInput("Engangskode");
-  assert.ok(otpInput, "OTP input is present");
-
-  const verifyBtn = harness.findButton("Bekreft kode");
-  assert.ok(verifyBtn, "Button 'Bekreft kode' is present");
-
-  otpInput.value = "456789";
-  await step2.submit();
-
-  assert.equal(harness.calls.length, 2);
-  assert.deepEqual(harness.calls[1], {
-    path: "/integrations/trumf/login/verify",
-    method: "POST",
-    body: {
-      session_id: "trumf-sess-abc-777",
-      otp: "456789",
-    },
-  });
-  assert.equal(harness.modal.open, false);
-  assert.deepEqual(harness.notices, ["Trumf er tilkoblet."]);
-
-  // Test validation error when OTP is empty
-  const errHarness = setupModalHarness(async (path) => {
-    if (path === "/integrations/trumf/login/start") return { session_id: "sess-1" };
-    return {};
-  });
-  errHarness.openConnectorModal({ id: "trumf", name: "Trumf" });
-  errHarness.findInput("Mobilnummer").value = "91234567";
-  const errStep1 = errHarness.modalContent.querySelectorAll("form").find((f) => f.className.includes("connector-step-1"));
-  await errStep1.submit();
-  const errStep2 = errHarness.modalContent.querySelectorAll("form").find((f) => f.className.includes("connector-step-2"));
-  await errStep2.submit();
-  const errAlert = errHarness.findError(errStep2);
-  assert.ok(errAlert);
-  assert.match(errAlert.textContent, /Vennligst oppgi engangskoden/);
-  assert.equal(errHarness.calls.length, 1, "Verify endpoint not called without OTP");
-});
-
-test("Trumf manual cookie fallback details form calls connect endpoint", async () => {
-  const harness = setupModalHarness(async () => ({ status: "connected" }));
-  harness.openConnectorModal({ id: "trumf", name: "Trumf" });
-
-  const details = harness.findDetails("Avansert: lim inn informasjonskapsel manuelt");
-  assert.ok(details, "Details summary matches 'Avansert: lim inn informasjonskapsel manuelt'");
+  const openBtn = harness.findButton("Åpne Trumf-innlogging");
+  assert.ok(openBtn, "Button 'Åpne Trumf-innlogging' is present");
 
   const cookieInput = harness.findInput("Informasjonskapsel (cookie)");
-  assert.ok(cookieInput);
+  assert.ok(cookieInput, "Cookie input is present");
   assert.equal(cookieInput.type, "password", "Cookie input has type='password'");
 
-  cookieInput.value = "trumf_session=trumf_cookie_999";
-  const manualForm = details.querySelectorAll("form")[0];
-  await manualForm.submit();
+  const saveBtn = harness.findButton("Lagre og koble til");
+  assert.ok(saveBtn, "Button 'Lagre og koble til' is present");
+
+  cookieInput.value = "trumf_session=test_cookie_12345";
+  const forms = harness.modalContent.querySelectorAll("form");
+  const form = forms[0];
+  await form.submit();
 
   assert.equal(harness.calls.length, 1);
   assert.deepEqual(harness.calls[0], {
@@ -762,11 +714,21 @@ test("Trumf manual cookie fallback details form calls connect endpoint", async (
     method: "POST",
     body: {
       auth_mode: "session_cookie",
-      session_cookie: "trumf_session=trumf_cookie_999",
+      session_cookie: "trumf_session=test_cookie_12345",
     },
   });
   assert.equal(harness.modal.open, false);
   assert.deepEqual(harness.notices, ["Trumf er tilkoblet."]);
+
+  // Test validation error when cookie is empty
+  const errHarness = setupModalHarness(async () => ({}));
+  errHarness.openConnectorModal({ id: "trumf", name: "Trumf" });
+  const errForm = errHarness.modalContent.querySelectorAll("form")[0];
+  await errForm.submit();
+  const errAlert = errHarness.findError(errForm);
+  assert.ok(errAlert);
+  assert.match(errAlert.textContent, /Vennligst oppgi informasjonskapsel/);
+  assert.equal(errHarness.calls.length, 0);
 });
 
 test("Bokmål labels and password masking across all connector modals", () => {
@@ -792,5 +754,58 @@ test("Bokmål labels and password masking across all connector modals", () => {
       passwordInputs.length >= 1,
       `Provider ${provider.id} must have at least one password-masked input`,
     );
+  }
+});
+
+test("api() error handling distinguishes Entra ID 401 from integration 401 provider detail", async () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const appSource = fs.readFileSync(path.join(__dirname, "../src/home_kitchen/static/app.js"), "utf8");
+
+  // Extract api function
+  const fnMatch = appSource.match(/async function api\(path, method = "GET", body\) \{[\s\S]*?\n\}/);
+  assert.ok(fnMatch, "api function found in app.js");
+
+  let mockResponse;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => mockResponse;
+
+  const apiFn = new Function(`return (${fnMatch[0]})`)();
+
+  try {
+    // 1. Regular endpoint 401: forward-auth Entra ID household error
+    mockResponse = {
+      ok: false,
+      status: 401,
+      json: async () => ({ detail: "Unauthorized" }),
+    };
+    await assert.rejects(
+      async () => apiFn("/meals"),
+      /Logg inn via husholdningens godkjente tilgangslenke, og prøv igjen\./,
+    );
+
+    // 2. Integration endpoint 401: uses actual server detail in Bokmål
+    mockResponse = {
+      ok: false,
+      status: 401,
+      json: async () => ({ detail: "Ugyldig e-postadresse eller passord for Cookidoo." }),
+    };
+    await assert.rejects(
+      async () => apiFn("/integrations/cookidoo/login", "POST", {}),
+      /Ugyldig e-postadresse eller passord for Cookidoo\./,
+    );
+
+    // 3. Integration endpoint 401 without detail: uses Bokmål fallback
+    mockResponse = {
+      ok: false,
+      status: 401,
+      json: async () => ({}),
+    };
+    await assert.rejects(
+      async () => apiFn("/integrations/cookidoo/login", "POST", {}),
+      /Ugyldig påloggingsinformasjon eller manglende tilgang\. Vennligst sjekk detaljene og prøv igjen\./,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });

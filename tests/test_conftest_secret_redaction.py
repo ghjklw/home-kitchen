@@ -11,8 +11,10 @@ _PASSWORD_MARKER = "__DB_SECRET_REDACTION_CANARY__"
 _PLUGIN_SOURCE = """
 import os
 import sys
+from pathlib import Path
 
-from sqlalchemy.engine import make_url
+import sqlalchemy
+from sqlalchemy.exc import OperationalError
 
 
 class _Connection:
@@ -28,29 +30,39 @@ class _Transaction:
         return False
 
 
-class _Engine:
-    def begin(self):
-        return _Transaction()
-
-    def dispose(self):
-        return None
-
-
 def pytest_runtest_setup(item):
     fixture = item._fixtureinfo.name2fixturedefs["test_database_url"][-1].func
     fixture_module = sys.modules[fixture.__module__]
-    fixture_module.create_engine = lambda _url: _Engine()
+    mode = os.environ["REDACTION_PROBE_MODE"]
+    original_create_engine = sqlalchemy.create_engine
+    engine_count = 0
 
-    def upgrade(config, _revision):
-        if os.environ["REDACTION_PROBE_MODE"] == "setup_failure":
-            url = config.attributes["database_url"]
-            options = make_url(url).query["options"]
-            schema = options.split("search_path=", 1)[1]
-            raise RuntimeError(
-                f"migration setup stage=upgrade schema={schema} database_url={url!r}"
-            )
+    def create_probe_engine(url, **kwargs):
+        nonlocal engine_count
+        engine_count += 1
+        engine = original_create_engine(url, **kwargs)
+        if mode == "setup_failure" or (mode == "alembic_failure" and engine_count == 2):
+            def fail_connect(*args, **connect_params):
+                Path(os.environ["REDACTION_CONNECT_REACHED"]).write_text("reached")
+                raise OperationalError(
+                    "synthetic connect failure",
+                    connect_params,
+                    RuntimeError("synthetic driver failure"),
+                )
 
-    fixture_module.command.upgrade = upgrade
+            # Patch only dialect.connect; no socket or database access occurs.
+            engine.dialect.connect = fail_connect
+        elif mode in {"alembic_failure", "test_failure"}:
+            # The admin engine's schema DDL is a no-op in these probes. The
+            # Alembic engine remains a real SQLAlchemy Engine in alembic_failure.
+            engine.begin = lambda: _Transaction()
+        return engine
+
+    fixture_module.create_engine = create_probe_engine
+    sqlalchemy.create_engine = create_probe_engine
+
+    if mode == "test_failure":
+        fixture_module.command.upgrade = lambda *_args: None
 """
 
 _PROBE_SOURCE = """
@@ -71,14 +83,21 @@ def test_fixture_failure_output(test_database_url):
 """
 
 
-def _run_nested_pytest(tmp_path: Path, mode: str) -> subprocess.CompletedProcess[str]:
+def _run_nested_pytest(tmp_path: Path, mode: str) -> tuple[subprocess.CompletedProcess[str], Path]:
     project = tmp_path / mode
     tests_dir = project / "tests"
     tests_dir.mkdir(parents=True)
     shutil.copyfile(Path(__file__).with_name("conftest.py"), tests_dir / "conftest.py")
+    shutil.copytree(Path(__file__).parents[1] / "migrations", project / "migrations")
+    (project / "src").mkdir()
+    shutil.copytree(
+        Path(__file__).parents[1] / "src" / "home_kitchen",
+        project / "src" / "home_kitchen",
+    )
     shutil.copyfile(Path(__file__).parents[1] / "alembic.ini", project / "alembic.ini")
     (project / "redaction_probe.py").write_text(_PLUGIN_SOURCE)
     (tests_dir / "test_probe.py").write_text(_PROBE_SOURCE)
+    connect_reached = project / "connect-reached"
 
     env = {
         "HOME": str(project),
@@ -86,11 +105,12 @@ def _run_nested_pytest(tmp_path: Path, mode: str) -> subprocess.CompletedProcess
             f"postgresql+psycopg://fixture-user:{_PASSWORD_MARKER}@127.0.0.1:1/kitchen_test"
         ),
         "PATH": os.defpath,
-        "PYTHONPATH": str(project),
+        "PYTHONPATH": os.pathsep.join((str(project / "src"), str(project))),
         "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
         "REDACTION_PROBE_MODE": mode,
+        "REDACTION_CONNECT_REACHED": str(connect_reached),
     }
-    return subprocess.run(
+    result = subprocess.run(
         [
             sys.executable,
             "-m",
@@ -107,17 +127,23 @@ def _run_nested_pytest(tmp_path: Path, mode: str) -> subprocess.CompletedProcess
         text=True,
         check=False,
     )
+    return result, connect_reached
 
 
-def test_setup_and_test_failure_output_redacts_database_password(tmp_path: Path) -> None:
-    for mode, stage in (
-        ("setup_failure", "stage=upgrade"),
-        ("test_failure", "stage=consumer"),
+def test_setup_migration_and_consumer_failure_output_redacts_password(
+    tmp_path: Path,
+) -> None:
+    for mode, stage, needs_driver_failure in (
+        ("setup_failure", "create schema", True),
+        ("alembic_failure", "Alembic migration", True),
+        ("test_failure", "stage=consumer", False),
     ):
-        result = _run_nested_pytest(tmp_path, mode)
+        result, connect_reached = _run_nested_pytest(tmp_path, mode)
         output = result.stdout + result.stderr
 
         assert result.returncode != 0, "the nested pytest probe must fail deliberately"
         assert _PASSWORD_MARKER not in output, "database password marker leaked into pytest output"
         assert stage in output, "failure stage should remain visible"
         assert "schema=test_" in output, "isolated schema context should remain visible"
+        if needs_driver_failure:
+            assert connect_reached.exists(), "probe must reach the patched dialect.connect"

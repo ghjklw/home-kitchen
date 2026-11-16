@@ -18,13 +18,17 @@ from home_kitchen.catalogue.repository import PostgresFoodCatalogueRepository
 from home_kitchen.catalogue.service import FoodCatalogueService
 from home_kitchen.catalogue.sku_repository import PostgresCatalogueSkuRepository
 from home_kitchen.catalogue.sku_service import CatalogueSkuService
+from home_kitchen.connector_store import ConnectorStore, resolve_connector_cipher
 from home_kitchen.context import history_context
 from home_kitchen.history import HistoryRepository
 from home_kitchen.integrations import (
     AIIntegration,
     CookidooIntegration,
+    CoopIntegration,
     IntegrationRegistry,
     OdaIntegration,
+    Rema1000Integration,
+    TrumfIntegration,
 )
 from home_kitchen.inventory import InventoryService
 from home_kitchen.models import RecipeCreate
@@ -81,8 +85,18 @@ class KitchenFeatures:
         self.recipe_feedback = RecipeFeedbackService(kitchen, self.history)
         self.oda = OdaService(kitchen.store.engine, settings)
         self.oda_cart = OdaCartService(self.oda)
+        self.connector_store = ConnectorStore(
+            kitchen.store.engine, resolve_connector_cipher(settings)
+        )
         self.integrations = IntegrationRegistry(
-            [OdaIntegration(self.oda), AIIntegration(settings), CookidooIntegration()]
+            [
+                OdaIntegration(self.oda),
+                AIIntegration(settings),
+                Rema1000Integration(self.connector_store, self.household_id),
+                CoopIntegration(self.connector_store, self.household_id),
+                TrumfIntegration(self.connector_store, self.household_id),
+                CookidooIntegration(self.connector_store, self.household_id),
+            ]
         )
         self.inventory = InventoryService(kitchen, self.history)
         if kitchen.store.engine is not None:

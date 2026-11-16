@@ -5850,6 +5850,176 @@ async function disconnectOdaAccount() {
     notify(error.message, true);
   }
 }
+async function disconnectConnector(providerId, providerName) {
+  try {
+    await api(`/integrations/${providerId}/connection`, "DELETE");
+    await loadConnectionStatus();
+    await refreshView();
+    notify(`${providerName || providerId} er koblet fra.`);
+  } catch (error) {
+    notify(error.message, true);
+  }
+}
+function openConnectorModal(integration) {
+  const root = openDialog(`Koble til ${integration.name || integration.id}`);
+  const form = el("form", null, "stack");
+  form.autocomplete = "off";
+
+  let tokenField = null;
+  let cookieField = null;
+  let usernameField = null;
+  let passwordField = null;
+  let modeSelect = null;
+
+  if (integration.id === "rema1000") {
+    add(
+      form,
+      el(
+        "p",
+        "Lim inn ditt personlige sesjonstoken fra Rema 1000 Æ for å hente kvitteringer og priskutt. Hemmeligheten krypteres og vises aldri.",
+        "muted",
+      ),
+    );
+    tokenField = field(
+      "Sesjonstoken (token)",
+      "password",
+      "",
+      "Lim inn gyldig sesjonstoken fra Rema 1000 Æ",
+    );
+    add(form, tokenField.wrap);
+  } else if (integration.id === "trumf") {
+    add(
+      form,
+      el(
+        "p",
+        "Lim inn din sesjonsinformasjonskapsel fra Trumf for å synkronisere kjøp og kvitteringer. Hemmeligheten krypteres og vises aldri.",
+        "muted",
+      ),
+    );
+    cookieField = field(
+      "Informasjonskapsel (cookie)",
+      "password",
+      "",
+      "Lim inn Trumf-informasjonskapsel fra en innlogget nettleser",
+    );
+    add(form, cookieField.wrap);
+  } else if (integration.id === "coop") {
+    add(
+      form,
+      el(
+        "p",
+        "Koble til Coop med sesjonstoken eller informasjonskapsel for automatisk kvitterings- og kjøpshistorikk. Hemmeligheten krypteres og vises aldri.",
+        "muted",
+      ),
+    );
+    modeSelect = field("Innloggingsmetode", "select");
+    const optToken = el("option", "Sesjonstoken");
+    optToken.value = "session_token";
+    const optCookie = el("option", "Informasjonskapsel");
+    optCookie.value = "session_cookie";
+    add(modeSelect.input, optToken, optCookie);
+    add(form, modeSelect.wrap);
+
+    tokenField = field(
+      "Verdi (token eller cookie)",
+      "password",
+      "",
+      "Lim inn sesjonstoken eller informasjonskapsel fra Coop",
+    );
+    add(form, tokenField.wrap);
+  } else if (integration.id === "cookidoo") {
+    add(
+      form,
+      el(
+        "p",
+        "Koble til Cookidoo / Thermomix TM6 med informasjonskapsel eller innloggingsdetaljer. Hemmelighetene krypteres og vises aldri.",
+        "muted",
+      ),
+    );
+    modeSelect = field("Innloggingsmetode", "select");
+    const optCookie = el("option", "Informasjonskapsel (anbefalt)");
+    optCookie.value = "session_cookie";
+    const optCreds = el("option", "Brukernavn og passord");
+    optCreds.value = "credentials";
+    add(modeSelect.input, optCookie, optCreds);
+    add(form, modeSelect.wrap);
+
+    cookieField = field(
+      "Informasjonskapsel (cookie)",
+      "password",
+      "",
+      "Lim inn Cookidoo-informasjonskapsel",
+    );
+    usernameField = field("Brukernavn / E-post", "text", "");
+    passwordField = field("Passord", "password", "");
+
+    usernameField.wrap.style.display = "none";
+    passwordField.wrap.style.display = "none";
+
+    modeSelect.input.addEventListener("change", () => {
+      const isCreds = modeSelect.input.value === "credentials";
+      cookieField.wrap.style.display = isCreds ? "none" : "";
+      usernameField.wrap.style.display = isCreds ? "" : "none";
+      passwordField.wrap.style.display = isCreds ? "" : "none";
+    });
+
+    add(form, cookieField.wrap, usernameField.wrap, passwordField.wrap);
+  }
+
+  const expiryField = field("Utløpsdato (valgfritt)", "date", "");
+  add(form, expiryField.wrap);
+
+  formSubmit(form, "Lagre og koble til", async () => {
+    const payload = {};
+    if (expiryField.input.value) {
+      payload.expires_at = new Date(expiryField.input.value + "T23:59:59Z").toISOString();
+    }
+    if (integration.id === "rema1000") {
+      const val = tokenField.input.value.trim();
+      if (!val) throw new Error("Vennligst oppgi sesjonstoken for Rema 1000.");
+      payload.session_token = val;
+      payload.auth_mode = "session_token";
+    } else if (integration.id === "trumf") {
+      const val = cookieField.input.value.trim();
+      if (!val) throw new Error("Vennligst oppgi informasjonskapsel for Trumf.");
+      payload.session_cookie = val;
+      payload.auth_mode = "session_cookie";
+    } else if (integration.id === "coop") {
+      const val = tokenField.input.value.trim();
+      if (!val) throw new Error("Vennligst oppgi token eller informasjonskapsel for Coop.");
+      const mode = modeSelect.input.value;
+      payload.auth_mode = mode;
+      if (mode === "session_cookie") {
+        payload.session_cookie = val;
+      } else {
+        payload.session_token = val;
+      }
+    } else if (integration.id === "cookidoo") {
+      const mode = modeSelect.input.value;
+      payload.auth_mode = mode;
+      if (mode === "credentials") {
+        const u = usernameField.input.value.trim();
+        const p = passwordField.input.value.trim();
+        if (!u || !p) throw new Error("Vennligst oppgi både brukernavn og passord for Cookidoo.");
+        payload.username = u;
+        payload.password = p;
+      } else {
+        const c = cookieField.input.value.trim();
+        if (!c) throw new Error("Vennligst oppgi informasjonskapsel for Cookidoo.");
+        payload.session_cookie = c;
+      }
+    }
+
+    await api(`/integrations/${integration.id}/connect`, "POST", payload);
+    const modal = $("#modal");
+    if (modal && modal.open) modal.close();
+    await loadConnectionStatus();
+    await refreshView();
+    notify(`${integration.name || integration.id} er tilkoblet.`);
+  });
+
+  add(root, form);
+}
 function odaConnectionIssue() {
   const messages = [
     state.basketMatchGlobalError,
@@ -6420,6 +6590,17 @@ function renderConnectionSettings() {
         "connection-auth-mode muted",
       ),
     );
+    const expiryNotice = window.KitchenSettingsView.integrationExpiryNotice(integration);
+    if (expiryNotice) {
+      add(
+        row,
+        el(
+          "p",
+          expiryNotice,
+          status === "expired" ? "callout danger connection-expiry" : "callout connection-expiry",
+        ),
+      );
+    }
     if (integration.id === "oda" && state.oda) {
       const actions = add(el("div", null, "actions connection-actions"));
       if (state.oda?.connected) {
@@ -6434,6 +6615,27 @@ function renderConnectionSettings() {
         const setup = button("Oppsett kreves", () => {}, "quiet");
         setup.disabled = true;
         add(actions, setup);
+      }
+      add(row, actions);
+    } else if (["rema1000", "coop", "trumf", "cookidoo"].includes(integration.id)) {
+      const actions = add(el("div", null, "actions connection-actions"));
+      if (status === "connected") {
+        add(
+          actions,
+          button("Oppdater tilkobling", () => openConnectorModal(integration), "quiet"),
+          button("Koble fra", () => disconnectConnector(integration.id, integration.name), "quiet danger"),
+        );
+      } else if (status === "expired") {
+        add(
+          actions,
+          button("Forny tilkobling", () => openConnectorModal(integration), "primary"),
+          button("Koble fra", () => disconnectConnector(integration.id, integration.name), "quiet danger"),
+        );
+      } else {
+        add(
+          actions,
+          button("Koble til", () => openConnectorModal(integration), "primary"),
+        );
       }
       add(row, actions);
     }

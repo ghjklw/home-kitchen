@@ -62,6 +62,7 @@
         configured: "Satt opp",
         not_configured: "Oppsett kreves",
         unavailable: "Ikke tilgjengelig",
+        expired: "Sesjon utløpt",
       }[status] || "Ukjent status"
     );
   }
@@ -72,8 +73,39 @@
         delegated_user_pkce: "Oda-kontoen din (OAuth)",
         federation: "Føderert administrert identitet",
         api_key: configured ? "API-nøkkel er satt opp (hemmeligheten er skjult)" : "API-nøkkel",
+        session_token: configured ? "Sesjonstoken er lagret (hemmeligheten er skjult)" : "Sesjonstoken",
+        session_cookie: configured ? "Sesjonsinformasjonskapsel er lagret (hemmeligheten er skjult)" : "Sesjonsinformasjonskapsel",
+        credentials: configured ? "Brukernavn og passord er lagret (hemmeligheten er skjult)" : "Brukernavn og passord",
+        manual_session_token: configured ? "Sesjonstoken er lagret (hemmeligheten er skjult)" : "Sesjonstoken",
+        manual_session_cookie: configured ? "Sesjonsinformasjonskapsel er lagret (hemmeligheten er skjult)" : "Sesjonsinformasjonskapsel",
       }[mode] || "Ikke oppgitt"
     );
+  }
+
+  function integrationExpiryNotice(integration, nowMs = Date.now()) {
+    if (!integration) return null;
+    if (integration.status === "expired") {
+      return (
+        integration.expiry_prompt ||
+        "Sesjonen har utløpt. Koble til på nytt for å fortsette synkronisering."
+      );
+    }
+    if (integration.expires_at) {
+      const expiry = new Date(integration.expires_at).getTime();
+      if (!isNaN(expiry)) {
+        if (expiry <= nowMs) {
+          return (
+            integration.expiry_prompt ||
+            "Sesjonen har utløpt. Koble til på nytt for å fortsette synkronisering."
+          );
+        }
+        const diffDays = Math.ceil((expiry - nowMs) / (1000 * 60 * 60 * 24));
+        if (diffDays <= 7) {
+          return `Sesjonen utløper om ${diffDays} ${diffDays === 1 ? "dag" : "dager"}. Vurder å fornye tilkoblingen snart.`;
+        }
+      }
+    }
+    return null;
   }
 
   function normalizeIntegrationResponse(payload) {
@@ -122,6 +154,7 @@
     normalizeIntegrationResponse,
     connectionStatusSnapshot,
     odaNeedsReconnect,
+    integrationExpiryNotice,
   };
   if (typeof module !== "undefined" && module.exports)
     module.exports = root.KitchenSettingsView;

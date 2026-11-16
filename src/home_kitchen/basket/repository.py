@@ -220,6 +220,9 @@ class BasketService:
                     unit=line.unit,
                     category=line.category,
                     origins=line.origins,
+                    approximate=line.approximate,
+                    provenance=line.provenance,
+                    source_url=line.source_url,
                 )
                 for line in plan.purchase_lines
             ],
@@ -237,6 +240,9 @@ class BasketService:
                 unit=line.unit,
                 origins=line.origins,
                 category=line.category,
+                approximate=line.approximate,
+                provenance=line.provenance,
+                source_url=line.source_url,
             )
             for line in week.lines
         ]

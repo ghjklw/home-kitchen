@@ -7,7 +7,64 @@ const {
   normalizeQuantity,
   parseSourceIngredient,
   rowFromDraft,
+  recipeIngredientForSave,
 } = require("../src/home_kitchen/static/recipe-editor.js");
+
+test("saves unknown source quantities without inventing an amount", () => {
+  assert.deepEqual(recipeIngredientForSave({
+    name: "1 klype salt",
+    quantity: "",
+    unit: "",
+    source_indices: [0],
+  }), {
+    item: {
+      name: "1 klype salt",
+      quantity: null,
+      unit: null,
+      category: "Other",
+      source_indices: [0],
+    },
+    errors: { name: false, quantity: false, unit: false },
+  });
+});
+
+test("requires a unit only when an explicit quantity is supplied", () => {
+  assert.deepEqual(recipeIngredientForSave({ name: "flour", quantity: "2", unit: "" }).errors, {
+    name: false,
+    quantity: false,
+    unit: true,
+  });
+  assert.deepEqual(recipeIngredientForSave({ name: "flour", quantity: "two", unit: "cup" }).errors, {
+    name: false,
+    quantity: true,
+    unit: false,
+  });
+});
+
+test("preserves separate purchase estimates through editable recipe saves", () => {
+  const purchaseEstimate = {
+    quantity: "55",
+    unit: "g",
+    approximate: true,
+    provenance: "Matprat ingredient-specific conversion",
+    source_url: "https://example.test/measurements",
+  };
+  const row = rowFromDraft({
+    name: "hvetemel",
+    quantity: "1",
+    unit: "dl",
+    purchase_estimate: purchaseEstimate,
+  });
+  const saved = recipeIngredientForSave({
+    name: row.name,
+    quantity: row.quantity,
+    unit: row.unit,
+    purchase_estimate: row.purchase_estimate,
+  });
+  assert.deepEqual(saved.item.purchase_estimate, purchaseEstimate);
+  assert.equal(saved.item.quantity, "1");
+  assert.equal(saved.item.unit, "dl");
+});
 
 test("parses a leading exact decimal and recognized explicit unit", () => {
   assert.deepEqual(parseSourceIngredient(" 0.25 kg carrots "), {
@@ -69,18 +126,36 @@ test("AI revision sends complete saved recipes and requires explicit quantities 
   });
   assert.throws(
     () => buildRevisionRequest({ ...values, ingredients: [{ name: "flour", quantity: "", unit: "kg" }] }, { isEditing: true, source: "manual" }, "revise"),
-    /Complete each quantity and unit/,
+    /Fyll ut mengde og enhet/,
   );
 });
 
 test("leaves ambiguous or unrecognized source text unresolved", () => {
-  for (const source of ["1-2 cups flour", "½ cup sugar", "1/2 cup sugar", "1,000.5 kg potatoes", "2 mystery carrots", "salt to taste"]) {
+  for (const source of ["1-2 cups flour", "½ cup sugar", "1/2 cup sugar", "1,000.5 kg potatoes", "2 mystery carrots", "salt to taste", "etter smak"])
+  {
     const row = parseSourceIngredient(source);
     assert.equal(row.sourceText, source);
     assert.equal(row.name, source.trim());
     assert.equal(row.quantity, "");
     assert.equal(row.unit, "");
     assert.equal(row.parsed, false);
+  }
+});
+
+test("keeps Norwegian practical measures and their source text without requiring cleanup", () => {
+  for (const source of ["1 klype salt", "2 håndfull persille"]) {
+    const row = parseSourceIngredient(source);
+    assert.equal(row.sourceText, source);
+    const saved = recipeIngredientForSave({
+      name: row.name,
+      quantity: row.quantity,
+      unit: row.unit,
+      source_indices: [0],
+    });
+    assert.deepEqual(saved.errors, { name: false, quantity: false, unit: false });
+    assert.equal(saved.item.quantity, source.startsWith("1") ? "1" : "2");
+    assert.equal(saved.item.unit, source.startsWith("1") ? "klype" : "håndfull");
+    assert.deepEqual(saved.item.source_indices, [0]);
   }
 });
 

@@ -33,6 +33,9 @@ class Inventory:
                     covered_quantity=0,
                     to_buy_quantity=self.quantity,
                     origins=[],
+                    approximate=True,
+                    provenance="Matprat estimate; source text: 1 dl sukker",
+                    source_url="https://www.matprat.no/artikler/mengde-mal-og-vekt/mal-og-vekt/",
                 )
                 for index in (1, 2)
             ],
@@ -61,6 +64,9 @@ class Matching:
                 has_more=False,
                 candidates=[],
                 status="matched",
+                approximate=line.approximate,
+                provenance=line.provenance,
+                source_url=line.source_url,
             )
             for line in plan.purchase_lines
         ]
@@ -102,6 +108,9 @@ async def test_start_returns_before_provider_finishes_and_partial_results_surviv
     initial = await asyncio.wait_for(jobs.start("alice", START, END), 1)
     assert initial.status == "queued"
     assert [need.status for need in initial.needs] == ["pending", "pending"]
+    assert initial.needs[0].approximate is True
+    assert "1 dl sukker" in initial.needs[0].provenance
+    assert str(initial.needs[0].source_url).startswith("https://www.matprat.no/")
     await asyncio.wait_for(matching.partial.wait(), 1)
     partial = await jobs.get("alice", initial.job_id)
     assert partial.status == "running"
@@ -113,6 +122,7 @@ async def test_start_returns_before_provider_finishes_and_partial_results_surviv
     final = await settled(jobs, "alice", initial.job_id)
     assert final.status == "complete"
     assert [need.status for need in final.needs] == ["matched", "matched"]
+    assert final.needs[0].approximate is True
 
 
 async def test_identical_requests_reuse_running_and_recent_completed_job(service):

@@ -4,6 +4,7 @@ const test = require("node:test");
 const {
   basketPriceSummary,
   formatQuantityForDisplay,
+  formatQuantityForAccessibility,
   formatQuantityMentions,
   groupedByCategory,
   hasSelectedProducts,
@@ -26,8 +27,8 @@ test("shows a complete total only for selected products with complete prices", (
   };
   assert.equal(hasSelectedProducts(basket), true);
   assert.deepEqual(basketPriceSummary(basket), {
-    label: "Selected product total: 92.5 NOK",
-    accessibleLabel: "Exact selected product total: 92.50 NOK",
+    label: "Sum for valgte varer: 92,5 NOK",
+    accessibleLabel: "Nøyaktig sum for valgte varer: 92,5 NOK",
     complete: true,
   });
 });
@@ -41,7 +42,7 @@ test("labels partial price data as a subtotal and suppresses a misleading zero t
       price_complete: false,
       needs: [{ selections: [selected] }],
     }).label,
-    "Known subtotal: 25 NOK · some prices are unknown",
+    "Kjent delsum: 25 NOK · noen priser er ukjente",
   );
   assert.equal(
     basketPriceSummary({
@@ -50,7 +51,7 @@ test("labels partial price data as a subtotal and suppresses a misleading zero t
       price_complete: false,
       needs: [{ selections: [selected] }],
     }).label,
-    "Selected product prices are incomplete.",
+    "Prisene for de valgte varene er ufullstendige.",
   );
   assert.equal(
     basketPriceSummary({
@@ -58,7 +59,7 @@ test("labels partial price data as a subtotal and suppresses a misleading zero t
       price_complete: false,
       needs: [{ selections: [selected] }],
     }).label,
-    "Selected product prices are incomplete.",
+    "Prisene for de valgte varene er ufullstendige.",
   );
 });
 
@@ -67,32 +68,40 @@ test("formats pickup progress and handles empty or inconsistent counts", () => {
     checked: 2,
     total: 5,
     percent: 40,
-    label: "2 of 5 picked up",
+    label: "2 av 5 varer plukket",
   });
   assert.deepEqual(pickupProgress(9, 3), {
     checked: 3,
     total: 3,
     percent: 100,
-    label: "3 of 3 picked up",
+    label: "3 av 3 varer plukket",
   });
   assert.deepEqual(pickupProgress(0, 0), {
     checked: 0,
     total: 0,
     percent: 0,
-    label: "No items to pick up",
+    label: "Ingen varer å plukke",
   });
 });
 
 test("rounds display quantities with decimal-string arithmetic only", () => {
-  assert.equal(formatQuantityForDisplay("2.345"), "2.35");
-  assert.equal(formatQuantityForDisplay("1.2300"), "1.23");
-  assert.equal(formatQuantityForDisplay("0.004"), "<0.01");
-  assert.equal(formatQuantityForDisplay("12345678901234567890.005"), "12345678901234567890.01");
+  assert.equal(formatQuantityForDisplay("2.345"), "2,35");
+  assert.equal(formatQuantityForDisplay("1.2300"), "1,23");
+  assert.equal(formatQuantityForDisplay("0.004"), "<0,01");
+  assert.equal(formatQuantityForDisplay("12345678901234567890.005"), "12345678901234567890,01");
   assert.equal(formatQuantityForDisplay("unknown"), "unknown");
   assert.equal(formatQuantityForDisplay("1E+3"), "1000");
-  assert.equal(formatQuantityForDisplay("1.25e-3"), "<0.01");
+  assert.equal(formatQuantityForDisplay("1.25e-3"), "<0,01");
   assert.equal(normalizeDecimalText("1.25e-3"), "0.00125");
   assert.equal(normalizeDecimalText("1,000.5"), null);
+});
+
+test("formats accessible quantities compactly without hiding small positive amounts", () => {
+  assert.equal(formatQuantityForAccessibility("233.3333333333333333333333334"), "233,33");
+  assert.equal(formatQuantityForAccessibility("1.2300"), "1,23");
+  assert.equal(formatQuantityForAccessibility("1E+3"), "1000");
+  assert.equal(formatQuantityForAccessibility("0.0001"), "<0,01");
+  assert.equal(formatQuantityForAccessibility("not-a-number"), "not-a-number");
 });
 
 test("detects positive decimal text without floating-point coercion", () => {
@@ -105,7 +114,7 @@ test("detects positive decimal text without floating-point coercion", () => {
 test("formats decimal quantities inside basket issue text", () => {
   assert.equal(
     formatQuantityMentions("Milk: 233.3333333333333333333333334 g still needed; 1E+3 ml overbuy"),
-    "Milk: 233.33 g still needed; 1000 ml overbuy",
+    "Milk: 233,33 g still needed; 1000 ml overbuy",
   );
 });
 

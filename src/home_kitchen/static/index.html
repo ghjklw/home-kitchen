@@ -1,17 +1,17 @@
 <!doctype html>
-<html lang="en">
+<html lang="nb">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#244c3e" />
     <meta
       name="description"
-      content="A shared home for recipes, weekly meals and the shopping list."
+      content="Et felles hjem for måltidsplaner, oppskrifter og handleliste."
     />
     <link rel="manifest" href="/static/manifest.webmanifest" />
     <link rel="icon" href="/static/icon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/static/style.css" />
-    <title>Kitchen</title>
+    <title>Kjøkken</title>
     <script defer src="/static/shopping-view.js"></script>
     <script defer src="/static/shopping-share.js"></script>
     <script defer src="/static/recipe-editor.js"></script>
@@ -27,28 +27,28 @@
         <div class="sidebar-header">
           <a class="brand" href="#week"
             ><img src="/static/icon.svg" alt="" width="42" height="42" /><span
-              >Kitchen<small>A little less everyday planning.</small></span
+              >Kjøkken<small>Litt mindre hverdagsplanlegging.</small></span
             ></a
           >
-          <button class="secondary-nav" data-view="settings" aria-label="Household settings">Settings</button>
+          <button class="secondary-nav" data-view="settings" aria-label="Husholdningsinnstillinger">Innstillinger</button>
         </div>
-        <nav aria-label="Main navigation">
+        <nav aria-label="Hovedmeny">
           <button data-view="week">Plan</button
-          ><button data-view="recipes">Recipes</button
-          ><button data-view="shopping">Shopping</button
+          ><button data-view="recipes">Oppskrifter</button
+          ><button data-view="shopping">Handleliste</button
         </nav>
         <p class="sidebar-note">
-          Good meals start with<br />a little room to plan.
+          Gode måltider starter med<br />litt rom for planlegging.
         </p>
       </aside>
       <main id="main" tabindex="-1">
-        <div class="loading">Opening your kitchen…</div>
+        <div class="loading">Åpner kjøkkenet …</div>
       </main>
     </div>
     <div id="notice" role="status" aria-live="polite" hidden></div>
     <dialog id="modal"><div id="modal-content"></div></dialog>
     <noscript
-      >Kitchen needs JavaScript to load your shared meal plans.</noscript
+      >Kjøkkenet trenger JavaScript for å laste inn måltidsplanene deres.</noscript
     >
   </body>
 </html>

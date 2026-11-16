@@ -40,7 +40,8 @@
     (Array.isArray(lines) ? lines : []).forEach((line) => {
       if (!isRemainingShoppingLine(line)) return;
       const name = cleanLine(line.name);
-      const category = cleanLine(line.category) || "Other";
+      const categoryValue = cleanLine(line.category) || "Other";
+      const category = categoryValue === "Other" ? "Annet" : categoryValue;
       const quantity = decimalText(line.to_buy_quantity);
       const unit = cleanLine(line.unit);
       if (!name || !quantity) return;
@@ -76,7 +77,7 @@
           .join("\n")}`;
       });
 
-    return [cleanLine(title), ...(sections.length ? sections : ["No items remaining."])].join(
+    return [cleanLine(title), ...(sections.length ? sections : ["Ingen varer gjenstår."])].join(
       "\n\n",
     );
   }

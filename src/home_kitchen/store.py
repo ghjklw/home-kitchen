@@ -19,11 +19,12 @@ from sqlalchemy import (
     Numeric,
     Table,
     Text,
-    UniqueConstraint,
+    Time,
     Uuid,
     create_engine,
     select,
     text,
+    update,
 )
 from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.engine import Connection, make_url
@@ -58,10 +59,10 @@ meals = Table(
     Column("id", Uuid, primary_key=True),
     Column("position", BigInteger, Identity(), nullable=False, unique=True),
     Column("date", Date, nullable=False),
-    Column("slot", Text, nullable=False),
+    Column("label", Text),
+    Column("scheduled_time", Time),
     Column("recipe_id", Uuid, ForeignKey("recipes.id"), nullable=False),
     Column("servings", Integer, nullable=False),
-    UniqueConstraint("date", "slot"),
 )
 items = Table(
     "items",
@@ -100,8 +101,12 @@ settings = Table(
 )
 
 
-class MealSlotOccupied(ValueError):
-    """A new meal must never silently replace an existing plan."""
+class MealIDConflict(ValueError):
+    """A meal create must never replace an existing meal ID."""
+
+
+# Kept as an import-compatible name for callers catching the prior conflict.
+MealSlotOccupied = MealIDConflict
 
 
 TABLES = {"recipe": recipes, "meal": meals, "item": items, "regular": regulars}
@@ -146,7 +151,7 @@ class Store:
         table = TABLES[kind]
         values = entity_values(entity)
         statement = insert(table).values(**values)
-        conflict = [table.c.date, table.c.slot] if kind == "meal" else [table.c.id]
+        conflict = [table.c.id]
         with self.connection() as connection:
             if isinstance(entity, Recipe) and entity.photo_source is not None:
                 from .recipes.photo_storage import recipe_photos
@@ -166,10 +171,7 @@ class Store:
                     statement.on_conflict_do_nothing(index_elements=conflict).returning(table.c.id)
                 ).scalar_one_or_none()
                 if inserted is None:
-                    raise MealSlotOccupied(
-                        "This meal slot is already planned. Choose another slot or remove "
-                        "the existing meal before adding its replacement."
-                    )
+                    raise MealIDConflict("A meal with this ID already exists")
             else:
                 connection.execute(
                     statement.on_conflict_do_update(index_elements=conflict, set_=values)
@@ -198,6 +200,30 @@ class Store:
                     else entity.recipe_id
                     if isinstance(entity, Meal)
                     else None,
+                ),
+                connection=connection,
+            )
+
+    def update_meal(self, entity: Meal) -> None:
+        values = entity_values(entity)
+        values.pop("id")
+        with self.connection() as connection:
+            result = connection.execute(
+                update(meals).where(meals.c.id == entity.id).values(**values)
+            )
+            if result.rowcount == 0:
+                raise KeyError(str(entity.id))
+            HistoryRepository(self.engine).record(
+                HistoryEntryCreate(
+                    channel=history_context.get().channel,
+                    kind="planning",
+                    message="Updated planned meal",
+                    recipe_id=entity.recipe_id,
+                    structured={
+                        "entity_type": "meal",
+                        "entity_id": str(entity.id),
+                        "data": entity.model_dump(mode="json"),
+                    },
                 ),
                 connection=connection,
             )

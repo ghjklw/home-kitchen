@@ -36,7 +36,7 @@ _proposals = Table(
 
 
 class ProposalConflict(ValueError):
-    """Refresh the proposal or choose empty slots before reviewing again."""
+    """Refresh a stale proposal and explicitly review any changed entries."""
 
 
 class ProposalExpired(ProposalConflict):
@@ -110,17 +110,6 @@ class PlanningProposalService:
         return row
 
     @staticmethod
-    def _check_slots(connection: Connection, proposed: list[MealCreate]) -> None:
-        for meal in proposed:
-            existing = connection.execute(
-                select(meals.c.id).where(meals.c.date == meal.date, meals.c.slot == meal.slot)
-            ).scalar_one_or_none()
-            if existing is not None:
-                raise ProposalConflict(
-                    f"{meal.date} {meal.slot} is already planned. Choose another slot or "
-                    "remove the existing meal, then create and review a new proposal."
-                )
-
     @staticmethod
     def _recipes(connection: Connection, proposed: list[MealCreate], *, lock=False):
         fingerprints = {}
@@ -142,15 +131,11 @@ class PlanningProposalService:
         proposed = [MealCreate.model_validate(meal) for meal in meals]
         if not 1 <= len(proposed) <= self.max_meals:
             raise ValueError(f"A proposal must contain between 1 and {self.max_meals} meals")
-        slots = [(meal.date, meal.slot) for meal in proposed]
-        if len(set(slots)) != len(slots):
-            raise ProposalConflict("Duplicate proposed date/slot. Choose one meal per slot.")
         dates = [meal.date for meal in proposed]
         if (max(dates) - min(dates)).days + 1 > self.max_range_days:
             raise ValueError(f"Proposal date range must be at most {self.max_range_days} days")
         now = datetime.now(UTC)
         with self.kitchen.store.connection() as connection:
-            self._check_slots(connection, proposed)
             fingerprints = self._recipes(connection, proposed)
             row = (
                 connection.execute(
@@ -202,23 +187,21 @@ class PlanningProposalService:
                         raise ProposalConflict(
                             "Source recipes changed. Create and review a new proposal."
                         )
-                    self._check_slots(connection, proposal.meals)
                     if proposal.expires_at <= datetime.now(UTC):
                         status = "expired"
                         raise ProposalExpired("Proposal expired. Create and review a new proposal.")
                     applied = []
-                    for data in sorted(proposal.meals, key=lambda meal: (meal.date, meal.slot)):
+                    for data in proposal.meals:
                         meal = Meal(id=uuid4(), **data.model_dump())
                         inserted = connection.execute(
                             insert(meals)
                             .values(**entity_values(meal))
-                            .on_conflict_do_nothing(index_elements=[meals.c.date, meals.c.slot])
+                            .on_conflict_do_nothing(index_elements=[meals.c.id])
                             .returning(meals.c.id)
                         ).scalar_one_or_none()
                         if inserted is None:
                             raise ProposalConflict(
-                                f"{meal.date} {meal.slot} became occupied. "
-                                "Create and review a new proposal."
+                                f"Meal ID {meal.id} already exists. Create and review a new proposal."
                             )
                         applied.append(meal)
                         self.history.record(
@@ -238,8 +221,7 @@ class PlanningProposalService:
                             connection=connection,
                         )
                     # Return IDs in the same order as the reviewed input.
-                    ids = {(meal.date, meal.slot): meal.id for meal in applied}
-                    proposal.applied_meal_ids = [ids[(m.date, m.slot)] for m in proposal.meals]
+                    proposal.applied_meal_ids = [meal.id for meal in applied]
                     status = "applied"
             except ProposalConflict as exc:
                 failure = exc

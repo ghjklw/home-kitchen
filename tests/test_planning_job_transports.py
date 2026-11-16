@@ -12,7 +12,7 @@ from home_kitchen.context import HistoryContext, history_context
 from home_kitchen.settings import Settings
 
 
-def test_plan_proposal_is_atomic_explicit_and_conflict_safe(test_database_url):
+def test_plan_proposal_is_atomic_explicit_and_additive(test_database_url):
     with make_client(test_database_url) as client:
         recipe = client.post("/api/recipes", json=recipe_payload()).json()
         meals = [
@@ -30,9 +30,11 @@ def test_plan_proposal_is_atomic_explicit_and_conflict_safe(test_database_url):
         assert applied.status_code == 200
         assert len(applied.json()["applied_meal_ids"]) == 2
         assert client.post(path, json={"reviewed": True}).json() == applied.json()
-        conflict = client.post("/api/meal-plan-proposals", json={"meals": meals})
-        assert conflict.status_code == 409
-        assert len(client.get("/api/meals", params=period).json()) == 2
+        repeated = client.post("/api/meal-plan-proposals", json={"meals": meals})
+        assert repeated.status_code == 201
+        repeated_path = "/api/meal-plan-proposals/" + repeated.json()["id"] + "/confirm"
+        assert client.post(repeated_path, json={"reviewed": True}).status_code == 200
+        assert len(client.get("/api/meals", params=period).json()) == 4
 
 
 def test_background_job_rest_passes_actor_and_exact_retry_scope(test_database_url):

@@ -29,7 +29,7 @@ test("keeps source recipe content while using planned-serving ingredient quantit
   assert.equal(view.sourceRecipe.servings, 3);
   assert.deepEqual(view.sourceRecipe.instructions, ["Cook for 15 minutes."]);
   assert.deepEqual(view.sourceRecipe.provenance, { original_source: "imported", source_url: "https://example.test/original" });
-  assert.throws(() => buildPlannedCookingView({}), /could not be opened/);
+  assert.throws(() => buildPlannedCookingView({}), /kunne ikke åpnes/);
 });
 
 test("uses readable quantities and a spoken label at the same precision", () => {
@@ -40,7 +40,7 @@ test("uses readable quantities and a spoken label at the same precision", () => 
 
   assert.deepEqual(line, {
     text: "233.33 g pasta",
-    accessibleLabel: "Amount: 233.33 grams pasta",
+    accessibleLabel: "Mengde: 233.33 gram pasta",
     copyText: "233.33 g pasta",
   });
   assert.ok(!line.accessibleLabel.includes("233.3333333333333333333333333"));
@@ -52,7 +52,7 @@ test("keeps very small positive and zero cooking quantities truthful", () => {
     formatPlannedIngredient({ name: "salt", quantity: "0.004", unit: "g" }, format),
     {
       text: "<0.01 g salt",
-      accessibleLabel: "Amount: <0.01 grams salt",
+      accessibleLabel: "Mengde: <0.01 gram salt",
       copyText: "<0.01 g salt",
     },
   );
@@ -60,7 +60,7 @@ test("keeps very small positive and zero cooking quantities truthful", () => {
     formatPlannedIngredient({ name: "water", quantity: "0", unit: "ml" }),
     {
       text: "0 ml water",
-      accessibleLabel: "Amount: 0 milliliters water",
+      accessibleLabel: "Mengde: 0 milliliter water",
       copyText: "0 ml water",
     },
   );
@@ -68,9 +68,9 @@ test("keeps very small positive and zero cooking quantities truthful", () => {
 
 test("keeps unresolved cooking amounts explicit instead of displaying null", () => {
   assert.deepEqual(formatPlannedIngredient({ name: "salt", quantity: null, unit: null }), {
-    text: "Quantity not specified · salt",
-    accessibleLabel: "Quantity not specified for salt",
-    copyText: "Quantity not specified · salt",
+    text: "Mengde ikke oppgitt · salt",
+    accessibleLabel: "Mengde ikke oppgitt for salt",
+    copyText: "Mengde ikke oppgitt · salt",
   });
 });
 
@@ -89,6 +89,6 @@ test("shares the same rounded amounts shown in planned cooking", () => {
 
   assert.equal(
     text,
-    "Tomato pasta\nFor 7 servings\n\nIngredients:\n- 233.33 g pasta\n- Quantity not specified · salt",
+    "Tomato pasta\nTil 7 porsjoner\n\nIngredienser:\n- 233.33 g pasta\n- Mengde ikke oppgitt · salt",
   );
 });

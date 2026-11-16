@@ -3,9 +3,11 @@ const test = require("node:test");
 
 const {
   formatDuration,
+  formatNeedQuantity,
   mergeNeedPages,
   planKey,
   selectionRecommendation,
+  sourceUrl,
   statusLabel,
 } = require("../src/home_kitchen/static/basket-match-view.js");
 
@@ -41,9 +43,9 @@ test("merges progressive and targeted job snapshots only for current need genera
 
 test("formats provider durations and labels per-need states", () => {
   assert.equal(formatDuration("P0DT00H20M00S"), "20 min");
-  assert.equal(formatDuration("PT1H5M"), "1 hr 5 min");
+  assert.equal(formatDuration("PT1H5M"), "1 t 5 min");
   assert.equal(formatDuration("unknown"), "unknown");
-  assert.equal(statusLabel("search_failed"), "Search failed");
+  assert.equal(statusLabel("search_failed"), "Søket mislyktes");
 });
 
 test("uses only a complete backend recommendation for compatible explicit selection", () => {
@@ -61,4 +63,12 @@ test("uses only a complete backend recommendation for compatible explicit select
   });
   assert.equal(selectionRecommendation({ ...candidate, recommended_packages: null }, "g"), null);
   assert.equal(selectionRecommendation(candidate, "ml"), null);
+});
+
+test("marks estimated need quantities as approximate and accepts only safe source links", () => {
+  assert.equal(formatNeedQuantity({ quantity: "1.25", unit: "g", approximate: true }, (value) => String(value).replace(".", ",")), "ca. 1,25 g");
+  assert.equal(formatNeedQuantity({ quantity: "2", unit: "stk", approximate: false }), "2 stk");
+  assert.equal(sourceUrl("https://matvaretabellen.no/food"), "https://matvaretabellen.no/food");
+  assert.equal(sourceUrl("http://matvaretabellen.no/food"), null);
+  assert.equal(sourceUrl("https://user:secret@example.test/food"), null);
 });

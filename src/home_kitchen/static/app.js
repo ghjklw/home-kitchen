@@ -46,6 +46,7 @@ const state = {
   integrationsError: null,
   settingsRefreshInFlight: false,
   week: localDate(new Date()),
+  selectedDate: localDate(new Date()),
 };
 let noticeTimer;
 function el(tag, text, className) {
@@ -89,7 +90,7 @@ async function api(path, method = "GET", body) {
     });
   } catch {
     throw new Error(
-      "Could not reach your kitchen. Check your connection and try again. Your changes have not been saved.",
+      "Fikk ikke kontakt med kjøkkenet. Sjekk tilkoblingen og prøv igjen. Endringene dine er ikke lagret.",
     );
   }
   if (!response.ok) {
@@ -101,17 +102,17 @@ async function api(path, method = "GET", body) {
     } catch {}
     const error = new Error(
       response.status === 401 || response.status === 403
-        ? "Sign in through your household’s trusted access link, then try again."
+        ? "Logg inn via husholdningens godkjente tilgangslenke, og prøv igjen."
         : response.status === 409 && path === "/meals"
-          ? "That meal time is already occupied. Choose another slot, or remove the existing meal first. Your form is still here."
+          ? "Dette måltidstidspunktet er allerede brukt. Velg et annet tidspunkt, eller fjern det eksisterende måltidet først. Skjemaet er fortsatt åpent."
           : detail ||
           (response.status === 503
             ? path === "/ai/plan"
-              ? "AI meal planning needs a provider configured by your household administrator."
-              : "This service needs setup before it can be used."
+              ? "KI-måltidsplanlegging krever at husholdningsadministratoren setter opp en leverandør."
+              : "Denne tjenesten må settes opp før den kan brukes."
             : response.status === 422 && path === "/ai/plan"
-              ? "No recipes are available for meal planning. Add a recipe, then try again."
-              : "Could not complete that request. Please try again."),
+              ? "Det finnes ingen oppskrifter å planlegge med. Legg til en oppskrift og prøv igjen."
+              : "Forespørselen kunne ikke fullføres. Prøv igjen."),
     );
     if (Number.isFinite(data?.retry_after_seconds))
       error.retryAfterSeconds = Math.max(0, data.retry_after_seconds);
@@ -131,7 +132,7 @@ function recipeAssistantConfigured() {
     integration?.configured === true
   );
 }
-function connectionSettingsButton(label = "Manage connections in Settings") {
+function connectionSettingsButton(label = "Administrer tilkoblinger i innstillinger") {
   return button(
     label,
     () => {
@@ -169,7 +170,7 @@ async function refreshConnectionSettings(event) {
   const keepFocus = document.activeElement === control;
   if (control) {
     control.disabled = true;
-    control.textContent = "Refreshing…";
+    control.textContent = "Oppdaterer …";
   }
   await loadConnectionStatus();
   const replacement = renderConnectionSettings();
@@ -197,6 +198,9 @@ function day(offset) {
 function range() {
   return "?start=" + iso(day(0)) + "&end=" + iso(day(6));
 }
+function agendaMeals(meals, date) {
+  return meals.filter((meal) => meal.date === date);
+}
 function parseDate(value) {
   if (!/^\d{4}-\d{2}-\d{2}$/u.test(value || "")) return null;
   const [year, month, date] = value.split("-").map(Number);
@@ -206,10 +210,82 @@ function parseDate(value) {
 function syncPlannerUrl() {
   const url = new URL(location.href);
   url.searchParams.set("date", iso(state.week));
+  if (iso(state.selectedDate) === iso(state.week)) url.searchParams.delete("day");
+  else url.searchParams.set("day", iso(state.selectedDate));
   history.replaceState(null, "", url.pathname + url.search + url.hash);
 }
 function dateLabel(date, options) {
-  return date.toLocaleDateString(undefined, options);
+  return date.toLocaleDateString("nb-NO", options);
+}
+function formatUiCount(value) {
+  return new Intl.NumberFormat("nb-NO").format(value);
+}
+function formatServings(value) {
+  return formatUiCount(value) + (Number(value) === 1 ? " porsjon" : " porsjoner");
+}
+function formatUiQuantity(value) {
+  return window.KitchenShoppingView.formatQuantityForDisplay(String(value ?? ""));
+}
+function formatUiAccessibleQuantity(value) {
+  return window.KitchenShoppingView.formatQuantityForAccessibility(String(value ?? ""));
+}
+function ingredientQuantityText(item) {
+  const quantity = formatUiQuantity(item.quantity);
+  return [quantity, item.unit, item.name].filter(Boolean).join(" ");
+}
+function purchaseEstimateText(estimate) {
+  if (
+    !estimate ||
+    estimate.quantity == null ||
+    !String(estimate.unit || "").trim() ||
+    !window.KitchenShoppingView.isPositiveDecimal(String(estimate.quantity))
+  ) return "";
+  return (estimate.approximate === true ? "Anslått handlemengde: " : "Omregnet handlemengde: ") +
+    formatUiQuantity(estimate.quantity) + " " + estimate.unit;
+}
+function renderPurchaseEvidence(item) {
+  if (!item || !(item.approximate === true || item.provenance || item.source_url)) return null;
+  const details = el("details", null, "purchase-evidence muted");
+  add(details, el("summary", "Om mengdegrunnlaget"));
+  if (item.approximate === true) add(details, el("p", "Handlemengden er omtrentlig.", "muted"));
+  if (item.provenance) add(details, el("p", String(item.provenance), "muted"));
+  const sourceUrl = window.KitchenBasketMatchView.sourceUrl(item.source_url);
+  if (sourceUrl) {
+    const source = el("a", "Se kilden for handlemengden ↗");
+    source.href = sourceUrl;
+    source.target = "_blank";
+    source.rel = "noopener noreferrer";
+    add(details, source);
+  }
+  return details;
+}
+function mealSlotLabel(slot) {
+  return ({ breakfast: "Frokost", lunch: "Lunsj", dinner: "Middag" })[slot] || slot || "";
+}
+function mealAgendaMetadata(meal) {
+  return [
+    meal.label || mealSlotLabel(meal.slot),
+    meal.scheduled_time,
+    formatServings(meal.servings),
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+function buildMealWriteRequest(existingMeal, values) {
+  const payload = {
+    date: values.date,
+    label: values.label.trim() || null,
+    scheduled_time: values.scheduled_time || null,
+    recipe_id: values.recipe_id,
+    servings: Number(values.servings),
+  };
+  return existingMeal
+    ? {
+        path: "/meals/" + encodeURIComponent(existingMeal.id),
+        method: "PUT",
+        payload,
+      }
+    : { path: "/meals", method: "POST", payload };
 }
 function httpsUrl(value) {
   try {
@@ -230,7 +306,7 @@ function recipeImage(recipe, className = "recipe-image") {
   image.decoding = "async";
   image.referrerPolicy = "no-referrer";
   image.addEventListener("error", () => {
-    frame.replaceChildren(el("span", "Image unavailable", "image-fallback"));
+    frame.replaceChildren(el("span", "Bildet er ikke tilgjengelig", "image-fallback"));
   });
   frame.append(image);
   return frame;
@@ -261,6 +337,7 @@ function weekControls() {
   const row = el("div", null, "toolbar period-toolbar");
   const change = async (amount) => {
     state.week.setDate(state.week.getDate() + amount);
+    state.selectedDate.setDate(state.selectedDate.getDate() + amount);
     syncPlannerUrl();
     await refreshView();
   };
@@ -271,12 +348,13 @@ function weekControls() {
   const jumpInput = el("input");
   jumpInput.type = "date";
   jumpInput.value = iso(state.week);
-  jumpInput.setAttribute("aria-label", "Jump to date");
-  jump.append(el("span", "Jump to date"), jumpInput);
+  jumpInput.setAttribute("aria-label", "Gå til dato");
+  jump.append(el("span", "Gå til dato"), jumpInput);
   jumpInput.addEventListener("change", async () => {
     const date = parseDate(jumpInput.value);
     if (!date) return;
     state.week = date;
+    state.selectedDate = new Date(date);
     syncPlannerUrl();
     await refreshView();
   });
@@ -292,9 +370,10 @@ function weekControls() {
     ),
     next,
     button(
-      "Today",
+      "I dag",
       async () => {
         state.week = localDate(new Date());
+        state.selectedDate = new Date(state.week);
         syncPlannerUrl();
         await refreshView();
       },
@@ -302,8 +381,68 @@ function weekControls() {
     ),
     jump,
   );
-  previous.ariaLabel = "Previous 7 days";
-  next.ariaLabel = "Next 7 days";
+  previous.ariaLabel = "Forrige uke";
+  next.ariaLabel = "Neste uke";
+  return row;
+}
+function selectedDateControls() {
+  const row = el("div", null, "toolbar period-toolbar selected-date-toolbar");
+  const change = async (amount) => {
+    state.selectedDate.setDate(state.selectedDate.getDate() + amount);
+    if (state.selectedDate < state.week) state.week.setDate(state.week.getDate() - 7);
+    else if (state.selectedDate > day(6)) state.week.setDate(state.week.getDate() + 7);
+    syncPlannerUrl();
+    await refreshView();
+  };
+  const previous = button("←", () => change(-1));
+  previous.ariaLabel = "Forrige dag";
+  previous.dataset.focusKey = "planner-previous-day";
+  const next = button("→", () => change(1));
+  next.ariaLabel = "Neste dag";
+  next.dataset.focusKey = "planner-next-day";
+  const jump = el("label", null, "date-jump");
+  const jumpInput = el("input");
+  jumpInput.type = "date";
+  jumpInput.value = iso(state.selectedDate);
+  jumpInput.setAttribute("aria-label", "Velg planleggingsdato");
+  jumpInput.dataset.focusKey = "planner-selected-date";
+  jump.append(el("span", "Velg dato"), jumpInput);
+  jumpInput.addEventListener("change", async () => {
+    const date = parseDate(jumpInput.value);
+    if (!date) return;
+    state.week = new Date(date);
+    state.selectedDate = new Date(date);
+    syncPlannerUrl();
+    await refreshView();
+  });
+  const today = button(
+    "I dag",
+    async () => {
+      state.week = localDate(new Date());
+      state.selectedDate = new Date(state.week);
+      syncPlannerUrl();
+      await refreshView();
+    },
+    "quiet small today-period",
+  );
+  today.dataset.focusKey = "planner-today";
+  add(
+    row,
+    previous,
+    el(
+      "span",
+      dateLabel(state.selectedDate, {
+        weekday: "long",
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      }),
+      "week-range selected-date-label",
+    ),
+    next,
+    today,
+    jump,
+  );
   return row;
 }
 function openDialog(heading) {
@@ -322,7 +461,7 @@ function openDialog(heading) {
       button("×", () => modal.close(), "quiet"),
     ),
   );
-  root.querySelector("button").ariaLabel = "Close dialog";
+  root.querySelector("button").ariaLabel = "Lukk dialogvindu";
   modal.showModal();
   return root;
 }
@@ -340,7 +479,7 @@ function formSubmit(form, text, action, { settingsOnFailure = false } = {}) {
   const error = el("p", "", "form-error");
   error.setAttribute("role", "alert");
   const settingsLink = settingsOnFailure
-    ? connectionSettingsButton("Review connections in Settings")
+    ? connectionSettingsButton("Se over tilkoblingene i innstillingene")
     : null;
   if (settingsLink) settingsLink.hidden = true;
   const submit = el("button", text, "primary");
@@ -375,25 +514,25 @@ function shouldRefreshShopping(view, visibility, modalOpen, formOpen) {
   );
 }
 function shoppingRefreshLabel() {
-  if (state.shoppingRefreshInFlight) return "Refreshing…";
-  if (!state.shoppingLastRefreshedAt) return "Not refreshed yet";
-  const time = new Intl.DateTimeFormat(undefined, {
+  if (state.shoppingRefreshInFlight) return "Oppdaterer …";
+  if (!state.shoppingLastRefreshedAt) return "Ikke oppdatert ennå";
+  const time = new Intl.DateTimeFormat("nb-NO", {
     hour: "numeric",
     minute: "2-digit",
   }).format(new Date(state.shoppingLastRefreshedAt));
-  return "Updated " + time;
+  return "Oppdatert kl. " + time;
 }
 function updateShoppingRefreshControl() {
   const control = $("#shopping-refresh");
   const status = $("#shopping-refresh-status");
   if (control) {
     control.disabled = state.shoppingRefreshInFlight;
-    control.textContent = state.shoppingRefreshInFlight ? "Refreshing…" : "Refresh";
+    control.textContent = state.shoppingRefreshInFlight ? "Oppdaterer …" : "Oppdater";
     control.setAttribute(
       "aria-label",
       state.shoppingRefreshInFlight
-        ? "Refreshing shared shopping list"
-        : "Refresh shared shopping list",
+        ? "Oppdaterer delt handleliste"
+        : "Oppdater delt handleliste",
     );
   }
   if (status) status.textContent = shoppingRefreshLabel();
@@ -745,9 +884,13 @@ function render() {
   const main = $("#main");
   const focused = document.activeElement;
   const focusKey = focused?.dataset?.focusKey;
-  const selection = focusKey && typeof focused.selectionStart === "number"
-    ? [focused.selectionStart, focused.selectionEnd]
-    : null;
+  let selection = null;
+  if (focusKey) {
+    try {
+      if (typeof focused.selectionStart === "number")
+        selection = [focused.selectionStart, focused.selectionEnd];
+    } catch {}
+  }
   main.replaceChildren();
   document.querySelectorAll("[data-view]").forEach((node) => {
     if (node.dataset.view === state.view)
@@ -784,23 +927,70 @@ function render() {
   }
 }
 function renderWeek(main) {
+  const selectedDate = iso(state.selectedDate);
+  const meals = agendaMeals(state.meals, selectedDate);
   add(
     main,
     title(
-      "Make room for good food",
-      "Your week, on a plate.",
-      "Plan breakfast, lunch and dinner for the next seven days.",
+      "Planlegg gode måltider",
+      "Litt rom i dagen.",
+      "Velg en dato for å se hva husholdningen har planlagt.",
       [
-        button("Suggest my week", suggestWeek),
-        button("Plan a meal", () => mealForm(), "primary"),
+        button("Foreslå måltider", suggestWeek),
+        button("Planlegg et måltid", () => mealForm(selectedDate), "primary"),
       ],
     ),
-    weekControls(),
+    selectedDateControls(),
   );
+  const agenda = el("section", null, "selected-day-agenda");
+  const agendaHeader = add(
+    el("div", null, "agenda-heading"),
+    el(
+      "h2",
+      dateLabel(state.selectedDate, {
+        weekday: "long",
+        month: "long",
+        day: "numeric",
+      }),
+    ),
+    el(
+      "p",
+      meals.length === 1 ? "1 måltid planlagt" : meals.length + " måltider planlagt",
+      "muted",
+    ),
+  );
+  add(agenda, agendaHeader);
+  if (meals.length) {
+    const list = el("div", null, "agenda-list");
+    meals.forEach((meal) => add(list, renderAgendaMeal(meal)));
+    agenda.append(list);
+  } else {
+    add(
+      agenda,
+      empty(
+        "Ingenting er planlagt denne dagen",
+        "De andre måltidene finner du i ukeoversikten.",
+        button("Planlegg et måltid", () => mealForm(selectedDate), "quiet"),
+      ),
+    );
+  }
+  main.append(agenda);
+  const fullWeek = el("details", null, "full-week-details");
+  add(
+    fullWeek,
+    el(
+      "summary",
+      "Hele uken · " +
+        dateLabel(day(0), { month: "short", day: "numeric" }) +
+        " – " +
+        dateLabel(day(6), { month: "short", day: "numeric", year: "numeric" }),
+    ),
+  );
+  add(fullWeek, weekControls());
   const grid = el("div", null, "week-grid");
   for (let i = 0; i < 7; i++) {
     const date = day(i);
-    const meals = state.meals.filter((meal) => meal.date === iso(date));
+    const dayMeals = agendaMeals(state.meals, iso(date));
     const card = el(
       "section",
       null,
@@ -812,89 +1002,66 @@ function renderWeek(main) {
       el(
         "p",
         dateLabel(date, { month: "short", day: "numeric" }) +
-          (iso(date) === iso(new Date()) ? " · Today" : ""),
+            (iso(date) === iso(new Date()) ? " · I dag" : ""),
         "date",
       ),
     );
-    const occupiedSlots = new Set(meals.map((meal) => meal.slot || "dinner"));
-    ["breakfast", "lunch", "dinner"].forEach((slot) => {
-      const slotSection = el("section", null, "meal-slot");
-      const slotMeals = meals.filter((meal) => (meal.slot || "dinner") === slot);
-      if (slotMeals.length) {
-        add(slotSection, el("span", slot, "eyebrow"));
-        slotMeals.forEach((meal) => {
-          const recipe = state.recipes.find((item) => item.id === meal.recipe_id);
-          add(
-            slotSection,
-            el("h3", recipe?.title || "Recipe unavailable", "meal-title"),
-            el("p", meal.servings + " servings", "muted"),
-            add(
-              el("div", null, "meal-actions"),
-              recipe
-                ? button("View recipe", () => viewRecipe(recipe), "small")
-                : null,
-              button(
-                "Cook",
-                () => openPlannedMeal(meal),
-                "small primary",
-              ),
-              button(
-                "Remove",
-                async () => {
-                  try {
-                    await mutate(
-                      "/meals/" + encodeURIComponent(meal.id),
-                      "DELETE",
-                      undefined,
-                      "Meal removed.",
-                    );
-                  } catch (err) {
-                    notify(err.message, true);
-                  }
-                },
-                "small quiet",
-              ),
-            ),
-          );
-        });
-      }
-      if (slotMeals.length) add(card, slotSection);
-    });
-    const openSlots = ["breakfast", "lunch", "dinner"].filter(
-      (slot) => !occupiedSlots.has(slot),
-    );
-    if (openSlots.length) {
-      add(
-        card,
-        el(
-          "p",
-          meals.length ? "Open: " + openSlots.join(" · ") : "Nothing planned yet",
-          "open-slots",
-        ),
-        button(
-          "+ Add meal",
-          () => mealForm(iso(date), undefined, openSlots[0]),
-          "quiet small",
-        ),
-      );
-    }
+    dayMeals.forEach((meal) => card.append(renderAgendaMeal(meal)));
+    add(card, button("+ Planlegg et måltid", () => mealForm(iso(date)), "quiet small"));
     add(grid, card);
   }
-  add(main, grid);
+  add(fullWeek, grid);
+  add(main, fullWeek);
+}
+function renderAgendaMeal(meal) {
+  const recipe = state.recipes.find((item) => item.id === meal.recipe_id);
+  const card = el("article", null, "agenda-meal");
+  const metadata = mealAgendaMetadata(meal);
+  add(
+    card,
+    add(
+      el("div", null, "agenda-meal-copy"),
+      el("h3", recipe?.title || "Oppskriften er ikke tilgjengelig", "meal-title"),
+      metadata ? el("p", metadata, "muted") : null,
+    ),
+    add(
+      el("div", null, "meal-actions"),
+      recipe ? button("Vis oppskrift", () => viewRecipe(recipe), "small") : null,
+      button("Start matlaging", () => openPlannedMeal(meal), "small primary"),
+      button("Rediger", () => mealForm(iso(parseDate(meal.date) || state.selectedDate), meal.recipe_id, meal), "small quiet"),
+      button(
+        "Fjern",
+        async () => {
+          try {
+            await mutate(
+              "/meals/" + encodeURIComponent(meal.id),
+              "DELETE",
+              undefined,
+              "Måltidet er fjernet.",
+            );
+          } catch (err) {
+            notify(err.message, true);
+          }
+        },
+        "small quiet",
+      ),
+    ),
+  );
+  return card;
 }
 async function suggestWeek() {
-  const root = openDialog("A week to review");
+  const root = openDialog("Ukeplanforslag");
   add(
     root,
     el(
       "p",
-      "Asking AI for dinner ideas. Nothing will be added until you save each meal.",
+      "Ber om middagsforslag fra KI. Ingenting legges til før du lagrer det enkelte måltidet.",
       "muted",
     ),
   );
   const result = el("div", null, "loading");
   result.setAttribute("aria-live", "polite");
-  result.textContent = "Putting together your suggestions…";
+  result.textContent = "Lager forslag …";
   add(root, result);
   try {
     const draft = await api("/ai/plan", "POST", {
@@ -908,7 +1075,7 @@ async function suggestWeek() {
         result,
         el(
           "p",
-          "No meal suggestions came back. Try again later or plan a dinner yourself.",
+          "Fikk ingen måltidsforslag. Prøv igjen senere, eller planlegg en middag selv.",
           "muted",
         ),
       );
@@ -917,7 +1084,7 @@ async function suggestWeek() {
     if (Array.isArray(draft.notes) && draft.notes.length) {
       const notes = add(
         el("section", null, "callout"),
-        el("strong", "Notes from the planner"),
+        el("strong", "Merknader fra planleggeren"),
       );
       const list = el("ul");
       draft.notes.forEach((note) => add(list, el("li", String(note))));
@@ -930,47 +1097,35 @@ async function suggestWeek() {
       const date = new Date(meal.date + "T12:00:00");
       const row = el("article", null, "draft-meal");
       const info = el("div");
+      const mealDate = Number.isNaN(date.valueOf())
+        ? meal.date
+        : dateLabel(date, { weekday: "long", month: "short", day: "numeric" });
       add(
         info,
-        el("h3", recipe?.title || "Recipe unavailable", "meal-title"),
-        el(
-          "p",
-          (Number.isNaN(date.valueOf())
-            ? meal.date
-            : dateLabel(date, {
-                weekday: "long",
-                month: "short",
-                day: "numeric",
-              })) +
-            " · " +
-            (meal.slot || "dinner") +
-            " · " +
-            meal.servings +
-            " servings",
-          "muted",
-        ),
+        el("h3", recipe?.title || "Oppskriften er ikke tilgjengelig", "meal-title"),
+        el("p", [mealDate, mealAgendaMetadata(meal)].filter(Boolean).join(" · "), "muted"),
       );
       const status = el("p", "", "draft-status");
       status.setAttribute("role", "status");
-      const save = button("Add to my week", async () => {
+      const save = button("Legg til i ukeplanen", async () => {
         save.disabled = true;
-        status.textContent = "Saving…";
+        status.textContent = "Lagrer …";
         try {
           await api("/meals", "POST", meal);
-          status.textContent = "Added to your week.";
-          save.textContent = "Added";
+          status.textContent = "Lagt til i ukeplanen.";
+          save.textContent = "Lagt til";
           save.className = "small";
           await refreshView();
         } catch (error) {
           save.disabled = false;
-          status.textContent = error.message + " You can retry this meal.";
+          status.textContent = error.message + " Du kan prøve å legge til måltidet igjen.";
         }
       });
       save.classList.add("small", "primary");
       if (!recipe) {
         save.disabled = true;
         status.textContent =
-          "This recipe is no longer in your collection, so it cannot be added.";
+          "Oppskriften finnes ikke lenger i samlingen din, og kan derfor ikke legges til.";
       }
       add(row, info, save, status);
       list.append(row);
@@ -985,7 +1140,7 @@ async function suggestWeek() {
         result,
         el(
           "p",
-          "Ask your household administrator to configure the AI provider, or add a dinner yourself.",
+          "Be husholdningsadministratoren om å sette opp KI-leverandøren, eller legg til en middag selv.",
           "muted",
         ),
       );
@@ -994,68 +1149,75 @@ async function suggestWeek() {
         result,
         el(
           "p",
-          "Add at least one recipe to your collection, then try again.",
+          "Legg til minst én oppskrift i samlingen, og prøv igjen.",
           "muted",
         ),
       );
     add(
       result,
-      button("Close", () => $("#modal").close(), "quiet"),
+      button("Lukk", () => $("#modal").close(), "quiet"),
     );
   }
 }
-function mealForm(date = iso(day(0)), recipeId, slot = "dinner") {
+function mealForm(date = iso(state.selectedDate), recipeId, existingMeal = null) {
   if (!state.recipes.length) {
-    const root = openDialog("Start with a recipe");
+    const root = openDialog("Start med en oppskrift");
     add(
       root,
-      el("p", "Add your first recipe, then choose a day for it.", "muted"),
-      button("Add a recipe", () => recipeForm(), "primary"),
+      el("p", "Legg til den første oppskriften, og velg deretter en dag.", "muted"),
+      button("Legg til en oppskrift", () => recipeForm(), "primary"),
     );
     return;
   }
-  const root = openDialog("Plan a meal");
+  const root = openDialog(existingMeal ? "Rediger måltid" : "Planlegg et måltid");
   const form = el("form");
-  const chosenDate = field("Day", "date", date);
+  const chosenDate = field("Dato", "date", date);
   chosenDate.input.required = true;
-  const recipe = field("Recipe", "select");
+  const label = field(
+    "Etikett (valgfritt)",
+    "text",
+    existingMeal?.label || mealSlotLabel(existingMeal?.slot),
+    "For eksempel frokost, matpakke eller restemiddag.",
+  );
+  const scheduledTime = field(
+    "Tidspunkt (valgfritt)",
+    "time",
+    existingMeal?.scheduled_time || "",
+  );
+  const recipe = field("Oppskrift", "select");
   state.recipes.forEach((item) => {
     const option = el("option", item.title);
     option.value = item.id;
     add(recipe.input, option);
   });
-  if (recipeId) recipe.input.value = recipeId;
-  const mealSlot = field("Meal time", "select");
-  ["breakfast", "lunch", "dinner"].forEach((value) => {
-    const option = el("option", value[0].toUpperCase() + value.slice(1));
-    option.value = value;
-    add(mealSlot.input, option);
-  });
-  mealSlot.input.value = slot;
+  recipe.input.value = recipeId || existingMeal?.recipe_id || "";
   const servings = field(
-    "Servings",
+    "Porsjoner",
     "number",
-    state.household.default_servings || 2,
+    existingMeal?.servings || state.household.default_servings || 2,
   );
   servings.input.min = 1;
   servings.input.max = 100;
   servings.input.required = true;
-  add(form, chosenDate.wrap, mealSlot.wrap, recipe.wrap, servings.wrap);
-  formSubmit(form, "Add to week", async () => {
+  add(form, chosenDate.wrap, label.wrap, scheduledTime.wrap, recipe.wrap, servings.wrap);
+  formSubmit(form, existingMeal ? "Lagre endringer" : "Legg til i ukeplanen", async () => {
     const mealDate = chosenDate.input.value;
-    await api("/meals", "POST", {
+    const request = buildMealWriteRequest(existingMeal, {
       date: mealDate,
-      slot: mealSlot.input.value,
+      label: label.input.value,
+      scheduled_time: scheduledTime.input.value,
       recipe_id: recipe.input.value,
-      servings: Number(servings.input.value),
+      servings: servings.input.value,
     });
+    await api(request.path, request.method, request.payload);
     state.week = parseDate(mealDate) || localDate(new Date());
+    state.selectedDate = new Date(state.week);
     syncPlannerUrl();
     $("#modal").close();
     state.view = "week";
     location.hash = "week";
     await refreshView();
-    notify("Meal planned.");
+    notify(existingMeal ? "Måltidet er oppdatert." : "Måltidet er lagt til i planen.");
   });
   add(root, form);
 }
@@ -1063,13 +1225,13 @@ function renderRecipes(main) {
   add(
     main,
     title(
-      "Your own collection",
-      "Recipes worth keeping.",
-      "Everyday favourites, new discoveries, and your next good dinner.",
+      "Din egen samling",
+      "Oppskrifter å ta vare på.",
+      "Hverdagsfavoritter, nye funn og din neste gode middag.",
       [
-        button("Find recipes", discoveryForm),
-        button("Import link", importForm),
-        button("+ Add recipe", () => recipeForm(), "primary"),
+        button("Finn oppskrifter", discoveryForm),
+        button("Importer lenke", importForm),
+        button("+ Legg til oppskrift", () => recipeForm(), "primary"),
       ],
     ),
   );
@@ -1080,7 +1242,7 @@ function renderRecipes(main) {
         el("section", null, "callout connection-prompt"),
         el(
           "p",
-          "AI recipe shaping and meal suggestions are not configured. You can still browse sources and edit recipes; manage the recipe assistant connection in Settings.",
+          "KI-hjelp for oppskrifter og måltidsforslag er ikke satt opp. Du kan fortsatt bla i kilder og redigere oppskrifter. Administrer tilkoblingen for oppskriftsassistenten i innstillingene.",
         ),
         connectionSettingsButton(),
       ),
@@ -1089,8 +1251,8 @@ function renderRecipes(main) {
   const tools = el("div", null, "toolbar");
   const search = el("input", null, "search");
   search.type = "search";
-  search.placeholder = "Find a recipe…";
-  search.ariaLabel = "Find a recipe";
+  search.placeholder = "Søk etter en oppskrift …";
+  search.ariaLabel = "Søk etter en oppskrift";
   add(tools, search);
   add(main, tools);
   const results = el("div");
@@ -1103,13 +1265,13 @@ function renderRecipes(main) {
       add(
         results,
         empty(
-          "Your recipe book starts here",
-          "Add a recipe you love or import one from a link. Your collection is yours to build.",
-          button("Add your first recipe", () => recipeForm(), "primary"),
+          "Oppskriftsboken starter her",
+          "Legg til en oppskrift du liker, eller importer en fra en lenke. Samlingen bygger du selv.",
+          button("Legg til din første oppskrift", () => recipeForm(), "primary"),
         ),
       );
     else if (!matches.length)
-      add(results, empty("No recipes found", "Try another recipe name."));
+      add(results, empty("Fant ingen oppskrifter", "Prøv et annet oppskriftsnavn."));
     else {
       const grid = el("div", null, "grid");
       matches.forEach((recipe) =>
@@ -1121,25 +1283,25 @@ function renderRecipes(main) {
             el(
               "span",
               recipe.source === "ai"
-                ? "AI idea"
+                ? "KI-idé"
                 : recipe.source === "imported"
-                  ? "From a recipe link"
-                  : "From your kitchen",
+                  ? "Fra en oppskriftslenke"
+                  : "Fra ditt kjøkken",
               "badge",
             ),
             el("h3", recipe.title),
             el(
               "p",
-              recipe.servings +
-                " servings · " +
-                recipe.ingredients.length +
-                " ingredients",
+                formatServings(recipe.servings) +
+                " · " +
+                formatUiCount(recipe.ingredients.length) +
+                " ingredienser",
               "muted",
             ),
             add(
               el("div", null, "actions"),
-              button("View recipe", () => viewRecipe(recipe)),
-              button("Plan", () => mealForm(undefined, recipe.id), "quiet"),
+              button("Vis oppskrift", () => viewRecipe(recipe)),
+              button("Planlegg", () => mealForm(undefined, recipe.id), "quiet"),
             ),
           ),
         ),
@@ -1154,22 +1316,22 @@ function renderRecipes(main) {
 function recipeForm(draft = {}, source = "manual") {
   const isEditing = Boolean(draft.id);
   const root = openDialog(
-    isEditing ? "Edit recipe" : draft.title ? "Review your recipe" : "Add a recipe",
+    isEditing ? "Rediger oppskrift" : draft.title ? "Se over oppskriften" : "Legg til oppskrift",
   );
   if (source !== "manual")
     add(
       root,
       el(
         "p",
-        "Check the ingredients, quantities and instructions before saving.",
+        "Kontroller ingrediensene, mengdene og fremgangsmåten før du lagrer.",
         "callout",
       ),
     );
   const form = el("form");
-  const name = field("Recipe name", "text", draft.title);
+  const name = field("Oppskriftsnavn", "text", draft.title);
   name.input.required = true;
   const servings = field(
-    "Recipe makes",
+    "Antall porsjoner",
     "number",
     draft.servings || state.household.default_servings || 2,
   );
@@ -1185,29 +1347,29 @@ function recipeForm(draft = {}, source = "manual") {
       form,
       el(
         "p",
-        "Source recipe servings: " + draft.servings + ". The value below is what Kitchen will save.",
+        "Porsjoner i kildeoppskriften: " + formatUiCount(draft.servings) + ". Verdien nedenfor er det som lagres.",
         "muted",
       ),
     );
   const imageUrl = field(
-    "Recipe photo URL (optional)",
+    "Lenke til oppskriftsbilde (valgfritt)",
     "url",
     draft.image_url || "",
-    "Use an HTTPS image URL. No photo is added unless you provide one.",
+    "Bruk en HTTPS-lenke til et bilde. Bildet legges bare til hvis du oppgir en lenke.",
   );
   imageUrl.input.placeholder = "https://…";
   const ingredientEditor = el("fieldset", null, "ingredient-editor");
-  add(ingredientEditor, el("legend", "Ingredients"));
+  add(ingredientEditor, el("legend", "Ingredienser"));
   add(
     ingredientEditor,
     el(
       "p",
-      "Review source lines. Use positive quantities with a decimal point or comma and explicit units before saving.",
+      "Se over kildeteksten. Mengder kan stå tomme hvis teksten er uklar. Oppgi bare mengder og enheter du kan bekrefte.",
       "muted",
     ),
   );
   if (draft.source_url) {
-    const original = el("a", "Open original recipe", "source-link");
+    const original = el("a", "Åpne kildeoppskriften", "source-link");
     original.href = draft.source_url;
     original.target = "_blank";
     original.rel = "noopener noreferrer";
@@ -1234,8 +1396,8 @@ function recipeForm(draft = {}, source = "manual") {
 
   function updateIngredientRowLabels() {
     rowControllers.forEach((row, index) => {
-      row.legend.textContent = "Ingredient " + (index + 1);
-      row.remove.setAttribute("aria-label", "Remove ingredient " + (index + 1));
+      row.legend.textContent = "Ingrediens " + formatUiCount(index + 1);
+      row.remove.setAttribute("aria-label", "Fjern ingrediens " + formatUiCount(index + 1));
     });
   }
 
@@ -1243,17 +1405,19 @@ function recipeForm(draft = {}, source = "manual") {
     const row = el("fieldset", null, "ingredient-row");
     const legend = el("legend");
     const sourceText = values.sourceText
-      ? el("p", "Source text: " + values.sourceText, "ingredient-source")
+      ? el("p", "Tekst fra kilden: " + values.sourceText, "ingredient-source")
       : null;
     const fields = el("div", null, "ingredient-fields");
-    const ingredientName = field("Name", "text", values.name);
-    const quantity = field("Quantity", "text", values.quantity);
+    const ingredientName = field("Navn", "text", values.name);
+    const quantity = field("Mengde", "text", values.quantity);
     quantity.input.inputMode = "decimal";
-    const unit = field("Unit", "text", values.unit);
-    const category = field("Category", "text", values.category || "Other");
+    const unit = field("Enhet", "text", values.unit);
+    const category = field("Kategori", "text", values.category || "Other");
+    const estimateText = purchaseEstimateText(values.purchase_estimate);
+    const estimateNode = estimateText ? el("p", estimateText, "muted purchase-estimate") : null;
     const rowError = el("p", "", "ingredient-error");
     rowError.setAttribute("role", "alert");
-    const remove = button("Remove", () => {
+    const remove = button("Fjern", () => {
       const index = rowControllers.indexOf(controller);
       if (index < 0) return;
       rowControllers.splice(index, 1);
@@ -1268,18 +1432,19 @@ function recipeForm(draft = {}, source = "manual") {
       quantity: quantity.input,
       unit: unit.input,
       source_indices: [...(values.source_indices || [])],
+      purchase_estimate: values.purchase_estimate ? { ...values.purchase_estimate } : null,
       category: category.input,
       error: rowError,
     };
     add(fields, ingredientName.wrap, quantity.wrap, unit.wrap, category.wrap);
-    add(row, legend, sourceText, fields, rowError, remove);
+    add(row, legend, sourceText, fields, estimateNode, rowError, remove);
     return controller;
   }
 
   rowControllers = rowControllers.map(createIngredientRow);
   rowControllers.forEach((row) => ingredientRows.append(row.row));
   updateIngredientRowLabels();
-  const addIngredient = button("+ Add ingredient", () => {
+  const addIngredient = button("+ Legg til ingrediens", () => {
     const row = createIngredientRow(window.KitchenRecipeEditor.rowFromDraft({}));
     rowControllers.push(row);
     ingredientRows.append(row.row);
@@ -1288,10 +1453,10 @@ function recipeForm(draft = {}, source = "manual") {
   }, "quiet");
   add(ingredientEditor, ingredientRows, addIngredient);
   const instructions = field(
-    "Instructions",
+    "Fremgangsmåte",
     "textarea",
     (draft.instructions || []).join("\n"),
-    "One step per line.",
+    "Skriv ett trinn per linje.",
   );
   instructions.input.required = true;
   add(
@@ -1302,31 +1467,27 @@ function recipeForm(draft = {}, source = "manual") {
     ingredientEditor,
     instructions.wrap,
   );
-  formSubmit(form, "Save recipe", async () => {
+  formSubmit(form, "Lagre oppskrift", async () => {
     const photo = imageUrl.input.value.trim();
     if (photo && !httpsUrl(photo))
-      throw new Error("Recipe photo URL must use HTTPS.");
-    if (!rowControllers.length) throw new Error("Add at least one ingredient before saving.");
+      throw new Error("Lenken til oppskriftsbildet må bruke HTTPS.");
+    if (!rowControllers.length) throw new Error("Legg til minst én ingrediens før du lagrer.");
     let hasIngredientErrors = false;
     const rows = rowControllers.map((row) => {
-      const item = {
-        name: row.name.value.trim(),
-        quantity: window.KitchenRecipeEditor.normalizeQuantity(row.quantity.value),
-        unit: row.unit.value.trim(),
-        category: row.category.value.trim() || "Other",
-        source_indices: [...row.source_indices],
-      };
+      const { item, errors: fieldErrors } = window.KitchenRecipeEditor.recipeIngredientForSave({
+        name: row.name.value,
+        quantity: row.quantity.value,
+        unit: row.unit.value,
+        category: row.category.value,
+        source_indices: row.source_indices,
+        purchase_estimate: row.purchase_estimate,
+      });
       const errors = [];
-      const fieldErrors = {
-        name: !item.name,
-        quantity: !window.KitchenRecipeEditor.isPositiveQuantity(item.quantity),
-        unit: !item.unit,
-      };
-      if (fieldErrors.name) errors.push("Add an ingredient name.");
+      if (fieldErrors.name) errors.push("Oppgi navnet på ingrediensen.");
       if (fieldErrors.quantity) {
-        errors.push("Enter an exact positive quantity using a decimal point or comma; ambiguous source text needs your review.");
+        errors.push("Oppgi en gyldig positiv mengde med komma eller punktum, eller la feltet stå tomt.");
       }
-      if (fieldErrors.unit) errors.push("Enter the ingredient unit explicitly.");
+      if (fieldErrors.unit) errors.push("Oppgi enheten når du har oppgitt en mengde.");
       row.error.textContent = errors.join(" ");
       row.name.setAttribute("aria-invalid", String(fieldErrors.name));
       row.quantity.setAttribute("aria-invalid", String(fieldErrors.quantity));
@@ -1335,7 +1496,7 @@ function recipeForm(draft = {}, source = "manual") {
       return item;
     });
     if (hasIngredientErrors)
-      throw new Error("Fix the ingredient fields marked with an error before saving.");
+      throw new Error("Rett ingrediensfeltene som er markert med feil før du lagrer.");
     const payload = {
       title: name.input.value.trim(),
       servings: Number(servings.input.value),
@@ -1358,36 +1519,36 @@ function recipeForm(draft = {}, source = "manual") {
     state.recipes = await api("/recipes");
     $("#modal").close();
     navigate("recipes");
-    notify(isEditing ? "Recipe changes saved." : "Recipe added to your collection.");
+    notify(isEditing ? "Oppskriften er lagret." : "Oppskriften er lagt til i samlingen.");
   });
   add(root, form);
   if (recipeAssistantConfigured() && (isEditing || source === "ai")) {
     const revision = el("details", null, "recipe-ai-revision");
     add(
       revision,
-      el("summary", "Revise with AI"),
+      el("summary", "Få forslag fra KI"),
       el(
         "p",
         isEditing
-          ? "AI proposes a draft. Your saved recipe changes only when you choose Save."
-          : "AI proposes a draft. Review it and choose Save recipe when ready.",
+          ? "KI foreslår et utkast. Den lagrede oppskriften endres først når du velger Lagre."
+          : "KI foreslår et utkast. Se over det og velg Lagre oppskrift når du er klar.",
         "muted",
       ),
     );
     const prompt = field(
-      "What should change?",
+      "Hva vil du endre?",
       "textarea",
       "",
-      "For example: make it vegetarian, faster, or suitable for more servings.",
+      "For eksempel: gjør den vegetarisk, raskere eller tilpasset flere porsjoner.",
     );
     prompt.input.required = true;
     prompt.input.maxLength = 1000;
     prompt.input.rows = 3;
     const revisionError = el("p", "", "form-error");
     revisionError.setAttribute("role", "alert");
-    const revisionSettings = connectionSettingsButton("Review recipe assistant settings");
+    const revisionSettings = connectionSettingsButton("Se over innstillingene for oppskriftsassistenten");
     revisionSettings.hidden = true;
-    const revise = button("Review AI revision", async () => {
+    const revise = button("Se over KI-forslaget", async () => {
       revise.disabled = true;
       revisionError.textContent = "";
       try {
@@ -1413,7 +1574,7 @@ function recipeForm(draft = {}, source = "manual") {
         );
         const response = await api("/recipe-drafts/ai", "POST", payload);
         if (!response?.adapted)
-          throw new Error("AI did not return an editable draft. Your recipe is unchanged.");
+          throw new Error("KI-en ga ikke et redigerbart utkast. Oppskriften din er uendret.");
         const revisedDraft = isEditing
           ? { ...response.adapted, id: draft.id }
           : response.adapted;
@@ -1432,7 +1593,7 @@ function recipeForm(draft = {}, source = "manual") {
       root,
       add(
         el("section", null, "callout connection-prompt"),
-        el("p", "The recipe assistant is not configured, so AI revision is unavailable."),
+        el("p", "Oppskriftsassistenten er ikke satt opp, så KI-redigering er ikke tilgjengelig."),
         connectionSettingsButton(),
       ),
     );
@@ -1444,24 +1605,25 @@ function viewRecipe(recipe) {
   add(
     body,
     recipeImage(recipe),
-    el("p", recipe.servings + " servings", "muted"),
-    el("h3", "Ingredients"),
+    el("p", formatUiCount(recipe.servings) + " porsjoner", "muted"),
+    el("h3", "Ingredienser"),
   );
   const ingredients = el("ul");
-  recipe.ingredients.forEach((item) =>
-    add(
-      ingredients,
-      el("li", item.quantity + " " + item.unit + " " + item.name),
-    ),
-  );
+  recipe.ingredients.forEach((item) => {
+    const row = el("li");
+    add(row, el("span", ingredientQuantityText(item)));
+    const estimate = purchaseEstimateText(item.purchase_estimate);
+    if (estimate) add(row, el("small", estimate, "muted purchase-estimate"));
+    add(ingredients, row);
+  });
   const steps = el("ol");
   recipe.instructions.forEach((step) => add(steps, el("li", step)));
-  add(body, ingredients, el("h3", "Method"), steps);
+  add(body, ingredients, el("h3", "Fremgangsmåte"), steps);
   if (recipe.source_url) {
     try {
       const url = new URL(recipe.source_url);
       if (["https:", "http:"].includes(url.protocol)) {
-        const link = el("a", "Original recipe", "source-link");
+        const link = el("a", "Kildeoppskrift", "source-link");
         link.href = url.href;
         link.target = "_blank";
         link.rel = "noopener noreferrer";
@@ -1473,25 +1635,25 @@ function viewRecipe(recipe) {
     body,
     add(
       el("div", null, "actions"),
-      button("Plan a meal", () => mealForm(undefined, recipe.id), "primary"),
-      button("Edit recipe", () => recipeForm(recipe, recipe.source || "manual"), "quiet"),
-      button("Rate this recipe", () => feedbackForm(recipe), "quiet"),
+      button("Planlegg et måltid", () => mealForm(undefined, recipe.id), "primary"),
+      button("Rediger oppskrift", () => recipeForm(recipe, recipe.source || "manual"), "quiet"),
+      button("Vurder oppskriften", () => feedbackForm(recipe), "quiet"),
       button(
-        "Delete recipe",
+        "Slett oppskrift",
         () => {
-          const confirmRoot = openDialog("Delete this recipe?");
+          const confirmRoot = openDialog("Slette oppskriften?");
           add(
             confirmRoot,
             el(
               "p",
-              "This removes “" +
+              "Dette fjerner «" +
                 recipe.title +
-                "” from your collection. Meals using it may also need updating.",
+                "» fra samlingen. Måltider som bruker den, kan også måtte oppdateres.",
               "muted",
             ),
-            button("Keep recipe", () => viewRecipe(recipe)),
+            button("Behold oppskriften", () => viewRecipe(recipe)),
             button(
-              "Delete recipe",
+              "Slett oppskrift",
               async () => {
                 try {
                   await api(
@@ -1501,7 +1663,7 @@ function viewRecipe(recipe) {
                   state.recipes = await api("/recipes");
                   $("#modal").close();
                   await refreshView();
-                  notify("Recipe deleted.");
+                  notify("Oppskriften er slettet.");
                 } catch (error) {
                   notify(error.message, true);
                 }
@@ -1517,12 +1679,12 @@ function viewRecipe(recipe) {
   add(root, body);
 }
 function importForm() {
-  const root = openDialog("Bring a recipe along");
+  const root = openDialog("Importer en oppskrift");
   add(
     root,
     el(
       "p",
-      "Paste a supported recipe link. AI will shape it into an editable draft for review.",
+      "Lim inn en støttet oppskriftslenke. KI lager et redigerbart utkast som du kan se over.",
       "muted",
     ),
   );
@@ -1531,30 +1693,30 @@ function importForm() {
       root,
       add(
         el("section", null, "callout connection-prompt"),
-        el("p", "AI is needed to shape a recipe link into an editable draft."),
+        el("p", "KI er nødvendig for å gjøre en oppskriftslenke om til et redigerbart utkast."),
         connectionSettingsButton(),
       ),
     );
   const form = el("form");
-  const url = field("Recipe link", "url");
+  const url = field("Oppskriftslenke", "url");
   url.input.required = true;
   url.input.placeholder = "https://…";
   add(form, url.wrap);
-  formSubmit(form, "Shape URL for review", async () => {
+  formSubmit(form, "Lag utkast fra lenke", async () => {
     const response = await api("/recipe-drafts/ai", "POST", { url: url.input.value });
     if (!response?.adapted)
-      throw new Error("AI did not return an editable recipe draft. No recipe was saved.");
+      throw new Error("KI-en ga ikke et redigerbart oppskriftsutkast. Ingenting ble lagret.");
     recipeForm(response.adapted, "ai");
   }, { settingsOnFailure: true });
   add(root, form);
 }
 function discoveryForm() {
-  const root = openDialog("Find a recipe from a source");
+  const root = openDialog("Finn oppskrifter fra kilder");
   add(
     root,
     el(
       "p",
-      "Search Oda, Marmiton and Matprat. Choose a result to shape its exact source link into a draft for review.",
+      "Søk hos Oda, Marmiton og Matprat. Velg et resultat for å lage et utkast fra den nøyaktige kildelenken.",
       "muted",
     ),
   );
@@ -1563,21 +1725,21 @@ function discoveryForm() {
       root,
       add(
         el("section", null, "callout connection-prompt"),
-        el("p", "You can search sources, but AI is needed to shape a result into an editable draft."),
+        el("p", "Du kan søke i kildene, men KI er nødvendig for å gjøre et resultat om til et redigerbart utkast."),
         connectionSettingsButton(),
       ),
     );
   const form = el("form");
   const query = field(
-    "Dish or ingredients",
+    "Rett eller ingredienser",
     "search",
     "",
-    "For example: salmon, dill and potatoes.",
+    "For eksempel: laks, dill og poteter.",
   );
   query.input.required = true;
   query.input.maxLength = 200;
   const sources = el("fieldset", null, "discovery-source-picker");
-  add(sources, el("legend", "Search sources"));
+  add(sources, el("legend", "Søkekilder"));
   const selected = new Set(
     window.KitchenRecipeDiscovery.SOURCES.map((source) => source.id),
   );
@@ -1596,7 +1758,7 @@ function discoveryForm() {
   });
   const content = el("div", null, "discovery-content");
   add(form, query.wrap, sources);
-  formSubmit(form, "Search sources", async () => {
+  formSubmit(form, "Søk i kildene", async () => {
     const request = window.KitchenRecipeDiscovery.buildRequest(
       query.input.value,
       [...selected],
@@ -1607,24 +1769,24 @@ function discoveryForm() {
     if (view.sources.length) {
       const statuses = el("section", null, "discovery-statuses");
       statuses.setAttribute("aria-live", "polite");
-      add(statuses, el("h3", "Source status"));
+      add(statuses, el("h3", "Kildestatus"));
       const list = el("ul", null, "discovery-status-list");
       view.sources.forEach((source) => {
         const line = el("li");
         add(line, el("strong", source.label + ": "), el("span", source.status));
         if (source.detail) add(line, el("span", " — " + source.detail));
-        if (source.status === "Search completed")
+        if (source.status === "Søket er fullført")
           add(
             line,
             el(
               "span",
               source.resultCount
-                ? " · " + source.resultCount + " found"
-                : " · No matches",
+                ? " · " + formatUiCount(source.resultCount) + " treff"
+                : " · Ingen treff",
             ),
           );
         if (source.indexUrl) {
-          const link = el("a", "Browse source");
+          const link = el("a", "Besøk kilden");
           link.href = source.indexUrl;
           link.target = "_blank";
           link.rel = "noopener noreferrer";
@@ -1638,7 +1800,7 @@ function discoveryForm() {
     if (!view.results.length) {
       add(
         nextContent,
-        empty("No recipes found", "See each source’s status above for search availability."),
+        empty("Fant ingen oppskrifter", "Se kildestatusen ovenfor for informasjon om søket."),
       );
     } else {
       const grid = el("div", null, "grid discovery-results");
@@ -1663,7 +1825,7 @@ function discoveryForm() {
         if (result.detail) add(card, el("p", result.detail, "muted"));
         const actions = el("div", null, "actions");
         if (result.url) {
-          const sourceLink = el("a", "View source");
+          const sourceLink = el("a", "Vis kilde");
           sourceLink.href = result.url;
           sourceLink.target = "_blank";
           sourceLink.rel = "noopener noreferrer";
@@ -1672,13 +1834,13 @@ function discoveryForm() {
         if (result.importable) {
           const error = el("p", "", "form-error discovery-import-error");
           error.setAttribute("role", "alert");
-          const settingsLink = connectionSettingsButton("Review recipe assistant settings");
+          const settingsLink = connectionSettingsButton("Se over innstillingene for oppskriftsassistenten");
           settingsLink.hidden = true;
           const importButton = button(
-            "Import for review",
+            "Importer for gjennomgang",
             async () => {
               importButton.disabled = true;
-              importButton.textContent = "Preparing draft…";
+              importButton.textContent = "Lager utkast …";
               error.textContent = "";
               try {
                 const draft = await api("/recipe-drafts/ai", "POST", {
@@ -1686,7 +1848,7 @@ function discoveryForm() {
                 });
                 if (!draft?.adapted)
                   throw new Error(
-                    "AI did not return an editable draft. Nothing was saved.",
+                    "KI-en ga ikke et redigerbart utkast. Ingenting ble lagret.",
                   );
                 if (!importButton.isConnected) return;
                 recipeForm(draft.adapted, "ai");
@@ -1696,7 +1858,7 @@ function discoveryForm() {
               } finally {
                 if (importButton.isConnected) {
                   importButton.disabled = false;
-                  importButton.textContent = "Import for review";
+                  importButton.textContent = "Importer for gjennomgang";
                 }
               }
             },
@@ -1705,7 +1867,7 @@ function discoveryForm() {
           add(actions, importButton);
           add(card, actions, error, settingsLink);
         } else {
-          add(actions, el("span", "This result cannot be imported yet.", "muted"));
+          add(actions, el("span", "Dette resultatet kan ikke importeres ennå.", "muted"));
           add(card, actions);
         }
         grid.append(card);
@@ -1734,10 +1896,10 @@ function plannedMealView(view) {
     recipeImage(recipe),
     el(
       "p",
-      "For " + view.servings + " servings · saved recipe makes " + recipe.servings,
+      "Til " + formatUiCount(view.servings) + " porsjoner · den lagrede oppskriften er for " + formatUiCount(recipe.servings),
       "callout",
     ),
-    el("h3", "Ingredients"),
+    el("h3", "Ingredienser"),
   );
   const ingredients = el("ul");
   view.ingredients.forEach((item) => {
@@ -1745,17 +1907,20 @@ function plannedMealView(view) {
       item,
       (quantity) => window.KitchenShoppingView.formatQuantityForDisplay(quantity),
     );
-    const row = el("li", presentation.text);
-    row.setAttribute("aria-label", presentation.accessibleLabel);
+    const row = el("li");
+    add(row, el("span", presentation.text));
+    const estimate = purchaseEstimateText(item.purchase_estimate);
+    row.setAttribute("aria-label", [presentation.accessibleLabel, estimate].filter(Boolean).join(". "));
+    if (estimate) add(row, el("small", estimate, "muted purchase-estimate"));
     add(ingredients, row);
   });
   const provenance = recipe.provenance;
   if (provenance?.original_source)
-    add(body, el("p", "Adapted from " + provenance.original_source + ".", "muted"));
+    add(body, el("p", "Tilpasset fra " + provenance.original_source + ".", "muted"));
   if (recipe.source_url) {
     const url = window.KitchenRecipeDiscovery.safeHttpsUrl(recipe.source_url);
     if (url) {
-      const link = el("a", "Original recipe", "source-link");
+      const link = el("a", "Opprinnelig oppskrift", "source-link");
       link.href = url;
       link.target = "_blank";
       link.rel = "noopener noreferrer";
@@ -1764,8 +1929,8 @@ function plannedMealView(view) {
   }
   const steps = el("ol");
   recipe.instructions.forEach((step) => add(steps, el("li", step)));
-  add(body, ingredients, el("h3", "Method"), steps);
-  const shareIngredients = button("Share ingredients", async () => {
+  add(body, ingredients, el("h3", "Fremgangsmåte"), steps);
+  const shareIngredients = button("Del ingrediensene", async () => {
     const text = window.KitchenPlannedCooking.formatPlannedIngredientList(
       view,
       (quantity) => window.KitchenShoppingView.formatQuantityForDisplay(quantity),
@@ -1773,7 +1938,7 @@ function plannedMealView(view) {
     if (typeof navigator.share === "function") {
       try {
         await navigator.share({ title: recipe.title, text });
-        notify("Ingredients shared.");
+        notify("Ingrediensene er delt.");
         return;
       } catch (error) {
         if (error?.name === "AbortError") return;
@@ -1782,18 +1947,18 @@ function plannedMealView(view) {
     if (typeof navigator.clipboard?.writeText === "function") {
       try {
         await navigator.clipboard.writeText(text);
-        notify("Ingredient list copied.");
+        notify("Ingredienslisten er kopiert.");
         return;
       } catch {}
     }
     if (!shareFallback) {
       const content = el("textarea");
-      content.setAttribute("aria-label", "Ingredient list to copy");
+      content.setAttribute("aria-label", "Ingrediensliste som skal kopieres");
       content.readOnly = true;
       content.rows = Math.min(14, Math.max(5, text.split("\n").length));
       shareFallback = add(
         el("details", null, "shopping-info"),
-        el("summary", "Copy ingredients manually"),
+        el("summary", "Kopier ingrediensene manuelt"),
         content,
       );
       shareFallback.open = true;
@@ -1803,14 +1968,14 @@ function plannedMealView(view) {
     content.value = text;
     content.focus();
     content.select();
-    notify("Select and copy the ingredient list.");
+    notify("Marker og kopier ingredienslisten.");
   }, "quiet");
   add(
     body,
     add(
       el("div", null, "actions"),
       shareIngredients,
-      button("View saved recipe amounts", () => viewRecipe(recipe), "quiet"),
+      button("Vis mengdene i den lagrede oppskriften", () => viewRecipe(recipe), "quiet"),
     ),
   );
   add(root, body);
@@ -1818,19 +1983,22 @@ function plannedMealView(view) {
 function shoppingOrigins(origins = []) {
   const labels = new Set();
   origins.forEach((origin) => {
-    if (origin.startsWith("meal:")) labels.add("Meal plan");
-    else if (origin.startsWith("item:")) labels.add("Quick addition");
-    else if (origin.startsWith("regular:")) labels.add("Regular");
+    if (origin.startsWith("meal:")) labels.add("Måltidsplan");
+    else if (origin.startsWith("item:")) labels.add("Hurtigtillegg");
+    else if (origin.startsWith("regular:")) labels.add("Fast vare");
   });
   return [...labels].join(", ");
+}
+function categoryLabel(category) {
+  return category === "Other" || !category ? "Annet" : category;
 }
 function shoppingSections() {
   const nav = el("div", null, "section-tabs");
   [
-    ["needs", "Needs"],
+    ["needs", "Behov"],
     ["oda", "Oda"],
-    ["in_store", "In-store"],
-    ["pantry", "At home"],
+    ["in_store", "I butikken"],
+    ["pantry", "Hjemme"],
   ].forEach(([key, label]) => {
     const tab = button(
       label,
@@ -1844,7 +2012,7 @@ function shoppingSections() {
     nav.append(tab);
   });
   const refresh = button(
-    state.shoppingRefreshInFlight ? "Refreshing…" : "Refresh",
+    state.shoppingRefreshInFlight ? "Oppdaterer …" : "Oppdater",
     () => refreshShoppingIfSafe(true),
     "quiet small",
   );
@@ -1853,8 +2021,8 @@ function shoppingSections() {
   refresh.setAttribute(
     "aria-label",
     state.shoppingRefreshInFlight
-      ? "Refreshing shared shopping list"
-      : "Refresh shared shopping list",
+      ? "Oppdaterer delt handleliste"
+      : "Oppdater delt handleliste",
   );
   const status = el("span", shoppingRefreshLabel(), "shopping-refresh-status");
   status.id = "shopping-refresh-status";
@@ -1876,7 +2044,7 @@ function renderInStore(main) {
     dateLabel(day(0), { month: "short", day: "numeric" }) +
     " – " +
     dateLabel(day(6), { month: "short", day: "numeric", year: "numeric" });
-  const shareTitle = "Kitchen shopping list · " + rangeTitle;
+  const shareTitle = "Handleliste · " + rangeTitle;
   const sharedText = () =>
     window.KitchenShoppingShare.formatRemainingShoppingText(
       shareTitle,
@@ -1884,10 +2052,10 @@ function renderInStore(main) {
       state.household.shopping_category_order || [],
     );
   const copyDialog = (text, explanation) => {
-    const root = openDialog("Copy shopping list");
+    const root = openDialog("Kopier handlelisten");
     add(root, el("p", explanation, "muted"));
     const content = el("textarea");
-    content.setAttribute("aria-label", "Remaining shopping list text");
+    content.setAttribute("aria-label", "Tekst for varer som gjenstår på handlelisten");
     content.readOnly = true;
     content.rows = Math.min(16, Math.max(6, text.split("\n").length));
     content.value = text;
@@ -1901,8 +2069,8 @@ function renderInStore(main) {
       copyDialog(
         text,
         forShare
-          ? "Sharing and clipboard access are unavailable here. Select the text and copy it into another app."
-          : "Clipboard access is unavailable here. Select the text and copy it into another app.",
+          ? "Deling og utklippstavle er ikke tilgjengelig her. Merk teksten og kopier den til en annen app."
+          : "Utklippstavlen er ikke tilgjengelig her. Merk teksten og kopier den til en annen app.",
       );
       return;
     }
@@ -1910,15 +2078,15 @@ function renderInStore(main) {
       await navigator.clipboard.writeText(text);
       notify(
         forShare
-          ? "Share sheet unavailable; shopping list copied. Paste it into the app you choose."
-          : "Remaining shopping list copied.",
+          ? "Deling er ikke tilgjengelig, så handlelisten er kopiert. Lim den inn i appen du ønsker."
+          : "Varene som gjenstår, er kopiert.",
       );
     } catch {
       copyDialog(
         text,
         forShare
-          ? "Sharing and clipboard access are unavailable here. Select the text and copy it into another app."
-          : "Clipboard access was blocked. Select the text and copy it into another app.",
+          ? "Deling og utklippstavle er ikke tilgjengelig her. Merk teksten og kopier den til en annen app."
+          : "Tilgang til utklippstavlen ble blokkert. Merk teksten og kopier den til en annen app.",
       );
     }
   };
@@ -1930,14 +2098,14 @@ function renderInStore(main) {
     }
     try {
       await navigator.share({ title: shareTitle, text });
-      notify("Shopping list shared.");
+      notify("Handlelisten er delt.");
     } catch (error) {
       if (error?.name === "AbortError") return;
-      notify("Could not open the share sheet. Use Copy remaining list instead.", true);
+      notify("Fikk ikke åpnet delingsmenyen. Bruk Kopier varer som gjenstår i stedet.", true);
     }
   };
-  const share = button("Share remaining list", shareRemaining, "quiet");
-  const copy = button("Copy remaining list", () => copyRemaining(), "quiet");
+  const share = button("Del varer som gjenstår", shareRemaining, "quiet");
+  const copy = button("Kopier varer som gjenstår", () => copyRemaining(), "quiet");
   share.disabled = copy.disabled = remaining.length === 0;
   const progressData = window.KitchenShoppingView.pickupProgress(
     trip.checked_count,
@@ -1946,7 +2114,7 @@ function renderInStore(main) {
   const progress = el("progress");
   progress.max = 100;
   progress.value = progressData.percent;
-  progress.setAttribute("aria-label", "Trip pickup progress");
+  progress.setAttribute("aria-label", "Fremdrift for plukking på handleturen");
   const progressSummary = add(
     el("div", null, "trip-progress"),
     el("strong", progressData.label),
@@ -1959,20 +2127,20 @@ function renderInStore(main) {
   const pickupInfo = el("details", null, "shopping-info");
   add(
     pickupInfo,
-    el("summary", "About pickup tracking"),
+    el("summary", "Om plukkestatus"),
     el(
       "p",
-      "Checking an item off means you picked it up for this trip. It does not record a purchase or change at-home quantities.",
+      "Når du krysser av en vare, betyr det at du har plukket den på denne handleturen. Det registrerer ikke et kjøp og endrer ikke mengdene du har hjemme.",
     ),
   );
   if (!trip.lines.length) {
     add(
       main,
       empty(
-        "No in-store needs",
-        "Add meals or shopping needs first. Only quantities still needed after your at-home inventory appear here.",
+        "Ingen varer å plukke",
+        "Legg først til måltider eller handlebehov. Her vises bare mengdene du fortsatt trenger etter at det du har hjemme, er trukket fra.",
         button(
-          "Review shopping needs",
+          "Se over handlebehov",
           () => {
             state.shoppingPanel = "needs";
             render();
@@ -1998,7 +2166,7 @@ function renderInStore(main) {
       check.checked = Boolean(line.checked);
       check.setAttribute(
         "aria-label",
-        (check.checked ? "Uncheck " : "Mark picked up: ") + line.name,
+        (check.checked ? "Fjern avkryssing for " : "Merk som plukket: ") + line.name,
       );
       check.addEventListener("change", async () => {
         check.disabled = true;
@@ -2026,14 +2194,14 @@ function renderInStore(main) {
         "small",
         window.KitchenShoppingView.formatQuantityForDisplay(exactQuantity) +
           (unit ? " " + unit : "") +
-          " to pick up" +
+          " å plukke" +
           (line.origins?.length ? " · " + shoppingOrigins(line.origins) : ""),
       );
       quantity.setAttribute(
         "aria-label",
-        "Exact amount: " + exactQuantity + (unit ? " " + unit : "") + " to pick up",
+        "Mengde: " + formatUiAccessibleQuantity(exactQuantity) + (unit ? " " + unit : "") + " å plukke",
       );
-      quantity.title = "Exact amount: " + exactQuantity + (unit ? " " + unit : "");
+      quantity.title = "Mengde: " + formatUiAccessibleQuantity(exactQuantity) + (unit ? " " + unit : "");
       add(
         detail,
         quantity,
@@ -2048,27 +2216,27 @@ function renderInStore(main) {
 }
 function inventoryForm(item = {}) {
   const root = openDialog(
-    item.id ? "Update what you have" : "Add to at-home inventory",
+    item.id ? "Oppdater det du har" : "Legg til i det du har hjemme",
   );
   const form = el("form");
-  const name = field("Item name", "text", item.name || "");
+  const name = field("Varenavn", "text", item.name || "");
   name.input.required = true;
   if (item.id) name.input.readOnly = true;
-  const quantity = field("Quantity on hand", "number", item.quantity ?? "0");
+  const quantity = field("Mengde du har", "number", item.quantity ?? "0");
   quantity.input.min = "0";
   quantity.input.step = "any";
   quantity.input.required = true;
-  const unit = field("Unit", "text", item.unit || "item");
+  const unit = field("Enhet", "text", item.unit || "item");
   unit.input.required = true;
   if (item.id) unit.input.readOnly = true;
   const category = field(
-    "Category",
+    "Kategori",
     "text",
     item.category || "Other",
-    "Used to organize the in-store list.",
+    "Brukes til å sortere handlelisten for butikken.",
   );
   category.input.maxLength = 60;
-  const note = field("Note (optional)", "text", item.note || "");
+  const note = field("Merknad (valgfritt)", "text", item.note || "");
   note.input.maxLength = 500;
   add(
     form,
@@ -2077,7 +2245,7 @@ function inventoryForm(item = {}) {
     category.wrap,
     note.wrap,
   );
-  formSubmit(form, item.id ? "Save quantity" : "Add at home", async () => {
+  formSubmit(form, item.id ? "Lagre mengde" : "Legg til hjemme", async () => {
     const payload = {
       name: name.input.value.trim(),
       quantity: quantity.input.value,
@@ -2089,7 +2257,7 @@ function inventoryForm(item = {}) {
     state.inventory = await api("/inventory");
     $("#modal").close();
     render();
-    notify("At-home quantity saved.");
+    notify("Mengden du har hjemme, er lagret.");
   });
   add(root, form);
 }
@@ -2098,7 +2266,7 @@ function renderInventory(main) {
     main,
     el(
       "p",
-      "Keep a simple quantity on hand. Kitchen subtracts it from shopping needs; checking off an in-store item does not change this inventory.",
+      "Hold oversikt over hvor mye du har hjemme. Kjøkkenet trekker mengden fra handlebehovet. Avkryssing av en vare i butikken endrer ikke beholdningen.",
       "muted",
     ),
   );
@@ -2106,8 +2274,8 @@ function renderInventory(main) {
     add(
       main,
       empty(
-        "Nothing in your at-home list yet",
-        "Add what you already have so the shopping list can show the remaining quantity.",
+        "Du har ikke lagt til noe hjemme ennå",
+        "Legg til det du allerede har, så viser handlelisten hva du fortsatt trenger.",
       ),
     );
     return;
@@ -2121,22 +2289,22 @@ function renderInventory(main) {
         el("strong", item.name),
         el(
           "small",
-          item.quantity +
+          formatUiQuantity(item.quantity) +
             " " +
             item.unit +
             " · " +
-            (item.category || "Other") +
+            categoryLabel(item.category) +
             (item.note ? " · " + item.note : ""),
         ),
       ),
-      button("Edit", () => inventoryForm(item), "quiet small"),
+      button("Rediger", () => inventoryForm(item), "quiet small"),
       button(
-        "Remove",
+        "Fjern",
         async () => {
           try {
             await api("/inventory/" + encodeURIComponent(item.id), "DELETE");
             await refreshView();
-            notify("At-home item removed.");
+            notify("Varen er fjernet fra det du har hjemme.");
           } catch (error) {
             notify(error.message, true);
           }
@@ -2153,27 +2321,27 @@ function renderShopping(main) {
   const isOda = state.shoppingPanel === "oda";
   const isPantry = state.shoppingPanel === "pantry";
   const heading = title(
-    "Shopping",
+    "Handleliste",
     inStore
-      ? "In-store trip"
+      ? "Handletur i butikk"
       : isOda
-        ? "Oda products"
+        ? "Oda-produkter"
         : isPantry
-          ? "At home"
-          : "The shopping list.",
+          ? "Hjemme"
+          : "Handlelisten.",
     inStore
-      ? "Pick up what remains for this period."
+      ? "Plukk varene som gjenstår denne uken."
       : isOda
-        ? "Review product choices for this period."
+        ? "Se over produktvalgene for denne uken."
         : isPantry
-          ? "Quantities here reduce what remains to buy."
-          : "Your list combines planned meals, everyday items, and anything you add.",
+          ? "Mengdene du har her, trekkes fra handlebehovet."
+          : "Listen samler planlagte måltider, hverdagsvarer og det du legger til.",
     inStore || isOda
       ? []
       : [
           isPantry
-            ? button("+ Add at-home item", () => inventoryForm(), "primary")
-            : button("+ Add shopping need", () => itemForm(), "primary"),
+            ? button("+ Legg til vare hjemme", () => inventoryForm(), "primary")
+            : button("+ Legg til handlebehov", () => itemForm(), "primary"),
         ],
   );
   if (inStore) heading.classList.add("shopping-compact-header");
@@ -2185,10 +2353,10 @@ function renderShopping(main) {
   const left = el("div");
   const planned = add(
     el("section", null, "panel"),
-    el("h2", "Shopping totals"),
+    el("h2", "Handleoversikt"),
     el(
       "p",
-      "Required quantity, what is at home, and the remaining amount to buy.",
+      "Nødvendig mengde, det du har hjemme, og det som gjenstår å kjøpe.",
       "muted",
     ),
   );
@@ -2196,8 +2364,8 @@ function renderShopping(main) {
   if (!planLines.length)
     add(
       planned,
-      el("p", "Plan a meal to bring its ingredients here.", "muted"),
-      button("Go to meal plan", () => navigate("week"), "quiet"),
+      el("p", "Planlegg et måltid for å se ingrediensene her.", "muted"),
+      button("Gå til måltidsplanen", () => navigate("week"), "quiet"),
     );
   else {
     const list = el("ul", null, "list");
@@ -2206,56 +2374,67 @@ function renderShopping(main) {
       const required = String(item.required_quantity ?? item.quantity ?? "");
       const available = item.available_quantity == null ? null : String(item.available_quantity);
       const toBuy = String(item.to_buy_quantity ?? item.quantity ?? "0");
+      const formatNeed = (quantity) => window.KitchenShoppingView.formatQuantityForDisplay(quantity);
       const summary = el(
         "small",
-        window.KitchenShoppingView.formatQuantityForDisplay(required) +
-          (unit ? " " + unit : "") +
+        window.KitchenBasketMatchView.formatNeedQuantity(
+          { quantity: required, unit, approximate: item.approximate === true },
+          formatNeed,
+        ) +
           (available != null
-            ? " · " + window.KitchenShoppingView.formatQuantityForDisplay(available) + " at home"
+            ? " · " + window.KitchenShoppingView.formatQuantityForDisplay(available) + " hjemme"
             : "") +
           " · " +
           (window.KitchenShoppingView.isPositiveDecimal(toBuy)
-            ? window.KitchenShoppingView.formatQuantityForDisplay(toBuy) + " to buy"
-            : "covered at home") +
+            ? window.KitchenBasketMatchView.formatNeedQuantity(
+                { quantity: toBuy, unit, approximate: item.approximate === true },
+                formatNeed,
+              ) + " å kjøpe"
+            : "dekket hjemme") +
           " · " +
-          (item.category || "Other") +
+          categoryLabel(item.category) +
           (item.origins?.length ? " · " + shoppingOrigins(item.origins) : ""),
       );
       summary.setAttribute(
         "aria-label",
-        "Exact quantities: " +
-          required +
-          (unit ? " " + unit : "") +
-          " required" +
-          (available != null ? "; " + available + " " + unit + " at home" : "") +
+        window.KitchenBasketMatchView.formatNeedQuantity(
+          { quantity: required, unit, approximate: item.approximate === true },
+          formatNeed,
+        ) +
+          " nødvendig" +
+          (available != null ? "; " + formatUiAccessibleQuantity(available) + " " + unit + " hjemme" : "") +
           "; " +
-          toBuy +
-          " " +
-          unit +
-          " to buy",
+          window.KitchenBasketMatchView.formatNeedQuantity(
+            { quantity: toBuy, unit, approximate: item.approximate === true },
+            formatNeed,
+          ) +
+          " å kjøpe",
       );
-      add(list, add(el("li"), add(el("div", null, "detail"), el("strong", item.name), summary)));
+      const detail = add(el("div", null, "detail"), el("strong", item.name), summary);
+      const evidence = renderPurchaseEvidence(item);
+      if (evidence) add(detail, evidence);
+      add(list, add(el("li"), detail));
     });
     add(planned, list);
   }
   const extras = add(
     el("section", null, "panel"),
-    el("h2", "Manage quick additions"),
+    el("h2", "Administrer hurtigtillegg"),
     el(
       "p",
-      "Items you add here are included in the shopping totals above. Exclude a capture from planning; picking progress is in In-store trip.",
+      "Varer du legger til her, tas med i handleoversikten. Du kan utelate en vare fra planen. Plukkestatus finner du under Handletur i butikk.",
       "muted",
     ),
   );
   if (!state.items.length)
-    add(extras, el("p", "Running low on something? Add it here.", "muted"));
+    add(extras, el("p", "Begynner det å bli tomt for noe? Legg det til her.", "muted"));
   const itemList = el("ul", null, "list");
   state.items.forEach((item) => {
     const row = el("li", null, item.completed ? "completed" : "");
     const check = el("input");
     check.type = "checkbox";
     check.checked = item.completed;
-    check.ariaLabel = "Exclude " + item.name + " from plan";
+    check.ariaLabel = "Utelat " + item.name + " fra planen";
     check.addEventListener("change", async () => {
       check.disabled = true;
       try {
@@ -2273,7 +2452,7 @@ function renderShopping(main) {
     const exclude = add(
       el("label", null, "check-label"),
       check,
-      el("span", "Exclude " + item.name + " from plan"),
+      el("span", "Utelat " + item.name + " fra planen"),
     );
     add(
       row,
@@ -2281,10 +2460,10 @@ function renderShopping(main) {
       add(
         el("div", null, "detail"),
         el("strong", item.name),
-        el("small", item.quantity + " " + item.unit),
+        el("small", formatUiQuantity(item.quantity) + " " + item.unit),
       ),
       button(
-        "Remove",
+        "Fjern",
         async () => {
           try {
             await mutate("/items/" + encodeURIComponent(item.id), "DELETE");
@@ -2302,10 +2481,10 @@ function renderShopping(main) {
   const right = el("div");
   const regular = add(
     el("section", null, "panel"),
-    el("h2", "Everyday items"),
+    el("h2", "Hverdagsvarer"),
     el(
       "p",
-      "Set a gentle reminder for things you buy often. Add due items when you need them.",
+      "Få en påminnelse om varer du kjøper ofte. Legg dem til på handlelisten når du trenger dem.",
       "muted",
     ),
   );
@@ -2320,17 +2499,17 @@ function renderShopping(main) {
           add(
             el("div", null, "detail"),
             el("strong", item.name),
-            el("small", item.quantity + " " + item.unit + " · Suggested"),
+            el("small", formatUiQuantity(item.quantity) + " " + item.unit + " · Forslag"),
           ),
           button(
-            "Add",
+            "Legg til",
             async () => {
               try {
                 await mutate(
                   "/regular-items/" + encodeURIComponent(item.id) + "/confirm",
                   "POST",
                   {},
-                  "Added to the shopping list.",
+                  "Lagt til på handlelisten.",
                 );
               } catch (error) {
                 notify(error.message, true);
@@ -2355,23 +2534,23 @@ function renderShopping(main) {
             el("strong", item.name),
             el(
               "small",
-              "Every " +
-                item.interval_days +
-                " days" +
+              "Hver " +
+                formatUiCount(item.interval_days) +
+                (Number(item.interval_days) === 1 ? " dag" : " dager") +
                 (item.last_purchased
-                  ? " · Last bought " + item.last_purchased
+                  ? " · Sist kjøpt " + item.last_purchased
                   : ""),
             ),
           ),
           button(
-            "Bought today",
+            "Kjøpt i dag",
             async () => {
               try {
                 await mutate(
                   "/regular-items/" + encodeURIComponent(item.id) + "/purchase",
                   "POST",
                   { purchased_on: iso(new Date()) },
-                  "Purchase recorded.",
+                  "Kjøpet er registrert.",
                 );
               } catch (error) {
                 notify(error.message, true);
@@ -2386,21 +2565,21 @@ function renderShopping(main) {
   }
   add(
     regular,
-    button("+ Add a regular", () => itemForm(true), "quiet"),
-    button("Share feedback", () => feedbackForm(), "quiet"),
+    button("+ Legg til fast vare", () => itemForm(true), "quiet"),
+    button("Gi tilbakemelding", () => feedbackForm(), "quiet"),
   );
   const oda = add(
     el("section", null, "panel"),
     el("h2", "Oda"),
     el(
       "p",
-      "Connect your Oda account from the Oda tab. In-store checklists work without Oda.",
+      "Koble til Oda-kontoen din under Oda-fanen. Handlelisten for butikken fungerer også uten Oda.",
       "muted",
     ),
   );
   add(
     oda,
-    button("Set up Oda in Kitchen", () => navigate("basket"), "quiet"),
+    button("Sett opp Oda i Kjøkken", () => navigate("basket"), "quiet"),
   );
   add(right, regular, oda);
   add(columns, left, right);
@@ -2421,7 +2600,7 @@ function basketProduct(product, packages, alternatives = false) {
     image.decoding = "async";
     image.referrerPolicy = "no-referrer";
     image.addEventListener("error", () =>
-      image.replaceWith(el("span", "Image unavailable", "image-fallback")),
+      image.replaceWith(el("span", "Bildet er ikke tilgjengelig", "image-fallback")),
     );
     card.append(image);
   }
@@ -2430,24 +2609,24 @@ function basketProduct(product, packages, alternatives = false) {
     details,
     el("h4", product.name),
     product.brand ? el("p", product.brand, "muted") : null,
-    product.provider ? el("p", "Source: " + product.provider, "muted") : null,
+    product.provider ? el("p", "Kilde: " + product.provider, "muted") : null,
     (product.product_id ?? product.id) != null
-      ? el("small", "Oda product ID: " + (product.product_id ?? product.id), "muted")
+      ? el("small", "Oda-produkt-ID: " + (product.product_id ?? product.id), "muted")
       : null,
   );
   const pack =
     product.pack_quantity != null
       ? product.pack_quantity +
         (product.pack_unit ? " " + product.pack_unit : "") +
-        " per pack"
-      : "Pack size unavailable";
+        " per pakke"
+      : "Pakningsstørrelse er ikke tilgjengelig";
   add(
     details,
     el(
       "p",
       pack +
         (packages != null
-          ? " · " + packages + (Number(packages) === 1 ? " pack" : " packs")
+          ? " · " + formatUiCount(packages) + (Number(packages) === 1 ? " pakke" : " pakker")
           : ""),
       "muted",
     ),
@@ -2457,7 +2636,7 @@ function basketProduct(product, packages, alternatives = false) {
     el(
       "p",
       product.price == null
-        ? "Price unknown"
+        ? "Ukjent pris"
         : product.price + (product.currency ? " " + product.currency : ""),
       product.price == null ? "muted" : "",
     ),
@@ -2467,10 +2646,10 @@ function basketProduct(product, packages, alternatives = false) {
     el(
       "p",
       product.available === true
-        ? "Available"
+        ? "Tilgjengelig"
         : product.available === false
-          ? "Unavailable"
-          : "Availability unknown",
+          ? "Ikke tilgjengelig"
+          : "Tilgjengelighet er ukjent",
       "muted",
     ),
   );
@@ -2478,20 +2657,20 @@ function basketProduct(product, packages, alternatives = false) {
     details,
     el(
       "p",
-      "Evidence: " +
-        (product.evidence_status || "status unknown").replaceAll("_", " ") +
+      "Grunnlag: " +
+        ({ verified: "verifisert", unverified: "ikke verifisert", unavailable: "ikke tilgjengelig" }[product.evidence_status] || "status ukjent") +
         (product.observed_at
-          ? " · Checked " +
+          ? " · Kontrollert " +
             (Number.isNaN(Date.parse(product.observed_at))
               ? product.observed_at
-              : new Date(product.observed_at).toLocaleString())
+              : new Date(product.observed_at).toLocaleString("nb-NO"))
           : ""),
       "muted",
     ),
   );
   const reference = httpsUrl(product.url);
   if (reference) {
-    const link = el("a", "View product reference ↗");
+    const link = el("a", "Vis produktreferanse ↗");
     link.href = reference;
     link.target = "_blank";
     link.rel = "noopener noreferrer";
@@ -2531,30 +2710,30 @@ function providerDecimalPrice(value) {
 function chooseOdaProduct(product, need) {
   const productId = Number(product.id);
   if (!Number.isSafeInteger(productId) || productId < 1) {
-    notify("Oda did not provide a usable product ID for this result.", true);
+    notify("Oda oppga ingen gyldig produkt-ID for dette resultatet.", true);
     return;
   }
-  const root = openDialog("Confirm product and package size");
+  const root = openDialog("Bekreft produkt og pakningsstørrelse");
   add(
     root,
     el(
       "p",
-      "You choose how many of " +
+      "Oppgi hvor mange " +
         need.unit +
-        " are in one package. Kitchen will not infer the package size from the Oda listing.",
+        " det er i én pakke. Kjøkkenet utleder ikke pakningsstørrelsen fra Oda-oppføringen.",
       "callout",
     ),
     el("h3", product.name || "Oda product"),
     product.brand ? el("p", product.brand, "muted") : null,
   );
   const form = el("form");
-  const packages = field("Number of packages", "number", "");
+  const packages = field("Antall pakker", "number", "");
   packages.input.min = "1";
   packages.input.max = "999";
   packages.input.step = "1";
   packages.input.required = true;
   const packQuantity = field(
-    "Amount of " + need.unit + " per package",
+    "Mengde " + need.unit + " per pakke",
     "number",
     "",
   );
@@ -2562,17 +2741,17 @@ function chooseOdaProduct(product, need) {
   packQuantity.input.step = "any";
   packQuantity.input.required = true;
   add(form, packages.wrap, packQuantity.wrap);
-  formSubmit(form, "Save product choice", async () => {
+  formSubmit(form, "Lagre produktvalg", async () => {
     const packageCount = Number(packages.input.value);
     const quantityText = packQuantity.input.value.trim();
     if (!Number.isSafeInteger(packageCount) || packageCount < 1)
-      throw new Error("Enter a whole number of packages greater than zero.");
+      throw new Error("Oppgi et helt antall pakker større enn null.");
     if (
       !/^(?:\d+(?:\.\d+)?|\.\d+)$/.test(quantityText) ||
       !Number.isFinite(Number(quantityText)) ||
       Number(quantityText) <= 0
     )
-      throw new Error("Enter a positive decimal amount per package.");
+      throw new Error("Oppgi en mengde per pakke som er større enn null.");
     const productUrl = officialOdaProductUrl(product.url);
     const media = productUrl ? state.odaMedia[productUrl] || {} : {};
     await api("/basket/selections", "PUT", {
@@ -2605,7 +2784,7 @@ function chooseOdaProduct(product, need) {
     state.cartProposalHandled = false;
     $("#modal").close();
     await refreshView();
-    notify("Oda product choice saved for review. It remains unverified.");
+    notify("Oda-produktvalget er lagret for gjennomgang. Det er ikke verifisert.");
   });
   add(root, form);
 }
@@ -2651,8 +2830,8 @@ function odaSearchResultCard(product, need) {
       el(
         "div",
         media.error
-          ? "Product picture could not be loaded"
-          : "Picture unavailable",
+          ? "Produktbildet kunne ikke lastes inn"
+          : "Bildet er ikke tilgjengelig",
         "oda-picture-fallback",
       ),
     );
@@ -2664,15 +2843,15 @@ function odaSearchResultCard(product, need) {
   if (product.brand) add(details, el("p", product.brand, "muted"));
   if (product.description) add(details, el("p", product.description));
   if (product.price)
-    add(details, el("p", "Oda price: " + product.price, "product-price"));
-  else add(details, el("p", "Price unavailable", "muted"));
+    add(details, el("p", "Pris hos Oda: " + product.price, "product-price"));
+  else add(details, el("p", "Pris er ikke tilgjengelig", "muted"));
   if (product.unitPrice || product.unitName)
     add(
       details,
       el(
         "p",
-        "Unit price: " +
-          (product.unitPrice || "not provided") +
+        "Enhetspris: " +
+          (product.unitPrice || "ikke oppgitt") +
           (product.unitName ? " per " + product.unitName : ""),
         "muted",
       ),
@@ -2680,28 +2859,28 @@ function odaSearchResultCard(product, need) {
   if (product.availability?.description)
     add(
       details,
-      el("p", "Availability: " + product.availability.description, "muted"),
+      el("p", "Tilgjengelighet: " + product.availability.description, "muted"),
     );
   else if (product.availability?.isAvailable === true)
-    add(details, el("p", "Oda marks this as available.", "muted"));
+    add(details, el("p", "Oda oppgir at varen er tilgjengelig.", "muted"));
   else if (product.availability?.isAvailable === false)
-    add(details, el("p", "Oda marks this as unavailable.", "muted"));
-  else add(details, el("p", "Availability not provided", "muted"));
+    add(details, el("p", "Oda oppgir at varen ikke er tilgjengelig.", "muted"));
+  else add(details, el("p", "Tilgjengelighet er ikke oppgitt", "muted"));
   if (productUrl) {
-    const link = el("a", "View Oda reference ↗");
+    const link = el("a", "Vis Oda-oppføring ↗");
     link.href = productUrl;
     link.target = "_blank";
     link.rel = "noopener noreferrer";
     add(details, link);
   }
   if (media.pack_description)
-    add(details, el("p", "Pack details from Oda: " + media.pack_description));
+    add(details, el("p", "Pakningsdetaljer fra Oda: " + media.pack_description));
   else
     add(
       details,
       el(
         "p",
-        "Pack size unknown. Oda’s unit price is not a package quantity.",
+        "Pakningsstørrelsen er ukjent. Enhetsprisen hos Oda sier ikke hvor stor pakken er.",
         "muted",
       ),
     );
@@ -2709,12 +2888,12 @@ function odaSearchResultCard(product, need) {
   if (productUrl && !imageUrls.length) {
     const loadPhoto = button(
       media.loading
-        ? "Loading product details…"
+        ? "Laster produktdetaljer …"
         : retryWait
-          ? "Try again in " + Math.ceil(retryWait / 1000) + "s"
+          ? "Prøv igjen om " + formatUiCount(Math.ceil(retryWait / 1000)) + " sek"
           : media.requested
-            ? "Check for product photo again"
-            : "Load product photo",
+            ? "Prøv å hente produktbildet igjen"
+            : "Hent produktbilde",
       async () => {
         if (media.loading || mediaRetryWait(media)) return;
         state.odaMedia[productUrl] = { loading: true, requested: true };
@@ -2752,14 +2931,14 @@ function odaSearchResultCard(product, need) {
     add(
       details,
       button(
-        "Choose product",
+        "Velg produkt",
         () => chooseOdaProduct(product, need),
         "primary small",
       ),
     );
   add(
     details,
-    el("small", "Suggested match · check product and pack size", "muted"),
+    el("small", "Forslag til treff · kontroller produkt og pakningsstørrelse", "muted"),
   );
   add(card, details);
   return card;
@@ -2769,7 +2948,7 @@ function odaSearchForNeed(need) {
   const current = state.odaSearch[need.id] || {};
   const form = el("form", null, "oda-search-form");
   const query = field(
-    "Search Oda products",
+    "Søk etter Oda-produkter",
     "search",
     current.query || need.name,
   );
@@ -2782,7 +2961,7 @@ function odaSearchForNeed(need) {
   });
   const submit = el(
     "button",
-    current.loading ? "Searching…" : "Search Oda",
+    current.loading ? "Søker …" : "Søk hos Oda",
     "quiet",
   );
   submit.type = "submit";
@@ -2811,16 +2990,16 @@ function odaSearchForNeed(need) {
   });
   const root = add(
     el("section", null, "oda-search"),
-    el("h3", "Find Oda products"),
+    el("h3", "Finn produkter hos Oda"),
     form,
   );
   if (!state.oda?.connected) {
     add(
       root,
-      el("p", "Connect your Oda account to Kitchen before searching.", "muted"),
+      el("p", "Koble Oda-kontoen til Kjøkken før du søker.", "muted"),
     );
   } else if (current.loading) {
-    add(root, el("p", "Searching Oda…", "muted"));
+    add(root, el("p", "Søker hos Oda …", "muted"));
   } else if (current.error) {
     add(root, el("p", current.error, "form-error"));
   } else if (current.results) {
@@ -2829,13 +3008,13 @@ function odaSearchForNeed(need) {
       products.forEach((product) =>
         add(root, odaSearchResultCard(product, need)),
       );
-    else add(root, el("p", "No products found for that search.", "muted"));
+    else add(root, el("p", "Ingen produkter ble funnet for dette søket.", "muted"));
     if (current.results.some((result) => result.hasMore))
       add(
         root,
         el(
           "p",
-          "More results are available in Oda. Kitchen shows the first results here.",
+          "Flere treff finnes hos Oda. Kjøkken viser de første treffene her.",
           "muted",
         ),
       );
@@ -2914,18 +3093,18 @@ function proposalProductDetails(product) {
   const availability =
     product.availability?.description ||
     (product.availability?.isAvailable === true || product.available === true
-      ? "Oda marks this available"
+      ? "Oda oppgir at varen er tilgjengelig"
       : product.availability?.isAvailable === false ||
           product.available === false
-        ? "Oda marks this unavailable"
-        : "Availability not provided");
+        ? "Oda oppgir at varen ikke er tilgjengelig"
+        : "Tilgjengelighet er ikke oppgitt");
   add(
     details,
     el(
       "p",
       product.price == null
-        ? "Fresh Oda price unavailable"
-        : "Fresh Oda price: " +
+        ? "Oda-prisen er ikke oppdatert ennå"
+        : "Oppdatert Oda-pris: " +
             product.price +
             (product.currency ? " " + product.currency : ""),
       product.price == null ? "muted" : "product-price",
@@ -2933,25 +3112,25 @@ function proposalProductDetails(product) {
     el("p", availability, "muted"),
   );
   if (productUrl) {
-    const link = el("a", "View this Oda product ↗");
+    const link = el("a", "Vis dette Oda-produktet ↗");
     link.href = productUrl;
     link.target = "_blank";
     link.rel = "noopener noreferrer";
     add(details, link);
   } else {
-    add(details, el("p", "Oda returned no product page reference.", "muted"));
+    add(details, el("p", "Oda oppga ingen lenke til produktsiden.", "muted"));
   }
   return details;
 }
 function proposalWarningText(warning) {
   const code = typeof warning === "string" ? warning : warning?.code;
   if (code === "mapping_unverified")
-    return "Oda refreshed the selected products, but their match to each shopping need is not independently verified. Review the product and quantity details above.";
+    return "Oda oppdaterte de valgte produktene, men samsvaret med hvert handlebehov er ikke kontrollert uavhengig. Se over produkt- og mengdedetaljene ovenfor.";
   if (code === "payment_at_oda")
-    return "Any order and payment must be reviewed and completed at Oda.";
+    return "Kontroller og fullfør bestillingen og betalingen hos Oda.";
   return typeof warning === "string"
     ? warning.replaceAll("_", " ")
-    : warning?.message || warning?.detail || "Oda returned a warning.";
+    : warning?.message || warning?.detail || "Oda sendte en advarsel.";
 }
 function selectedMappingDetails(productId) {
   const details = [];
@@ -2960,15 +3139,15 @@ function selectedMappingDetails(productId) {
     (entry.selections || []).forEach((selection) => {
       if (String(selection.product?.product_id) === String(productId))
         details.push(
-          "You entered " +
+          "Du oppga " +
             selection.packages +
             " packages for " +
-            (need.name || "this need") +
+            (need.name || "dette behovet") +
             " · " +
             selection.product.pack_quantity +
             " " +
             selection.product.pack_unit +
-            " per package",
+            " per pakke",
         );
     });
   });
@@ -2979,7 +3158,7 @@ function proposalExpiryText(value) {
   const timestamp = Date.parse(value);
   return Number.isNaN(timestamp)
     ? ""
-    : "Review expires " + new Date(timestamp).toLocaleString() + ".";
+    : "Forslaget utløper " + new Date(timestamp).toLocaleString("nb-NO") + ".";
 }
 function renderProposalOutcome(
   proposal,
@@ -2994,18 +3173,18 @@ function renderProposalOutcome(
   state.cartProposalBlocked =
     cleanupFailed || known === "uncertain" || known === "attempted";
   render();
-  const root = openDialog("Oda cart update status");
+  const root = openDialog("Status for oppdatering av Oda-handlekurven");
   const messages = {
     success:
-      "Oda accepted the reviewed additions. This changed the Oda cart only; it did not place an order or make a payment.",
+      "Oda godtok de gjennomgåtte varene. Dette endret bare Oda-handlekurven. Ingen bestilling eller betaling ble gjennomført.",
     stale:
-      "The Oda cart changed after review. Kitchen did not apply these additions. Refresh and review again before deciding what to add.",
+      "Oda-handlekurven ble endret etter gjennomgangen. Kjøkken la ikke til varene. Oppdater og se over på nytt før du velger hva som skal legges til.",
     uncertain:
-      "Kitchen cannot confirm whether Oda applied these additions. Do not confirm again. Check the actual Oda cart first.",
+      "Kjøkken kan ikke bekrefte om Oda la til varene. Ikke bekreft på nytt. Kontroller Oda-handlekurven først.",
     attempted:
-      "Oda reported an attempted update, but Kitchen cannot confirm the final cart. Do not confirm again. Check the actual Oda cart first.",
+      "Oda meldte om et forsøk på oppdatering, men Kjøkken kan ikke bekrefte den endelige handlekurven. Ikke bekreft på nytt. Kontroller Oda-handlekurven først.",
   };
-  add(root, el("p", "Status: " + known.replaceAll("_", " "), "eyebrow"));
+  add(root, el("p", "Status: " + ({ success: "fullført", stale: "utdatert", uncertain: "ukjent", attempted: "forsøkt" }[known]), "eyebrow"));
   add(
     root,
     el(
@@ -3015,22 +3194,22 @@ function renderProposalOutcome(
     ),
   );
   add(root, el("p", messages[known], "muted"));
-  const cartLink = el("a", "Review your Oda cart ↗");
+  const cartLink = el("a", "Se over Oda-handlekurven ↗");
   cartLink.href = "https://oda.com/no/cart/";
   cartLink.target = "_blank";
   cartLink.rel = "noopener noreferrer";
   add(root, cartLink);
-  const close = button("Close", () => $("#modal").close(), "quiet");
+  const close = button("Lukk", () => $("#modal").close(), "quiet");
   add(root, add(el("div", null, "actions"), close));
   return root;
 }
 function renderOdaProposal(proposal, request) {
-  const root = openDialog("Review proposed Oda cart additions");
+  const root = openDialog("Se over foreslåtte varer til Oda-handlekurven");
   add(
     root,
     el(
       "p",
-      "This adds these packages to your existing Oda cart. Review the full cart and pay at Oda. Kitchen does not place an order or handle payment.",
+      "Disse pakkene legges til i Oda-handlekurven. Se over hele handlekurven og betal hos Oda. Kjøkken legger ikke inn bestillinger eller håndterer betaling.",
       "callout",
     ),
   );
@@ -3048,9 +3227,9 @@ function renderOdaProposal(proposal, request) {
       item,
       el(
         "p",
-        "Packages added: " +
+        "Pakker lagt til: " +
           addition.quantity +
-          " · Oda cart quantity: " +
+          " · Antall i Oda-handlekurven: " +
           (addition.current_quantity ?? "unknown") +
           " → " +
           (addition.after_quantity ?? "unknown"),
@@ -3063,7 +3242,7 @@ function renderOdaProposal(proposal, request) {
   if (proposal.warnings?.length) {
     const warnings = add(
       el("section", null, "callout offline"),
-      el("strong", "Review these notes"),
+      el("strong", "Se over disse merknadene"),
     );
     const warningList = el("ul");
     proposal.warnings.forEach((warning) =>
@@ -3076,14 +3255,14 @@ function renderOdaProposal(proposal, request) {
     root,
     el(
       "p",
-      "Only the listed additions are proposed. Other items already in your Oda cart stay as they are.",
+      "Bare varene som er oppført, foreslås lagt til. Andre varer i Oda-handlekurven forblir uendret.",
       "muted",
     ),
   );
   const expiry = Date.parse(proposal.expires_at || "");
   const expired = Number.isFinite(expiry) && expiry <= Date.now();
   const confirm = button(
-    expired ? "Review expired" : "Add these packs to Oda cart",
+    expired ? "Forslaget er utløpt" : "Legg disse pakkene i Oda-handlekurven",
     async () => confirmOdaCartProposal(proposal, request),
     "primary",
   );
@@ -3092,14 +3271,14 @@ function renderOdaProposal(proposal, request) {
     !proposal.proposal_id ||
     !proposal.additions?.length ||
     expired;
-  const close = button("Cancel", () => $("#modal").close(), "quiet");
+  const close = button("Avbryt", () => $("#modal").close(), "quiet");
   add(root, add(el("div", null, "actions"), close, confirm));
   if (confirm.disabled)
     add(
       root,
       el(
         "p",
-        "This proposal cannot be confirmed. Request a fresh review before continuing.",
+        "Forslaget kan ikke bekreftes. Be om en ny gjennomgang før du fortsetter.",
         "form-error",
       ),
     );
@@ -3184,7 +3363,7 @@ async function confirmOdaCartProposal(proposal, request) {
   });
   const root = $("#modal-content");
   root.replaceChildren(
-    el("h2", "Confirming Oda cart additions"),
+    el("h2", "Bekrefter varer i Oda-handlekurven"),
     el(
       "p",
       "Waiting for Oda. Do not close this dialog or retry the confirmation.",
@@ -3228,7 +3407,7 @@ async function createOdaCartProposal(request, trigger) {
   state.cartProposalLoading = true;
   if (trigger) {
     trigger.disabled = true;
-    trigger.textContent = "Checking current Oda cart…";
+    trigger.textContent = "Kontrollerer Oda-handlekurven …";
   }
   try {
     const proposal = await api("/oda/cart/proposals", "POST", {
@@ -3246,7 +3425,7 @@ async function createOdaCartProposal(request, trigger) {
     state.cartProposalLoading = false;
     if (trigger?.isConnected) {
       trigger.disabled = false;
-      trigger.textContent = "Review additions to Oda cart";
+      trigger.textContent = "Se over varer til Oda-handlekurven";
     }
   }
 }
@@ -3258,11 +3437,11 @@ function renderBasketMatchSummary() {
     return (state.basketMatchPages[String(need.id)]?.[page]?.candidates || []).length > 0;
   }).length;
   const summary = busyCount
-    ? "Searching products for " + busyCount + " of " + needs.length + " items…"
+    ? "Søker etter produkter for " + formatUiCount(busyCount) + " av " + formatUiCount(needs.length) + " varer …"
     : foundCount + " of " + needs.length + " items have product suggestions.";
   const panel = add(
     el("section", null, "panel basket-match-summary"),
-    el("h2", "Product suggestions"),
+    el("h2", "Produktforslag"),
     el("p", summary, "muted"),
   );
   if (state.basketMatchGlobalError) {
@@ -3271,9 +3450,9 @@ function renderBasketMatchSummary() {
     add(panel, error);
   }
   if (state.basketMatchSkippedNeedCount)
-    add(panel, el("p", state.basketMatchSkippedNeedCount + " more items were skipped by the search limit.", "muted"));
+    add(panel, el("p", formatUiCount(state.basketMatchSkippedNeedCount) + " flere varer ble utelatt på grunn av søkegrensen.", "muted"));
   const refresh = button(
-    state.basketMatchGlobalRefreshing ? "Refreshing matches…" : "Refresh all matches",
+    state.basketMatchGlobalRefreshing ? "Oppdaterer treff …" : "Oppdater alle treff",
     () => void startBasketMatchJob({ forceRefresh: true }),
     "quiet small",
   );
@@ -3295,10 +3474,10 @@ function renderBasketMatchNeed(need) {
   const error = state.basketMatchErrors[id];
   const panel = add(
     el("section", null, "basket-match-need"),
-    el("h3", "Suggested products"),
+    el("h3", "Foreslåtte produkter"),
   );
   if (busy) {
-    add(panel, el("p", busy.page > currentPage ? "Loading page " + busy.page + "…" : "Searching Oda…", "muted"));
+    add(panel, el("p", busy.page > currentPage ? "Laster side " + formatUiCount(busy.page) + " …" : "Søker hos Oda …", "muted"));
   } else if (error) {
     const errorText = el("p", error, "form-error");
     errorText.setAttribute("role", "alert");
@@ -3307,7 +3486,7 @@ function renderBasketMatchNeed(need) {
     add(panel, el("p", window.KitchenBasketMatchView.statusLabel(result.status), "muted"));
     if (result.detail) add(panel, el("p", result.detail, "muted"));
   } else {
-    add(panel, el("p", "Waiting for automatic product search…", "muted"));
+    add(panel, el("p", "Venter på automatisk produktsøk …", "muted"));
   }
 
   if (result?.candidates?.length) {
@@ -3326,7 +3505,7 @@ function renderBasketMatchNeed(need) {
   const actions = el("div", null, "actions basket-match-actions");
   if (error || ["search_failed", "search_unavailable"].includes(result?.status)) {
     const retry = button(
-      busy ? "Searching…" : "Retry this item",
+      busy ? "Søker …" : "Prøv denne varen igjen",
       () => void startBasketMatchJob({ needIds: [id], forceRefresh: true, page: 1 }),
       "quiet small",
     );
@@ -3334,12 +3513,12 @@ function renderBasketMatchNeed(need) {
     add(actions, retry);
   }
   if (currentPage > 1 && pages[currentPage - 1])
-    add(actions, button("Previous results", () => showBasketMatchPage(id, currentPage - 1), "quiet small"));
+    add(actions, button("Forrige treff", () => showBasketMatchPage(id, currentPage - 1), "quiet small"));
   if (result?.has_more && currentPage < 50) {
     const nextPage = currentPage + 1;
     const cached = pages[nextPage];
     const more = button(
-      busy?.page === nextPage ? "Loading more…" : cached ? "Next results" : "More results",
+      busy?.page === nextPage ? "Laster flere …" : cached ? "Neste treff" : "Flere treff",
       () => {
         if (cached) showBasketMatchPage(id, nextPage);
         else void startBasketMatchJob({ needIds: [id], page: nextPage });
@@ -3368,31 +3547,31 @@ function renderBasketMatchCandidate(candidate, need) {
       details,
       el(
         "small",
-        "Suggested " + candidate.recommended_packages + " packs · " +
+        "Foreslått " + formatUiCount(candidate.recommended_packages) + " pakker · " +
           window.KitchenShoppingView.formatQuantityForDisplay(String(candidate.recommended_fulfillment_quantity)) +
-          " " + need.unit + " total",
+          " " + need.unit + " totalt",
         "muted",
       ),
     );
   } else {
     const pack = candidate.pack_quantity != null && candidate.pack_unit
-      ? "Pack " + candidate.pack_quantity + " " + candidate.pack_unit + " · count not calculated"
-      : "Pack size unclear · check before choosing";
+      ? "Pakke " + formatUiQuantity(candidate.pack_quantity) + " " + candidate.pack_unit + " · antall er ikke beregnet"
+      : "Pakningsstørrelsen er uklar · kontroller før du velger";
     add(details, el("small", pack, "muted"));
   }
-  if (candidate.price) add(details, el("small", "Oda price: " + candidate.price, "muted"));
+  if (candidate.price) add(details, el("small", "Pris hos Oda: " + candidate.price, "muted"));
   add(summary, details);
   const productUrl = officialOdaProductUrl(candidate.product_url);
-  add(summary, button("Choose", () => chooseMatchedCandidate(candidate, need), "primary small"));
+  add(summary, button("Velg", () => chooseMatchedCandidate(candidate, need), "primary small"));
   const more = el("details", null, "basket-match-candidate-details");
-  add(more, el("summary", "Details"));
+  add(more, el("summary", "Detaljer"));
   if (candidate.description) add(more, el("p", candidate.description, "muted"));
   if (candidate.pack_description)
     add(more, el("p", "Pack details from Oda: " + candidate.pack_description + " · unverified", "muted"));
   else if (media.pack_description)
     add(more, el("p", "Pack details from Oda: " + media.pack_description + " · unverified", "muted"));
-  if (candidate.available === true) add(more, el("p", "Oda marks this as available.", "muted"));
-  else if (candidate.available === false) add(more, el("p", "Oda marks this as unavailable.", "muted"));
+  if (candidate.available === true) add(more, el("p", "Oda oppgir at varen er tilgjengelig.", "muted"));
+  else if (candidate.available === false) add(more, el("p", "Oda oppgir at varen ikke er tilgjengelig.", "muted"));
   if (media.detail) add(more, el("p", media.detail, "muted"));
   if (productUrl) {
     const link = el("a", "View Oda reference ↗");
@@ -3406,7 +3585,7 @@ function renderBasketMatchCandidate(candidate, need) {
 }
 function chooseMatchedCandidate(candidate, need) {
   if (candidate.provider !== "oda" || !candidate.product_id) {
-    notify("This result does not include a usable Oda product reference.", true);
+    notify("Dette resultatet har ingen gyldig Oda-produktreferanse.", true);
     return;
   }
   const recommendation = window.KitchenBasketMatchView.selectionRecommendation(
@@ -3416,7 +3595,7 @@ function chooseMatchedCandidate(candidate, need) {
   const recommendedPackages = recommendation?.packages;
   const recommendedFulfillment = recommendation?.fulfillment;
   const hasRecommendation = Boolean(recommendation);
-  const root = openDialog("Confirm product and package size");
+  const root = openDialog("Bekreft produkt og pakningsstørrelse");
   add(
     root,
     el("p", "This saves a product choice for basket review only. It does not add anything to your Oda cart. Oda pack details are unverified; check them before saving.", "callout"),
@@ -3428,7 +3607,7 @@ function chooseMatchedCandidate(candidate, need) {
       : el("p", "No reliable package count is available. Enter the per-pack amount in " + need.unit + " and choose a package count.", "muted"),
   );
   const form = el("form");
-  const packages = field("Number of packages", "number", hasRecommendation ? recommendedPackages : "");
+  const packages = field("Antall pakker", "number", hasRecommendation ? recommendedPackages : "");
   packages.input.min = "1";
   packages.input.max = "999";
   packages.input.step = "1";
@@ -3438,13 +3617,13 @@ function chooseMatchedCandidate(candidate, need) {
   amount.input.step = "any";
   amount.input.required = true;
   add(form, packages.wrap, amount.wrap);
-  formSubmit(form, "Save product choice", async () => {
+  formSubmit(form, "Lagre produktvalg", async () => {
     const packageCount = Number(packages.input.value);
     if (!Number.isSafeInteger(packageCount) || packageCount < 1)
-      throw new Error("Enter a whole number of packages greater than zero.");
+      throw new Error("Oppgi et helt antall pakker større enn null.");
     const quantityText = amount.input.value.trim();
     if (!/^(?:\d+(?:\.\d+)?|\.\d+)$/.test(quantityText) || !Number.isFinite(Number(quantityText)) || Number(quantityText) <= 0)
-      throw new Error("Enter a positive amount per package.");
+      throw new Error("Oppgi en mengde per pakke som er større enn null.");
     await api("/basket/selections", "PUT", {
       start: iso(day(0)),
       end: iso(day(6)),
@@ -3472,7 +3651,7 @@ function chooseMatchedCandidate(candidate, need) {
     state.cartProposalHandled = false;
     $("#modal").close();
     await refreshView();
-    notify("Oda product choice saved for review. It remains unverified.");
+    notify("Oda-produktvalget er lagret for gjennomgang, men det er ikke verifisert.");
   });
   add(root, form);
 }
@@ -3489,7 +3668,7 @@ async function connectOdaAccount() {
       authorization.host !== "oda.com" ||
       !authorization.pathname.startsWith("/o/authorize/")
     )
-      throw new Error("Kitchen did not return a valid Oda authorization link.");
+      throw new Error("Kjøkken mottok ikke en gyldig autorisasjonslenke fra Oda.");
     window.location.assign(authorization.href);
   } catch (error) {
     notify(error.message, true);
@@ -3501,7 +3680,7 @@ async function disconnectOdaAccount() {
     resetBasketMatching();
     state.basketMatchConnected = false;
     await refreshView();
-    notify("Oda disconnected from Kitchen.");
+    notify("Oda er koblet fra Kjøkken.");
   } catch (error) {
     notify(error.message, true);
   }
@@ -3525,9 +3704,9 @@ function renderShoppingConnectionPrompt(main) {
       main,
       add(
         el("section", null, "callout connection-prompt"),
-        el("strong", "Oda connection needs attention"),
+        el("strong", "Oda-tilkoblingen trenger oppfølging"),
         el("p", connectionIssue),
-        connectionSettingsButton("Reconnect Oda in Settings"),
+        connectionSettingsButton("Koble til Oda på nytt i innstillingene"),
       ),
     );
     return;
@@ -3537,8 +3716,8 @@ function renderShoppingConnectionPrompt(main) {
       main,
       add(
         el("details", null, "shopping-info basket-oda-info"),
-        el("summary", "About Oda product choices"),
-        el("p", "Product matches are suggestions. Check the exact product and package quantities before saving a choice. Kitchen does not place an order or handle payment."),
+        el("summary", "Om produktvalg fra Oda"),
+        el("p", "Produktreff er forslag. Kontroller produktet og pakningsmengden før du lagrer et valg. Kjøkken legger ikke inn bestillinger eller håndterer betaling."),
       ),
     );
     return;
@@ -3548,12 +3727,12 @@ function renderShoppingConnectionPrompt(main) {
     main,
     add(
       el("section", null, "callout connection-prompt"),
-      el("strong", configured ? "Oda is not connected" : "Oda setup is required"),
+      el("strong", configured ? "Oda er ikke tilkoblet" : "Oda må settes opp"),
       el(
         "p",
         configured
-          ? "Connect your account in Settings to search Oda products and review cart additions."
-          : "Oda product matching needs operator setup. You can still use the in-store shopping list.",
+          ? "Koble til kontoen din i innstillingene for å søke etter Oda-produkter og se over varer i handlekurven."
+          : "Oda-produkttreff krever oppsett. Du kan fortsatt bruke handlelisten i butikken.",
       ),
       connectionSettingsButton(),
     ),
@@ -3567,10 +3746,10 @@ function renderBasket(main) {
     const status = el(
       "p",
       basket.ready_for_review
-        ? "Ready for cart review"
+        ? "Klar for gjennomgang av handlekurven"
         : hasSelections
-          ? "Review selected products"
-          : "Choose a product for each need",
+          ? "Se over valgte produkter"
+          : "Velg et produkt for hvert behov",
       "basket-status" + (basket.ready_for_review ? "" : " needs-attention"),
     );
     const priceSummary = window.KitchenShoppingView.basketPriceSummary(basket);
@@ -3584,7 +3763,7 @@ function renderBasket(main) {
   }
   if (basket.issues?.length) {
     const issues = el("details", null, "shopping-info basket-issues");
-    add(issues, el("summary", "Review details (" + basket.issues.length + ")"));
+    add(issues, el("summary", "Se over detaljer (" + formatUiCount(basket.issues.length) + ")"));
     const list = el("ul");
     basket.issues.forEach((issue) =>
       (() => {
@@ -3604,10 +3783,10 @@ function renderBasket(main) {
     add(
       main,
       empty(
-        "No shopping needs to match yet",
-        "Plan meals or add shopping needs first.",
+        "Ingen handlebehov å finne produkter til ennå",
+        "Planlegg måltider eller legg til handlebehov først.",
         button(
-          "Open shopping needs",
+          "Åpne handlebehov",
           () => {
             state.shoppingPanel = "needs";
             navigate("shopping");
@@ -3625,25 +3804,31 @@ function renderBasket(main) {
     const heading = el("div", null, "need-heading");
     const needQuantity = el(
       "p",
-      window.KitchenShoppingView.formatQuantityForDisplay(String(need.quantity ?? "")) +
-        (need.unit ? " " + need.unit : ""),
+      window.KitchenBasketMatchView.formatNeedQuantity(
+        need,
+        (quantity) => window.KitchenShoppingView.formatQuantityForDisplay(String(quantity ?? "")),
+      ),
       "need-quantity",
     );
     needQuantity.setAttribute(
       "aria-label",
-      "Exact quantity: " + String(need.quantity ?? "") + (need.unit ? " " + need.unit : ""),
+      (need.approximate === true ? "Omtrentlig mengde: ca. " : "Nøyaktig mengde: ") +
+        String(need.quantity ?? "") +
+        (need.unit ? " " + need.unit : ""),
     );
     add(
       heading,
       add(
         el("div"),
-        el("h2", need.name || "Shopping need"),
+        el("h2", need.name || "Handlebehov"),
         needQuantity,
       ),
     );
     if (need.origins?.length)
-      add(heading, el("p", "From " + shoppingOrigins(need.origins), "muted"));
+      add(heading, el("p", "Fra " + shoppingOrigins(need.origins), "muted"));
     add(section, heading);
+    const evidence = renderPurchaseEvidence(need);
+    if (evidence) add(section, evidence);
     if (
       entry.allocated_quantity != null ||
       entry.remaining_quantity != null ||
@@ -3655,26 +3840,26 @@ function renderBasket(main) {
       const unit = need.unit || "";
       const allocation = el(
         "p",
-        "Covered by selected packs: " +
+        "Dekket av valgte pakker: " +
           window.KitchenShoppingView.formatQuantityForDisplay(allocated) +
           (unit ? " " + unit : "") +
-          " · Still needed: " +
+          " · Gjenstår: " +
           window.KitchenShoppingView.formatQuantityForDisplay(remaining) +
           (unit ? " " + unit : "") +
-          " · Extra from selected packs: " +
+          " · Til overs fra valgte pakker: " +
           window.KitchenShoppingView.formatQuantityForDisplay(overbuy) +
           (unit ? " " + unit : ""),
         "muted",
       );
       allocation.setAttribute(
         "aria-label",
-        "Exact quantities: covered by selected packs " +
+        "Nøyaktige mengder: dekket av valgte pakker " +
           allocated +
           (unit ? " " + unit : "") +
-          "; still needed " +
+          "; gjenstår " +
           remaining +
           (unit ? " " + unit : "") +
-          "; extra from selected packs " +
+          "; til overs fra valgte pakker " +
           overbuy +
           (unit ? " " + unit : ""),
       );
@@ -3686,7 +3871,7 @@ function renderBasket(main) {
       const manualSearch = odaSearchForNeed(need);
       const manualDetails = el("details", null, "oda-manual-search");
       manualDetails.open = Boolean(state.odaManualSearchOpen[String(need.id)]);
-      add(manualDetails, el("summary", "Refine with a manual Oda search"), manualSearch);
+      add(manualDetails, el("summary", "Søk manuelt hos Oda"), manualSearch);
       manualDetails.addEventListener("toggle", () => {
         state.odaManualSearchOpen[String(need.id)] = manualDetails.open;
       });
@@ -3699,7 +3884,7 @@ function renderBasket(main) {
         add(
           selected,
           button(
-            "Remove from review",
+            "Fjern fra gjennomgangen",
             async () => {
               try {
                 await api(
@@ -3722,7 +3907,7 @@ function renderBasket(main) {
         add(section, selected);
       }
       if (selection.alternatives?.length) {
-        add(section, el("h3", "Alternatives"));
+        add(section, el("h3", "Alternativer"));
         const alternatives = el("div", null, "alternatives-grid");
         selection.alternatives.forEach((product) =>
           add(alternatives, basketProduct(product, null, true)),
@@ -3740,10 +3925,10 @@ function renderBasket(main) {
   ) {
     const cartPanel = add(
       el("section", null, "panel oda-cart-panel"),
-      el("h2", "Add selected products to Oda"),
+      el("h2", "Legg valgte produkter til i Oda"),
       el(
         "p",
-        "Review exact additions against the current Oda cart before confirming. Existing Oda cart items are kept.",
+        "Kontroller de nøyaktige varene mot den gjeldende Oda-handlekurven før du bekrefter. Varer som allerede ligger i handlekurven, beholdes.",
         "muted",
       ),
     );
@@ -3754,7 +3939,7 @@ function renderBasket(main) {
         cartPanel,
         el(
           "p",
-          "The last Oda cart update may have been applied. Do not retry it from Kitchen. Review the actual Oda cart first.",
+          "Den siste oppdateringen kan ha blitt utført i Oda-handlekurven. Ikke prøv på nytt fra Kjøkken. Kontroller Oda-handlekurven først.",
           "callout offline",
         ),
       );
@@ -3763,7 +3948,7 @@ function renderBasket(main) {
         cartPanel,
         el(
           "p",
-          "The reviewed additions were accepted and removed from this Kitchen review.",
+          "De gjennomgåtte varene ble godtatt og fjernet fra denne gjennomgangen i Kjøkken.",
           "callout",
         ),
       );
@@ -3771,8 +3956,8 @@ function renderBasket(main) {
       let review;
       review = button(
         state.cartProposalLoading
-          ? "Checking current Oda cart…"
-          : "Review additions to Oda cart",
+          ? "Kontrollerer Oda-handlekurven …"
+          : "Se over varer til Oda-handlekurven",
         () => createOdaCartProposal(proposalRequest, review),
         "primary",
       );
@@ -3783,7 +3968,7 @@ function renderBasket(main) {
   }
 }
 function feedbackForm(recipe) {
-  const root = openDialog(recipe ? "Rate this recipe" : "Share feedback");
+    const root = openDialog(recipe ? "Vurder oppskriften" : "Gi tilbakemelding");
   if (recipe) {
     add(
       root,
@@ -3812,7 +3997,7 @@ function feedbackForm(recipe) {
     notes.input.maxLength = 2000;
     notes.input.rows = 4;
     add(form, rating.wrap, wouldMakeAgain.wrap, notes.wrap);
-    formSubmit(form, "Save feedback", async () => {
+    formSubmit(form, "Lagre tilbakemeldingen", async () => {
       const payload = {};
       if (rating.input.value.trim()) payload.rating = Number(rating.input.value);
       if (wouldMakeAgain.input.value) {
@@ -3821,7 +4006,7 @@ function feedbackForm(recipe) {
       if (notes.input.value.trim()) payload.notes = notes.input.value.trim();
       await api(`/recipes/${recipe.id}/feedback`, "POST", payload);
       $("#modal").close();
-      notify("Feedback saved for future recommendations.");
+      notify("Tilbakemeldingen er lagret for framtidige anbefalinger.");
     });
     add(root, form);
     return;
@@ -3837,9 +4022,9 @@ function feedbackForm(recipe) {
   const form = el("form");
   const kind = field("Type", "select");
   [
-    ["feedback", "General feedback"],
-    ["preference", "Food preference"],
-    ["recipe_rating", "Recipe rating"],
+    ["feedback", "Generell tilbakemelding"],
+    ["preference", "Matpreferanse"],
+    ["recipe_rating", "Oppskriftsvurdering"],
   ].forEach(([value, label]) => {
     const option = el("option", label);
     option.value = value;
@@ -3850,18 +4035,18 @@ function feedbackForm(recipe) {
     kind.input.disabled = true;
   }
   const message = field(
-    recipe ? "Your rating or note" : "Your note",
+    recipe ? "Vurderingen eller notatet ditt" : "Notatet ditt",
     "textarea",
     "",
     recipe
       ? "What worked well, or what should change next time?"
-      : "A short note to guide future recommendations.",
+      : "Et kort notat som kan brukes i framtidige anbefalinger.",
   );
   message.input.required = true;
   message.input.maxLength = 2000;
   message.input.rows = 4;
   add(form, kind.wrap, message.wrap);
-  formSubmit(form, "Save feedback", async () => {
+  formSubmit(form, "Lagre tilbakemeldingen", async () => {
     await api("/interactions", "POST", {
       channel: "app",
       kind: kind.input.value,
@@ -3870,28 +4055,28 @@ function feedbackForm(recipe) {
       ...(recipe ? { recipe_id: recipe.id } : {}),
     });
     $("#modal").close();
-    notify("Feedback saved for future recommendations.");
+      notify("Tilbakemeldingen er lagret for framtidige anbefalinger.");
   });
   add(root, form);
 }
 function itemForm(regular = false) {
   const root = openDialog(
-    regular ? "Add an everyday regular" : "Add to the shopping list",
+    regular ? "Legg til en hverdagsvare" : "Legg til på handlelisten",
   );
   const form = el("form");
-  const name = field("Item name");
+  const name = field("Varenavn");
   name.input.required = true;
-  const quantity = field("Quantity", "number", "1");
+  const quantity = field("Mengde", "number", "1");
   quantity.input.min = "0.001";
   quantity.input.step = "any";
   quantity.input.required = true;
-  const unit = field("Unit", "text", "item");
+  const unit = field("Enhet", "text", "stk.");
   unit.input.required = true;
   const category = field(
-    "Category",
+    "Kategori",
     "text",
     "Other",
-    "Used to organize the in-store list.",
+    "Brukes til å sortere handlelisten i butikken.",
   );
   category.input.maxLength = 60;
   add(
@@ -3900,11 +4085,11 @@ function itemForm(regular = false) {
     add(el("div", null, "form-grid"), quantity.wrap, unit.wrap),
     category.wrap,
   );
-  const interval = field("Usually buy every (days)", "number", 7);
+  const interval = field("Kjøpes vanligvis hver (dag)", "number", 7);
   interval.input.min = 1;
   interval.input.required = true;
   if (regular) add(form, interval.wrap);
-  formSubmit(form, regular ? "Save regular" : "Add item", () =>
+  formSubmit(form, regular ? "Lagre hverdagsvare" : "Legg til vare", () =>
     mutate(
       regular ? "/regular-items" : "/items",
       "POST",
@@ -3915,7 +4100,7 @@ function itemForm(regular = false) {
         category: category.input.value.trim() || "Other",
         ...(regular ? { interval_days: Number(interval.input.value) } : {}),
       },
-      regular ? "Regular item saved." : "Item added.",
+      regular ? "Hverdagsvaren er lagret." : "Varen er lagt til.",
     ),
   );
   add(root, form);
@@ -3925,14 +4110,14 @@ function renderConnectionSettings() {
     el("section", null, "panel connection-settings"),
     add(
       el("div", null, "connection-settings-heading"),
-      el("h2", "Connections"),
+      el("h2", "Tilkoblinger"),
       button(
-        state.settingsRefreshInFlight ? "Refreshing…" : "Refresh status",
+        state.settingsRefreshInFlight ? "Oppdaterer …" : "Oppdater status",
         refreshConnectionSettings,
         "quiet small",
       ),
     ),
-    el("p", "Manage provider access here. Secrets are never shown in Kitchen.", "muted"),
+    el("p", "Administrer leverandørtilgang her. Hemmeligheter vises aldri i Kjøkken.", "muted"),
   );
   const refresh = section.querySelector("button");
   refresh.id = "settings-connection-refresh";
@@ -3940,7 +4125,7 @@ function renderConnectionSettings() {
   refresh.disabled = state.settingsRefreshInFlight;
   refresh.setAttribute(
     "aria-label",
-    state.settingsRefreshInFlight ? "Refreshing connection status" : "Refresh connection status",
+    state.settingsRefreshInFlight ? "Oppdaterer tilkoblingsstatus" : "Oppdater tilkoblingsstatus",
   );
   const integrations = Array.isArray(state.integrations) ? [...state.integrations] : [];
   if (state.oda && !integrations.some((integration) => integration.id === "oda"))
@@ -3949,7 +4134,7 @@ function renderConnectionSettings() {
       name: "Oda",
       status: state.oda.connected ? "connected" : state.oda.configured ? "configured" : "not_configured",
       supported_auth_modes: [],
-      detail: state.oda.detail || "Oda connection status was loaded independently.",
+      detail: state.oda.detail || "Oda-tilkoblingsstatus ble hentet separat.",
     });
   integrations.forEach((integration) => {
     const status = integration.id === "oda" && state.oda
@@ -3978,15 +4163,15 @@ function renderConnectionSettings() {
       .map((mode) => window.KitchenSettingsView.integrationAuthLabel(mode))
       .join(", ");
     const authentication = activeMode
-      ? "Authentication: " + window.KitchenSettingsView.integrationAuthLabel(activeMode, true)
-      : "Supported methods: " + (supportedMethods || "Not reported");
+      ? "Autentisering: " + window.KitchenSettingsView.integrationAuthLabel(activeMode, true)
+      : "Støttede metoder: " + (supportedMethods || "Ikke oppgitt");
     add(
       row,
       el(
         "p",
         integration.id === "oda" && state.oda
-          ? state.oda?.detail || integration.detail || "No Oda connection details are available."
-          : integration.detail || "No connection details are available.",
+          ? state.oda?.detail || integration.detail || "Ingen tilkoblingsdetaljer for Oda er tilgjengelige."
+          : integration.detail || "Ingen tilkoblingsdetaljer er tilgjengelige.",
         "muted",
       ),
       el(
@@ -4000,13 +4185,13 @@ function renderConnectionSettings() {
       if (state.oda?.connected) {
         add(
           actions,
-          button("Reconnect Oda", connectOdaAccount, "quiet"),
-          button("Disconnect Oda", disconnectOdaAccount, "quiet danger"),
+          button("Koble til Oda på nytt", connectOdaAccount, "quiet"),
+          button("Koble fra Oda", disconnectOdaAccount, "quiet danger"),
         );
       } else if (state.oda?.configured) {
-        add(actions, button("Connect Oda account", connectOdaAccount, "primary"));
+        add(actions, button("Koble til Oda-konto", connectOdaAccount, "primary"));
       } else {
-        const setup = button("Setup required", () => {}, "quiet");
+        const setup = button("Oppsett kreves", () => {}, "quiet");
         setup.disabled = true;
         add(actions, setup);
       }
@@ -4019,10 +4204,10 @@ function renderConnectionSettings() {
   if (state.odaStatusError)
     add(section, el("p", state.odaStatusError, "callout"));
   if (!integrations.length && !state.integrationsError && !state.odaStatusError)
-    add(section, el("p", "No connection status is available yet. Refresh to try again.", "muted"));
+    add(section, el("p", "Tilkoblingsstatus er ikke tilgjengelig ennå. Oppdater for å prøve igjen.", "muted"));
   add(
     section,
-    el("p", "You can install Kitchen from your browser’s menu on Android. The app shell opens offline; shared recipes and changes need a connection.", "muted"),
+    el("p", "På Android kan du installere Kjøkken fra nettlesermenyen. Appen åpnes uten nett, men delte oppskrifter og endringer krever tilkobling.", "muted"),
   );
   return section;
 }
@@ -4032,56 +4217,56 @@ function renderSettings(main) {
   add(
     main,
     title(
-      "Make yourself at home",
-      first ? "Welcome to your kitchen." : "Your household.",
+      "Gjør kjøkkenet til ditt eget",
+      first ? "Velkommen til kjøkkenet." : "Husholdningen din.",
       first
-        ? "A few details help make meal planning fit your home. You can change these anytime."
-        : "The people, preferences, and portions behind your plan.",
+        ? "Noen få opplysninger gjør måltidsplanleggingen mer relevant. Du kan endre dem når som helst."
+        : "Personene, preferansene og porsjonene som planen bygger på.",
     ),
   );
   const form = el("form", null, "panel");
   const name = field(
-    "Household name",
+    "Navn på husholdningen",
     "text",
     household.name || "",
-    "Choose a name for your shared kitchen.",
+    "Velg et navn på kjøkkenet dere deler.",
   );
   name.input.required = true;
   name.input.maxLength = 100;
-  const adults = field("Adults", "number", household.adults ?? 1);
+  const adults = field("Voksne", "number", household.adults ?? 1);
   adults.input.min = 0;
   adults.input.max = 30;
   adults.input.required = true;
   const children = field(
-    "Children’s ages",
+    "Barnas alder",
     "text",
     (household.children_ages || []).join(", "),
-    "Optional. Separate ages with commas, for example: 4, 8.",
+    "Valgfritt. Skill alderen med komma, for eksempel: 4, 8.",
   );
   const servings = field(
-    "Default meal servings",
+    "Standard antall porsjoner",
     "number",
     household.default_servings || 2,
   );
   servings.input.min = 1;
   servings.input.max = 100;
   servings.input.required = true;
-  const language = field("Preferred language", "select");
+  const language = field("Foretrukket språk", "select");
   [
-    ["en", "English"],
-    ["no", "Norsk"],
-    ["fr", "Français"],
+    ["en", "Engelsk"],
+    ["nb", "Norsk (bokmål)"],
+    ["fr", "Fransk"],
   ].forEach(([value, label]) => {
     const option = el("option", label);
     option.value = value;
     add(language.input, option);
   });
-  language.input.value = household.language || "en";
+  language.input.value = household.language || "nb";
   const preferences = field(
-    "Food preferences",
+    "Matpreferanser",
     "textarea",
     (household.dietary_preferences || []).join("\n"),
-    "Optional. One per line, including allergies or ingredients to avoid. Always check recipes and product labels.",
+    "Valgfritt. Én per linje, for eksempel allergier eller ingredienser dere vil unngå. Kontroller alltid oppskrifter og produktetiketter.",
   );
   preferences.input.rows = 3;
   let nextCategoryKey = 0;
@@ -4091,10 +4276,10 @@ function renderSettings(main) {
   }));
   const categoryEditor = add(
     el("section", null, "category-order-settings"),
-    el("h2", "Store walking order"),
+    el("h2", "Rekkefølge i butikken"),
     el(
       "p",
-      "Set the household’s preferred category order for the in-store list and shared list text. Unlisted categories follow alphabetically; this is household guidance, not a store aisle map.",
+      "Velg rekkefølgen på kategoriene i butikklisten og den delte handlelisten. Kategorier som ikke er oppført, sorteres alfabetisk. Dette er husholdningens preferanse, ikke et butikkart.",
       "muted",
     ),
   );
@@ -4102,35 +4287,35 @@ function renderSettings(main) {
   const renderCategoryRows = (focusKey = null) => {
     categoryList.replaceChildren();
     if (!categoryRows.length)
-      add(categoryList, el("li", "All categories will be sorted alphabetically.", "muted category-order-empty"));
+      add(categoryList, el("li", "Alle kategorier sorteres alfabetisk.", "muted category-order-empty"));
     categoryRows.forEach((row, index) => {
       const item = el("li", null, "category-order-row");
       const input = el("input");
       input.type = "text";
       input.maxLength = 100;
       input.value = row.value;
-      input.setAttribute("aria-label", "Category at position " + (index + 1));
+      input.setAttribute("aria-label", "Kategori på plass " + formatUiCount(index + 1));
       input.dataset.focusKey = "shopping-category-" + row.key;
       input.addEventListener("input", () => { row.value = input.value; });
-      const moveUp = button("Move up", () => {
+      const moveUp = button("Flytt opp", () => {
         categoryRows = window.KitchenSettingsView.moveShoppingCategory(categoryRows, index, index - 1);
         renderCategoryRows("shopping-category-" + row.key);
       }, "quiet category-order-move");
       moveUp.disabled = index === 0;
-      moveUp.setAttribute("aria-label", "Move " + row.value + " up");
-      const moveDown = button("Move down", () => {
+      moveUp.setAttribute("aria-label", "Flytt " + row.value + " opp");
+      const moveDown = button("Flytt ned", () => {
         categoryRows = window.KitchenSettingsView.moveShoppingCategory(categoryRows, index, index + 1);
         renderCategoryRows("shopping-category-" + row.key);
       }, "quiet category-order-move");
       moveDown.disabled = index === categoryRows.length - 1;
-      moveDown.setAttribute("aria-label", "Move " + row.value + " down");
-      const remove = button("Remove", () => {
+      moveDown.setAttribute("aria-label", "Flytt " + row.value + " ned");
+      const remove = button("Fjern", () => {
         categoryRows = categoryRows.filter((category) => category.key !== row.key);
         const next = categoryRows[Math.min(index, categoryRows.length - 1)];
         renderCategoryRows(next ? "shopping-category-" + next.key : null);
         if (!next) categoryEntry.input.focus();
       }, "quiet category-order-remove");
-      remove.setAttribute("aria-label", "Remove " + row.value);
+      remove.setAttribute("aria-label", "Fjern " + row.value);
       add(item, input, moveUp, moveDown, remove);
       categoryList.append(item);
     });
@@ -4138,32 +4323,32 @@ function renderSettings(main) {
       categoryList.querySelector('[data-focus-key="' + focusKey + '"]')?.focus({ preventScroll: true });
   };
   renderCategoryRows();
-  const categoryEntry = field("Add a category", "text", "", "For example: Bakery or Household.");
+  const categoryEntry = field("Legg til en kategori", "text", "", "For eksempel: Bakery eller Household.");
   categoryEntry.input.maxLength = 100;
   categoryEntry.input.dataset.focusKey = "new-shopping-category";
   const categoryError = el("p", "", "form-error");
   categoryError.setAttribute("role", "alert");
-  const addCategory = button("Add category", () => {
+  const addCategory = button("Legg til kategori", () => {
     const value = categoryEntry.input.value.trim();
     const normalized = window.KitchenSettingsView.normalizeShoppingCategoryOrder(
       categoryRows.map((row) => row.value),
     );
     if (!value) {
-      categoryError.textContent = "Enter a category name.";
+      categoryError.textContent = "Skriv inn et kategorinavn.";
       categoryEntry.input.focus();
       return;
     }
     if (value.length > 100) {
-      categoryError.textContent = "Category names can be up to 100 characters.";
+      categoryError.textContent = "Kategorinavn kan være opptil 100 tegn.";
       categoryEntry.input.focus();
       return;
     }
     if (categoryRows.length >= 64) {
-      categoryError.textContent = "You can add up to 64 categories.";
+      categoryError.textContent = "Du kan legge til opptil 64 kategorier.";
       return;
     }
     if (normalized.error === "duplicate" || normalized.value?.some((category) => category.toLowerCase() === value.toLowerCase())) {
-      categoryError.textContent = "Each category must have a unique name.";
+      categoryError.textContent = "Hver kategori må ha et unikt navn.";
       categoryEntry.input.focus();
       return;
     }
@@ -4179,7 +4364,7 @@ function renderSettings(main) {
       addCategory.click();
     }
   });
-  const restoreDefaults = button("Restore curated order", () => {
+  const restoreDefaults = button("Gjenopprett anbefalt rekkefølge", () => {
     categoryRows = window.KitchenSettingsView.DEFAULT_SHOPPING_CATEGORY_ORDER.map((value) => ({
       key: String(nextCategoryKey++),
       value,
@@ -4187,7 +4372,7 @@ function renderSettings(main) {
     categoryError.textContent = "";
     renderCategoryRows();
   }, "quiet");
-  const alphabetical = button("Use alphabetical order", () => {
+  const alphabetical = button("Sorter alfabetisk", () => {
     categoryRows = [];
     categoryError.textContent = "";
     renderCategoryRows();
@@ -4213,29 +4398,29 @@ function renderSettings(main) {
     preferences.wrap,
     el(
       "p",
-      "The interface currently uses English. Your preferred language is saved for recipe and household context.",
+      "Grensesnittet vises på bokmål. Språkvalget brukes som kontekst for oppskrifter og husholdningen.",
       "muted",
     ),
     categoryEditor,
   );
-  formSubmit(form, first ? "Set up my kitchen" : "Save household settings", async () => {
+  formSubmit(form, first ? "Sett opp kjøkkenet" : "Lagre husholdningsinnstillinger", async () => {
     const values = children.input.value
       .split(",")
       .map((value) => value.trim())
       .filter(Boolean);
     if (values.some((value) => !/^\d+$/.test(value) || Number(value) > 17))
       throw new Error(
-        "Enter children’s ages as whole numbers from 0 to 17, separated by commas.",
+        "Oppgi barnas alder som hele tall fra 0 til 17, adskilt med komma.",
       );
     const order = window.KitchenSettingsView.normalizeShoppingCategoryOrder(
       categoryRows.map((row) => row.value),
     );
     if (order.error === "duplicate")
-      throw new Error("Category names must be unique, ignoring capitalization.");
+      throw new Error("Kategorinavn må være unike, uavhengig av store og små bokstaver.");
     if (order.error === "too_many")
-      throw new Error("You can save up to 64 shopping categories.");
+      throw new Error("Du kan lagre opptil 64 handlekategorier.");
     if (order.error)
-      throw new Error("Each shopping category needs a name no longer than 100 characters.");
+      throw new Error("Hver handlekategori må ha et navn på høyst 100 tegn.");
     state.household = await api("/household", "PUT", {
       name: name.input.value.trim(),
       adults: Number(adults.input.value),
@@ -4248,7 +4433,7 @@ function renderSettings(main) {
       language: language.input.value,
       shopping_category_order: order.value,
     });
-    notify("Household saved.");
+    notify("Husholdningsinnstillingene er lagret.");
     if (first) navigate("week");
   });
   add(main, form);
@@ -4282,7 +4467,7 @@ window.addEventListener("offline", () => {
   );
 });
 window.addEventListener("online", () => {
-  notify("Connection restored.");
+  notify("Tilkoblingen er gjenopprettet.");
   if (state.view === "shopping") void refreshShoppingIfSafe(true);
   else if (!$("#modal").open && !$("#main form")) refreshView();
 });
@@ -4296,8 +4481,18 @@ $("#modal").addEventListener("close", queuePendingShoppingRefresh);
 async function start() {
   try {
     const odaResult = new URLSearchParams(location.search).get("oda");
-    const requestedDate = parseDate(new URLSearchParams(location.search).get("date"));
-    if (requestedDate) state.week = requestedDate;
+    const params = new URLSearchParams(location.search);
+    const requestedDate = parseDate(params.get("date"));
+    if (requestedDate) {
+      state.week = requestedDate;
+      state.selectedDate = new Date(requestedDate);
+    }
+    const requestedDay = parseDate(params.get("day"));
+    if (
+      requestedDay &&
+      requestedDay >= state.week &&
+      requestedDay <= day(6)
+    ) state.selectedDate = requestedDay;
     [state.household, state.recipes] = await Promise.all([
       api("/household"),
       api("/recipes"),
@@ -4332,29 +4527,29 @@ async function start() {
         } catch {}
         notify(
           state.oda?.connected
-            ? "Oda connected to Kitchen."
-            : "Kitchen could not confirm the Oda connection.",
+            ? "Oda er koblet til Kjøkken."
+            : "Kjøkken kunne ikke bekrefte Oda-tilkoblingen.",
           !state.oda?.connected,
         );
       } else {
-        notify("Oda connection did not complete. You can try again.", true);
+        notify("Oda-tilkoblingen ble ikke fullført. Prøv igjen.", true);
       }
     }
   } catch (error) {
     const main = $("#main");
     main.replaceChildren(
       title(
-        "Welcome to Kitchen",
-        "Let’s get connected.",
-        "Your shared kitchen needs a connection to load.",
+        "Velkommen til Kjøkken",
+        "La oss koble til.",
+        "Kjøkkenet dere deler, trenger tilkobling for å lastes inn.",
       ),
     );
     add(
       main,
       empty(
-        "Your kitchen is unavailable",
+        "Kjøkkenet er ikke tilgjengelig",
         error.message,
-        button("Try again", start, "primary"),
+        button("Prøv igjen", start, "primary"),
       ),
     );
   }

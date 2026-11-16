@@ -9,8 +9,8 @@ test("builds a trimmed, bounded source search request", () => {
     sources: ["oda", "marmiton"],
     limit: 10,
   });
-  assert.throws(() => buildRequest("  ", ["oda"]), /Enter ingredients/);
-  assert.throws(() => buildRequest("soup", []), /Choose at least one/);
+  assert.throws(() => buildRequest("  ", ["oda"]), /Skriv inn ingredienser/);
+  assert.throws(() => buildRequest("soup", []), /Velg minst én/);
 });
 
 test("keeps source failure states while accepting safe, source-backed results", () => {
@@ -27,7 +27,7 @@ test("keeps source failure states while accepting safe, source-backed results", 
     ],
   });
 
-  assert.equal(view.sources[0].status, "Connect this source to search");
+  assert.equal(view.sources[0].status, "Koble til kilden for å søke");
   assert.equal(view.sources[0].detail, "Sign in first");
   assert.equal(view.sources[1].indexUrl, "https://www.marmiton.org/recettes/");
   assert.deepEqual(view.results, [{

@@ -43,7 +43,112 @@ SEARCH_CACHE_TTL = timedelta(minutes=5)
 SEARCH_EMPTY_CACHE_TTL = timedelta(seconds=20)
 SEARCH_CACHE_MAX_ENTRIES = 512
 ODA_QUERY_BATCH_SIZE = 5
-ODA_QUERY_EXPANSIONS = {"coffee": ("kaffe",), "tomato": ("tomat",)}
+# Imported recipes commonly keep English ingredient names, while Oda's search
+# is strongest with Bokmål. Keep the source query intact and add one localized
+# query so the provider request and the whole-plan cache remain bounded.
+_BOKMAL_INGREDIENTS = {
+    "chicken breast": "kyllingfilet",
+    "chicken breasts": "kyllingfilet",
+    "chicken thigh": "kyllinglår",
+    "chicken thighs": "kyllinglår",
+    "ground beef": "kjøttdeig",
+    "minced beef": "kjøttdeig",
+    "minced meat": "kjøttdeig",
+    "crème fraîche": "crème fraîche",
+    "creme fraiche": "crème fraîche",
+    "sour cream": "rømme",
+    "heavy cream": "kremfløte",
+    "whipping cream": "kremfløte",
+    "spring onion": "vårløk",
+    "green onion": "vårløk",
+    "red onion": "rødløk",
+    "yellow onion": "gul løk",
+    "cherry tomatoes": "cherrytomater",
+    "coffee beans": "kaffebønner",
+    "black pepper": "sort pepper",
+    "olive oil": "olivenolje",
+    "vegetable oil": "matolje",
+    "coconut milk": "kokosmelk",
+    "red bell pepper": "rød paprika",
+    "bell pepper": "paprika",
+    "tomatoes": "tomater",
+    "tomato": "tomat",
+    "potatoes": "poteter",
+    "potato": "potet",
+    "carrots": "gulrøtter",
+    "carrot": "gulrot",
+    "garlic": "hvitløk",
+    "onions": "løk",
+    "onion": "løk",
+    "coffee": "kaffe",
+    "milk": "melk",
+    "butter": "smør",
+    "flour": "hvetemel",
+    "sugar": "sukker",
+    "eggs": "egg",
+    "egg": "egg",
+    "lemon": "sitron",
+    "parsley": "persille",
+    "basil": "basilikum",
+    "coriander": "koriander",
+    "cucumber": "agurk",
+    "spinach": "spinat",
+    "salmon": "laks",
+    "rice": "ris",
+    "pasta": "pasta",
+}
+_BOKMAL_QUALIFIERS = {
+    "fresh": "ferske",
+    "chopped": "hakket",
+    "diced": "terninger",
+    "minced": "finhakket",
+    "ground": "malt",
+    "whole": "hel",
+    "frozen": "fryst",
+    "canned": "hermetisk",
+    "dried": "tørket",
+    "smoked": "røkt",
+}
+_INGREDIENT_PHRASES = re.compile(
+    r"(?<!\w)("
+    + "|".join(re.escape(key) for key in sorted(_BOKMAL_INGREDIENTS, key=len, reverse=True))
+    + r")(?!\w)",
+    re.I,
+)
+_QUALIFIER_WORDS = re.compile(
+    r"(?<!\w)(" + "|".join(re.escape(key) for key in _BOKMAL_QUALIFIERS) + r")(?!\w)",
+    re.I,
+)
+_TRAILING_FORM_QUALIFIER = re.compile(
+    r"^(.*?)(?:,\s*|\s+)(hakket|finhakket|terninger|malt|hel|fryst|hermetisk|tørket|røkt)$",
+    re.I,
+)
+
+
+def _bokmal_ingredient_query(query: str) -> str | None:
+    """Translate known food terms and common form qualifiers for Oda search."""
+    if re.search(r"\bcoffee[\s-]*mate\b", query, re.I):
+        return None
+    translated, count = _INGREDIENT_PHRASES.subn(
+        lambda match: _BOKMAL_INGREDIENTS[match.group(0).casefold()], query
+    )
+    if not count:
+        return None
+    translated = _QUALIFIER_WORDS.sub(
+        lambda match: _BOKMAL_QUALIFIERS[match.group(0).casefold()], translated
+    )
+    translated = " ".join(translated.split())
+    trailing_qualifier = _TRAILING_FORM_QUALIFIER.fullmatch(translated)
+    if trailing_qualifier:
+        translated = f"{trailing_qualifier.group(2)} {trailing_qualifier.group(1)}"
+    return translated
+
+
+def _query_expansions(query: str) -> tuple[str, ...]:
+    localized = _bokmal_ingredient_query(query)
+    if localized and localized.casefold() != query.casefold():
+        return query, localized
+    return (query,)
 
 
 class BasketCandidate(BaseModel):
@@ -107,6 +212,9 @@ class NeedMatchResult(BaseModel):
     candidates: list[BasketCandidate]
     status: str = "matched"
     detail: str | None = None
+    approximate: bool = False
+    provenance: str | None = None
+    source_url: HttpUrl | None = None
 
 
 class BasketMatchResult(BaseModel):
@@ -141,14 +249,7 @@ class OdaSearchAdapter:
     async def search_products(
         self, actor_id: str, queries: list[str], page: int, size: int
     ) -> list[ProviderSearchGroup]:
-        expanded_by_query = {
-            query: tuple(
-                dict.fromkeys(
-                    [query, *ODA_QUERY_EXPANSIONS.get(" ".join(query.casefold().split()), ())]
-                )
-            )
-            for query in queries
-        }
+        expanded_by_query = {query: _query_expansions(query) for query in queries}
         provider_queries = list(
             dict.fromkeys(expanded for query in queries for expanded in expanded_by_query[query])
         )
@@ -180,12 +281,32 @@ class OdaSearchAdapter:
 
         def product_is_mismatch(query: str, product: ProviderProduct) -> bool:
             normalized = " ".join(query.casefold().split())
-            if normalized not in {"coffee", "tomato"}:
-                return False
             text = " ".join((product.name, product.description, product.brand or "")).casefold()
-            if normalized == "coffee":
-                return re.search(r"\bcoffee[\s-]*mate\b", text) is not None
-            return re.search(r"\b(?:tomato\s+paste|tomatpur[eé])\b", text) is not None
+            coffee_need = (
+                re.search(r"\b(?:coffee|kaffe)\b", normalized) is not None
+                and re.search(r"\bcoffee[\s-]*mate\b", normalized) is None
+            )
+            tomato_need = re.search(r"\b(?:tomato(?:es)?|tomat(?:er)?)\b", normalized) is not None
+            tomato_paste_need = re.search(r"\b(?:paste|pur[eé]e|pur[eé])\b", normalized) is not None
+            if coffee_need:
+                return (
+                    re.search(
+                        r"\bcoffee[\s-]*mate\b|\bkaffe(?:\w*)fløte\b|\bkaffemelk\b|\bkaffekrem\b",
+                        text,
+                    )
+                    is not None
+                    or re.search(r"coffee|kaffe\w*", text) is None
+                )
+            if tomato_need and not tomato_paste_need:
+                return (
+                    re.search(
+                        r"\b(?:tomato\s+(?:paste|pur[eé]e)|tomatpur[eé]|tomatkonsentrat)\b",
+                        text,
+                    )
+                    is not None
+                    or re.search(r"(?:tomato|tomat)\w*", text) is None
+                )
+            return False
 
         result = []
         for query in queries:
@@ -485,6 +606,9 @@ class BasketMatchingService:
                 has_more=False,
                 candidates=[],
                 status="searching",
+                approximate=line.approximate,
+                provenance=line.provenance,
+                source_url=line.source_url,
             )
             for line in bounded_lines
         ]

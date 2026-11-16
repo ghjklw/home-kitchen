@@ -9,6 +9,7 @@ from home_kitchen.models import (
     AdaptationProvenance,
     NonBlank,
     PhotoSource,
+    PurchaseEstimate,
     Quantity,
     RecipeCreate,
     RecipeImageAttribution,
@@ -36,6 +37,7 @@ class DraftIngredient(BaseModel):
     unit: NonBlank | None = None
     category: NonBlank = "Other"
     source_indices: list[SourceIndex] = Field(default_factory=list)
+    purchase_estimate: PurchaseEstimate | None = None
 
 
 class EditableRecipeDraft(BaseModel):

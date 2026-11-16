@@ -1,9 +1,9 @@
 """Validated household kitchen data."""
 
-from datetime import date
+from datetime import date, time
 from decimal import Decimal
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, HttpUrl, StringConstraints, field_validator, model_validator
@@ -13,12 +13,28 @@ Quantity = Annotated[Decimal, Field(gt=0, allow_inf_nan=False)]
 SourceIndex = Annotated[int, Field(ge=0)]
 
 
+class PurchaseEstimate(BaseModel):
+    """A separate shopping amount, with explicit approximation evidence."""
+
+    quantity: Quantity
+    unit: NonBlank
+    approximate: bool
+    provenance: NonBlank
+    source_url: HttpUrl | None = None
+
+    @field_validator("unit")
+    @classmethod
+    def normalize_estimate_unit(cls, value: str) -> str:
+        return value.casefold()
+
+
 class Ingredient(BaseModel):
     name: NonBlank
     quantity: Quantity | None
     unit: NonBlank | None = "item"
     category: NonBlank = "Other"
     source_indices: list[SourceIndex] = Field(default_factory=list)
+    purchase_estimate: PurchaseEstimate | None = None
 
     @field_validator("unit")
     @classmethod
@@ -133,9 +149,35 @@ class Recipe(RecipeCreate):
 
 class MealCreate(BaseModel):
     date: date
-    slot: Literal["breakfast", "lunch", "dinner"] = "dinner"
     recipe_id: UUID
     servings: int = Field(gt=0)
+    label: (
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)] | None
+    ) = None
+    scheduled_time: time | None = None
+
+    @field_validator("scheduled_time")
+    @classmethod
+    def validate_local_scheduled_time(cls, value: time | None) -> time | None:
+        if value is not None and value.tzinfo is not None:
+            raise ValueError("Scheduled time must be a local time without a timezone")
+        return value
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_legacy_slot(cls, value: Any) -> Any:
+        """Translate old breakfast/lunch/dinner payloads and pending proposals."""
+        if isinstance(value, dict) and "slot" in value:
+            data = dict(value)
+            slot = data.pop("slot")
+            if data.get("label") is None and slot is not None:
+                data["label"] = {
+                    "breakfast": "Frokost",
+                    "lunch": "Lunsj",
+                    "dinner": "Middag",
+                }.get(str(slot).casefold(), str(slot))
+            return data
+        return value
 
 
 class Meal(MealCreate):
@@ -180,6 +222,9 @@ class ShoppingLine(BaseModel):
     unit: NonBlank
     category: NonBlank = "Other"
     origins: list[str]
+    approximate: bool = False
+    provenance: NonBlank | None = None
+    source_url: HttpUrl | None = None
 
 
 class UnquantifiedNeed(BaseModel):

@@ -14,32 +14,32 @@
   function basketPriceSummary(basket) {
     if (!hasSelectedProducts(basket)) return null;
     if (basket.total_cost == null)
-      return { label: "Selected product prices are incomplete.", complete: false };
+      return { label: "Prisene for de valgte varene er ufullstendige.", complete: false };
     const exactAmount = normalizeDecimalText(String(basket.total_cost)) || String(basket.total_cost);
     const amount = formatQuantityForDisplay(exactAmount);
     const currency = String(basket.currency || "").trim();
     if (basket.price_complete === true)
       return {
-        label: "Selected product total: " + amount + (currency ? " " + currency : ""),
+        label: "Sum for valgte varer: " + amount + (currency ? " " + currency : ""),
         accessibleLabel:
-          "Exact selected product total: " + exactAmount + (currency ? " " + currency : ""),
+          "Nøyaktig sum for valgte varer: " + formatQuantityForDisplay(exactAmount) + (currency ? " " + currency : ""),
         complete: true,
       };
     if (isPositiveDecimal(exactAmount))
       return {
         label:
-          "Known subtotal: " +
+          "Kjent delsum: " +
           amount +
           (currency ? " " + currency : "") +
-          " · some prices are unknown",
+          " · noen priser er ukjente",
         accessibleLabel:
-          "Exact known subtotal: " +
-          exactAmount +
+          "Nøyaktig kjent delsum: " +
+          formatQuantityForDisplay(exactAmount) +
           (currency ? " " + currency : "") +
-          "; some prices are unknown",
+          "; noen priser er ukjente",
         complete: false,
       };
-    return { label: "Selected product prices are incomplete.", complete: false };
+    return { label: "Prisene for de valgte varene er ufullstendige.", complete: false };
   }
 
   function pickupProgress(checked, total) {
@@ -52,8 +52,8 @@
       total: totalCount,
       percent: totalCount ? Math.round((checkedCount / totalCount) * 100) : 0,
       label: totalCount
-        ? checkedCount + " of " + totalCount + " picked up"
-        : "No items to pick up",
+        ? new Intl.NumberFormat("nb-NO").format(checkedCount) + " av " + new Intl.NumberFormat("nb-NO").format(totalCount) + " varer plukket"
+        : "Ingen varer å plukke",
     };
   }
 
@@ -90,10 +90,14 @@
     const scale = 100n;
     let rounded = whole * scale + BigInt(fraction.slice(0, 2).padEnd(2, "0") || "0");
     if (fraction.length > 2 && fraction[2] >= "5") rounded += 1n;
-    if (rounded === 0n && /[1-9]/u.test(exact)) return "<0.01";
+    if (rounded === 0n && /[1-9]/u.test(exact)) return "<0,01";
     const wholePart = rounded / scale;
     const decimalPart = String(rounded % scale).padStart(2, "0").replace(/0+$/u, "");
-    return String(wholePart) + (decimalPart ? "." + decimalPart : "");
+    return String(wholePart) + (decimalPart ? "," + decimalPart : "");
+  }
+
+  function formatQuantityForAccessibility(value) {
+    return formatQuantityForDisplay(value);
   }
 
   function isPositiveDecimal(value) {
@@ -137,6 +141,7 @@
   root.KitchenShoppingView = {
     basketPriceSummary,
     formatQuantityForDisplay,
+    formatQuantityForAccessibility,
     formatQuantityMentions,
     groupedByCategory,
     hasSelectedProducts,

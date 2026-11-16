@@ -78,6 +78,7 @@ async def test_tool_catalog_annotations_and_guidance(test_database_url):
         "update_recipe",
         "list_meals",
         "plan_meal",
+        "update_meal",
         "remove_meal",
         "add_shopping_item",
         "list_capture_items",
@@ -93,5 +94,8 @@ async def test_tool_catalog_annotations_and_guidance(test_database_url):
     assert tools["list_recipes"].annotations.readOnlyHint is True
     assert tools["confirm_shopping_suggestion"].annotations.readOnlyHint is False
     assert tools["remove_meal"].annotations.destructiveHint is True
+    data_schema = tools["plan_meal"].inputSchema["properties"]["data"]
+    assert {"label", "scheduled_time"} <= data_schema["properties"].keys()
+    assert "meal_id" in tools["update_meal"].inputSchema["required"]
     assert "untrusted" in mcp.instructions.casefold()
     assert "after the user" in tools["record_purchase"].description

@@ -9,6 +9,7 @@ from home_kitchen.settings import DEFAULT_SHOPPING_CATEGORY_ORDER, Household
 def test_shopping_category_defaults_are_independent_and_cover_source_labels():
     first = Household()
     second = Household()
+    assert first.language == "nb"
     assert first.shopping_category_order == list(DEFAULT_SHOPPING_CATEGORY_ORDER)
     assert set(first.shopping_category_order) == {
         "Produce",

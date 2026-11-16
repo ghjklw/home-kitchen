@@ -1,5 +1,6 @@
 """Real PostgreSQL guarantees for reviewable multi-meal proposals."""
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 
@@ -32,7 +33,7 @@ def setup(test_database_url):
     start = date.today() + timedelta(days=40)
     proposed = [
         MealCreate(date=start, slot="breakfast", recipe_id=recipe.id, servings=1),
-        MealCreate(date=start + timedelta(days=10), slot="lunch", recipe_id=recipe.id, servings=3),
+        MealCreate(date=start, slot="lunch", recipe_id=recipe.id, servings=3),
     ]
     yield kitchen, recipe, service, proposed
     kitchen.store.engine.dispose()
@@ -61,10 +62,33 @@ def test_review_actor_and_idempotent_atomic_apply(setup):
     assert planning[0].structured["proposal_id"] == str(proposal.id)
 
 
-def test_duplicate_occupied_and_bounded_input(setup):
+def test_pending_legacy_slot_proposal_json_still_applies(setup):
     kitchen, _, service, proposed = setup
-    with pytest.raises(ProposalConflict, match="Duplicate"):
-        service.create("alice", [proposed[0], proposed[0]])
+    proposal = service.create("alice", proposed[:1])
+    old_payload = [
+        {
+            "date": proposed[0].date.isoformat(),
+            "slot": "breakfast",
+            "recipe_id": str(proposed[0].recipe_id),
+            "servings": proposed[0].servings,
+        }
+    ]
+    with kitchen.store.connection() as connection:
+        connection.execute(
+            text("UPDATE kitchen_plan_proposals SET meals = CAST(:meals AS jsonb) WHERE id = :id"),
+            {"meals": json.dumps(old_payload), "id": proposal.id},
+        )
+    loaded = service.get(proposal.id, "alice")
+    assert loaded.meals[0].label == "Frokost"
+    applied = service.confirm(proposal.id, "alice", reviewed=True)
+    assert applied.status == "applied"
+    assert kitchen.store.get("meal", applied.applied_meal_ids[0], Meal).label == "Frokost"
+
+
+def test_duplicate_date_recipe_and_bounded_input(setup):
+    kitchen, _, service, proposed = setup
+    duplicate = service.create("alice", [proposed[0], proposed[0]])
+    assert len(duplicate.meals) == 2
     with pytest.raises(ValueError, match="between"):
         service.create("alice", [])
     with pytest.raises(ValueError, match="range"):
@@ -76,8 +100,8 @@ def test_duplicate_occupied_and_bounded_input(setup):
             ],
         )
     kitchen.plan_meal(proposed[0])
-    with pytest.raises(ProposalConflict, match="already planned"):
-        service.create("alice", proposed)
+    additive = service.create("alice", proposed)
+    assert len(additive.meals) == 2
 
 
 def test_recipe_change_and_expiry_are_durable_without_meals(setup):
@@ -109,19 +133,15 @@ def test_recipe_change_and_expiry_are_durable_without_meals(setup):
     assert kitchen.list_meals(proposed[0].date, proposed[-1].date) == []
 
 
-def test_slot_change_is_stale_and_refresh_requires_new_review(setup):
+def test_existing_date_entries_do_not_block_reviewed_additions(setup):
     kitchen, _, service, proposed = setup
     proposal = service.create("alice", proposed)
-    occupied = kitchen.plan_meal(proposed[-1])
-    with pytest.raises(ProposalConflict, match="already planned"):
-        service.confirm(proposal.id, "alice", reviewed=True)
-    assert len(kitchen.list_meals(proposed[0].date, proposed[-1].date)) == 1
-    kitchen.delete_meal(occupied.id)
-    with pytest.raises(ProposalConflict, match="stale"):
-        service.confirm(proposal.id, "alice", reviewed=True)
-    refreshed = service.create("alice", proposed)
-    assert refreshed.id != proposal.id
-    assert service.confirm(refreshed.id, "alice", reviewed=True).status == "applied"
+    existing = kitchen.plan_meal(proposed[0])
+    applied = service.confirm(proposal.id, "alice", reviewed=True)
+    assert applied.status == "applied"
+    planned = kitchen.list_meals(proposed[0].date, proposed[-1].date)
+    assert len(planned) == 3
+    assert existing.id in {meal.id for meal in planned}
 
 
 def test_concurrent_confirmation_and_overlapping_proposals(setup):
@@ -139,9 +159,9 @@ def test_concurrent_confirmation_and_overlapping_proposals(setup):
         results = list(pool.map(apply, [first.id, second.id, first.id]))
     winners = [result for result in results if result is not None]
     assert winners
-    assert len({tuple(result.applied_meal_ids) for result in winners}) == 1
-    assert len(kitchen.list_meals(proposed[0].date, proposed[-1].date)) == 2
-    assert len([entry for entry in service.history.list() if entry.kind == "planning"]) == 2
+    assert len({tuple(result.applied_meal_ids) for result in winners}) == 2
+    assert len(kitchen.list_meals(proposed[0].date, proposed[-1].date)) == 4
+    assert len([entry for entry in service.history.list() if entry.kind == "planning"]) == 4
 
 
 def test_history_failure_rolls_back_all_writes(setup, monkeypatch):

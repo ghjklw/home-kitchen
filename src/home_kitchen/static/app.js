@@ -4991,26 +4991,26 @@ function feedbackForm(recipe) {
       root,
       el(
         "p",
-        "Your rating or note is saved as household context for future recommendations. This form records only the feedback you enter, not a full chat.",
+        "Vurderingen eller notatet lagres som husholdningskontekst for framtidige anbefalinger. Her lagres bare tilbakemeldingen du skriver inn, ikke en hel samtale.",
         "muted",
       ),
     );
     const form = el("form");
-    const rating = field("Rating (optional)", "number", "", "Choose a whole number from 1 to 5.");
+    const rating = field("Vurdering (valgfritt)", "number", "", "Velg et helt tall fra 1 til 5.");
     rating.input.min = "1";
     rating.input.max = "5";
     rating.input.step = "1";
-    const wouldMakeAgain = field("Would cook this again? (optional)", "select");
+    const wouldMakeAgain = field("Lager du denne retten igjen? (valgfritt)", "select");
     [
-      ["", "No answer"],
-      ["true", "Yes"],
-      ["false", "No"],
+      ["", "Ikke besvart"],
+      ["true", "Ja"],
+      ["false", "Nei"],
     ].forEach(([value, label]) => {
       const option = el("option", label);
       option.value = value;
       add(wouldMakeAgain.input, option);
     });
-    const notes = field("Notes (optional)", "textarea", "", "What worked well, or what should change next time?");
+    const notes = field("Notater (valgfritt)", "textarea", "", "Hva fungerte bra, eller hva bør endres neste gang?");
     notes.input.maxLength = 2000;
     notes.input.rows = 4;
     add(form, rating.wrap, wouldMakeAgain.wrap, notes.wrap);
@@ -5032,7 +5032,7 @@ function feedbackForm(recipe) {
     root,
     el(
       "p",
-      "Your note is saved as household context for future recommendations. This form records only the feedback you enter, not a full chat.",
+      "Notatet lagres som husholdningskontekst for framtidige anbefalinger. Her lagres bare tilbakemeldingen du skriver inn, ikke en hel samtale.",
       "muted",
     ),
   );
@@ -5056,7 +5056,7 @@ function feedbackForm(recipe) {
     "textarea",
     "",
     recipe
-      ? "What worked well, or what should change next time?"
+      ? "Hva fungerte bra, eller hva bør endres neste gang?"
       : "Et kort notat som kan brukes i framtidige anbefalinger.",
   );
   message.input.required = true;

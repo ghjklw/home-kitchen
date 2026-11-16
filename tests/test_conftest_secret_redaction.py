@@ -59,7 +59,14 @@ def pytest_runtest_setup(item):
                     raise RuntimeError("synthetic cleanup failure")
 
                 engine.dispose = fail_dispose
-        elif mode in {"alembic_failure", "consumer_failure", "test_failure"}:
+        elif mode in {
+            "alembic_failure",
+            "captured_output",
+            "consumer_failure",
+            "explicit_chain",
+            "implicit_chain",
+            "test_failure",
+        }:
             # The admin engine's schema DDL is a no-op in these probes. The
             # Alembic engine remains a real SQLAlchemy Engine in alembic_failure.
             engine.begin = lambda: _Transaction()
@@ -68,7 +75,13 @@ def pytest_runtest_setup(item):
     fixture_module.create_engine = create_probe_engine
     sqlalchemy.create_engine = create_probe_engine
 
-    if mode in {"consumer_failure", "test_failure"}:
+    if mode in {
+        "captured_output",
+        "consumer_failure",
+        "explicit_chain",
+        "implicit_chain",
+        "test_failure",
+    }:
         fixture_module.command.upgrade = lambda *_args: None
 """
 
@@ -95,6 +108,18 @@ def test_fixture_failure_output(test_database_url):
                 pass
         finally:
             engine.dispose()
+    if os.environ["REDACTION_PROBE_MODE"] in {"explicit_chain", "implicit_chain"}:
+        secret = make_url(os.environ["KITCHEN_TEST_DATABASE_URL"]).password
+        try:
+            raise ValueError(secret)
+        except ValueError as cause:
+            if os.environ["REDACTION_PROBE_MODE"] == "explicit_chain":
+                raise RuntimeError("safe outer diagnosis") from cause
+            raise RuntimeError("safe outer diagnosis")
+    if os.environ["REDACTION_PROBE_MODE"] == "captured_output":
+        secret = make_url(os.environ["KITCHEN_TEST_DATABASE_URL"]).password
+        print(f"synthetic log password={secret}")
+        raise RuntimeError("safe log diagnosis")
 """
 
 
@@ -152,6 +177,9 @@ def test_setup_migration_and_consumer_failure_output_redacts_password(
         ("setup_failure", "create schema", True),
         ("alembic_failure", "Alembic migration", True),
         ("consumer_failure", "synthetic connect failure", True),
+        ("captured_output", "safe log diagnosis", False),
+        ("explicit_chain", "safe outer diagnosis", False),
+        ("implicit_chain", "safe outer diagnosis", False),
         ("test_failure", "stage=consumer", False),
     ):
         result, connect_reached = _run_nested_pytest(tmp_path, mode)
@@ -160,6 +188,11 @@ def test_setup_migration_and_consumer_failure_output_redacts_password(
         assert result.returncode != 0, "the nested pytest probe must fail deliberately"
         assert _PASSWORD_MARKER not in output, "database password marker leaked into pytest output"
         assert stage in output, "failure stage should remain visible"
+        if mode in {"explicit_chain", "implicit_chain"}:
+            assert "ValueError: [REDACTED]" in output, "chained cause should remain useful"
+        if mode == "captured_output":
+            assert "Captured stdout" in output
+            assert "password=[REDACTED]" in output
         if mode in {"setup_failure", "alembic_failure"}:
             assert "error=OperationalError" in output, "safe exception class should remain visible"
         assert "test_" in output, "isolated schema name should remain visible"

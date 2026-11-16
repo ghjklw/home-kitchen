@@ -51,16 +51,9 @@ def _redact_diagnostic_text(value, secrets):
     return value
 
 
-def _redact_pytest_report(report, secrets):
-    if not secrets:
-        return
-    report.sections = [
-        (name, _redact_diagnostic_text(content, secrets)) for name, content in report.sections
-    ]
-    longrepr = report.longrepr
-    traceback = getattr(longrepr, "reprtraceback", None)
+def _redact_traceback(traceback, secrets):
     if traceback is None:
-        return
+        return None
     traceback.extraline = _redact_diagnostic_text(traceback.extraline, secrets)
     for entry in traceback.reprentries:
         if hasattr(entry, "lines"):
@@ -79,9 +72,39 @@ def _redact_pytest_report(report, secrets):
         fileloc = getattr(entry, "reprfileloc", None)
         if fileloc is not None:
             fileloc.message = _redact_diagnostic_text(fileloc.message, secrets)
-    crash = getattr(longrepr, "reprcrash", None)
+    return traceback
+
+
+def _redact_crash(crash, secrets):
     if crash is not None:
         crash.message = _redact_diagnostic_text(crash.message, secrets)
+    return crash
+
+
+def _redact_pytest_report(report, secrets):
+    if not secrets:
+        return
+    report.sections = [
+        (name, _redact_diagnostic_text(content, secrets)) for name, content in report.sections
+    ]
+    longrepr = report.longrepr
+    if isinstance(longrepr, str):
+        report.longrepr = _redact_diagnostic_text(longrepr, secrets)
+        return
+    chain = getattr(longrepr, "chain", None)
+    if chain is not None:
+        longrepr.chain = tuple(
+            (
+                _redact_traceback(traceback, secrets),
+                _redact_crash(crash, secrets),
+                _redact_diagnostic_text(description, secrets),
+            )
+            for traceback, crash, description in chain
+        )
+    traceback = getattr(longrepr, "reprtraceback", None)
+    if traceback is not None:
+        _redact_traceback(traceback, secrets)
+    _redact_crash(getattr(longrepr, "reprcrash", None), secrets)
     if hasattr(longrepr, "sections"):
         longrepr.sections = [
             (name, _redact_diagnostic_text(content, secrets), sep)

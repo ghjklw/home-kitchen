@@ -314,6 +314,8 @@ _IDENTITY_FAMILIES = (
             ("tomato paste", "processed", "tomatpuré"),
             ("tomato puree", "processed", "tomatpuré"),
             ("tomatpuré", "processed", None),
+            ("fresh tomatoes", "fresh", "ferske tomater"),
+            ("fresh tomato", "fresh", "fersk tomat"),
             ("cherry tomatoes", "fresh", "cherrytomater"),
             ("tomatoes", "fresh", "tomater"),
             ("tomato", "fresh", "tomat"),
@@ -330,6 +332,8 @@ _IDENTITY_FAMILIES = (
     _IdentityFamily(
         "coffee",
         (
+            ("ground coffee", "ground", "malt kaffe"),
+            ("malt kaffe", "ground", None),
             ("coffee beans", "beans", "kaffebønner"),
             ("coffee", None, "kaffe"),
             ("kaffe", None, None),
@@ -497,8 +501,12 @@ _EXPLICIT_MANUAL_INTENT = re.compile(
 )
 _ALLOWED_QUERY_QUALIFIERS = frozenset(
     {
-        *_BOKMAL_QUALIFIERS,
-        *_BOKMAL_QUALIFIERS.values(),
+        "chopped",
+        "diced",
+        "minced",
+        "hakket",
+        "terninger",
+        "finhakket",
         "for",
         "dusting",
         "plus",

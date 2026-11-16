@@ -9,7 +9,9 @@ from home_kitchen.basket.matching import (
     OdaSearchAdapter,
     ProviderProduct,
     ProviderSearchGroup,
+    _bokmal_ingredient_query,
     _explicit_pack,
+    _identity_status,
     _oda_description_pack,
     _product_matches_ingredient,
 )
@@ -402,7 +404,7 @@ async def test_oda_adapter_localizes_imported_ingredients_and_preserves_product_
                         "products": [product(product_id, name)],
                     }
                     for query, product_id, name in [
-                        ("chicken breast, chopped", 101, "Prior query result"),
+                        ("chicken breast, chopped", 101, "Old El Paso Large tortillas"),
                         ("hakket kyllingfilet", 102, "Kyllingfilet, hakket"),
                         ("fresh tomatoes", 201, "Fresh fruit box"),
                         ("ferske tomater", 202, "Tomater, ferske"),
@@ -553,7 +555,8 @@ async def test_oda_adapter_localizes_imported_ingredients_and_rejects_weak_ident
         "vanilla extract",
         "cocoa powder, for dusting",
     ]
-    adapter = OdaSearchAdapter(Oda())
+    oda = Oda()
+    adapter = OdaSearchAdapter(oda)
     groups = []
     for offset in range(0, len(names), 4):
         groups.extend(
@@ -569,6 +572,10 @@ async def test_oda_adapter_localizes_imported_ingredients_and_rejects_weak_ident
         ["Vaniljeekstrakt"],
         ["Kakaopulver"],
     ]
+    assert oda.calls == 2
+    assert all(
+        product.identity_status == "compatible" for group in groups for product in group.products
+    )
 
 
 @pytest.mark.asyncio
@@ -598,6 +605,40 @@ async def test_oda_adapter_keeps_manual_non_food_search_results():
 
     groups = await OdaSearchAdapter(Oda()).search_products("household-1", ["dish soap"], 1, 5)
     assert [product.name for product in groups[0].products] == ["Dish soap"]
+    assert groups[0].products[0].identity_status == "unverified"
+
+
+@pytest.mark.asyncio
+async def test_explicit_manual_product_intent_overrides_ingredient_word_overlap():
+    class Oda:
+        async def search_products(self, actor_id, queries, page, size):
+            assert queries == ["olive oil shower gel"]
+            return {
+                "result": [
+                    {
+                        "query": queries[0],
+                        "hasMore": False,
+                        "products": [
+                            {
+                                "id": 55,
+                                "name": "Olive Oil Shower Gel",
+                                "description": "Shower gel",
+                                "price": "10",
+                                "unitPrice": "10",
+                                "unitName": "per item",
+                                "url": "https://oda.com/no/products/55-shower-gel",
+                            }
+                        ],
+                    }
+                ]
+            }
+
+    groups = await OdaSearchAdapter(Oda()).search_products(
+        "household-1", ["olive oil shower gel"], 1, 5
+    )
+    assert groups[0].query == "olive oil shower gel"
+    assert groups[0].products[0].name == "Olive Oil Shower Gel"
+    assert groups[0].products[0].identity_status == "unverified"
 
 
 @pytest.mark.asyncio
@@ -641,8 +682,22 @@ async def test_oda_adapter_rejects_tonic_as_hot_water_but_keeps_original_query()
         ("whole milk", "Whole Milk Chocolate", False),
         ("olive oil", "Olive Oil Shower Gel", False),
         ("milk", "Tine Lettmelk", True),
+        ("milk", "Tine Helmelk", True),
+        ("whole milk", "Tine Lettmelk", False),
         ("unsalted butter", "Tine Meierismør Usaltet", True),
+        ("butter", "Tine Meierismør Usaltet", True),
         ("rice", "Basmatiris", True),
+        ("vegetable oil", "Oda Olivenolje", True),
+        ("olive oil", "Rapsolje", False),
+        ("matolje", "Nivea Shower Oil", False),
+        ("rice", "Lakris", False),
+        ("butter", "Peanøttsmør", False),
+        ("flour", "Almond flour", True),
+        ("all-purpose flour", "Almond flour", False),
+        ("lettmelk", "Tine Lettmelk", True),
+        ("basmatiris", "Basmatiris", True),
+        ("basmati rice", "Jasminris", False),
+        ("low-fat milk", "Tine Helmelk", False),
     ],
 )
 def test_ingredient_identity_handles_bokmal_compounds_and_product_classes(
@@ -652,6 +707,62 @@ def test_ingredient_identity_handles_bokmal_compounds_and_product_classes(
         provider="oda", product_id="1", name=product_name, description=product_name
     )
     assert _product_matches_ingredient(query, product) is matches
+
+
+def test_manual_and_unknown_searches_are_retained_as_unverified():
+    shower_gel = ProviderProduct(
+        provider="oda",
+        product_id="gel",
+        name="Olive Oil Shower Gel",
+        description="",
+    )
+    unknown = ProviderProduct(
+        provider="oda", product_id="unknown", name="Special pantry item", description=""
+    )
+    assert _bokmal_ingredient_query("olive oil shower gel") is None
+    assert _identity_status("olive oil shower gel", shower_gel) == "unverified"
+    assert _identity_status("unmapped pantry term", unknown) == "unverified"
+    assert (
+        ProviderProduct(
+            provider="oda", product_id="missing", name="Unknown", description=""
+        ).identity_status
+        == "unverified"
+    )
+
+
+def test_identity_table_localizes_supported_aliases():
+    assert _bokmal_ingredient_query("unsalted butter") == "usaltet smør"
+    assert _bokmal_ingredient_query("whole milk") == "helmelk"
+    assert _bokmal_ingredient_query("olive oil") == "olivenolje"
+    assert _bokmal_ingredient_query("basmati rice") == "basmatiris"
+
+
+@pytest.mark.parametrize(
+    ("query", "localized", "product_name"),
+    [
+        ("all-purpose flour", "hvetemel", "Siktet hvetemel"),
+        ("large eggs", "egg L", "Frittgående egg M/L"),
+        ("unsalted butter", "usaltet smør", "Tine Meierismør Usaltet"),
+        ("whole milk", "helmelk", "Tine Helmelk"),
+        ("granulated sugar", "sukker", "Sukker"),
+        ("vegetable oil", "matolje", "Rapsolje"),
+        ("olive oil", "olivenolje", "Olivenolje"),
+        ("basmati rice", "basmatiris", "Basmatiris"),
+        ("tomato", "tomat", "Tomater, ferske"),
+        ("coffee", "kaffe", "Filterkaffe"),
+        ("vanilla extract", "vaniljeekstrakt", "Vaniljeekstrakt"),
+        ("cocoa powder", "kakaopulver", "Kakaopulver"),
+        ("hot water", "varmt vann", "Varmt vann"),
+        ("chicken breast", "kyllingfilet", "Kyllingfilet"),
+        ("creme fraiche", "crème fraîche", "Crème fraîche 300 g"),
+    ],
+)
+def test_identity_table_aliases_expand_and_match_the_same_family(query, localized, product_name):
+    product = ProviderProduct(
+        provider="oda", product_id="1", name=product_name, description=product_name
+    )
+    assert _bokmal_ingredient_query(query) == localized
+    assert _identity_status(query, product) == "compatible"
 
 
 @pytest.mark.asyncio
@@ -687,7 +798,10 @@ async def test_search_cache_only_reuses_semantically_eligible_oda_products():
                     }
                     for index, (query, names) in enumerate(
                         [
-                            ("large eggs, separated", ["Old El Paso Large tortillas"]),
+                            (
+                                "large eggs, separated",
+                                ["Old El Paso Large tortillas", "Mystery Pantry Item"],
+                            ),
                             ("egg L", ["Frittgående egg M/L"]),
                         ]
                     )
@@ -705,8 +819,11 @@ async def test_search_cache_only_reuses_semantically_eligible_oda_products():
 
     for result in (first, second):
         assert [candidate.name for candidate in result.needs[0].candidates] == [
-            "Frittgående egg M/L"
+            "Mystery Pantry Item",
+            "Frittgående egg M/L",
         ]
+        assert result.needs[0].candidates[0].identity_status == "unverified"
+        assert result.needs[0].candidates[1].identity_status == "compatible"
     assert oda.calls == 1
 
 

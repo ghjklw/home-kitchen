@@ -313,6 +313,7 @@ async def test_batch_candidate_resolution_is_actor_scope_period_and_snapshot_sco
         pack_metadata_status="unverified",
         match_query="Need 1",
         match_reason="Search result",
+        identity_status="compatible",
     )
     owned = jobs._jobs[final.job_id]
     owned.value.needs[0].candidates = [candidate]
@@ -328,6 +329,107 @@ async def test_batch_candidate_resolution_is_actor_scope_period_and_snapshot_sco
     contexts["alice"] = 2
     with pytest.raises(ValueError, match="provider context changed"):
         await jobs.resolve_batch_candidates("alice", final.job_id, START, END, reference)
+
+
+async def test_unverified_candidates_require_exact_candidate_specific_confirmation(service):
+    jobs, _, matching, _ = service
+    job = await jobs.start("alice", START, END)
+    matching.release.set()
+    final = await settled(jobs, "alice", job.job_id)
+    manual_a = BasketCandidate(
+        id="store:manual-a",
+        provider="store",
+        product_id="manual-a",
+        name="First manual product",
+        description="",
+        match_query="Need 1",
+        match_reason="Identity needs review",
+    )
+    # Missing identity metadata defaults to unverified.
+    manual = BasketCandidate(
+        id="store:manual",
+        provider="store",
+        product_id="manual",
+        name="Manual product",
+        description="",
+        match_query="Need 2",
+        match_reason="Identity needs review",
+    )
+    owned = jobs._jobs[final.job_id]
+    owned.value.needs[0].candidates = [manual_a]
+    owned.value.needs[1].candidates = [manual]
+    references = [
+        (final.needs[0].need_id, manual_a.id),
+        (final.needs[1].need_id, manual.id),
+    ]
+
+    with pytest.raises(ValueError, match="unverified"):
+        await jobs.resolve_batch_candidates("alice", final.job_id, START, END, references)
+
+    wrong_pair = {(final.needs[0].need_id, manual.id)}
+    with pytest.raises(ValueError, match="must name a selected candidate"):
+        await jobs.resolve_batch_candidates(
+            "alice",
+            final.job_id,
+            START,
+            END,
+            references,
+            identity_confirmations=wrong_pair,
+        )
+
+    with pytest.raises(ValueError, match="unverified"):
+        await jobs.resolve_batch_candidates(
+            "alice",
+            final.job_id,
+            START,
+            END,
+            references,
+            identity_confirmations={(final.needs[1].need_id, manual.id)},
+        )
+
+    resolved = await jobs.resolve_batch_candidates(
+        "alice",
+        final.job_id,
+        START,
+        END,
+        references,
+        identity_confirmations=set(references),
+    )
+    assert resolved[(final.needs[0].need_id, manual_a.id)][1].identity_status == "unverified"
+    assert resolved[(final.needs[1].need_id, manual.id)][1].identity_status == "unverified"
+
+
+async def test_unverified_selection_confirmation_is_not_a_generic_review_flag(service):
+    from pydantic import ValidationError
+
+    jobs, _, matching, _ = service
+    job = await jobs.start("alice", START, END)
+    matching.release.set()
+    final = await settled(jobs, "alice", job.job_id)
+    candidate = BasketCandidate(
+        id="store:unknown",
+        provider="store",
+        product_id="unknown",
+        name="Unknown product",
+        description="",
+        match_query="Need 1",
+        match_reason="Identity unverified",
+    )
+    final_pair = (final.needs[0].need_id, candidate.id)
+    jobs._jobs[final.job_id].value.needs[0].candidates = [candidate]
+    with pytest.raises(ValidationError, match="reviewed"):
+        BasketCandidate(
+            id="store:reviewed",
+            provider="store",
+            product_id="reviewed",
+            name="Reviewed",
+            description="",
+            match_query="Need 1",
+            match_reason="Search result",
+            reviewed=True,
+        )
+    with pytest.raises(ValueError, match="Confirm this exact candidate"):
+        await jobs.resolve_batch_candidates("alice", final.job_id, START, END, [final_pair])
 
 
 async def test_observation_time_is_exposed_only_after_successful_completion(service):

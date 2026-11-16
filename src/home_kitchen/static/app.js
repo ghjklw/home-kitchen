@@ -1435,9 +1435,8 @@ function recipeForm(draft = {}, source = "manual") {
       ),
     );
   if (draft.photo_source)
-    add(
-      root,
-      add(
+    {
+      const photoEvidence = add(
         el("div", null, "photo-source-evidence"),
         el(
           "p",
@@ -1447,8 +1446,83 @@ function recipeForm(draft = {}, source = "manual") {
           "muted",
         ),
         button("Vis originalbildet", () => viewRecipePhoto(draft.photo_source), "quiet"),
-      ),
-    );
+      );
+      if (!isEditing) {
+        const modal = $("#modal");
+        const discardStatus = el("p", "", "muted");
+        discardStatus.setAttribute("role", "status");
+        const discardPrompt = el(
+          "div",
+          null,
+          "photo-discard-confirmation",
+        );
+        discardPrompt.setAttribute("role", "group");
+        discardPrompt.setAttribute("aria-label", "Bekreft forkasting av bildeutkast");
+        discardPrompt.hidden = true;
+        add(
+          discardPrompt,
+          el(
+            "p",
+            "Dette forkaster originalbildet og den usparte oppskriftskladden. Oppskriften blir ikke lagret.",
+            "muted",
+          ),
+        );
+        const discardButton = button("Forkast bilde og utkast", async () => {
+          discardButton.disabled = true;
+          keepDraftButton.disabled = true;
+          discardStatus.textContent = "Forkaster bildeutkastet …";
+          try {
+            await window.KitchenRecipePhoto.applyDiscardIfActive(
+              api("/recipe-photos/" + encodeURIComponent(draft.photo_source.id), "DELETE"),
+              () => modal.open && photoEvidence.isConnected,
+              {
+                deleted: () => {
+                  modal.close();
+                  notify("Bildeutkastet er forkastet.");
+                },
+                retained: () => {
+                  discardPrompt.hidden = true;
+                  discardTrigger.focus();
+                  discardStatus.textContent =
+                    "Bildet er knyttet til en lagret oppskrift og ble beholdt. Kladden er fortsatt åpen.";
+                },
+                unconfirmed: () => {
+                  discardPrompt.hidden = true;
+                  discardTrigger.focus();
+                  discardStatus.textContent =
+                    "Vi kunne ikke bekrefte at bildet ble forkastet. Kladden er fortsatt åpen.";
+                },
+              },
+            );
+          } catch {
+            if (modal.open && photoEvidence.isConnected)
+              discardStatus.textContent =
+                "Vi kunne ikke bekrefte at bildet ble forkastet. Kladden er fortsatt åpen.";
+          } finally {
+            if (discardButton.isConnected) {
+              discardButton.disabled = false;
+              keepDraftButton.disabled = false;
+            }
+          }
+        }, "quiet");
+        const keepDraftButton = button("Behold oppskriftsutkastet", () => {
+          discardPrompt.hidden = true;
+          discardTrigger.focus();
+        }, "quiet");
+        const discardTrigger = button("Forkast bildeutkast", () => {
+          discardPrompt.hidden = false;
+          keepDraftButton.focus();
+        }, "quiet");
+        add(discardPrompt, add(el("div", null, "actions"), keepDraftButton, discardButton));
+        add(
+          photoEvidence,
+          discardTrigger,
+          discardPrompt,
+          discardStatus,
+        );
+      }
+      add(root, photoEvidence);
+    }
   const form = el("form");
   const name = field("Oppskriftsnavn", "text", draft.title);
   name.input.required = true;

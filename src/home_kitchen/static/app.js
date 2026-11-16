@@ -3295,7 +3295,28 @@ function renderTripCompletion(main) {
   date.max = iso(new Date()); date.setAttribute("aria-label", "Kjøpsdato");
   const controls = add(el("section", null, "panel"), el("h2", "Faktiske kjøp"), el("label", "Kjøpsdato"), date);
   const lineForms = [];
-  (review.lines || []).forEach((line) => {
+  (review.lines || []).forEach((reviewLine) => {
+    const selectedProducts = Array.isArray(reviewLine.selected_products)
+      ? reviewLine.selected_products.filter((selection) => {
+          const product = selection?.product;
+          return (
+            product &&
+            typeof product.provider === "string" &&
+            product.provider.trim() &&
+            typeof product.product_id === "string" &&
+            product.product_id.trim() &&
+            typeof product.name === "string" &&
+            product.name.trim() &&
+            Number.isFinite(Number(product.pack_quantity)) &&
+            Number(product.pack_quantity) > 0 &&
+            typeof product.pack_unit === "string" &&
+            product.pack_unit.trim() &&
+            Number.isInteger(selection.packages) &&
+            selection.packages > 0
+          );
+        })
+      : [];
+    const line = { ...reviewLine, selected_products: selectedProducts };
     const section = add(el("section", null, "panel trip-completion-line"), el("h3", line.name));
     add(section, el("p", `Planlagt behov: ${formatUiQuantity(line.to_buy_quantity)} ${line.unit} · kontekst, ikke faktisk kjøp.`, "muted"));
     const bought = el("input"); bought.type = "checkbox"; bought.setAttribute("aria-label", `Registrer faktisk kjøp: ${line.name}`);
@@ -3323,9 +3344,10 @@ function renderTripCompletion(main) {
       add(productDetails, el("p", `${p.name} · ${p.provider} / ${p.product_id} · ${p.pack_quantity} ${p.pack_unit} per pakke`));
       if (p.url) { const link = el("a", "Åpne produktreferanse"); link.href = p.url; link.rel = "noopener noreferrer"; link.target = "_blank"; productDetails.append(link); }
     });
-    const hasExactProduct = state.oda?.connected === true && (line.selected_products || []).length > 0;
+    const hasExactProduct = selectedProducts.length > 0;
     if (hasExactProduct) {
-      add(section, add(el("label"), exact, el("span", "Jeg kjøpte et av de viste produktene")));
+      add(section, el("p", "Dette er lagrede produktvalg for varen. Tilgjengeligheten hos Oda er ikke kontrollert nå.", "muted"));
+      add(section, add(el("label"), exact, el("span", "Jeg kjøpte et av de valgte produktene")));
       add(section, productSelect, packCount, productDetails);
     } else {
       const explanation = !state.oda

@@ -113,7 +113,7 @@ function labeled(ui, label) {
   return node;
 }
 
-test("exact-product fields stay hidden without a connected Oda selection", () => {
+test("exact-product fields stay hidden without a valid reviewed product selection", () => {
   const line = makeLine("need-yoghurt", "Yoghurt", "g", "meal");
   const disconnected = renderCompletion({
     lines: [line],
@@ -142,10 +142,11 @@ test("exact-product fields stay hidden without a connected Oda selection", () =>
     node.textContent === "Ingen valgte Oda-produkter for denne varen. Oppgi faktisk mengde, eller la den stå ukjent.",
   ));
 
-  const connected = renderCompletion({
+  const offlineWithSelection = renderCompletion({
     lines: [{
       ...line,
       selected_products: [{
+        packages: 1,
         product: {
           name: "Test yoghurt",
           provider: "oda",
@@ -155,12 +156,15 @@ test("exact-product fields stay hidden without a connected Oda selection", () =>
         },
       }],
     }],
-    oda: { connected: true },
+    oda: { connected: false },
     api: async () => ({}),
   });
-  assert.ok(connected.nodes.some((node) => node.attributes?.["aria-label"] === "Kjøp eksakt produkt for Yoghurt"));
-  assert.ok(connected.nodes.some((node) => node.attributes?.["aria-label"] === "Velg vist produkt for Yoghurt"));
-  assert.ok(connected.nodes.some((node) => node.attributes?.["aria-label"] === "Antall pakker kjøpt: Yoghurt"));
+  assert.ok(offlineWithSelection.nodes.some((node) => node.attributes?.["aria-label"] === "Kjøp eksakt produkt for Yoghurt"));
+  assert.ok(offlineWithSelection.nodes.some((node) => node.attributes?.["aria-label"] === "Velg vist produkt for Yoghurt"));
+  assert.ok(offlineWithSelection.nodes.some((node) => node.attributes?.["aria-label"] === "Antall pakker kjøpt: Yoghurt"));
+  assert.ok(offlineWithSelection.nodes.some((node) =>
+    node.textContent === "Dette er lagrede produktvalg for varen. Tilgjengeligheten hos Oda er ikke kontrollert nå.",
+  ));
 });
 
 test("unknown actual quantities stay null for g/ml/item purchases and closures stay separate", async () => {

@@ -202,6 +202,32 @@ async def test_cleanup_failure_retries_without_exposing_error(monkeypatch, caplo
     assert "will retry" in caplog.text
 
 
+async def test_cleanup_cancellation_survives_offloaded_failure():
+    from home_kitchen.recipes.photo_storage import PhotoRecipeService
+
+    photos = Mock()
+    started, release = Event(), Event()
+
+    def fail_after_release():
+        started.set()
+        assert release.wait(2)
+        raise RuntimeError("database failed during shutdown")
+
+    photos.cleanup = fail_after_release
+    photos._offload = PhotoRecipeService._offload
+    task = asyncio.create_task(PhotoRecipeService.cleanup_forever(photos, interval=3600))
+    try:
+        assert await asyncio.to_thread(started.wait, 2)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2)
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+
+
 async def test_discard_wins_save_race_without_dangling_reference(test_database_url, monkeypatch):
     photos, store = service(test_database_url)
     result = await upload(photos)

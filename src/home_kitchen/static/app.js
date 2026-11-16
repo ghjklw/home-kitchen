@@ -1586,6 +1586,12 @@ function recipeForm(draft = {}, source = "manual") {
         ),
       ),
     );
+  if (draft.identity_roundtrip_warning)
+    add(root, el(
+      "p",
+      "KI-utkastet har ikke bekreftede produkt- og enhetskoblinger. Hvis du lagrer det, fjernes koblingene fra oppskriften. Den lagrede oppskriften er uendret fram til du lagrer.",
+      "callout",
+    ));
   if (draft.photo_source)
     {
       const photoEvidence = add(
@@ -1781,6 +1787,17 @@ function recipeForm(draft = {}, source = "manual") {
       quantity: quantity.input,
       unit: unit.input,
       source_indices: [...(values.source_indices || [])],
+      original_name: values.name == null ? "" : String(values.name),
+      original_unit: values.unit == null ? "" : String(values.unit),
+      ...(Object.prototype.hasOwnProperty.call(values, "canonical_product_id")
+        ? { canonical_product_id: values.canonical_product_id }
+        : {}),
+      ...(Object.prototype.hasOwnProperty.call(values, "canonical_unit_id")
+        ? { canonical_unit_id: values.canonical_unit_id }
+        : {}),
+      ...(Object.prototype.hasOwnProperty.call(values, "source_unit_expression")
+        ? { source_unit_expression: values.source_unit_expression }
+        : {}),
       purchase_estimate: values.purchase_estimate ? { ...values.purchase_estimate } : null,
       category: category.input,
       error: rowError,
@@ -1831,6 +1848,11 @@ function recipeForm(draft = {}, source = "manual") {
         category: row.category.value,
         source_indices: row.source_indices,
         purchase_estimate: row.purchase_estimate,
+        original_name: row.original_name,
+        original_unit: row.original_unit,
+        canonical_product_id: row.canonical_product_id,
+        canonical_unit_id: row.canonical_unit_id,
+        source_unit_expression: row.source_unit_expression,
       });
       const errors = [];
       if (fieldErrors.name) errors.push("Oppgi navnet på ingrediensen.");
@@ -1900,42 +1922,72 @@ function recipeForm(draft = {}, source = "manual") {
     revisionError.setAttribute("role", "alert");
     const revisionSettings = connectionSettingsButton("Se over innstillingene for oppskriftsassistenten");
     revisionSettings.hidden = true;
+    const revisionEditorValues = () => ({
+      title: name.input.value,
+      servings: servings.input.value,
+      prompt: prompt.input.value,
+      ingredients: rowControllers.map((row) => ({
+        name: row.name.value,
+        quantity: row.quantity.value,
+        unit: row.unit.value,
+        category: row.category.value,
+        source_indices: row.source_indices,
+        original_name: row.original_name,
+        original_unit: row.original_unit,
+        canonical_product_id: row.canonical_product_id,
+        canonical_unit_id: row.canonical_unit_id,
+        source_unit_expression: row.source_unit_expression,
+      })),
+      instructions: instructions.input.value,
+      source_url: draft.source_url || null,
+      image_url: imageUrl.input.value,
+      source_ingredients: sourceIngredients,
+      provenance: draft.provenance || null,
+      photo_source: draft.photo_source || null,
+      image_attribution: draft.image_attribution || null,
+    });
     const revise = button("Se over KI-forslaget", async () => {
       revise.disabled = true;
       revisionError.textContent = "";
       try {
+        const revisionValues = revisionEditorValues();
+        const submittedSnapshot = window.KitchenRecipeEditor.recipeRevisionSnapshot(revisionValues);
         const payload = window.KitchenRecipeEditor.buildRevisionRequest(
-          {
-            title: name.input.value,
-            servings: servings.input.value,
-            ingredients: rowControllers.map((row) => ({
-              name: row.name.value,
-              quantity: row.quantity.value,
-              unit: row.unit.value,
-              category: row.category.value,
-              source_indices: row.source_indices,
-            })),
-            instructions: instructions.input.value,
-            source_url: draft.source_url || null,
-            image_url: imageUrl.input.value,
-            source_ingredients: sourceIngredients,
-            provenance: draft.provenance || null,
-            photo_source: draft.photo_source || null,
-            image_attribution: draft.image_attribution || null,
-          },
+          revisionValues,
           { isEditing, source },
           prompt.input.value,
         );
-        const response = await api("/recipe-drafts/ai", "POST", payload);
-        if (!response?.adapted)
-          throw new Error("KI-en ga ikke et redigerbart utkast. Oppskriften din er uendret.");
-        const revisedDraft = isEditing
-          ? { ...response.adapted, id: draft.id }
-          : response.adapted;
-        recipeForm(revisedDraft, isEditing ? source : "ai");
+        const applied = await window.KitchenRecipeEditor.applyRevisionIfActive(
+          api("/recipe-drafts/ai", "POST", payload),
+          () => revise.isConnected && $("#modal").open &&
+            submittedSnapshot === window.KitchenRecipeEditor.recipeRevisionSnapshot(revisionEditorValues()),
+          (response) => {
+            if (!response?.adapted)
+              throw new Error("KI-en ga ikke et redigerbart utkast. Oppskriften din er uendret.");
+            const revisedDraft = isEditing
+              ? { ...response.adapted, id: draft.id }
+              : response.adapted;
+            if (isEditing) {
+              const sourceIngredients = revisionValues.ingredients.map((item) =>
+                window.KitchenRecipeEditor.recipeIngredientForSave(item).item,
+              );
+              const identityReview = window.KitchenRecipeEditor.prepareAIRevisionForEditor(
+                sourceIngredients,
+                response.adapted.ingredients,
+              );
+              revisedDraft.ingredients = identityReview.ingredients;
+              revisedDraft.identity_roundtrip_warning = identityReview.identityReviewRequired;
+            }
+            recipeForm(revisedDraft, isEditing ? source : "ai");
+          },
+        );
+        if (!applied && revise.isConnected && $("#modal").open)
+          revisionError.textContent = "Oppskriften ble endret mens KI-forslaget ble laget. Forslaget ble ikke brukt. Be om et nytt forslag for å ta med de siste endringene.";
       } catch (error) {
-        revisionError.textContent = error.message;
-        revisionSettings.hidden = false;
+        if (revise.isConnected && $("#modal").open) {
+          revisionError.textContent = error.message;
+          revisionSettings.hidden = false;
+        }
       } finally {
         if (revise.isConnected) revise.disabled = false;
       }

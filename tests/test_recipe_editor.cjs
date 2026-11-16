@@ -8,6 +8,9 @@ const {
   parseSourceIngredient,
   rowFromDraft,
   recipeIngredientForSave,
+  prepareAIRevisionForEditor,
+  applyRevisionIfActive,
+  recipeRevisionSnapshot,
 } = require("../src/home_kitchen/static/recipe-editor.js");
 
 test("saves unknown source quantities without inventing an amount", () => {
@@ -64,6 +67,202 @@ test("preserves separate purchase estimates through editable recipe saves", () =
   assert.deepEqual(saved.item.purchase_estimate, purchaseEstimate);
   assert.equal(saved.item.quantity, "1");
   assert.equal(saved.item.unit, "dl");
+});
+
+test("round-trips canonical identity and original unit wording through quantity edits", () => {
+  const row = rowFromDraft({
+    name: "Old unmatched phrase",
+    quantity: "1.25",
+    unit: "handfuls",
+    canonical_product_id: "product-id",
+    canonical_unit_id: "unit-id",
+    source_unit_expression: "Handfuls",
+  });
+  const saved = recipeIngredientForSave({
+    ...row,
+    quantity: "2.5",
+    original_name: row.name,
+    original_unit: row.unit,
+  });
+  assert.deepEqual(saved.item, {
+    name: "Old unmatched phrase",
+    quantity: "2.5",
+    unit: "handfuls",
+    category: "Other",
+    source_indices: [],
+    canonical_product_id: "product-id",
+    canonical_unit_id: "unit-id",
+    source_unit_expression: "Handfuls",
+  });
+});
+
+test("semantic edits clear only their related identity and preserve explicit nulls", () => {
+  const original = rowFromDraft({
+    name: "Salt",
+    quantity: "1",
+    unit: "tsp",
+    canonical_product_id: "product-id",
+    canonical_unit_id: "unit-id",
+    source_unit_expression: "Teaspoons",
+  });
+  const renamed = recipeIngredientForSave({
+    ...original,
+    name: "Pepper",
+    original_name: original.name,
+    original_unit: original.unit,
+  }).item;
+  assert.equal(renamed.canonical_product_id, null);
+  assert.equal(renamed.canonical_unit_id, "unit-id");
+  assert.equal(renamed.source_unit_expression, "Teaspoons");
+
+  const remeasured = recipeIngredientForSave({
+    ...original,
+    unit: "ml",
+    original_name: original.name,
+    original_unit: original.unit,
+  }).item;
+  assert.equal(remeasured.canonical_product_id, "product-id");
+  assert.equal(remeasured.canonical_unit_id, null);
+  assert.equal(remeasured.source_unit_expression, "ml");
+
+  const explicitlyCleared = rowFromDraft({
+    name: "Salt",
+    quantity: "1",
+    unit: "tsp",
+    canonical_product_id: null,
+    canonical_unit_id: null,
+    source_unit_expression: null,
+  });
+  const savedNulls = recipeIngredientForSave({
+    ...explicitlyCleared,
+    original_name: explicitlyCleared.name,
+    original_unit: explicitlyCleared.unit,
+  }).item;
+  assert.equal(Object.hasOwn(savedNulls, "canonical_product_id"), true);
+  assert.equal(Object.hasOwn(savedNulls, "canonical_unit_id"), true);
+  assert.equal(Object.hasOwn(savedNulls, "source_unit_expression"), true);
+  assert.equal(savedNulls.canonical_product_id, null);
+  assert.equal(savedNulls.canonical_unit_id, null);
+  assert.equal(savedNulls.source_unit_expression, null);
+});
+
+test("AI redrafts never inherit canonical IDs from source references and preserve only source wording", () => {
+  const originals = [
+    {
+      name: "flour", quantity: "2", unit: "cup", source_indices: [0],
+      canonical_product_id: "flour-id", canonical_unit_id: "cup-id", source_unit_expression: "cups",
+    },
+    {
+      name: "salt", quantity: "1", unit: "tsp", source_indices: [1],
+      canonical_product_id: "salt-id", canonical_unit_id: "tsp-id", source_unit_expression: "teaspoon",
+    },
+  ];
+  const proposed = [
+    { name: "Fine salt", quantity: "2", unit: "tsp", source_indices: [1] },
+    { name: "flour", quantity: "3", unit: "ml", source_indices: [0] },
+    { name: "ambiguous", quantity: "1", unit: "g", source_indices: [] },
+  ];
+  const result = prepareAIRevisionForEditor(originals, proposed);
+  assert.equal(result.identityReviewRequired, true);
+  assert.deepEqual(result.ingredients[0], {
+    name: "Fine salt", quantity: "2", unit: "tsp", source_indices: [1],
+    canonical_product_id: null, canonical_unit_id: null, source_unit_expression: "teaspoon",
+  });
+  assert.deepEqual(result.ingredients[1], {
+    name: "flour", quantity: "3", unit: "ml", source_indices: [0],
+    canonical_product_id: null, canonical_unit_id: null, source_unit_expression: null,
+  });
+  assert.deepEqual(result.ingredients[2], {
+    ...proposed[2],
+    canonical_product_id: null,
+    canonical_unit_id: null,
+  });
+});
+
+test("AI revision keeps source wording for an unmapped unchanged measure without treating it as identity", () => {
+  const result = prepareAIRevisionForEditor(
+    [{ name: "salt", quantity: "1", unit: "tsp", source_indices: [0], source_unit_expression: "Teaspoons" }],
+    [{ name: "salt", quantity: "2", unit: "tsp", source_indices: [0] }],
+  );
+  assert.equal(result.identityReviewRequired, false);
+  assert.deepEqual(result.ingredients[0], {
+    name: "salt",
+    quantity: "2",
+    unit: "tsp",
+    source_indices: [0],
+    canonical_product_id: null,
+    canonical_unit_id: null,
+    source_unit_expression: "Teaspoons",
+  });
+});
+
+test("late AI response cannot replace a different recipe editor opened after the request", async () => {
+  let resolveResponse;
+  const response = new Promise((resolve) => { resolveResponse = resolve; });
+  const modal = { open: true, editor: null };
+  const editorA = { reviseButton: { isConnected: true }, draft: { title: "Recipe A" } };
+  modal.editor = editorA;
+  const applying = applyRevisionIfActive(
+    response,
+    () => modal.open && editorA.reviseButton.isConnected,
+    (result) => { modal.editor.draft = result.adapted; },
+  );
+
+  editorA.reviseButton.isConnected = false;
+  modal.open = false;
+  const editorB = { reviseButton: { isConnected: true }, draft: { title: "Recipe B" } };
+  modal.editor = editorB;
+  modal.open = true;
+  resolveResponse({ adapted: { title: "Late Recipe A" } });
+
+  assert.equal(await applying, false);
+  assert.equal(modal.editor, editorB);
+  assert.deepEqual(editorB.draft, { title: "Recipe B" });
+});
+
+test("AI response still applies to the active recipe editor", async () => {
+  const modal = { open: true, editor: { draft: { title: "Recipe A", servings: "2", ingredients: [], instructions: "Cook" } } };
+  const submittedSnapshot = recipeRevisionSnapshot(modal.editor.draft);
+  const applied = await applyRevisionIfActive(
+    Promise.resolve({ adapted: { title: "Revised Recipe A" } }),
+    () => modal.open && submittedSnapshot === recipeRevisionSnapshot(modal.editor.draft),
+    (result) => { modal.editor.draft = result.adapted; },
+  );
+  assert.equal(applied, true);
+  assert.deepEqual(modal.editor.draft, { title: "Revised Recipe A" });
+});
+
+test("AI response is ignored when manual recipe edits change the submitted snapshot", async () => {
+  let resolveResponse;
+  const response = new Promise((resolve) => { resolveResponse = resolve; });
+  const modal = {
+    open: true,
+    editor: {
+      values: {
+        title: "Recipe A",
+        servings: "2",
+        ingredients: [{ name: "Salt", quantity: "1", unit: "tsp" }],
+        instructions: "Cook",
+      },
+    },
+  };
+  const submittedSnapshot = recipeRevisionSnapshot(modal.editor.values);
+  const applying = applyRevisionIfActive(
+    response,
+    () => modal.open && submittedSnapshot === recipeRevisionSnapshot(modal.editor.values),
+    (result) => { modal.editor.values = result.adapted; },
+  );
+
+  modal.editor.values = {
+    ...modal.editor.values,
+    title: "My manual edit while waiting",
+    ingredients: [{ name: "Salt", quantity: "3", unit: "tsp" }],
+  };
+  resolveResponse({ adapted: { title: "AI response based on old values" } });
+
+  assert.equal(await applying, false);
+  assert.equal(modal.editor.values.title, "My manual edit while waiting");
+  assert.equal(modal.editor.values.ingredients[0].quantity, "3");
 });
 
 test("parses a leading exact decimal and recognized explicit unit", () => {
@@ -153,6 +352,60 @@ test("AI revision sends complete saved recipes and requires explicit quantities 
     () => buildRevisionRequest({ ...values, ingredients: [{ name: "flour", quantity: "", unit: "kg" }] }, { isEditing: true, source: "manual" }, "revise"),
     /Fyll ut mengde og enhet/,
   );
+});
+
+test("AI revision requests include explicit canonical identity fields for mapped ingredients", () => {
+  const payload = buildRevisionRequest({
+    title: "Soup",
+    servings: 1,
+    ingredients: [{
+      name: "Old unmatched phrase",
+      quantity: "1.25",
+      unit: "Handfuls",
+      original_name: "Old unmatched phrase",
+      original_unit: "Handfuls",
+      category: "Other",
+      source_indices: [0],
+      canonical_product_id: "product-id",
+      canonical_unit_id: "unit-id",
+      source_unit_expression: "Handfuls",
+    }],
+    instructions: ["Cook"],
+  }, { isEditing: true, source: "manual" }, "adjust quantity");
+  assert.deepEqual(payload.recipe.ingredients[0], {
+    name: "Old unmatched phrase",
+    quantity: "1.25",
+    unit: "Handfuls",
+    category: "Other",
+    source_indices: [0],
+    canonical_product_id: "product-id",
+    canonical_unit_id: "unit-id",
+    source_unit_expression: "Handfuls",
+  });
+});
+
+test("an unmapped ingredient with source wording alone can still change quantity", () => {
+  const payload = buildRevisionRequest({
+    title: "Soup",
+    servings: 1,
+    ingredients: [{
+      name: "salt",
+      quantity: "2",
+      unit: "ml",
+      original_name: "salt",
+      original_unit: "tsp",
+      source_unit_expression: "Teaspoons",
+    }],
+    instructions: ["Cook"],
+  }, { isEditing: true, source: "manual" }, "change amount");
+  assert.deepEqual(payload.recipe.ingredients[0], {
+    name: "salt",
+    quantity: "2",
+    unit: "ml",
+    category: "Other",
+    source_indices: [],
+    source_unit_expression: "ml",
+  });
 });
 
 test("leaves ambiguous or unrecognized source text unresolved", () => {

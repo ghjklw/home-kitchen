@@ -7,6 +7,7 @@ semantics. Oda order payloads are explicitly internal synthetic examples;
 they are not an asserted Oda wire contract.
 """
 
+import json
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -29,7 +30,7 @@ class SyntheticSourcePage:
 class SyntheticReceiptRevision:
     """Test-side lifecycle/revision annotation kept outside provider payloads."""
 
-    provider: Literal["oda", "coop", "trumf"]
+    provider: Literal["oda", "coop", "trumf", "rema1000"]
     external_id: str
     revision_id: str
     lifecycle: ReceiptLifecycle
@@ -40,7 +41,7 @@ class SyntheticReceiptRevision:
 class SyntheticHistoryFailure:
     """A fake-reader failure category; it has no provider HTTP/status contract."""
 
-    provider: Literal["oda", "coop", "trumf"]
+    provider: Literal["oda", "coop", "trumf", "rema1000"]
     kind: FailureKind
 
 
@@ -447,4 +448,335 @@ def history_failure_scenarios() -> tuple[SyntheticHistoryFailure, ...]:
         SyntheticHistoryFailure(provider="coop", kind="authentication"),
         SyntheticHistoryFailure(provider="trumf", kind="rate_limit"),
         SyntheticHistoryFailure(provider="coop", kind="unsupported_contract"),
+        SyntheticHistoryFailure(provider="rema1000", kind="authentication"),
+    )
+
+
+def rema1000_transaction_pages() -> tuple[SyntheticSourcePage, ...]:
+    """Return fictional Rema 1000-shaped transaction and receipt responses."""
+    first = {
+        "receiptId": "synthetic-rema-rec-100",
+        "storeName": "REMA 1000 Vulkan",
+        "storeId": "1042",
+        "chain": "REMA 1000",
+        "totalAmount": 184.50,
+        "totalDiscount": 14.50,
+        "timestamp": "2026-09-08T15:30:00+02:00",
+        "hasReceipt": True,
+    }
+    second = {
+        "receiptId": "synthetic-rema-stub-101",
+        "storeName": "REMA 1000 Torggata",
+        "storeId": "1088",
+        "chain": "REMA 1000",
+        "totalAmount": 42.00,
+        "totalDiscount": 0.0,
+        "timestamp": "2026-09-09T11:15:00+02:00",
+        "hasReceipt": False,
+    }
+    details = {
+        "receiptId": "synthetic-rema-rec-100",
+        "storeName": "REMA 1000 Vulkan",
+        "storeId": "1042",
+        "chain": "REMA 1000",
+        "timestamp": "2026-09-08T15:30:00+02:00",
+        "totalAmount": 184.50,
+        "totalDiscount": 14.50,
+        "hasReceipt": True,
+        "lines": [
+            {
+                "name": "FIKTIV REMA 1000 HELMELK 1L",
+                "ean": "7032069704018",
+                "quantity": 2,
+                "unit": "stk",
+                "unitPrice": 24.50,
+                "amount": 49.00,
+                "discount": 0.0,
+                "taxPercent": 15,
+                "discounts": [],
+            },
+            {
+                "name": "FIKTIV GULROTBÅND / CARROT RIBBONS",
+                "ean": None,
+                "quantity": 0.5,
+                "unit": "kg",
+                "unitPrice": 45.00,
+                "amount": 18.00,
+                "discount": 4.50,
+                "taxPercent": 15,
+                "discounts": [
+                    {
+                        "type": "personal_cut",
+                        "description": "10 på 10",
+                        "amount": 4.50,
+                        "percentage": 20,
+                    }
+                ],
+            },
+            {
+                "name": "FIKTIV REMA 1000 HAVREGRYN LETTKOKTE 1KG",
+                "ean": "7032069704032",
+                "quantity": 1,
+                "unit": "pose",
+                "unitPrice": 22.50,
+                "amount": 22.50,
+                "discount": 0.0,
+                "taxPercent": 15,
+                "discounts": [],
+            },
+        ],
+    }
+    return (
+        SyntheticSourcePage([first], continuation_observed=True),
+        SyntheticSourcePage([first, second], continuation_observed=False),
+        SyntheticSourcePage(details, continuation_observed=False),
+    )
+
+
+def synthetic_rema1000_transactions_json() -> str:
+    """Return synthetic JSON string containing Rema 1000 transaction headers."""
+    return json.dumps(
+        {
+            "receipts": [
+                {
+                    "receiptId": "synthetic-rema-rec-100",
+                    "storeName": "REMA 1000 Vulkan",
+                    "storeId": "1042",
+                    "chain": "REMA 1000",
+                    "totalAmount": 184.50,
+                    "totalDiscount": 14.50,
+                    "timestamp": "2026-09-08T15:30:00+02:00",
+                    "hasReceipt": True,
+                },
+                {
+                    "receiptId": "synthetic-rema-stub-101",
+                    "storeName": "REMA 1000 Torggata",
+                    "storeId": "1088",
+                    "chain": "REMA 1000",
+                    "totalAmount": 42.00,
+                    "totalDiscount": 0.0,
+                    "timestamp": "2026-09-09T11:15:00+02:00",
+                    "hasReceipt": False,
+                },
+            ]
+        },
+        ensure_ascii=False,
+    )
+
+
+def synthetic_rema1000_receipt_json() -> str:
+    """Return synthetic JSON string containing detailed Rema 1000 line items."""
+    return json.dumps(
+        {
+            "receipt": {
+                "receiptId": "synthetic-rema-rec-100",
+                "storeName": "REMA 1000 Vulkan",
+                "storeId": "1042",
+                "chain": "REMA 1000",
+                "timestamp": "2026-09-08T15:30:00+02:00",
+                "totalAmount": 184.50,
+                "totalDiscount": 14.50,
+                "hasReceipt": True,
+                "lines": [
+                    {
+                        "name": "FIKTIV REMA 1000 HELMELK 1L",
+                        "ean": "7032069704018",
+                        "quantity": 2,
+                        "unit": "stk",
+                        "unitPrice": 24.50,
+                        "amount": 49.00,
+                        "discount": 0.0,
+                        "taxPercent": 15,
+                        "discounts": [],
+                    },
+                    {
+                        "name": "FIKTIV GULROTBÅND / CARROT RIBBONS",
+                        "ean": None,
+                        "quantity": 0.5,
+                        "unit": "kg",
+                        "unitPrice": 45.00,
+                        "amount": 18.00,
+                        "discount": 4.50,
+                        "taxPercent": 15,
+                        "discounts": [
+                            {
+                                "type": "personal_cut",
+                                "description": "10 på 10",
+                                "amount": 4.50,
+                                "percentage": 20,
+                            }
+                        ],
+                    },
+                ],
+            }
+        },
+        ensure_ascii=False,
+    )
+
+
+def synthetic_rema1000_unauthenticated_html() -> str:
+    """Return mock HTML simulating an unauthenticated login page."""
+    return (
+        "<!DOCTYPE html><html><head><title>Logg inn - REMA 1000</title></head>"
+        "<body><h1>Logg inn med telefonnummer</h1></body></html>"
+    )
+
+
+def synthetic_rema1000_unauthenticated_json() -> str:
+    """Return mock JSON response simulating a 401 Unauthorized API error."""
+    return json.dumps(
+        {
+            "statusCode": 401,
+            "error": "Unauthorized",
+            "message": "Invalid or expired session token",
+        }
+    )
+
+
+def synthetic_rema1000_receipt_revisions() -> tuple[SyntheticReceiptRevision, ...]:
+    """Return lifecycle scenarios for Rema 1000 receipt captures."""
+    base_payload = {
+        "receiptId": "synthetic-rema-rec-100",
+        "storeName": "REMA 1000 Vulkan",
+        "storeId": "1042",
+        "chain": "REMA 1000",
+        "timestamp": "2026-09-08T15:30:00+02:00",
+        "totalAmount": 184.50,
+        "totalDiscount": 14.50,
+        "hasReceipt": True,
+        "lines": [
+            {
+                "name": "FIKTIV REMA 1000 HELMELK 1L",
+                "ean": "7032069704018",
+                "quantity": 2,
+                "unit": "stk",
+                "unitPrice": 24.50,
+                "amount": 49.00,
+                "discount": 0.0,
+                "taxPercent": 15,
+                "discounts": [],
+            },
+            {
+                "name": "FIKTIV GULROTBÅND / CARROT RIBBONS",
+                "ean": None,
+                "quantity": 0.5,
+                "unit": "kg",
+                "unitPrice": 45.00,
+                "amount": 18.00,
+                "discount": 4.50,
+                "taxPercent": 15,
+                "discounts": [
+                    {
+                        "type": "personal_cut",
+                        "description": "10 på 10",
+                        "amount": 4.50,
+                        "percentage": 20,
+                    }
+                ],
+            },
+        ],
+    }
+
+    corrected_payload = {
+        **base_payload,
+        "totalAmount": 175.50,
+        "totalDiscount": 23.50,
+        "lines": [
+            {
+                "name": "FIKTIV REMA 1000 HELMELK 1L",
+                "ean": "7032069704018",
+                "quantity": 2,
+                "unit": "stk",
+                "unitPrice": 24.50,
+                "amount": 49.00,
+                "discount": 0.0,
+                "taxPercent": 15,
+                "discounts": [],
+            },
+            {
+                "name": "FIKTIV GULROTBÅND / CARROT RIBBONS",
+                "ean": None,
+                "quantity": 0.5,
+                "unit": "kg",
+                "unitPrice": 45.00,
+                "amount": 9.00,
+                "discount": 13.50,
+                "taxPercent": 15,
+                "discounts": [
+                    {
+                        "type": "personal_cut",
+                        "description": "Personlig priskutt",
+                        "amount": 13.50,
+                        "percentage": 60,
+                    }
+                ],
+            },
+        ],
+    }
+
+    stub_payload = {
+        "receiptId": "synthetic-rema-stub-101",
+        "storeName": "REMA 1000 Torggata",
+        "storeId": "1088",
+        "chain": "REMA 1000",
+        "totalAmount": 42.00,
+        "totalDiscount": 0.0,
+        "timestamp": "2026-09-09T11:15:00+02:00",
+        "hasReceipt": False,
+        "lines": [],
+    }
+
+    refund_payload = {
+        "receiptId": "synthetic-rema-refund-102",
+        "storeName": "REMA 1000 Vulkan",
+        "storeId": "1042",
+        "chain": "REMA 1000",
+        "totalAmount": -18.00,
+        "totalDiscount": 0.0,
+        "timestamp": "2026-09-10T12:00:00+02:00",
+        "hasReceipt": True,
+        "lines": [
+            {
+                "name": "FIKTIV RETURN GULROTBÅND",
+                "ean": None,
+                "quantity": -0.5,
+                "unit": "kg",
+                "unitPrice": 36.00,
+                "amount": -18.00,
+                "discount": 0.0,
+                "taxPercent": 15,
+                "discounts": [],
+            }
+        ],
+    }
+
+    return (
+        SyntheticReceiptRevision(
+            provider="rema1000",
+            external_id="synthetic-rema-rec-100",
+            revision_id="fixture-rema-rev-1",
+            lifecycle="completed",
+            payload=base_payload,
+        ),
+        SyntheticReceiptRevision(
+            provider="rema1000",
+            external_id="synthetic-rema-rec-100",
+            revision_id="fixture-rema-rev-2",
+            lifecycle="corrected",
+            payload=corrected_payload,
+        ),
+        SyntheticReceiptRevision(
+            provider="rema1000",
+            external_id="synthetic-rema-stub-101",
+            revision_id="fixture-rema-stub-1",
+            lifecycle="completed",
+            payload=stub_payload,
+        ),
+        SyntheticReceiptRevision(
+            provider="rema1000",
+            external_id="synthetic-rema-refund-102",
+            revision_id="fixture-rema-refund-1",
+            lifecycle="refund_scenario",
+            payload=refund_payload,
+        ),
     )

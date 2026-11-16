@@ -215,6 +215,157 @@ def trumf_transaction_pages() -> tuple[SyntheticSourcePage, ...]:
     )
 
 
+def synthetic_trumf_rsc_list_html() -> str:
+    """Return synthetic RSC flight payload HTML containing transaction headers."""
+    return (
+        '<script>self.__next_f.push([1,"12:[\\"$\\",\\"div\\",null,{\\"transactionsData\\":'
+        "[auto-trumf-tx"
+        ']},\\"areMonthsGrouped\\":true}]"])</script>'
+    ).replace(
+        "auto-trumf-tx",
+        '{\\"batchId\\":\\"synthetic-trumf-b-100\\",\\"belop\\":268.41,'
+        '\\"beskrivelse\\":\\"KIWI Fiktiv Testbutikk\\",\\"bonus\\":2.67,'
+        '\\"transaksjonsTidspunkt\\":\\"$D2026-09-05T17:58:14.000Z\\",'
+        '\\"filterCategory\\":\\"KIWI\\",\\"partnerId\\":\\"KIWI\\",\\"harKvittering\\":true},'
+        '{\\"batchId\\":\\"synthetic-trumf-b-101\\",\\"belop\\":99.00,'
+        '\\"beskrivelse\\":\\"MENY Fiktiv Testby\\",\\"bonus\\":1.00,'
+        '\\"transaksjonsTidspunkt\\":\\"$D2026-08-01T10:00:00.000Z\\",'
+        '\\"filterCategory\\":\\"MENY\\",\\"partnerId\\":\\"MENY\\",\\"harKvittering\\":false}',
+    )
+
+
+def synthetic_trumf_rsc_receipt_html() -> str:
+    """Return synthetic RSC flight payload HTML containing detailed line items."""
+    return (
+        '<script>self.__next_f.push([1,"60:[\\"$\\",\\"x\\",null,{\\"purchaseDetails\\":'
+        '{\\"batchId\\":\\"synthetic-trumf-b-100\\",\\"kvitteringsId\\":\\"syn-rec-224383\\",'
+        '\\"belop\\":268.41,\\"bonus\\":2.67,'
+        '\\"transaksjonsTidspunkt\\":\\"$D2026-09-05T17:58:14.000Z\\",\\"varelinjer\\":['
+        '{\\"produktBeskrivelse\\":\\"FIKTIV HELMELK 1L\\",\\"ean\\":\\"$undefined\\",'
+        '\\"antall\\":2,\\"belop\\":49.80,\\"enhetsType\\":\\"EA\\",\\"momsProsent\\":15,\\"besparelser\\":[]},'
+        '{\\"produktBeskrivelse\\":\\"FIKTIV GULROTBÅND / CARROT RIBBONS PR KG\\",\\"ean\\":\\"$undefined\\",'
+        '\\"antall\\":0.215,\\"belop\\":27.74,\\"enhetsType\\":\\"KG\\",\\"momsProsent\\":15,\\"besparelser\\":['
+        '{\\"type\\":\\"OFFER\\",\\"beskrivelse\\":\\"UKE 36\\",\\"belop\\":10.75}]}]}}]"])</script>'
+    )
+
+
+def synthetic_trumf_rsc_unauthenticated_html() -> str:
+    """Return mock HTML simulating an unauthenticated login redirect page."""
+    return "<!DOCTYPE html><html><head><title>Logg inn - Trumf</title></head><body><h1>Logg inn</h1></body></html>"
+
+
+def synthetic_trumf_receipt_revisions() -> tuple[SyntheticReceiptRevision, ...]:
+    """Return lifecycle scenarios for Trumf receipt captures."""
+    base_payload = {
+        "batchId": "synthetic-trumf-b-100",
+        "kvitteringsId": "syn-rec-224383",
+        "storeName": "KIWI Fiktiv Testbutikk",
+        "chain": "KIWI",
+        "belop": 268.41,
+        "bonus": 2.67,
+        "transaksjonsTidspunkt": "2026-09-05T17:58:14.000Z",
+        "hasReceipt": True,
+        "varelinjer": [
+            {
+                "produktBeskrivelse": "FIKTIV HELMELK 1L",
+                "ean": None,
+                "antall": 2,
+                "belop": 49.80,
+                "enhetsType": "EA",
+                "momsProsent": 15,
+                "besparelser": [],
+            },
+            {
+                "produktBeskrivelse": "FIKTIV GULROTBÅND / CARROT RIBBONS PR KG",
+                "ean": None,
+                "antall": 0.215,
+                "belop": 27.74,
+                "enhetsType": "KG",
+                "besparelser": [{"type": "OFFER", "beskrivelse": "UKE 36", "belop": 10.75}],
+            },
+        ],
+    }
+
+    corrected_payload = {
+        **base_payload,
+        "belop": 250.00,
+        "varelinjer": [
+            {
+                "produktBeskrivelse": "FIKTIV HELMELK 1L",
+                "ean": None,
+                "antall": 1,
+                "belop": 24.90,
+                "enhetsType": "EA",
+                "momsProsent": 15,
+                "besparelser": [],
+            }
+        ],
+    }
+
+    stub_payload = {
+        "batchId": "synthetic-trumf-b-101",
+        "storeName": "MENY Fiktiv Testby",
+        "chain": "MENY",
+        "belop": 99.00,
+        "bonus": 1.00,
+        "transaksjonsTidspunkt": "2026-08-01T10:00:00.000Z",
+        "hasReceipt": False,
+        "varelinjer": [],
+    }
+
+    refund_payload = {
+        "batchId": "synthetic-trumf-refund-001",
+        "storeName": "KIWI Fiktiv Testbutikk",
+        "chain": "KIWI",
+        "belop": -4.00,
+        "bonus": 0.00,
+        "transaksjonsTidspunkt": "2026-09-06T11:00:00.000Z",
+        "hasReceipt": True,
+        "varelinjer": [
+            {
+                "produktBeskrivelse": "FIKTIV RETURN ADJUSTMENT",
+                "ean": None,
+                "antall": 1,
+                "belop": -4.00,
+                "enhetsType": "EA",
+                "momsProsent": 15,
+                "besparelser": [],
+            }
+        ],
+    }
+
+    return (
+        SyntheticReceiptRevision(
+            provider="trumf",
+            external_id="synthetic-trumf-b-100",
+            revision_id="fixture-trumf-rev-1",
+            lifecycle="completed",
+            payload=base_payload,
+        ),
+        SyntheticReceiptRevision(
+            provider="trumf",
+            external_id="synthetic-trumf-b-100",
+            revision_id="fixture-trumf-rev-2",
+            lifecycle="corrected",
+            payload=corrected_payload,
+        ),
+        SyntheticReceiptRevision(
+            provider="trumf",
+            external_id="synthetic-trumf-b-101",
+            revision_id="fixture-trumf-stub-1",
+            lifecycle="completed",
+            payload=stub_payload,
+        ),
+        SyntheticReceiptRevision(
+            provider="trumf",
+            external_id="synthetic-trumf-refund-001",
+            revision_id="fixture-trumf-refund-1",
+            lifecycle="refund_scenario",
+            payload=refund_payload,
+        ),
+    )
+
+
 def oda_order_receipt_scenarios() -> tuple[SyntheticReceiptRevision, ...]:
     """Return internal synthetic Oda-order envelopes; not an Oda wire contract."""
     return (

@@ -17,6 +17,10 @@ from fixtures.synthetic_kitchen.purchase_history import (
     coop_receipt_detail_revisions,
     history_failure_scenarios,
     oda_order_receipt_scenarios,
+    synthetic_trumf_receipt_revisions,
+    synthetic_trumf_rsc_list_html,
+    synthetic_trumf_rsc_receipt_html,
+    synthetic_trumf_rsc_unauthenticated_html,
     trumf_transaction_pages,
 )
 from fixtures.synthetic_kitchen.recipes import SYNTHETIC_RECIPE_ID, synthetic_recipe
@@ -142,6 +146,36 @@ def test_trumf_pages_keep_fake_ids_amounts_and_unknown_quantities():
     assert details["varelinjer"][0]["antall"] == 2
     assert details["varelinjer"][1]["antall"] is None
     assert "source_updated_at" not in transactions[0]
+
+
+def test_trumf_rsc_fixtures_and_revisions_structure():
+    list_html = synthetic_trumf_rsc_list_html()
+    assert "transactionsData" in list_html
+    assert "synthetic-trumf-b-100" in list_html
+    assert "$D2026-09-05" in list_html
+
+    receipt_html = synthetic_trumf_rsc_receipt_html()
+    assert "purchaseDetails" in receipt_html
+    assert "FIKTIV HELMELK 1L" in receipt_html
+    assert "$undefined" in receipt_html
+
+    unauth = synthetic_trumf_rsc_unauthenticated_html()
+    assert "Logg inn" in unauth
+    assert "transactionsData" not in unauth
+
+    revisions = synthetic_trumf_receipt_revisions()
+    base, corrected, stub, refund = revisions
+
+    assert base.provider == "trumf"
+    assert base.external_id == "synthetic-trumf-b-100"
+    assert base.lifecycle == "completed"
+    assert corrected.external_id == base.external_id
+    assert corrected.lifecycle == "corrected"
+    assert corrected.revision_id != base.revision_id
+    assert stub.lifecycle == "completed"
+    assert stub.payload["hasReceipt"] is False
+    assert refund.lifecycle == "refund_scenario"
+    assert refund.payload["belop"] < 0
 
 
 def test_oda_order_scenarios_keep_internal_lifecycle_separate_from_payload():

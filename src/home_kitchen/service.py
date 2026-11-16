@@ -65,6 +65,7 @@ class KitchenService:
         """Preserve omitted metadata only for a unique, unchanged ingredient row."""
         preserved = [dict(values) for values in current_values]
         fields = ("name", "quantity", "unit", "category", "source_indices", "purchase_estimate")
+        source_fields = ("name", "unit", "category", "source_indices")
 
         def freeze(value):
             if isinstance(value, dict):
@@ -76,9 +77,14 @@ class KitchenService:
         def signature(values: dict) -> tuple:
             return tuple(freeze(values.get(field)) for field in fields)
 
+        def source_signature(values: dict) -> tuple:
+            return tuple(freeze(values.get(field)) for field in source_fields)
+
         existing_values = [item.model_dump() for item in existing.ingredients]
         existing_signatures = Counter(signature(item) for item in existing_values)
         incoming_signatures = Counter(signature(item) for item in preserved)
+        existing_source_signatures = Counter(source_signature(item) for item in existing_values)
+        incoming_source_signatures = Counter(source_signature(item) for item in preserved)
         for index, ingredient in enumerate(data.ingredients):
             if index >= len(existing.ingredients):
                 continue
@@ -106,8 +112,17 @@ class KitchenService:
             if unchanged_and_unique:
                 for field in omitted_identity_fields:
                     values[field] = prior.get(field)
-                if "source_unit_expression" not in ingredient.model_fields_set:
-                    values["source_unit_expression"] = prior.get("source_unit_expression")
+            source_key = source_signature(values)
+            source_expression_unchanged = (
+                source_key == source_signature(prior)
+                and existing_source_signatures[source_key] == 1
+                and incoming_source_signatures[source_key] == 1
+            )
+            if (
+                source_expression_unchanged
+                and "source_unit_expression" not in ingredient.model_fields_set
+            ):
+                values["source_unit_expression"] = prior.get("source_unit_expression")
         return preserved
 
     def _validate_canonical_identities(self, data: RecipeCreate) -> None:

@@ -75,7 +75,7 @@ function renderFixture(overrides = {}) {
     renderBasketBatchReview: () => {},
     renderBasketMatchNeed: () => new Node("section"),
     renderPurchaseEvidence: (value) => value.provenance ? new Node("details", "Om mengdegrunnlaget") : null,
-    categoryLabel: (value) => value,
+    categoryLabel: shoppingView.categoryLabel,
     odaSearchForNeed: () => new Node("div"),
     basketProduct: () => new Node("article"),
     odaCartProposalRequest: () => ({ additions: [], issue: null }),
@@ -102,6 +102,51 @@ test("renders one checked net-quantity row for a need shared by multiple recipes
   assert.match(row.text, /ca\. 1000 ml å kjøpe/u);
   assert.match(row.text, /Til: Grøt · Pannekaker/u);
   assert.match(row.text, /Om mengdegrunnlaget/u);
+});
+
+test("renders rounded Bokmål quantities in visible and accessible shopping row text", () => {
+  const { main, line } = renderFixture();
+  line.to_buy_quantity = "233.3333333333333333333333334";
+  line.unit = "item";
+  line.category = "Produce";
+  const rerendered = renderFixture({ shoppingGrouping: "category", storeTrip: { lines: [line], checked_count: 0, total_count: 1, unquantified: [] } });
+  const group = rerendered.main.children.find((node) => node.className.includes("actionable-shopping-group"));
+  assert.equal(group.children[0].textContent, "Frukt og grønt");
+  const row = group.children[1].children[0];
+  const summary = row.children[1].children.find((node) => node.tagName === "small");
+  assert.match(summary.text, /233,33 stk\. å kjøpe/u);
+  assert.equal(summary.attributes["aria-label"], "Omtrentlig mengde: ca. 233,33 stykk å kjøpe");
+  assert.doesNotMatch(summary.attributes["aria-label"], /333333|item/u);
+});
+
+test("preserves custom category text in the rendered heading", () => {
+  const { main, line } = renderFixture();
+  line.category = "Min egen kategori";
+  const fixture = renderFixture({ shoppingGrouping: "category", storeTrip: { lines: [line], checked_count: 0, total_count: 1, unquantified: [] } });
+  const group = fixture.main.children.find((node) => node.className.includes("actionable-shopping-group"));
+  assert.equal(group.children[0].textContent, "Min egen kategori");
+});
+
+test("renders a localized provider failure without exposing raw English detail", () => {
+  const renderer = source.match(/function renderBasketMatchNeed\(need\) \{[\s\S]*?\n\}(?=\nfunction renderBasketMatchCandidate\()/u);
+  assert.ok(renderer, "the inline product match renderer exists");
+  const context = {
+    state: {
+      basketMatchPages: { "need-1": { 1: { status: "search_failed", detail: "Product search failed or timed out.", candidates: [] } } },
+      basketMatchCurrentPage: {}, basketMatchBusy: {}, basketMatchErrors: {}, oda: { connected: true },
+    },
+    window: { KitchenBasketMatchView: basketView },
+    el: (tag, text, className) => new Node(tag, text, className),
+    add: (parent, ...children) => { children.filter(Boolean).forEach((child) => parent.append(child)); return parent; },
+    button: (text) => new Node("button", text),
+    formatUiCount: String,
+    startBasketMatchJob: () => {},
+    showBasketMatchPage: () => {},
+  };
+  vm.runInNewContext(renderer[0] + "\nglobalThis.renderBasketMatchNeed = renderBasketMatchNeed;", context);
+  const panel = context.renderBasketMatchNeed({ id: "need-1" });
+  assert.match(panel.text, /Produktsøket kunne ikke fullføres/u);
+  assert.doesNotMatch(panel.text, /Product search failed|timed out/u);
 });
 
 test("checking a rendered line writes only its stable store-trip need ID", async () => {

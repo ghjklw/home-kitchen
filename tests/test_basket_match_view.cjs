@@ -45,7 +45,7 @@ test("formats provider durations and labels per-need states", () => {
   assert.equal(formatDuration("P0DT00H20M00S"), "20 min");
   assert.equal(formatDuration("PT1H5M"), "1 t 5 min");
   assert.equal(formatDuration("unknown"), "unknown");
-  assert.equal(statusLabel("search_failed"), "Søket mislyktes");
+  assert.equal(statusLabel("search_failed"), "Produktsøket kunne ikke fullføres. Prøv igjen.");
 });
 
 test("uses only a complete backend recommendation for compatible explicit selection", () => {

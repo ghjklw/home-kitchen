@@ -3,7 +3,8 @@
 import asyncio
 from contextlib import asynccontextmanager, suppress
 from datetime import date
-from importlib.metadata import PackageNotFoundError, version as package_version
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as package_version
 from pathlib import Path
 from typing import Annotated
 from uuid import UUID

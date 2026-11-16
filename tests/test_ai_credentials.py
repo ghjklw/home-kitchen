@@ -2,7 +2,7 @@ import json
 from types import SimpleNamespace
 from uuid import UUID
 
-import httpx
+import httpx2
 import pytest
 from anthropic import AsyncAnthropic, WorkloadIdentityCredentials
 from azure.core.credentials import AccessToken
@@ -114,7 +114,7 @@ async def test_wif_exchanges_entra_token_refreshes_and_closes(wif_values, monkey
         assert body["organization_id"] == str(UUID(int=1))
         assert body["service_account_id"] == "svac_test"
         assert body["workspace_id"] == "wrkspc_test"
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "access_token": f"anthropic-access-token-{len(exchanges)}",
@@ -129,7 +129,7 @@ async def test_wif_exchanges_entra_token_refreshes_and_closes(wif_values, monkey
         headers.append(request.headers)
         assert "x-api-key" not in request.headers
         if len(headers) == 1:
-            return httpx.Response(
+            return httpx2.Response(
                 401,
                 json={
                     "type": "error",
@@ -139,7 +139,7 @@ async def test_wif_exchanges_entra_token_refreshes_and_closes(wif_values, monkey
                     },
                 },
             )
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "id": "msg_test",
@@ -152,14 +152,14 @@ async def test_wif_exchanges_entra_token_refreshes_and_closes(wif_values, monkey
             },
         )
 
-    with httpx.Client(transport=httpx.MockTransport(exchange)) as exchange_http:
+    with httpx2.Client(transport=httpx2.MockTransport(exchange)) as exchange_http:
         original_init = WorkloadIdentityCredentials.__init__
 
         def credentials_init(self, **kwargs):
             original_init(self, **kwargs, http_client=exchange_http)
 
         monkeypatch.setattr(WorkloadIdentityCredentials, "__init__", credentials_init)
-        http = httpx.AsyncClient(transport=httpx.MockTransport(messages))
+        http = httpx2.AsyncClient(transport=httpx2.MockTransport(messages))
         monkeypatch.setattr(
             ai_credentials,
             "AsyncAnthropic",

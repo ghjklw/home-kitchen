@@ -162,6 +162,21 @@
     };
   }
 
+  function buildTrumfConnectPayload(cookieOrToken, expiryDate) {
+    const trimmed = String(cookieOrToken || "").trim();
+    if (!trimmed) return null;
+    const payload = {
+      auth_mode: "session_cookie",
+      session_cookie: trimmed,
+    };
+    if (expiryDate) {
+      payload.expires_at = new Date(
+        expiryDate + (String(expiryDate).length === 10 ? "T23:59:59Z" : "")
+      ).toISOString();
+    }
+    return payload;
+  }
+
   function buildTrumfVerifyPayload(sessionId, otp) {
     const trimmedSession = String(sessionId || "").trim();
     const trimmedOtp = String(otp || "").trim();
@@ -187,6 +202,7 @@
     parsePkceCompletionPayload,
     buildCookidooLoginPayload,
     buildTrumfVerifyPayload,
+    buildTrumfConnectPayload,
   };
   if (typeof module !== "undefined" && module.exports)
     module.exports = root.KitchenSettingsView;

@@ -10,6 +10,7 @@ const {
   recipeIngredientForSave,
   prepareAIRevisionForEditor,
   applyRevisionIfActive,
+  recipeRevisionSnapshot,
 } = require("../src/home_kitchen/static/recipe-editor.js");
 
 test("saves unknown source quantities without inventing an amount", () => {
@@ -220,14 +221,48 @@ test("late AI response cannot replace a different recipe editor opened after the
 });
 
 test("AI response still applies to the active recipe editor", async () => {
-  const modal = { open: true, editor: { draft: { title: "Recipe A" } } };
+  const modal = { open: true, editor: { draft: { title: "Recipe A", servings: "2", ingredients: [], instructions: "Cook" } } };
+  const submittedSnapshot = recipeRevisionSnapshot(modal.editor.draft);
   const applied = await applyRevisionIfActive(
     Promise.resolve({ adapted: { title: "Revised Recipe A" } }),
-    () => modal.open,
+    () => modal.open && submittedSnapshot === recipeRevisionSnapshot(modal.editor.draft),
     (result) => { modal.editor.draft = result.adapted; },
   );
   assert.equal(applied, true);
   assert.deepEqual(modal.editor.draft, { title: "Revised Recipe A" });
+});
+
+test("AI response is ignored when manual recipe edits change the submitted snapshot", async () => {
+  let resolveResponse;
+  const response = new Promise((resolve) => { resolveResponse = resolve; });
+  const modal = {
+    open: true,
+    editor: {
+      values: {
+        title: "Recipe A",
+        servings: "2",
+        ingredients: [{ name: "Salt", quantity: "1", unit: "tsp" }],
+        instructions: "Cook",
+      },
+    },
+  };
+  const submittedSnapshot = recipeRevisionSnapshot(modal.editor.values);
+  const applying = applyRevisionIfActive(
+    response,
+    () => modal.open && submittedSnapshot === recipeRevisionSnapshot(modal.editor.values),
+    (result) => { modal.editor.values = result.adapted; },
+  );
+
+  modal.editor.values = {
+    ...modal.editor.values,
+    title: "My manual edit while waiting",
+    ingredients: [{ name: "Salt", quantity: "3", unit: "tsp" }],
+  };
+  resolveResponse({ adapted: { title: "AI response based on old values" } });
+
+  assert.equal(await applying, false);
+  assert.equal(modal.editor.values.title, "My manual edit while waiting");
+  assert.equal(modal.editor.values.ingredients[0].quantity, "3");
 });
 
 test("parses a leading exact decimal and recognized explicit unit", () => {

@@ -300,6 +300,27 @@
     return true;
   }
 
+  function recipeRevisionSnapshot(values) {
+    return JSON.stringify({
+      title: String(values?.title ?? ""),
+      servings: String(values?.servings ?? ""),
+      prompt: String(values?.prompt ?? ""),
+      image_url: String(values?.image_url ?? ""),
+      ingredients: (Array.isArray(values?.ingredients) ? values.ingredients : []).map((item) => ({
+        name: String(item?.name ?? ""),
+        quantity: String(item?.quantity ?? ""),
+        unit: String(item?.unit ?? ""),
+        category: String(item?.category ?? ""),
+        source_indices: Array.isArray(item?.source_indices) ? [...item.source_indices] : [],
+        purchase_estimate: item?.purchase_estimate ?? null,
+        canonical_product_id: item?.canonical_product_id,
+        canonical_unit_id: item?.canonical_unit_id,
+        source_unit_expression: item?.source_unit_expression,
+      })),
+      instructions: String(values?.instructions ?? ""),
+    });
+  }
+
   root.KitchenRecipeEditor = {
     buildRevisionRequest,
     applyRevisionIfActive,
@@ -307,6 +328,7 @@
     normalizeQuantity,
     parseSourceIngredient,
     prepareAIRevisionForEditor,
+    recipeRevisionSnapshot,
     rowFromDraft,
     recipeIngredientForSave,
   };

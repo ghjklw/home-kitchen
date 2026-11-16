@@ -5862,163 +5862,383 @@ async function disconnectConnector(providerId, providerName) {
 }
 function openConnectorModal(integration) {
   const root = openDialog(`Koble til ${integration.name || integration.id}`);
-  const form = el("form", null, "stack");
-  form.autocomplete = "off";
+  const container = el("div", null, "stack connector-modal-content");
 
-  let tokenField = null;
-  let cookieField = null;
-  let usernameField = null;
-  let passwordField = null;
-  let modeSelect = null;
+  if (integration.id === "rema1000" || integration.id === "coop") {
+    const introText = integration.id === "rema1000"
+      ? "Logg inn med din Rema 1000 Æ-konto for å hente kvitteringer og priskutt automatisk."
+      : "Logg inn med din Coop-konto for automatisk kvitterings- og kjøpshistorikk.";
+    add(container, el("p", introText, "muted"));
 
-  if (integration.id === "rema1000") {
+    const flow = el("div", null, "connector-guided-flow stack");
+
+    // Step 1: Open login
+    const step1 = el("div", null, "connector-step connector-step-1 stack");
+    add(step1, el("h3", "Trinn 1: Åpne innlogging"));
     add(
-      form,
+      step1,
       el(
         "p",
-        "Lim inn ditt personlige sesjonstoken fra Rema 1000 Æ for å hente kvitteringer og priskutt. Hemmeligheten krypteres og vises aldri.",
+        "Trykk på knappen under for å åpne innloggingen i en ny fane. Logg inn som vanlig hos leverandøren.",
         "muted",
       ),
     );
-    tokenField = field(
+    const step1Error = el("p", "", "form-error");
+    step1Error.setAttribute("role", "alert");
+    const openLoginBtn = button("Åpne innlogging", async () => {
+      step1Error.textContent = "";
+      openLoginBtn.disabled = true;
+      try {
+        const data = await api(`/integrations/${integration.id}/pkce/start`, "POST");
+        if (!data || !data.authorize_url) {
+          throw new Error("Mottok ingen innloggingslenke fra tjeneren.");
+        }
+        window.open(data.authorize_url, "_blank", "noopener,noreferrer");
+        step1Notice.textContent =
+          "Innloggingssiden er åpnet i en ny fane. Fullfør innloggingen der, og gå deretter til trinn 2.";
+        step1Notice.hidden = false;
+        step2.hidden = false;
+        step2.style.display = "";
+        pasteField.input.focus();
+      } catch (err) {
+        step1Error.textContent = err.message;
+      } finally {
+        openLoginBtn.disabled = false;
+      }
+    }, "primary");
+    const step1Notice = el("p", "", "callout info");
+    step1Notice.hidden = true;
+    add(step1, step1Error, add(el("div", null, "actions"), openLoginBtn), step1Notice);
+    add(flow, step1);
+
+    // Step 2: Complete connection
+    const step2 = el("form", null, "connector-step connector-step-2 stack");
+    step2.autocomplete = "off";
+    step2.hidden = true;
+    step2.style.display = "none";
+    add(step2, el("h3", "Trinn 2: Fullfør tilkobling"));
+    add(
+      step2,
+      el(
+        "p",
+        "Kopier hele nettadressen (URL) fra adressefeltet eller autorisasjonskoden etter fullført innlogging, og lim den inn her.",
+        "muted",
+      ),
+    );
+    const pasteField = field(
+      "Lim inn nettadressen eller koden etter innlogging",
+      "text",
+      "",
+      "Lim inn hele nettadressen eller koden fra adressefeltet etter innlogging",
+    );
+    add(step2, pasteField.wrap);
+
+    formSubmit(step2, "Fullfør tilkobling", async () => {
+      const val = pasteField.input.value.trim();
+      if (!val) {
+        throw new Error("Vennligst lim inn nettadressen eller koden etter innlogging.");
+      }
+      const payload = (typeof window.KitchenSettingsView?.parsePkceCompletionPayload === "function")
+        ? window.KitchenSettingsView.parsePkceCompletionPayload(val)
+        : (/^https?:\/\//i.test(val) ? { redirect_url: val } : { code: val });
+      await api(`/integrations/${integration.id}/pkce/complete`, "POST", payload);
+      const modal = $("#modal");
+      if (modal && modal.open) modal.close();
+      await loadConnectionStatus();
+      await refreshView();
+      notify(`${integration.name || integration.id} er tilkoblet.`);
+    });
+    add(flow, step2);
+    add(container, flow);
+
+    // Manual fallback <details>
+    const details = el("details", null, "connector-manual-details");
+    const summary = el("summary", "Avansert: lim inn sesjonstoken manuelt");
+    add(details, summary);
+
+    const manualForm = el("form", null, "stack");
+    manualForm.autocomplete = "off";
+    add(
+      manualForm,
+      el(
+        "p",
+        "Hvis du allerede har hentet et sesjonstoken, kan du lime det inn direkte her. Hemmeligheten krypteres og vises aldri.",
+        "muted",
+      ),
+    );
+    const manualTokenField = field(
       "Sesjonstoken (token)",
       "password",
       "",
-      "Lim inn gyldig sesjonstoken fra Rema 1000 Æ",
+      "Lim inn gyldig sesjonstoken",
     );
-    add(form, tokenField.wrap);
-  } else if (integration.id === "trumf") {
-    add(
-      form,
-      el(
-        "p",
-        "Lim inn din sesjonsinformasjonskapsel fra Trumf for å synkronisere kjøp og kvitteringer. Hemmeligheten krypteres og vises aldri.",
-        "muted",
-      ),
-    );
-    cookieField = field(
-      "Informasjonskapsel (cookie)",
-      "password",
-      "",
-      "Lim inn Trumf-informasjonskapsel fra en innlogget nettleser",
-    );
-    add(form, cookieField.wrap);
-  } else if (integration.id === "coop") {
-    add(
-      form,
-      el(
-        "p",
-        "Koble til Coop med sesjonstoken eller informasjonskapsel for automatisk kvitterings- og kjøpshistorikk. Hemmeligheten krypteres og vises aldri.",
-        "muted",
-      ),
-    );
-    modeSelect = field("Innloggingsmetode", "select");
-    const optToken = el("option", "Sesjonstoken");
-    optToken.value = "session_token";
-    const optCookie = el("option", "Informasjonskapsel");
-    optCookie.value = "session_cookie";
-    add(modeSelect.input, optToken, optCookie);
-    add(form, modeSelect.wrap);
+    const manualExpiryField = field("Utløpsdato (valgfritt)", "date", "");
+    add(manualForm, manualTokenField.wrap, manualExpiryField.wrap);
 
-    tokenField = field(
-      "Verdi (token eller cookie)",
-      "password",
-      "",
-      "Lim inn sesjonstoken eller informasjonskapsel fra Coop",
-    );
-    add(form, tokenField.wrap);
+    formSubmit(manualForm, "Lagre og koble til", async () => {
+      const tokenVal = manualTokenField.input.value.trim();
+      if (!tokenVal) {
+        throw new Error("Vennligst oppgi et gyldig sesjonstoken.");
+      }
+      const payload = {
+        auth_mode: "session_token",
+        session_token: tokenVal,
+      };
+      if (manualExpiryField.input.value) {
+        payload.expires_at = new Date(manualExpiryField.input.value + "T23:59:59Z").toISOString();
+      }
+      await api(`/integrations/${integration.id}/connect`, "POST", payload);
+      const modal = $("#modal");
+      if (modal && modal.open) modal.close();
+      await loadConnectionStatus();
+      await refreshView();
+      notify(`${integration.name || integration.id} er tilkoblet.`);
+    });
+    add(details, manualForm);
+    add(container, details);
+
   } else if (integration.id === "cookidoo") {
     add(
-      form,
+      container,
       el(
         "p",
-        "Koble til Cookidoo / Thermomix TM6 med informasjonskapsel eller innloggingsdetaljer. Hemmelighetene krypteres og vises aldri.",
+        "Koble til Cookidoo / Thermomix TM6 for oppskriftsimport og ukeplansynkronisering.",
         "muted",
       ),
     );
-    modeSelect = field("Innloggingsmetode", "select");
-    const optCookie = el("option", "Informasjonskapsel (anbefalt)");
-    optCookie.value = "session_cookie";
-    const optCreds = el("option", "Brukernavn og passord");
-    optCreds.value = "credentials";
-    add(modeSelect.input, optCookie, optCreds);
-    add(form, modeSelect.wrap);
+    add(
+      container,
+      el(
+        "p",
+        "Passordet lagres aldri – kun det resulterende OAuth-tokenet lagres trygt kryptert.",
+        "callout connector-security-note",
+      ),
+    );
 
-    cookieField = field(
+    const loginForm = el("form", null, "stack");
+    loginForm.autocomplete = "off";
+
+    const emailField = field("E-post", "email", "", "E-postadressen til din Cookidoo-konto");
+    const passwordField = field("Passord", "password", "", "Passordet til din Cookidoo-konto");
+    const countryField = field("Land", "text", "no", "Landskode (standard: 'no')");
+    add(loginForm, emailField.wrap, passwordField.wrap, countryField.wrap);
+
+    formSubmit(loginForm, "Koble til Cookidoo", async () => {
+      const email = emailField.input.value.trim();
+      const password = passwordField.input.value.trim();
+      const country = countryField.input.value.trim() || "no";
+      if (!email || !password) {
+        throw new Error("Vennligst oppgi både e-post og passord for Cookidoo.");
+      }
+      const payload = (typeof window.KitchenSettingsView?.buildCookidooLoginPayload === "function")
+        ? window.KitchenSettingsView.buildCookidooLoginPayload(email, password, country)
+        : { email, password, country };
+      await api("/integrations/cookidoo/login", "POST", payload);
+      const modal = $("#modal");
+      if (modal && modal.open) modal.close();
+      await loadConnectionStatus();
+      await refreshView();
+      notify(`${integration.name || integration.id} er tilkoblet.`);
+    });
+    add(container, loginForm);
+
+    // Manual fallback <details>
+    const details = el("details", null, "connector-manual-details");
+    const summary = el("summary", "Avansert: lim inn informasjonskapsel manuelt");
+    add(details, summary);
+
+    const manualForm = el("form", null, "stack");
+    manualForm.autocomplete = "off";
+    add(
+      manualForm,
+      el(
+        "p",
+        "Hvis du foretrekker å oppgi en sesjonsinformasjonskapsel (cookie) fra Cookidoo, kan du lime den inn her. Hemmeligheten krypteres og vises aldri.",
+        "muted",
+      ),
+    );
+    const cookieField = field(
       "Informasjonskapsel (cookie)",
       "password",
       "",
       "Lim inn Cookidoo-informasjonskapsel",
     );
-    usernameField = field("Brukernavn / E-post", "text", "");
-    passwordField = field("Passord", "password", "");
+    const manualExpiryField = field("Utløpsdato (valgfritt)", "date", "");
+    add(manualForm, cookieField.wrap, manualExpiryField.wrap);
 
-    usernameField.wrap.style.display = "none";
-    passwordField.wrap.style.display = "none";
-
-    modeSelect.input.addEventListener("change", () => {
-      const isCreds = modeSelect.input.value === "credentials";
-      cookieField.wrap.style.display = isCreds ? "none" : "";
-      usernameField.wrap.style.display = isCreds ? "" : "none";
-      passwordField.wrap.style.display = isCreds ? "" : "none";
+    formSubmit(manualForm, "Lagre og koble til", async () => {
+      const cookieVal = cookieField.input.value.trim();
+      if (!cookieVal) {
+        throw new Error("Vennligst oppgi informasjonskapsel for Cookidoo.");
+      }
+      const payload = {
+        auth_mode: "session_cookie",
+        session_cookie: cookieVal,
+      };
+      if (manualExpiryField.input.value) {
+        payload.expires_at = new Date(manualExpiryField.input.value + "T23:59:59Z").toISOString();
+      }
+      await api(`/integrations/${integration.id}/connect`, "POST", payload);
+      const modal = $("#modal");
+      if (modal && modal.open) modal.close();
+      await loadConnectionStatus();
+      await refreshView();
+      notify(`${integration.name || integration.id} er tilkoblet.`);
     });
+    add(details, manualForm);
+    add(container, details);
 
-    add(form, cookieField.wrap, usernameField.wrap, passwordField.wrap);
+  } else if (integration.id === "trumf") {
+    add(
+      container,
+      el(
+        "p",
+        "Koble til Trumf med mobilnummer og engangskode på SMS for automatisk synkronisering av kjøpshistorikk og kvitteringer.",
+        "muted",
+      ),
+    );
+
+    const flow = el("div", null, "connector-guided-flow stack");
+    let sessionId = null;
+
+    // Step 1: Send SMS code
+    const step1 = el("form", null, "connector-step connector-step-1 stack");
+    step1.autocomplete = "off";
+    add(step1, el("h3", "Trinn 1: Send engangskode"));
+    const phoneField = field(
+      "Mobilnummer",
+      "tel",
+      "",
+      "Norsk mobilnummer (8 siffer)",
+    );
+    add(step1, phoneField.wrap);
+    const step1Notice = el("p", "", "callout info");
+    step1Notice.hidden = true;
+
+    formSubmit(step1, "Send engangskode", async () => {
+      const phone = phoneField.input.value.trim();
+      if (!phone) {
+        throw new Error("Vennligst oppgi mobilnummer.");
+      }
+      const res = await api("/integrations/trumf/login/start", "POST", { phone });
+      sessionId = res?.session_id || res?.sessionId || res?.id || "";
+      step1Notice.textContent = `Engangskode er sendt på SMS til ${phone}. Skriv inn koden under.`;
+      step1Notice.hidden = false;
+      step2.hidden = false;
+      step2.style.display = "";
+      otpField.input.focus();
+    });
+    add(step1, step1Notice);
+    add(flow, step1);
+
+    // Step 2: Verify OTP
+    const step2 = el("form", null, "connector-step connector-step-2 stack");
+    step2.autocomplete = "off";
+    step2.hidden = true;
+    step2.style.display = "none";
+    add(step2, el("h3", "Trinn 2: Bekreft engangskode"));
+    const otpField = field(
+      "Engangskode",
+      "text",
+      "",
+      "Lim inn eller skriv inn engangskoden mottatt på SMS",
+    );
+    add(step2, otpField.wrap);
+
+    formSubmit(step2, "Bekreft kode", async () => {
+      const otp = otpField.input.value.trim();
+      if (!otp) {
+        throw new Error("Vennligst oppgi engangskoden.");
+      }
+      if (!sessionId) {
+        throw new Error("Mangler sesjons-ID. Vennligst send en ny engangskode først.");
+      }
+      const payload = (typeof window.KitchenSettingsView?.buildTrumfVerifyPayload === "function")
+        ? window.KitchenSettingsView.buildTrumfVerifyPayload(sessionId, otp)
+        : { session_id: sessionId, otp };
+      await api("/integrations/trumf/login/verify", "POST", payload);
+      const modal = $("#modal");
+      if (modal && modal.open) modal.close();
+      await loadConnectionStatus();
+      await refreshView();
+      notify(`${integration.name || integration.id} er tilkoblet.`);
+    });
+    add(flow, step2);
+    add(container, flow);
+
+    // Manual fallback <details>
+    const details = el("details", null, "connector-manual-details");
+    const summary = el("summary", "Avansert: lim inn informasjonskapsel manuelt");
+    add(details, summary);
+
+    const manualForm = el("form", null, "stack");
+    manualForm.autocomplete = "off";
+    add(
+      manualForm,
+      el(
+        "p",
+        "Hvis du foretrekker å bruke en sesjonsinformasjonskapsel fra Trumf, kan du lime den inn her. Hemmeligheten krypteres og vises aldri.",
+        "muted",
+      ),
+    );
+    const cookieField = field(
+      "Informasjonskapsel (cookie)",
+      "password",
+      "",
+      "Lim inn Trumf-informasjonskapsel fra en innlogget nettleser",
+    );
+    const manualExpiryField = field("Utløpsdato (valgfritt)", "date", "");
+    add(manualForm, cookieField.wrap, manualExpiryField.wrap);
+
+    formSubmit(manualForm, "Lagre og koble til", async () => {
+      const cookieVal = cookieField.input.value.trim();
+      if (!cookieVal) {
+        throw new Error("Vennligst oppgi informasjonskapsel for Trumf.");
+      }
+      const payload = {
+        auth_mode: "session_cookie",
+        session_cookie: cookieVal,
+      };
+      if (manualExpiryField.input.value) {
+        payload.expires_at = new Date(manualExpiryField.input.value + "T23:59:59Z").toISOString();
+      }
+      await api(`/integrations/${integration.id}/connect`, "POST", payload);
+      const modal = $("#modal");
+      if (modal && modal.open) modal.close();
+      await loadConnectionStatus();
+      await refreshView();
+      notify(`${integration.name || integration.id} er tilkoblet.`);
+    });
+    add(details, manualForm);
+    add(container, details);
+
+  } else {
+    const form = el("form", null, "stack");
+    form.autocomplete = "off";
+    const tokenField = field("Sesjonstoken (token)", "password", "");
+    const expiryField = field("Utløpsdato (valgfritt)", "date", "");
+    add(form, tokenField.wrap, expiryField.wrap);
+    formSubmit(form, "Lagre og koble til", async () => {
+      const val = tokenField.input.value.trim();
+      if (!val) throw new Error("Vennligst oppgi sesjonstoken.");
+      const payload = { session_token: val, auth_mode: "session_token" };
+      if (expiryField.input.value) {
+        payload.expires_at = new Date(expiryField.input.value + "T23:59:59Z").toISOString();
+      }
+      await api(`/integrations/${integration.id}/connect`, "POST", payload);
+      const modal = $("#modal");
+      if (modal && modal.open) modal.close();
+      await loadConnectionStatus();
+      await refreshView();
+      notify(`${integration.name || integration.id} er tilkoblet.`);
+    });
+    add(container, form);
   }
 
-  const expiryField = field("Utløpsdato (valgfritt)", "date", "");
-  add(form, expiryField.wrap);
-
-  formSubmit(form, "Lagre og koble til", async () => {
-    const payload = {};
-    if (expiryField.input.value) {
-      payload.expires_at = new Date(expiryField.input.value + "T23:59:59Z").toISOString();
-    }
-    if (integration.id === "rema1000") {
-      const val = tokenField.input.value.trim();
-      if (!val) throw new Error("Vennligst oppgi sesjonstoken for Rema 1000.");
-      payload.session_token = val;
-      payload.auth_mode = "session_token";
-    } else if (integration.id === "trumf") {
-      const val = cookieField.input.value.trim();
-      if (!val) throw new Error("Vennligst oppgi informasjonskapsel for Trumf.");
-      payload.session_cookie = val;
-      payload.auth_mode = "session_cookie";
-    } else if (integration.id === "coop") {
-      const val = tokenField.input.value.trim();
-      if (!val) throw new Error("Vennligst oppgi token eller informasjonskapsel for Coop.");
-      const mode = modeSelect.input.value;
-      payload.auth_mode = mode;
-      if (mode === "session_cookie") {
-        payload.session_cookie = val;
-      } else {
-        payload.session_token = val;
-      }
-    } else if (integration.id === "cookidoo") {
-      const mode = modeSelect.input.value;
-      payload.auth_mode = mode;
-      if (mode === "credentials") {
-        const u = usernameField.input.value.trim();
-        const p = passwordField.input.value.trim();
-        if (!u || !p) throw new Error("Vennligst oppgi både brukernavn og passord for Cookidoo.");
-        payload.username = u;
-        payload.password = p;
-      } else {
-        const c = cookieField.input.value.trim();
-        if (!c) throw new Error("Vennligst oppgi informasjonskapsel for Cookidoo.");
-        payload.session_cookie = c;
-      }
-    }
-
-    await api(`/integrations/${integration.id}/connect`, "POST", payload);
-    const modal = $("#modal");
-    if (modal && modal.open) modal.close();
-    await loadConnectionStatus();
-    await refreshView();
-    notify(`${integration.name || integration.id} er tilkoblet.`);
-  });
-
-  add(root, form);
+  add(root, container);
+  if (typeof window !== "undefined" && window.KitchenSettingsView) {
+    window.KitchenSettingsView.openConnectorModal = openConnectorModal;
+  }
 }
 function odaConnectionIssue() {
   const messages = [

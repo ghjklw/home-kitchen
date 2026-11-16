@@ -143,6 +143,35 @@
     );
   }
 
+  function parsePkceCompletionPayload(input) {
+    const raw = String(input || "").trim();
+    if (!raw) return null;
+    const isUrl = /^https?:\/\//i.test(raw) || /^[a-z0-9+.-]+:\/\//i.test(raw);
+    return isUrl ? { redirect_url: raw } : { code: raw };
+  }
+
+  function buildCookidooLoginPayload(email, password, country = "no") {
+    const trimmedEmail = String(email || "").trim();
+    const trimmedPassword = String(password || "").trim();
+    const trimmedCountry = String(country || "").trim().toLowerCase() || "no";
+    if (!trimmedEmail || !trimmedPassword) return null;
+    return {
+      email: trimmedEmail,
+      password: trimmedPassword,
+      country: trimmedCountry,
+    };
+  }
+
+  function buildTrumfVerifyPayload(sessionId, otp) {
+    const trimmedSession = String(sessionId || "").trim();
+    const trimmedOtp = String(otp || "").trim();
+    if (!trimmedSession || !trimmedOtp) return null;
+    return {
+      session_id: trimmedSession,
+      otp: trimmedOtp,
+    };
+  }
+
   root.KitchenSettingsView = {
     DEFAULT_SHOPPING_CATEGORY_ORDER,
     moveShoppingCategory,
@@ -155,6 +184,9 @@
     connectionStatusSnapshot,
     odaNeedsReconnect,
     integrationExpiryNotice,
+    parsePkceCompletionPayload,
+    buildCookidooLoginPayload,
+    buildTrumfVerifyPayload,
   };
   if (typeof module !== "undefined" && module.exports)
     module.exports = root.KitchenSettingsView;

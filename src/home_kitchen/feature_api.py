@@ -142,6 +142,14 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
             headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
         )
 
+    @router.delete("/recipe-photos/{photo_id}")
+    async def discard_recipe_photo(
+        photo_id: UUID, request: Request, response: Response
+    ) -> dict[str, bool]:
+        response.headers["Cache-Control"] = "no-store"
+        deleted = await features.recipe_photos.discard(photo_id, authenticated_actor(request))
+        return {"deleted": deleted}
+
     @router.post("/recipe-photos/{photo_id}/redraft")
     async def redraft_recipe_photo(
         photo_id: UUID, request: Request, response: Response

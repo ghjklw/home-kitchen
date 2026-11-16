@@ -32,9 +32,20 @@ class Ingredient(BaseModel):
     name: NonBlank
     quantity: Quantity | None
     unit: NonBlank | None = "item"
+    canonical_product_id: UUID | None = None
+    canonical_unit_id: UUID | None = None
+    source_unit_expression: NonBlank | None = None
     category: NonBlank = "Other"
     source_indices: list[SourceIndex] = Field(default_factory=list)
     purchase_estimate: PurchaseEstimate | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def retain_source_unit_expression(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "source_unit_expression" not in value:
+            value = dict(value)
+            value["source_unit_expression"] = value.get("unit")
+        return value
 
     @field_validator("unit")
     @classmethod

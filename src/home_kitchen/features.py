@@ -9,6 +9,8 @@ from pydantic_ai import Agent
 
 from home_kitchen.basket.jobs import BasketMatchJobs
 from home_kitchen.basket.matching import BasketMatchingService, OdaSearchAdapter
+from home_kitchen.catalogue.identity_repository import PostgresIdentityRepository
+from home_kitchen.catalogue.identity_service import CanonicalIdentityService
 from home_kitchen.catalogue.repository import PostgresFoodCatalogueRepository
 from home_kitchen.catalogue.service import FoodCatalogueService
 from home_kitchen.catalogue.sku_repository import PostgresCatalogueSkuRepository
@@ -63,6 +65,9 @@ class KitchenFeatures:
         self.settings = settings
         self.household = household
         self.catalogue = FoodCatalogueService(PostgresFoodCatalogueRepository(kitchen.store.engine))
+        self.catalogue_identities = CanonicalIdentityService(
+            PostgresIdentityRepository(kitchen.store.engine)
+        )
         self.household_id = settings.entra_allowed_group or UUID(
             kitchen.store.ensure_setting("local_household_id", str(uuid4()))
         )

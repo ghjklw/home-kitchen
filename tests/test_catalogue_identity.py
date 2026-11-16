@@ -1,0 +1,181 @@
+"""Canonical identity reuse and conservative alias resolution."""
+
+import os
+from uuid import UUID, uuid4
+
+import pytest
+
+from home_kitchen.catalogue.identity import CanonicalProduct, CanonicalUnit
+from home_kitchen.catalogue.identity_service import CanonicalIdentityService
+
+
+class MemoryIdentityRepository:
+    def __init__(self):
+        self.products: dict[tuple[str, str], CanonicalProduct] = {}
+        self.units: dict[str, CanonicalUnit] = {}
+        self.aliases: dict[tuple[str, str, str, str], set[UUID]] = {}
+        self.reviewed: set[tuple[str, str, str, str]] = set()
+
+    def product(self, name: str, variant: str) -> CanonicalProduct:
+        return self.products.setdefault(
+            (name, variant), CanonicalProduct(id=uuid4(), canonical_name=name, variant=variant)
+        )
+
+    def unit(self, name: str) -> CanonicalUnit:
+        return self.units.setdefault(name, CanonicalUnit(id=uuid4(), canonical_name=name))
+
+    def add_alias(
+        self, kind: str, locale: str, context: str, alias: str, identity_id: UUID
+    ) -> None:
+        key = kind, locale, context, " ".join(alias.split()).casefold()
+        self.aliases.setdefault(key, set()).add(identity_id)
+
+    def correct_alias(
+        self, kind: str, locale: str, context: str, alias: str, identity_id: UUID
+    ) -> None:
+        key = kind, locale, context, " ".join(alias.split()).casefold()
+        self.aliases[key] = {identity_id}
+        self.reviewed.add(key)
+
+    def resolve(
+        self, kind: str, locale: str, context: str, alias: str
+    ) -> list[CanonicalProduct | CanonicalUnit]:
+        normalized = " ".join(alias.split()).casefold()
+        ids = self.aliases.get((kind, locale, context, normalized), set()) | self.aliases.get(
+            (kind, locale, "", normalized), set()
+        )
+        identities = (
+            list(self.products.values()) if kind == "product" else list(self.units.values())
+        )
+        return [identity for identity in identities if identity.id in ids]
+
+
+def test_product_identities_reuse_exact_canonical_variant_and_keep_variants_distinct():
+    service = CanonicalIdentityService(MemoryIdentityRepository())
+    first = service.create_product("  Red Tomato ")
+    reused = service.create_product("red   tomato")
+    distinct = service.create_product("red tomato", "canned")
+    assert first.id == reused.id
+    assert distinct.id != first.id
+
+
+def test_aliases_are_language_and_context_scoped_and_ambiguity_needs_reviewed_correction():
+    repository = MemoryIdentityRepository()
+    service = CanonicalIdentityService(repository)
+    fresh = service.create_product("tomato", "fresh")
+    tinned = service.create_product("tomato", "tinned")
+    service.add_alias("product", "nb", "recipe", "tomat", fresh.id)
+    service.add_alias("product", "nb", "recipe", "tomat", tinned.id)
+
+    assert service.resolve("product", "nb", "recipe", "tomat").status == "ambiguous"
+    assert service.resolve("product", "en", "recipe", "tomat").status == "unmapped"
+    corrected = service.correct_alias("product", "nb", "recipe", "tomat", fresh.id)
+    assert corrected is None
+    result = service.resolve("product", "nb", "recipe", " TOMAT ")
+    assert result.status == "resolved"
+    assert result.candidates == [fresh]
+    assert ("product", "nb", "recipe", "tomat") in repository.reviewed
+
+
+def test_unmapped_legacy_ingredient_remains_valid_and_source_quantity_is_unchanged():
+    from decimal import Decimal
+
+    from home_kitchen.models import RecipeCreate
+
+    recipe = RecipeCreate.model_validate(
+        {
+            "title": "Soup",
+            "servings": 2,
+            "ingredients": [
+                {"name": "my grandmother's odd ingredient", "quantity": "1.25", "unit": "handfuls"}
+            ],
+            "instructions": ["Cook"],
+        }
+    )
+    assert recipe.ingredients[0].name == "my grandmother's odd ingredient"
+    assert recipe.ingredients[0].quantity == Decimal("1.25")
+    assert recipe.ingredients[0].unit == "handfuls"
+
+
+@pytest.mark.skipif(
+    not os.environ.get("KITCHEN_TEST_DATABASE_URL"),
+    reason="requires the explicitly configured disposable PostgreSQL test database",
+)
+def test_identity_api_reuses_products_resolves_aliases_and_preserves_recipe_payload(
+    test_database_url,
+):
+    from fastapi.testclient import TestClient
+
+    from home_kitchen.app import create_app
+    from home_kitchen.settings import Settings
+
+    with TestClient(create_app(Settings(local_dev=True, database_url=test_database_url))) as client:
+        first = client.post(
+            "/api/catalogue/identities/products",
+            json={"canonical_name": "Tomato", "variant": "fresh"},
+        )
+        reused = client.post(
+            "/api/catalogue/identities/products",
+            json={"canonical_name": " tomato ", "variant": "FRESH"},
+        )
+        distinct = client.post(
+            "/api/catalogue/identities/products",
+            json={"canonical_name": "tomato", "variant": "canned"},
+        )
+        assert first.status_code == reused.status_code == distinct.status_code == 201
+        assert first.json()["id"] == reused.json()["id"]
+        assert distinct.json()["id"] != first.json()["id"]
+
+        alias_path = f"/api/catalogue/aliases/product/{first.json()['id']}"
+        assert (
+            client.post(
+                alias_path, json={"alias": "tomat", "locale": "nb", "context": "recipe"}
+            ).status_code
+            == 201
+        )
+        assert (
+            client.post(
+                f"/api/catalogue/aliases/product/{distinct.json()['id']}",
+                json={"alias": "tomat", "locale": "nb", "context": "recipe"},
+            ).status_code
+            == 201
+        )
+        ambiguous = client.get(
+            "/api/catalogue/aliases/product",
+            params={"alias": "tomat", "locale": "nb", "context": "recipe"},
+        )
+        assert ambiguous.json()["status"] == "ambiguous"
+        assert (
+            client.put(
+                f"{alias_path}/review", json={"alias": "tomat", "locale": "nb", "context": "recipe"}
+            ).status_code
+            == 204
+        )
+        resolved = client.get(
+            "/api/catalogue/aliases/product",
+            params={"alias": "tomat", "locale": "nb", "context": "recipe"},
+        )
+        assert resolved.json()["status"] == "resolved"
+        assert resolved.json()["candidates"][0]["id"] == first.json()["id"]
+
+        recipe = client.post(
+            "/api/recipes",
+            json={
+                "title": "Legacy",
+                "servings": 1,
+                "ingredients": [
+                    {
+                        "name": "Old unmatched phrase",
+                        "quantity": "1.25",
+                        "unit": "Handfuls",
+                        "canonical_product_id": first.json()["id"],
+                    }
+                ],
+                "instructions": ["Cook"],
+            },
+        )
+        assert recipe.status_code == 201
+        assert recipe.json()["ingredients"][0]["quantity"] == "1.25"
+        assert recipe.json()["ingredients"][0]["unit"] == "handfuls"
+        assert recipe.json()["ingredients"][0]["source_unit_expression"] == "Handfuls"
+        assert recipe.json()["ingredients"][0]["canonical_product_id"] == first.json()["id"]

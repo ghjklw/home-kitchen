@@ -146,6 +146,8 @@ test("opening and closing review makes no write, shows retained choices and unre
   assert.match(value.modal.root.text, /Yoghurt 500 g/u);
   assert.match(value.modal.root.text, /Kan stå over/u);
   assert.ok(value.modal.root.find((node) => node.tagName === "button" && node.textContent === "Bruk 0 produktforslag"));
+  assert.ok(value.modal.root.find((node) => node.tagName === "button" && node.textContent === "Erstatt lagrede valg med dette"));
+  assert.equal(value.modal.root.find((node) => node.tagName === "button" && node.textContent === "Velg til samlet godkjenning"), null);
   value.modal.close();
   assert.equal(value.requests.length, 0);
   assert.equal(value.state.basketBatchChoices["need-safe"], undefined);

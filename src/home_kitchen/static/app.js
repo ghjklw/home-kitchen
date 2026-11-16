@@ -4886,7 +4886,7 @@ function renderBasketMatchNeed(need) {
   add(panel, actions);
   return panel;
 }
-function renderBasketMatchCandidate(candidate, need, matchJobId = null) {
+function renderBasketMatchCandidate(candidate, need) {
   const card = el("article", null, "basket-match-candidate");
   const media = candidate.media || {};
   const imageUrl = safeImageUrl(media.image_url);
@@ -4917,22 +4917,6 @@ function renderBasketMatchCandidate(candidate, need, matchJobId = null) {
   if (candidate.price) add(details, el("small", "Pris hos Oda: " + candidate.price, "muted"));
   add(summary, details);
   const productUrl = officialOdaProductUrl(candidate.product_url);
-  const recommendation = window.KitchenBasketMatchView.selectionRecommendation(
-    candidate,
-    need.unit,
-  );
-  if (recommendation && matchJobId && matchJobId === state.basketBatchReviewJobId) {
-    const existingChoice = state.basketBatchChoices[String(need.id)];
-    const isChosen = existingChoice?.candidate_id === candidate.id;
-    const select = button(
-      isChosen ? "Valgt for samlet godkjenning" : "Velg til samlet godkjenning",
-      () => toggleBasketBatchChoice(candidate, need, matchJobId),
-      isChosen ? "primary small" : "quiet small",
-    );
-    select.setAttribute("aria-pressed", String(isChosen));
-    select.disabled = state.basketBatchSaving;
-    add(summary, select);
-  }
   const more = el("details", null, "basket-match-candidate-details");
   add(more, el("summary", "Detaljer"));
   if (candidate.description) add(more, el("p", candidate.description, "muted"));

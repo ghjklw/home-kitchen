@@ -85,8 +85,9 @@ a {
   transform: translateY(0);
 }
 :focus-visible {
-  outline: 3px solid #c18338;
-  outline-offset: 3px;
+  outline: 2px solid #fffef9;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 5px #244c3e;
 }
 .app {
   display: grid;

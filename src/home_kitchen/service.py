@@ -91,6 +91,7 @@ class KitchenService:
                 or prior.get("canonical_unit_id")
                 or (
                     prior.get("source_unit_expression")
+                    and prior.get("source_unit_expression") != prior.get("unit")
                     and "source_unit_expression" in prior_model.model_fields_set
                 )
             )

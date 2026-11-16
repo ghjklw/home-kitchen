@@ -1,12 +1,40 @@
 """Contract checks for original, isolated synthetic fixtures."""
 
+import re
+from datetime import date
+from decimal import Decimal
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from fixtures.synthetic_kitchen.basket import (
+    SYNTHETIC_BASKET_NEED_ID,
+    SYNTHETIC_UNVERIFIED_NEED_ID,
+    SyntheticBasketMatchScenario,
+    synthetic_basket_match_scenarios,
+    synthetic_compatible_candidate,
+    synthetic_incompatible_unit_candidate,
+    synthetic_unverified_candidate,
+)
 from fixtures.synthetic_kitchen.fakes import (
     ScriptedHistoryReader,
+    StaticIdentityRepository,
     StaticOdaClient,
     SyntheticReaderFailure,
+)
+from fixtures.synthetic_kitchen.identity import (
+    SYNTHETIC_BARLEY_PRODUCT_ID,
+    SYNTHETIC_CARROT_PRODUCT_ID,
+    SYNTHETIC_CHICKPEAS_PRODUCT_ID,
+    SYNTHETIC_CITRUS_OIL_PRODUCT_ID,
+    SYNTHETIC_GRAM_UNIT_ID,
+    SYNTHETIC_TBSP_UNIT_ID,
+    SYNTHETIC_TOMATO_FRESH_PRODUCT_ID,
+    synthetic_alias_scenarios,
+    synthetic_canonical_products,
+    synthetic_canonical_units,
+    synthetic_reviewed_aliases,
+    synthetic_unreviewed_aliases,
 )
 from fixtures.synthetic_kitchen.oda import (
     synthetic_oda_product_search_response,
@@ -23,13 +51,26 @@ from fixtures.synthetic_kitchen.purchase_history import (
     synthetic_trumf_rsc_unauthenticated_html,
     trumf_transaction_pages,
 )
-from fixtures.synthetic_kitchen.recipes import SYNTHETIC_RECIPE_ID, synthetic_recipe
+from fixtures.synthetic_kitchen.recipes import (
+    SYNTHETIC_LINKED_RECIPE_ID,
+    SYNTHETIC_RECIPE_ID,
+    synthetic_linked_recipe,
+    synthetic_recipe,
+)
 
-from home_kitchen.basket.matching import OdaSearchAdapter
-from home_kitchen.models import Recipe
+from home_kitchen.basket.jobs import BasketMatchJob, BasketMatchJobs, _Job
+from home_kitchen.basket.matching import (
+    NeedMatchResult,
+    OdaSearchAdapter,
+    _identity_status,
+    _product_matches_ingredient,
+)
+from home_kitchen.catalogue.identity_service import CanonicalIdentityService
+from home_kitchen.models import Recipe, RecipeCreate
 from home_kitchen.oda.models import OdaSearchResponse
 from home_kitchen.oda.service import OdaService
 from home_kitchen.recipes.collections import OdaCollectionProvider
+from home_kitchen.service import KitchenService
 
 
 def test_fictional_recipe_roundtrip_preserves_source_mapping_and_unknown_quantity():
@@ -216,3 +257,270 @@ def test_scripted_history_reader_emits_failure_class_without_network(scenario):
     assert error.value.provider == scenario.provider
     assert error.value.kind == scenario.kind
     assert reader.network_calls == 0
+
+
+def test_canonical_identity_fixtures_schema_and_isolation():
+    products = synthetic_canonical_products()
+    units = synthetic_canonical_units()
+    reviewed = synthetic_reviewed_aliases()
+    unreviewed = synthetic_unreviewed_aliases()
+
+    assert len(products) == 9
+    assert len(units) == 4
+    assert len(reviewed) >= 12
+    assert len(unreviewed) >= 2
+
+    # Verify deterministic UUIDs and required properties
+    product_map = {p.id: p for p in products}
+    assert SYNTHETIC_CARROT_PRODUCT_ID in product_map
+    assert product_map[SYNTHETIC_CARROT_PRODUCT_ID].canonical_name == "carrot"
+    assert product_map[SYNTHETIC_CARROT_PRODUCT_ID].variant == ""
+    assert product_map[SYNTHETIC_CHICKPEAS_PRODUCT_ID].variant == "canned"
+
+    unit_map = {u.id: u for u in units}
+    assert SYNTHETIC_GRAM_UNIT_ID in unit_map
+    assert unit_map[SYNTHETIC_GRAM_UNIT_ID].canonical_name == "g"
+
+    # Isolation: mutating a returned model does not mutate subsequent calls
+    products[0].canonical_name = "mutated-name"  # type: ignore[assignment]
+    fresh_products = synthetic_canonical_products()
+    assert fresh_products[0].canonical_name != "mutated-name"
+
+
+def test_static_identity_repository_resolves_scenarios_and_handles_reviewed_corrections():
+    repository = StaticIdentityRepository()
+    service = CanonicalIdentityService(repository)
+
+    # Validate each pre-authored alias scenario
+    for scenario in synthetic_alias_scenarios():
+        resolution = service.resolve(
+            scenario.kind, scenario.locale, scenario.context, scenario.query_alias
+        )
+        assert resolution.status == scenario.expected_status, f"Failed on scenario {scenario.name}"
+        candidate_ids = [c.id for c in resolution.candidates]
+        assert candidate_ids == scenario.expected_identity_ids, (
+            f"Candidates mismatch for {scenario.name}"
+        )
+
+    # Scenario: resolving ambiguous unreviewed alias, then correcting it via reviewed update
+    ambiguous = service.resolve("product", "nb", "recipe", "tomat")
+    assert ambiguous.status == "ambiguous"
+    assert len(ambiguous.candidates) == 2
+
+    # Reviewer confirms tomato is the fresh variant
+    service.correct_alias("product", "nb", "recipe", "tomat", SYNTHETIC_TOMATO_FRESH_PRODUCT_ID)
+    resolved = service.resolve("product", "nb", "recipe", "tomat")
+    assert resolved.status == "resolved"
+    assert [c.id for c in resolved.candidates] == [SYNTHETIC_TOMATO_FRESH_PRODUCT_ID]
+    assert ("product", "nb", "recipe", "tomat") in repository.reviewed
+    assert repository.network_calls == 0
+
+
+def test_linked_recipe_roundtrip_preserves_canonical_identities_and_source_expression():
+    recipe = synthetic_linked_recipe()
+    round_trip = Recipe.model_validate(recipe.model_dump(mode="json"))
+
+    assert recipe == round_trip
+    assert round_trip.id == SYNTHETIC_LINKED_RECIPE_ID
+
+    barley = round_trip.ingredients[0]
+    assert barley.canonical_product_id == SYNTHETIC_BARLEY_PRODUCT_ID
+    assert barley.canonical_unit_id == SYNTHETIC_GRAM_UNIT_ID
+    assert barley.source_unit_expression == "grams (g)"
+    assert barley.unit == "g"
+
+    carrot = round_trip.ingredients[1]
+    assert carrot.canonical_product_id == SYNTHETIC_CARROT_PRODUCT_ID
+    assert carrot.canonical_unit_id == SYNTHETIC_GRAM_UNIT_ID
+    assert carrot.source_unit_expression == "g"
+
+    chickpeas = round_trip.ingredients[2]
+    assert chickpeas.canonical_product_id == SYNTHETIC_CHICKPEAS_PRODUCT_ID
+    assert chickpeas.canonical_unit_id == SYNTHETIC_GRAM_UNIT_ID
+
+    citrus_oil = round_trip.ingredients[3]
+    assert citrus_oil.canonical_product_id == SYNTHETIC_CITRUS_OIL_PRODUCT_ID
+    assert citrus_oil.canonical_unit_id == SYNTHETIC_TBSP_UNIT_ID
+    assert citrus_oil.source_unit_expression == "Tablespoons"
+    assert citrus_oil.unit == "tbsp"
+
+    salt = round_trip.ingredients[4]
+    assert salt.canonical_product_id is None
+    assert salt.canonical_unit_id is None
+    assert salt.source_unit_expression is None
+    assert salt.quantity is None
+    assert salt.unit is None
+
+    # Verify legacy recipe editor client update retains canonical identities
+    legacy_payload = RecipeCreate.model_validate(
+        {
+            "title": round_trip.title,
+            "servings": round_trip.servings,
+            "ingredients": [
+                {
+                    "name": item.name,
+                    "quantity": str(item.quantity) if item.quantity is not None else None,
+                    "unit": item.unit,
+                    "category": item.category,
+                    "source_indices": item.source_indices,
+                }
+                for item in round_trip.ingredients
+            ],
+            "instructions": round_trip.instructions,
+            "source_ingredients": [
+                {"index": item.index, "text": item.text} for item in round_trip.source_ingredients
+            ],
+        }
+    )
+    incoming_values = [item.model_dump() for item in legacy_payload.ingredients]
+    retained = KitchenService._retain_omitted_ingredient_identity_fields(
+        legacy_payload, round_trip, incoming_values
+    )
+    assert retained[0]["canonical_product_id"] == SYNTHETIC_BARLEY_PRODUCT_ID
+    assert retained[0]["canonical_unit_id"] == SYNTHETIC_GRAM_UNIT_ID
+    assert retained[0]["source_unit_expression"] == "grams (g)"
+    assert retained[3]["canonical_product_id"] == SYNTHETIC_CITRUS_OIL_PRODUCT_ID
+    assert retained[3]["source_unit_expression"] == "Tablespoons"
+
+
+def test_basket_candidate_identity_confirmation_states_and_freshness():
+    compatible = synthetic_compatible_candidate()
+    unverified = synthetic_unverified_candidate()
+    incompatible_unit = synthetic_incompatible_unit_candidate()
+
+    assert compatible.identity_status == "compatible"
+    assert compatible.product_url is not None
+    assert str(compatible.product_url).startswith("https://fixtures.invalid/")
+
+    assert unverified.identity_status == "unverified"
+    assert unverified.product_url is not None
+    assert str(unverified.product_url).startswith("https://fixtures.invalid/")
+
+    assert incompatible_unit.pack_unit == "l"
+
+    # Isolation check
+    compatible.name = "Mutated candidate name"
+    fresh_compatible = synthetic_compatible_candidate()
+    assert fresh_compatible.name == "TEST ONLY Gulrotbånd, 2 stk"
+
+
+@pytest.mark.parametrize("scenario", synthetic_basket_match_scenarios())
+def test_basket_match_scenarios_and_negative_exclusions(scenario: SyntheticBasketMatchScenario):
+    status = _identity_status(scenario.query, scenario.product)
+    matches = _product_matches_ingredient(scenario.query, scenario.product)
+
+    if scenario.expected_identity_status == "compatible":
+        assert status == "compatible"
+        assert matches is True
+        assert scenario.is_excluded is False
+        assert scenario.requires_confirmation is False
+    elif scenario.expected_identity_status == "unverified":
+        assert status == "unverified"
+        assert matches is False
+        assert scenario.is_excluded is False
+        assert scenario.requires_confirmation is True
+    elif scenario.expected_identity_status == "incompatible":
+        assert status is None
+        assert matches is False
+        assert scenario.is_excluded is True
+
+
+@pytest.mark.asyncio
+async def test_basket_job_identity_confirmation_with_synthetic_fixtures():
+    jobs = BasketMatchJobs(
+        matching=cast(Any, None),
+        inventory=cast(Any, None),
+        scope_provider=lambda actor: 1,
+    )
+    actor = "synthetic-actor"
+    start, end = date(2026, 11, 16), date(2026, 11, 22)
+    job_id = "synthetic-job-001"
+
+    compatible = synthetic_compatible_candidate()
+    unverified = synthetic_unverified_candidate()
+
+    need_comp = NeedMatchResult(
+        need_id=SYNTHETIC_BASKET_NEED_ID,
+        name="gulrot",
+        quantity=Decimal(2),
+        unit="item",
+        page=1,
+        has_more=False,
+        candidates=[compatible],
+        status="matched",
+    )
+    need_unver = NeedMatchResult(
+        need_id=SYNTHETIC_UNVERIFIED_NEED_ID,
+        name="citrus oil shower gel",
+        quantity=Decimal(1),
+        unit="item",
+        page=1,
+        has_more=False,
+        candidates=[unverified],
+        status="matched",
+    )
+
+    job_value = BasketMatchJob(
+        job_id=job_id,
+        status="complete",
+        start=start,
+        end=end,
+        needs=[need_comp, need_unver],
+    )
+    now = jobs.clock()
+    jobs._jobs[job_id] = _Job(
+        actor=actor,
+        scope=1,
+        fingerprint=(),
+        created=now,
+        value=job_value,
+        finished=now,
+    )
+
+    # 1. Compatible candidate resolves without requiring explicit confirmation
+    comp_ref = [(SYNTHETIC_BASKET_NEED_ID, compatible.id)]
+    resolved_comp = await jobs.resolve_batch_candidates(actor, job_id, start, end, comp_ref)
+    assert resolved_comp[comp_ref[0]][1].identity_status == "compatible"
+
+    # 2. Unverified candidate fails without identity confirmation (#100)
+    unver_ref = [(SYNTHETIC_UNVERIFIED_NEED_ID, unverified.id)]
+    with pytest.raises(ValueError, match="Product identity is unverified"):
+        await jobs.resolve_batch_candidates(actor, job_id, start, end, unver_ref)
+
+    # 3. Invalid confirmation pair not matching references raises ValueError
+    wrong_pair = {(SYNTHETIC_BASKET_NEED_ID, unverified.id)}
+    with pytest.raises(ValueError, match="must name a selected candidate"):
+        await jobs.resolve_batch_candidates(
+            actor, job_id, start, end, unver_ref, identity_confirmations=wrong_pair
+        )
+
+    # 4. Unverified candidate succeeds when explicitly confirmed
+    resolved_unver = await jobs.resolve_batch_candidates(
+        actor, job_id, start, end, unver_ref, identity_confirmations=set(unver_ref)
+    )
+    assert resolved_unver[unver_ref[0]][1].identity_status == "unverified"
+
+
+def test_fixture_isolation_and_production_safety():
+    repo_root = Path(__file__).parents[1]
+    src_dir = repo_root / "src" / "home_kitchen"
+
+    # Verify no source code imports from tests or fixtures
+    for py_file in src_dir.rglob("*.py"):
+        content = py_file.read_text()
+        assert not re.search(r"\bfrom\s+(tests|fixtures)\b", content), (
+            f"{py_file} improperly imports test or fixture modules"
+        )
+        assert not re.search(r"\bimport\s+(tests|fixtures)\b", content), (
+            f"{py_file} improperly imports test or fixture modules"
+        )
+
+    # Verify all synthetic URLs across synthetic_kitchen fixtures use RFC 2606 safe domains
+    fixtures_dir = repo_root / "tests" / "fixtures" / "synthetic_kitchen"
+    for py_file in fixtures_dir.glob("*.py"):
+        content = py_file.read_text()
+        for url_match in re.finditer(r"https?://([^/\"'\s]+)", content):
+            domain = url_match.group(1).casefold()
+            assert domain.endswith(".invalid") or domain.endswith(".test"), (
+                f"Non-isolated URL domain '{domain}' found in {py_file}"
+            )

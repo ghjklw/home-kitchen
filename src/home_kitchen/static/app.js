@@ -3625,15 +3625,17 @@ function renderInventory(main) {
   });
   add(main, list);
 }
-function toggleBasketBatchChoice(candidate, need, matchJobId) {
+function toggleBasketBatchChoice(candidate, need, matchJobId, confirmIdentity = false) {
   if (state.basketBatchSaving) return;
   if (!matchJobId || matchJobId !== state.basketBatchReviewJobId) {
     notify("Produktforslagene er endret. Oppdater listen før du godkjenner dem.", true);
     return;
   }
   const key = String(need.id);
+  const { start, end } = currentBasketMatchDates();
   const existing = state.basketBatchChoices[key];
-  if (existing?.candidate_id === candidate.id && existing?.match_job_id === matchJobId)
+  if (existing?.candidate_id === candidate.id && existing?.match_job_id === matchJobId &&
+      existing?.start === start && existing?.end === end)
     delete state.basketBatchChoices[key];
   else {
     state.basketBatchChoices[key] = {
@@ -3644,6 +3646,9 @@ function toggleBasketBatchChoice(candidate, need, matchJobId) {
       fulfillment: String(candidate.recommended_fulfillment_quantity),
       unit: need.unit,
       match_job_id: matchJobId,
+      confirm_identity: confirmIdentity === true,
+      start,
+      end,
     };
   }
   state.basketBatchSaveError = "";
@@ -3654,6 +3659,25 @@ function basketBatchRecommendation(candidate, unit) {
   if (typeof candidate?.id !== "string" || candidate.id.length > 200) return null;
   const recommendation = window.KitchenBasketMatchView.selectionRecommendation(candidate, unit);
   return recommendation?.packages <= 99 ? recommendation : null;
+}
+function basketBatchIdentityStatus(candidate) {
+  return window.KitchenBasketMatchView.identityStatus(candidate);
+}
+function basketBatchSelectableCandidate(candidate, unit) {
+  return candidate?.available !== false && Boolean(basketBatchRecommendation(candidate, unit));
+}
+function clearStaleBasketBatchIdentityConfirmations() {
+  const { start, end } = currentBasketMatchDates();
+  Object.values(state.basketBatchChoices).forEach((choice) => {
+    if (choice.confirm_identity !== true) return;
+    const result = state.basketMatchPages[String(choice.need_id)]?.[1];
+    const candidate = (result?.candidates || []).find((value) => value.id === choice.candidate_id);
+    if (choice.match_job_id !== state.basketBatchReviewJobId || choice.start !== start ||
+        choice.end !== end || result?.match_job_id !== state.basketBatchReviewJobId ||
+        basketBatchIdentityStatus(candidate) !== "unverified" ||
+        !basketBatchSelectableCandidate(candidate, choice.unit))
+      choice.confirm_identity = false;
+  });
 }
 function basketBatchSkipReason(need, result) {
   if (state.basketBatchNeedsRefresh) return "Treffene er utdaterte og må oppdateres før ny gjennomgang.";
@@ -3669,20 +3693,34 @@ function basketBatchSkipReason(need, result) {
       : window.KitchenBasketMatchView.statusLabel(result.status);
   if (candidates.every((candidate) => candidate.available === false))
     return "Oda oppgir at de viste produktene ikke er tilgjengelige.";
-  if (!candidates.some((candidate) =>
-    candidate.available !== false &&
-    basketBatchRecommendation(candidate, need.unit),
-  ))
+  if (candidates.some((candidate) =>
+    basketBatchIdentityStatus(candidate) === "compatible" &&
+    basketBatchSelectableCandidate(candidate, need.unit),
+  )) return "";
+  if (candidates.some((candidate) =>
+    basketBatchIdentityStatus(candidate) === "unverified" &&
+    basketBatchSelectableCandidate(candidate, need.unit),
+  )) return "Treffene må bekreftes enkeltvis som riktig produkt før de kan velges.";
+  if (!candidates.some((candidate) => basketBatchSelectableCandidate(candidate, need.unit)))
     return "Pakningsstørrelse, måleenhet eller anbefalt antall kan ikke brukes samlet. Oppdater søket eller hopp over varen.";
   return "";
 }
 function openBasketBatchReview() {
+  clearStaleBasketBatchIdentityConfirmations();
   const root = openDialog("Se over produktforslag");
   $("#modal").dataset.kind = "basket-batch-review";
   const choices = Object.values(state.basketBatchChoices);
-  const activeChoices = choices.filter(
-    (choice) => choice.match_job_id === state.basketBatchReviewJobId,
-  );
+  const { start, end } = currentBasketMatchDates();
+  const activeChoices = choices.filter((choice) => {
+    if (choice.match_job_id !== state.basketBatchReviewJobId || choice.start !== start || choice.end !== end)
+      return false;
+    const result = state.basketMatchPages[String(choice.need_id)]?.[1];
+    const candidate = (result?.candidates || []).find((value) => value.id === choice.candidate_id);
+    const status = basketBatchIdentityStatus(candidate);
+    return result?.match_job_id === state.basketBatchReviewJobId &&
+      basketBatchSelectableCandidate(candidate, choice.unit) &&
+      (status === "compatible" || (status === "unverified" && choice.confirm_identity === true));
+  });
   const needs = currentBasketMatchNeeds();
   add(
     root,
@@ -3717,8 +3755,11 @@ function openBasketBatchReview() {
     }
     if (staged) {
       const change = el("p", null, "callout");
-      change.textContent = staged.match_job_id !== state.basketBatchReviewJobId
+      change.textContent = staged.match_job_id !== state.basketBatchReviewJobId ||
+        staged.start !== start || staged.end !== end
         ? "Tidligere valgt: " + staged.name + " · " + formatUiCount(staged.packages) + " pakker. Velg det på nytt hvis du fortsatt ønsker det."
+        : staged.confirm_identity === true
+          ? "Du har bekreftet at dette er riktig produkt for akkurat denne varen. Pakningsforslaget må fortsatt kontrolleres."
         : saved.length
           ? "Valget under vil erstatte " + formatUiCount(saved.length) + " lagrede valg for denne varen."
           : "Dette forslaget legges til i den samlede godkjenningen.";
@@ -3730,24 +3771,42 @@ function openBasketBatchReview() {
     const candidates = !state.basketBatchNeedsRefresh && result?.match_job_id === state.basketBatchReviewJobId
       ? result.candidates || []
       : [];
-    const eligible = reason ? [] : candidates.filter((candidate) =>
-      candidate.available !== false && basketBatchRecommendation(candidate, need.unit),
+    const selectable = candidates.filter((candidate) =>
+      basketBatchSelectableCandidate(candidate, need.unit),
     );
-    const primary = eligible.find((candidate) =>
-      staged?.candidate_id === candidate.id && staged?.match_job_id === state.basketBatchReviewJobId,
-    ) || eligible[0];
+    const compatible = selectable.filter((candidate) =>
+      basketBatchIdentityStatus(candidate) === "compatible",
+    );
+    const primary = candidates.find((candidate) =>
+      staged?.candidate_id === candidate.id && staged?.match_job_id === state.basketBatchReviewJobId &&
+        staged?.start === start && staged?.end === end,
+    ) || compatible[0] || selectable[0];
     const renderOption = (candidate) => {
       const card = el("article", null, "basket-batch-option");
       add(card, renderBasketMatchCandidate(candidate, need));
-      if (eligible.includes(candidate)) {
+      const identityUnverified = basketBatchIdentityStatus(candidate) === "unverified";
+      if (identityUnverified)
+        add(card, el("p", "Produktidentiteten er ikke bekreftet automatisk.", "muted"));
+      if (basketBatchSelectableCandidate(candidate, need.unit)) {
         const selected = staged?.candidate_id === candidate.id &&
-          staged?.match_job_id === state.basketBatchReviewJobId;
-        const select = button(
-          selected ? "Valgt for godkjenning" : saved.length ? "Erstatt lagrede valg med dette" : "Velg dette for varen",
-          () => toggleBasketBatchChoice(candidate, need, result.match_job_id),
-          selected ? "primary small" : "quiet small",
-        );
-        select.setAttribute("aria-pressed", String(selected));
+          staged?.match_job_id === state.basketBatchReviewJobId &&
+          staged?.start === start && staged?.end === end;
+        const select = identityUnverified
+          ? button(
+              selected && staged?.confirm_identity === true
+                ? "Bekreftelsen er valgt"
+                : "Dette er riktig produkt",
+              () => toggleBasketBatchChoice(candidate, need, result.match_job_id, true),
+              selected && staged?.confirm_identity === true ? "primary small" : "quiet small",
+            )
+          : button(
+              selected ? "Valgt for godkjenning" : saved.length ? "Erstatt lagrede valg med dette" : "Velg dette for varen",
+              () => toggleBasketBatchChoice(candidate, need, result.match_job_id, false),
+              selected ? "primary small" : "quiet small",
+            );
+        select.setAttribute("aria-pressed", String(
+          selected && (!identityUnverified || staged?.confirm_identity === true),
+        ));
         select.disabled = state.basketBatchSaving || state.basketBatchNeedsRefresh;
         add(card, select);
       }
@@ -3814,23 +3873,28 @@ function openBasketBatchReview() {
   add(root, apply);
 }
 function renderBasketBatchReview(main) {
+  clearStaleBasketBatchIdentityConfirmations();
   if (!state.oda?.connected || !state.basketBatchReviewJobId) return;
   const eligibility = state.basketBatchNeedsRefresh
-    ? { safe: 0, alternatives: 0, skipped: currentBasketMatchNeeds().length }
+    ? { safe: 0, alternatives: 0, identityConfirmation: 0, skipped: currentBasketMatchNeeds().length }
     : currentBasketMatchNeeds().reduce((summary, need) => {
       const result = state.basketMatchPages[String(need.id)]?.[1];
-      const eligible = result?.match_job_id === state.basketBatchReviewJobId && !basketBatchSkipReason(need, result)
-        ? (result.candidates || []).filter((candidate) =>
-            candidate.available !== false &&
-            basketBatchRecommendation(candidate, need.unit),
-          )
+      const candidates = result?.match_job_id === state.basketBatchReviewJobId &&
+        !state.basketBatchNeedsRefresh &&
+        !state.basketMatchBusy[String(need.id)] &&
+        !state.basketMatchErrors[String(need.id)]
+        ? (result.candidates || []).filter((candidate) => basketBatchSelectableCandidate(candidate, need.unit))
         : [];
-      if (eligible.length) {
+      const compatible = candidates.filter((candidate) => basketBatchIdentityStatus(candidate) === "compatible");
+      const unverified = candidates.filter((candidate) => basketBatchIdentityStatus(candidate) === "unverified");
+      if (compatible.length) {
         summary.safe += 1;
-        summary.alternatives += eligible.length - 1;
-      } else summary.skipped += 1;
+        summary.alternatives += compatible.length - 1;
+      }
+      if (unverified.length) summary.identityConfirmation += 1;
+      if (!compatible.length && !unverified.length) summary.skipped += 1;
       return summary;
-    }, { safe: 0, alternatives: 0, skipped: 0 });
+    }, { safe: 0, alternatives: 0, identityConfirmation: 0, skipped: 0 });
   const panel = add(
     el("section", null, "panel basket-batch-review"),
     el("h2", "Samlet Oda-gjennomgang"),
@@ -3840,7 +3904,9 @@ function renderBasketBatchReview(main) {
       "muted",
     ),
   );
-  add(panel, el("p", formatUiCount(eligibility.safe) + " varer har forslag som kan velges samlet · " + formatUiCount(eligibility.skipped) + " varer må stå over eller avklares.", "muted"));
+  add(panel, el("p", formatUiCount(eligibility.safe) + " varer har forslag som kan velges direkte · " + formatUiCount(eligibility.skipped) + " varer må stå over eller avklares.", "muted"));
+  if (eligibility.identityConfirmation)
+    add(panel, el("p", formatUiCount(eligibility.identityConfirmation) + " varer har treff som må bekreftes enkeltvis som riktig produkt.", "muted"));
   if (eligibility.alternatives)
     add(panel, el("p", formatUiCount(eligibility.alternatives) + " ekstra valgbare alternativer finnes under «Flere treff».", "muted"));
   if (state.basketBatchSaveError) {
@@ -3862,8 +3928,8 @@ function renderBasketBatchReview(main) {
       "primary",
     ));
   }
-  if (!eligibility.safe) {
-    add(panel, el("p", "Ingen varer har forslag som kan velges samlet ennå. Oppdater produkttreffene eller hopp over uavklarte varer.", "muted"));
+  if (!eligibility.safe && !eligibility.identityConfirmation) {
+    add(panel, el("p", "Ingen varer har forslag som kan velges ennå. Oppdater produkttreffene eller hopp over uavklarte varer.", "muted"));
     if (!state.basketBatchNeedsRefresh)
       add(panel, button(
         state.basketMatchGlobalRefreshing ? "Oppdaterer produkttreff …" : "Oppdater produkttreff",
@@ -3874,6 +3940,7 @@ function renderBasketBatchReview(main) {
   add(main, panel);
 }
 async function saveBasketBatchChoices() {
+  clearStaleBasketBatchIdentityConfirmations();
   if (
     state.basketBatchSaving ||
     !state.basketBatchReviewJobId ||
@@ -3884,8 +3951,21 @@ async function saveBasketBatchChoices() {
   const planEpoch = state.basketMatchPlanEpoch;
   const jobId = state.basketBatchReviewJobId;
   const choices = Object.values(state.basketBatchChoices)
-    .filter((choice) => choice.match_job_id === jobId)
-    .map(({ need_id, candidate_id, packages }) => ({ need_id, candidate_id, packages }));
+    .filter((choice) => choice.match_job_id === jobId && choice.start === start && choice.end === end)
+    .filter((choice) => {
+      const result = state.basketMatchPages[String(choice.need_id)]?.[1];
+      if (result?.match_job_id !== jobId) return false;
+      const candidate = (result.candidates || []).find((value) => value.id === choice.candidate_id);
+      if (!candidate || !basketBatchSelectableCandidate(candidate, choice.unit)) return false;
+      const status = basketBatchIdentityStatus(candidate);
+      return status === "compatible" || (status === "unverified" && choice.confirm_identity === true);
+    })
+    .map(({ need_id, candidate_id, packages, confirm_identity }) => ({
+      need_id,
+      candidate_id,
+      packages,
+      confirm_identity: confirm_identity === true,
+    }));
   if (!choices.length) return;
   state.basketBatchSaving = true;
   state.basketBatchSaveError = "";

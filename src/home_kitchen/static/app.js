@@ -47,6 +47,9 @@ const state = {
   settingsRefreshInFlight: false,
   week: localDate(new Date()),
   selectedDate: localDate(new Date()),
+  recipeCollectionJob: null,
+  recipeCollectionStatusNode: null,
+  recipeCollectionPollGeneration: 0,
 };
 let noticeTimer;
 function el(tag, text, className) {
@@ -77,6 +80,33 @@ function notify(message, error = false) {
     },
     error ? 10000 : 4500,
   );
+}
+function rememberRecipeCollectionJob(job) {
+  state.recipeCollectionJob = job;
+  try {
+    if (job?.job_id) sessionStorage.setItem("recipeCollectionJobId", job.job_id);
+    else sessionStorage.removeItem("recipeCollectionJobId");
+  } catch {}
+  updateRecipeCollectionStatus();
+}
+function updateRecipeCollectionStatus() {
+  const host = state.recipeCollectionStatusNode;
+  const job = state.recipeCollectionJob;
+  if (!host?.isConnected) return;
+  if (!job) {
+    host.hidden = true;
+    return;
+  }
+  host.hidden = false;
+  const summary = window.KitchenRecipeCollections.progress(job);
+  const counts = window.KitchenRecipeCollections.completionCounts(job);
+  const partial = ["completed", "cancelled", "failed"].includes(job.status)
+    ? ` · ${counts.imported} nye importert · ${counts.already} fantes fra før · ${counts.failed} feilet${job.status === "cancelled" ? " · allerede importerte oppskrifter beholdes" : ""}`
+    : "";
+  const label = host.querySelector("[data-collection-summary]");
+  if (label) label.textContent = summary + partial;
+  const cancel = host.querySelector("[data-collection-cancel]");
+  if (cancel) cancel.hidden = !["previewing", "importing"].includes(job.status);
 }
 async function api(path, method = "GET", body) {
   let response;
@@ -1165,7 +1195,7 @@ function mealForm(date = iso(state.selectedDate), recipeId, existingMeal = null)
     add(
       root,
       el("p", "Legg til den første oppskriften, og velg deretter en dag.", "muted"),
-      button("Legg til en oppskrift", () => recipeForm(), "primary"),
+      button("Legg til oppskrift", addRecipeForm, "primary"),
     );
     return;
   }
@@ -1228,11 +1258,7 @@ function renderRecipes(main) {
       "Din egen samling",
       "Oppskrifter å ta vare på.",
       "Hverdagsfavoritter, nye funn og din neste gode middag.",
-      [
-        button("Finn oppskrifter", discoveryForm),
-        button("Importer lenke", importForm),
-        button("+ Legg til oppskrift", () => recipeForm(), "primary"),
-      ],
+      [button("Legg til oppskrift", addRecipeForm, "primary")],
     ),
   );
   if (!recipeAssistantConfigured()) {
@@ -1248,6 +1274,37 @@ function renderRecipes(main) {
       ),
     );
   }
+  const collectionStatus = el("section", null, "callout recipe-collection-progress");
+  collectionStatus.hidden = true;
+  const collectionSummary = el("p", "", "muted");
+  collectionSummary.dataset.collectionSummary = "true";
+  collectionSummary.setAttribute("role", "status");
+  collectionSummary.setAttribute("aria-live", "polite");
+  const collectionActions = el("div", null, "actions");
+  const resumeCollection = button("Vis importen", () => recipeCollectionForm(state.recipeCollectionJob?.job_id));
+  const cancelCollection = button("Avbryt gjenstående import", async () => {
+    const jobId = state.recipeCollectionJob?.job_id;
+    if (!jobId) return;
+    cancelCollection.disabled = true;
+    try {
+      const job = window.KitchenRecipeCollections.normalizeJob(
+        await api("/recipe-collections/" + encodeURIComponent(jobId) + "/cancel", "POST", {}),
+      );
+      rememberRecipeCollectionJob(job);
+      state.recipes = await api("/recipes");
+      if (state.view === "recipes") render();
+    } catch (error) {
+      collectionSummary.textContent = error.message;
+    } finally {
+      cancelCollection.disabled = false;
+    }
+  }, "quiet");
+  cancelCollection.dataset.collectionCancel = "true";
+  add(collectionActions, resumeCollection, cancelCollection);
+  add(collectionStatus, collectionSummary, collectionActions);
+  state.recipeCollectionStatusNode = collectionStatus;
+  updateRecipeCollectionStatus();
+  add(main, collectionStatus);
   const tools = el("div", null, "toolbar");
   const search = el("input", null, "search");
   search.type = "search";
@@ -1267,7 +1324,7 @@ function renderRecipes(main) {
         empty(
           "Oppskriftsboken starter her",
           "Legg til en oppskrift du liker, eller importer en fra en lenke. Samlingen bygger du selv.",
-          button("Legg til din første oppskrift", () => recipeForm(), "primary"),
+          button("Legg til din første oppskrift", addRecipeForm, "primary"),
         ),
       );
     else if (!matches.length)
@@ -1327,6 +1384,33 @@ function recipeForm(draft = {}, source = "manual") {
         "callout",
       ),
     );
+  if (draft.photo_uncertainties?.length)
+    add(
+      root,
+      add(
+        el("section", null, "callout"),
+        el("strong", "Kontroller dette fra bildet"),
+        add(
+          el("ul"),
+          ...draft.photo_uncertainties.map((note) => el("li", note)),
+        ),
+      ),
+    );
+  if (draft.photo_source)
+    add(
+      root,
+      add(
+        el("div", null, "photo-source-evidence"),
+        el(
+          "p",
+          [draft.photo_source.book_title, draft.photo_source.page ? "side " + draft.photo_source.page : ""]
+            .filter(Boolean)
+            .join(" · ") || "Kilde: privat bilde av oppskriftsside",
+          "muted",
+        ),
+        button("Vis originalbildet", () => viewRecipePhoto(draft.photo_source), "quiet"),
+      ),
+    );
   const form = el("form");
   const name = field("Oppskriftsnavn", "text", draft.title);
   name.input.required = true;
@@ -1358,6 +1442,7 @@ function recipeForm(draft = {}, source = "manual") {
     "Bruk en HTTPS-lenke til et bilde. Bildet legges bare til hvis du oppgir en lenke.",
   );
   imageUrl.input.placeholder = "https://…";
+  const imageCredit = recipeImageCredit(draft.image_attribution);
   const ingredientEditor = el("fieldset", null, "ingredient-editor");
   add(ingredientEditor, el("legend", "Ingredienser"));
   add(
@@ -1464,6 +1549,7 @@ function recipeForm(draft = {}, source = "manual") {
     name.wrap,
     servings.wrap,
     imageUrl.wrap,
+    imageCredit,
     ingredientEditor,
     instructions.wrap,
   );
@@ -1510,6 +1596,8 @@ function recipeForm(draft = {}, source = "manual") {
       source_url: draft.source_url || null,
       source_ingredients: sourceIngredients,
       provenance: draft.provenance || null,
+      photo_source: draft.photo_source || null,
+      image_attribution: draft.image_attribution || null,
     };
     await api(
       isEditing ? "/recipes/" + encodeURIComponent(draft.id) : "/recipes",
@@ -1568,6 +1656,8 @@ function recipeForm(draft = {}, source = "manual") {
             image_url: imageUrl.input.value,
             source_ingredients: sourceIngredients,
             provenance: draft.provenance || null,
+            photo_source: draft.photo_source || null,
+            image_attribution: draft.image_attribution || null,
           },
           { isEditing, source },
           prompt.input.value,
@@ -1599,6 +1689,41 @@ function recipeForm(draft = {}, source = "manual") {
     );
   }
 }
+function recipeImageCredit(attribution) {
+  if (!attribution) return null;
+  const section = el("section", null, "image-credit");
+  add(section, el("h3", "Kreditering av bilde"));
+  if (attribution.title) add(section, el("p", attribution.title));
+  const creator = attribution.artist || attribution.credit || attribution.attribution;
+  if (creator) add(section, el("p", "Fotograf/kreditering: " + creator));
+  const license = window.KitchenRecipeImages.safeUrl(
+    attribution.license_url,
+    new Set(["creativecommons.org", "www.creativecommons.org", "commons.wikimedia.org"]),
+  );
+  const source = window.KitchenRecipeImages.safeUrl(
+    attribution.source_page_url,
+    new Set(["commons.wikimedia.org"]),
+  );
+  const links = el("div", null, "actions");
+  if (license) {
+    const link = el("a", attribution.license_name || "Bildekreditering og lisens");
+    link.href = license;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    add(links, link);
+  }
+  if (source) {
+    const link = el("a", "Kilde hos Wikimedia Commons");
+    link.href = source;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    add(links, link);
+  }
+  if (attribution.obligations?.length)
+    add(section, add(el("ul"), ...attribution.obligations.map((item) => el("li", item))));
+  if (links.childElementCount) add(section, links);
+  return section;
+}
 function viewRecipe(recipe) {
   const root = openDialog(recipe.title);
   const body = el("div", null, "recipe-body");
@@ -1608,6 +1733,20 @@ function viewRecipe(recipe) {
     el("p", formatUiCount(recipe.servings) + " porsjoner", "muted"),
     el("h3", "Ingredienser"),
   );
+  if (recipe.photo_source) {
+    const citation = [
+      recipe.photo_source.book_title,
+      recipe.photo_source.page ? "side " + recipe.photo_source.page : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    add(
+      body,
+      el("p", citation || "Oppskriftsfoto lagret privat", "muted"),
+      button("Vis originalbildet", () => viewRecipePhoto(recipe.photo_source), "quiet"),
+    );
+  }
+  if (recipe.image_attribution) add(body, recipeImageCredit(recipe.image_attribution));
   const ingredients = el("ul");
   recipe.ingredients.forEach((item) => {
     const row = el("li");
@@ -1637,7 +1776,13 @@ function viewRecipe(recipe) {
       el("div", null, "actions"),
       button("Planlegg et måltid", () => mealForm(undefined, recipe.id), "primary"),
       button("Rediger oppskrift", () => recipeForm(recipe, recipe.source || "manual"), "quiet"),
+      recipe.source === "manual"
+        ? button("Finn et bilde", () => recipeImageSearchForm(recipe), "quiet")
+        : null,
       button("Vurder oppskriften", () => feedbackForm(recipe), "quiet"),
+      recipe.image_url
+        ? button("Fjern bilde", () => removeRecipeImage(recipe), "quiet")
+        : null,
       button(
         "Slett oppskrift",
         () => {
@@ -1677,6 +1822,619 @@ function viewRecipe(recipe) {
     ),
   );
   add(root, body);
+}
+function removeRecipeImage(recipe) {
+  const root = openDialog("Fjerne oppskriftsbildet?");
+  add(
+    root,
+    el("p", "Dette fjerner bildet og bildekrediteringen. Oppskriftens kilde, ingredienser og fremgangsmåte beholdes.", "muted"),
+    button("Behold bildet", () => viewRecipe(recipe)),
+    button("Fjern bilde", async () => {
+      try {
+        const updated = await api("/recipes/" + encodeURIComponent(recipe.id), "PUT", {
+          title: recipe.title,
+          servings: recipe.servings,
+          ingredients: recipe.ingredients,
+          instructions: recipe.instructions,
+          source_url: recipe.source_url || null,
+          image_url: null,
+          source: recipe.source,
+          source_ingredients: recipe.source_ingredients || [],
+          provenance: recipe.provenance || null,
+          photo_source: recipe.photo_source || null,
+          image_attribution: null,
+        });
+        state.recipes = state.recipes.map((item) => item.id === recipe.id ? updated : item);
+        viewRecipe(updated);
+        notify("Oppskriftsbildet og krediteringen er fjernet.");
+      } catch (error) {
+        notify(error.message, true);
+        viewRecipe(recipe);
+      }
+    }, "danger"),
+  );
+}
+function recipeImageSearchForm(recipe) {
+  const root = openDialog("Finn et bilde til oppskriften");
+  add(
+    root,
+    el("p", "Søk etter bilder på Wikimedia Commons. Velg selv etter at du har sett bildet, fotografen, lisensen og krediteringskravene.", "muted"),
+    el("p", "Dette endrer bare oppskriftsbildet og bildekrediteringen. Oppskriftens kilde og innhold forblir uendret.", "callout"),
+  );
+  const form = el("form");
+  const query = field("Søk etter bilde", "search", recipe.title);
+  query.input.maxLength = 200;
+  query.input.required = true;
+  const status = el("p", "Søket har ikke startet.", "muted");
+  status.setAttribute("role", "status");
+  const errors = el("p", "", "form-error");
+  errors.setAttribute("role", "alert");
+  const results = el("div", null, "recipe-image-results");
+  const searchButton = button("Søk etter bilder", () => runSearch(false), "primary");
+  const moreButton = button("Vis flere bilder", () => runSearch(true), "quiet");
+  moreButton.hidden = true;
+  let currentQuery = "";
+  let continuation = null;
+  let candidates = [];
+  let requestSequence = 0;
+  let busy = false;
+
+  function drawCandidates() {
+    results.replaceChildren();
+    if (!candidates.length) return;
+    add(results, el("h3", `Treff for «${currentQuery}»`));
+    const grid = el("div", null, "grid recipe-image-results-grid");
+    candidates.forEach(({ candidate, searchId }) => {
+      const card = el("article", null, "card recipe-image-candidate");
+      const image = el("img", null, "recipe-image-candidate-preview");
+      image.src = candidate.thumbnail_url;
+      image.alt = candidate.title;
+      image.loading = "lazy";
+      image.decoding = "async";
+      image.referrerPolicy = "no-referrer";
+      image.addEventListener("error", () => image.replaceWith(el("p", "Forhåndsvisningen er ikke tilgjengelig.", "muted")));
+      add(card, image, el("h3", candidate.title));
+      if (candidate.artist || candidate.credit || candidate.attribution)
+        add(card, el("p", candidate.artist || candidate.credit || candidate.attribution, "muted"));
+      if (candidate.credit && candidate.artist) add(card, el("p", candidate.credit, "muted"));
+      const license = el("a", candidate.license_name);
+      license.href = candidate.license_url;
+      license.target = "_blank";
+      license.rel = "noopener noreferrer";
+      const source = el("a", "Åpne kilde og bildeinformasjon");
+      source.href = candidate.source_page_url;
+      source.target = "_blank";
+      source.rel = "noopener noreferrer";
+      add(card, el("p", "Lisens: "), license, source);
+      if (candidate.obligations?.length)
+        add(card, add(el("ul", null, "image-license-obligations"), ...candidate.obligations.map((item) => el("li", item))));
+      if (candidate.attribution_required && candidate.attribution)
+        add(card, el("p", "Kreditering: " + candidate.attribution, "image-credit-required"));
+      const review = el("label", null, "image-license-review");
+      const reviewed = el("input");
+      reviewed.type = "checkbox";
+      add(review, reviewed, el("span", "Jeg har gjennomgått lisensen og krediteringen."));
+      const candidateError = el("p", "", "form-error");
+      candidateError.setAttribute("role", "alert");
+      const choose = button("Bruk dette bildet", async () => {
+        choose.disabled = true;
+        candidateError.textContent = "";
+        status.textContent = "Lagrer valgt bilde og kreditering …";
+        try {
+          if (!reviewed.checked) throw new Error("Bekreft at du har sett gjennom lisens og kreditering.");
+          const updated = await api("/recipes/" + encodeURIComponent(recipe.id) + "/image", "POST", {
+            search_id: searchId,
+            provider_id: candidate.provider_id,
+            reviewed: true,
+          });
+          state.recipes = state.recipes.map((item) => item.id === recipe.id ? updated : item);
+          viewRecipe(updated);
+          notify("Oppskriftsbildet og krediteringen er lagret.");
+        } catch (error) {
+          candidateError.textContent = error.message;
+          status.textContent = "Oppskriften er uendret. Du kan gjennomgå bildet på nytt eller søke videre.";
+          choose.disabled = !reviewed.checked;
+        }
+      }, "primary");
+      choose.disabled = true;
+      reviewed.addEventListener("change", () => { choose.disabled = !reviewed.checked || busy; });
+      add(card, review, candidateError, choose);
+      grid.append(card);
+    });
+    add(results, grid);
+  }
+
+  async function runSearch(loadMore) {
+    if (busy) return;
+    const term = query.input.value.trim();
+    if (!term) {
+      errors.textContent = "Skriv inn hva du vil finne bilde av.";
+      return;
+    }
+    if (loadMore && (!continuation || term !== currentQuery)) return;
+    const sequence = ++requestSequence;
+    const priorQuery = currentQuery;
+    busy = true;
+    searchButton.disabled = true;
+    moreButton.disabled = true;
+    results.querySelectorAll("button, input").forEach((control) => { control.disabled = true; });
+    if (!loadMore) moreButton.hidden = true;
+    errors.textContent = "";
+    status.textContent = loadMore ? "Henter flere bilder …" : "Søker etter bilder …";
+    try {
+      const response = await api("/recipe-images/search", "POST", {
+        query: term,
+        limit: 10,
+        ...(loadMore ? { continuation } : {}),
+      });
+      if (sequence !== requestSequence) return;
+      const session = window.KitchenRecipeImages.normalizeSession(response);
+      if (session.status !== "ok") {
+        if (session.status === "no_usable_results" && !loadMore) {
+          candidates = [];
+          currentQuery = term;
+          continuation = null;
+          drawCandidates();
+        }
+        if (session.status === "invalid_continuation") continuation = null;
+        status.textContent = window.KitchenRecipeImages.statusLabel(session.status) +
+          (candidates.length && term !== currentQuery ? ` Viser fortsatt treff for «${currentQuery}».` : "");
+        moreButton.hidden = !continuation;
+        return;
+      }
+      if (!loadMore) {
+        candidates = [];
+        currentQuery = term;
+      }
+      const known = new Set(candidates.map(({ candidate }) => candidate.provider_id));
+      session.results.forEach((candidate) => {
+        if (!known.has(candidate.provider_id)) {
+          candidates.push({ candidate, searchId: session.search_id });
+          known.add(candidate.provider_id);
+        }
+      });
+      continuation = session.continuation;
+      status.textContent = session.results.length
+        ? window.KitchenRecipeImages.statusLabel("ok")
+        : "Fant ikke flere brukbare bilder.";
+      drawCandidates();
+      moreButton.hidden = !continuation;
+      if (term !== currentQuery) moreButton.hidden = true;
+    } catch (error) {
+      if (sequence !== requestSequence) return;
+      status.textContent = candidates.length
+        ? `Søket kunne ikke fullføres. Viser fortsatt treff for «${priorQuery || currentQuery}».`
+        : "Søket kunne ikke fullføres. Prøv igjen.";
+      errors.textContent = error.message;
+      moreButton.hidden = !continuation || term !== currentQuery;
+    } finally {
+      if (sequence === requestSequence) {
+        busy = false;
+        searchButton.disabled = false;
+        moreButton.disabled = false;
+        drawCandidates();
+      }
+    }
+  }
+  add(form, query.wrap, el("div", null, "actions"));
+  const actions = form.lastElementChild;
+  add(actions, searchButton, moreButton);
+  form.addEventListener("submit", (event) => { event.preventDefault(); runSearch(false); });
+  add(root, form, status, errors, results);
+}
+async function viewRecipePhoto(photoSource) {
+  const modal = $("#private-photo-modal");
+  const root = $("#private-photo-content");
+  if (modal.open) modal.close();
+  root.replaceChildren();
+  const heading = el("h2", "Privat bilde av oppskriftssiden");
+  heading.id = "private-photo-title";
+  const status = el("p", "Henter originalbildet …", "muted");
+  const close = button("Lukk", () => modal.close(), "quiet");
+  close.ariaLabel = "Lukk originalbildet";
+  add(root, add(el("div", null, "dialog-header"), heading, close), status);
+  let objectUrl = null;
+  const release = () => {
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    modal.removeEventListener("close", release);
+  };
+  modal.addEventListener("close", release);
+  modal.showModal();
+  try {
+    const response = await fetch("/api/recipe-photos/" + encodeURIComponent(photoSource.id), {
+      credentials: "same-origin",
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error("Det private originalbildet er ikke tilgjengelig akkurat nå.");
+    const imageBlob = await response.blob();
+    objectUrl = URL.createObjectURL(imageBlob);
+    if (!modal.open || !status.isConnected) {
+      release();
+      return;
+    }
+    const image = el("img", null, "recipe-photo-original");
+    image.src = objectUrl;
+    image.alt = "Originalt bilde av oppskriftssiden";
+    status.replaceWith(image);
+  } catch (error) {
+    if (modal.open && status.isConnected) status.textContent = error.message;
+  }
+}
+function addRecipeForm() {
+  const root = openDialog("Legg til oppskrift");
+  add(
+    root,
+    el("p", "Velg hvordan du vil starte. Oppskriften lagres først når du ser over og velger Lagre.", "muted"),
+  );
+  add(
+    root,
+    add(
+      el("div", null, "actions recipe-acquisition-options"),
+      button("Finn oppskrifter fra kilder", discoveryForm),
+      button("Importer fra en lenke", importForm),
+      button("Fotografer en oppskriftsside", recipePhotoForm),
+      button("Importer oppskrifter fra Oda", recipeCollectionForm),
+      button("Skriv inn selv", () => recipeForm(), "quiet"),
+    ),
+  );
+}
+function recipePhotoForm() {
+  const root = openDialog("Fotografer en oppskriftsside");
+  add(
+    root,
+    el(
+      "p",
+      "Bildet lagres privat i husholdningen. KI transkriberer siden til et redigerbart utkast; du kontrollerer det før du lagrer oppskriften.",
+      "callout",
+    ),
+  );
+  if (!recipeAssistantConfigured())
+    add(
+      root,
+      add(
+        el("section", null, "callout connection-prompt"),
+        el("p", "KI-tilkobling er nødvendig for å lese teksten fra bildet."),
+        connectionSettingsButton(),
+      ),
+    );
+  const form = el("form");
+  const formModal = $("#modal");
+  const isCurrentDialog = () => form.isConnected && formModal.open;
+  const image = field("Bilde av oppskriftssiden", "file", "", "JPEG, PNG eller WebP · maks 8 MiB");
+  image.input.accept = "image/jpeg,image/png,image/webp";
+  image.input.capture = "environment";
+  image.input.required = true;
+  const book = field("Kokebok (valgfritt)", "text", "");
+  book.input.maxLength = 300;
+  const page = field("Side (valgfritt)", "text", "");
+  page.input.maxLength = 40;
+  const status = el("p", "", "muted");
+  status.setAttribute("role", "status");
+  const retry = button("Prøv å lese bildet på nytt", async () => {
+    if (!photoSource?.id) return;
+    retry.disabled = true;
+    status.textContent = "Prøver å lese siden på nytt …";
+    try {
+      await window.KitchenRecipePhoto.applyIfActive(
+        api("/recipe-photos/" + encodeURIComponent(photoSource.id) + "/redraft", "POST", {}),
+        isCurrentDialog,
+        showPhotoDraft,
+      );
+    } catch (error) {
+      status.textContent = error.message;
+    } finally {
+      retry.disabled = false;
+    }
+  }, "quiet");
+  retry.hidden = true;
+  let photoSource = null;
+  function showPhotoDraft(result) {
+    photoSource = result?.photo_source || photoSource;
+    if (result?.status === "draft_ready" && result.draft) {
+      const draft = { ...result.draft, photo_uncertainties: result.uncertainties || [] };
+      recipeForm(draft, "ai");
+      return;
+    }
+    status.textContent = "Teksten kunne ikke leses tydelig nok. Kontroller bildet, eller prøv på nytt. Bildet og eventuell tidligere kladd er beholdt.";
+    retry.hidden = !photoSource?.id;
+  }
+  formSubmit(form, "Lag redigerbart utkast", async () => {
+    if (!recipeAssistantConfigured()) throw new Error("Sett opp KI-tilkoblingen i innstillingene før du leser inn bildet.");
+    status.textContent = "Laster opp bildet og leser oppskriften …";
+    retry.hidden = true;
+    const payload = await window.KitchenRecipePhoto.buildUpload(image.input.files?.[0], {
+      book_title: book.input.value,
+      page: page.input.value,
+    });
+    if (!isCurrentDialog()) return;
+    await window.KitchenRecipePhoto.applyIfActive(
+      api("/recipe-photos", "POST", payload),
+      isCurrentDialog,
+      showPhotoDraft,
+    );
+  });
+  add(form, image.wrap, book.wrap, page.wrap, status, retry);
+  add(root, form);
+}
+function recipeCollectionForm(resumeJobId = null) {
+  const root = openDialog("Importer oppskrifter fra Oda");
+  const collectionModal = $("#modal");
+  collectionModal.dataset.recipeCollection = "true";
+  const pollOwner = ++state.recipeCollectionPollGeneration;
+  add(
+    root,
+    el(
+      "p",
+      "Velg samlingene du vil hente til gjennomgang. Oda kan vise likerklikk og oppskrifter med bestilte ingredienser; et kjøp betyr ikke at retten er laget.",
+      "muted",
+    ),
+    el("p", "Oda viser inntil 50 sider à 20 oppskrifter per samling (maks 1 000). Importen leser kildeoppskriften og legger til nye oppskrifter etter at du har valgt dem.", "muted"),
+    el("p", "Ingenting importeres før du bekrefter valget. Etter bekreftelse fortsetter importen selv om du lukker dette vinduet. Du kan følge fremdriften i Oppskrifter og avbryte gjenstående arbeid; oppskrifter som allerede er importert, beholdes.", "callout"),
+  );
+  if (!state.oda?.connected && !resumeJobId) {
+    add(
+      root,
+      add(
+        el("section", null, "callout connection-prompt"),
+        el("p", "Koble til Oda i innstillingene for å hente dine oppskriftssamlinger."),
+        connectionSettingsButton("Åpne Oda-innstillinger"),
+      ),
+    );
+    return;
+  }
+  const form = el("form");
+  const picker = el("fieldset", null, "collection-picker");
+  add(picker, el("legend", "Oda-samlinger"));
+  const selectedKinds = new Set(["liked", "purchased"]);
+  for (const [kind, label] of [["liked", "Oppskrifter jeg liker"], ["purchased", "Oppskrifter med ingredienser jeg har bestilt"]]) {
+    const option = el("label", null, "collection-option");
+    const checkbox = el("input");
+    checkbox.type = "checkbox";
+    checkbox.value = kind;
+    checkbox.checked = true;
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) selectedKinds.add(kind);
+      else selectedKinds.delete(kind);
+    });
+    add(option, checkbox, el("span", label));
+    picker.append(option);
+  }
+  const status = el("p", "Velg én eller begge samlinger, og hent en liste til gjennomgang.", "muted");
+  status.setAttribute("role", "status");
+  const errors = el("ul", null, "collection-errors");
+  errors.setAttribute("role", "alert");
+  const entries = el("div", null, "collection-entries");
+  const actions = el("div", null, "actions");
+  let job = null;
+  let generation = 0;
+  let previewStarting = false;
+  const selectedIds = new Set();
+  let pollTimer = null;
+  const importButton = button("Importer valgte oppskrifter", async () => {
+    if (!job || !["ready", "completed"].includes(job.status)) return;
+    let request;
+    try {
+      request = window.KitchenRecipeCollections.importPayload(job.job_id, [...selectedIds]);
+    } catch (error) {
+      status.textContent = error.message;
+      return;
+    }
+    importButton.disabled = true;
+    clearTimeout(pollTimer);
+    const importGeneration = ++generation;
+    const importJobId = job.job_id;
+    try {
+      const nextJob = window.KitchenRecipeCollections.normalizeJob(await api(request.path, "POST", request.body));
+      if (importGeneration !== generation || nextJob.job_id !== importJobId) return;
+      job = nextJob;
+      draw(job);
+      schedulePoll();
+    } catch (error) {
+      if (importGeneration !== generation || job?.job_id !== importJobId) return;
+      status.textContent = error.message;
+      importButton.disabled = selectedIds.size === 0 || !["ready", "completed"].includes(job.status);
+    }
+  }, "primary");
+  importButton.textContent = "Bekreft og importer valgte oppskrifter";
+  importButton.disabled = true;
+  const retryPreview = button("Hent samlingene på nytt", async () => {
+    if (job && ["previewing", "importing"].includes(job.status)) {
+      schedulePoll();
+      return;
+    }
+    await startPreview();
+  }, "quiet");
+  retryPreview.hidden = true;
+  const cancelJob = button("Avbryt innhenting/import", async () => {
+    if (!job?.job_id) return;
+    clearTimeout(pollTimer);
+    const cancelGeneration = ++generation;
+    const cancelJobId = job.job_id;
+    cancelJob.disabled = true;
+    try {
+      job = window.KitchenRecipeCollections.normalizeJob(
+        await api("/recipe-collections/" + encodeURIComponent(cancelJobId) + "/cancel", "POST", {}),
+      );
+      if (cancelGeneration !== generation || job.job_id !== cancelJobId) return;
+      draw(job);
+      if (job.status === "cancelled") {
+        state.recipes = await api("/recipes");
+        if (state.view === "recipes") await refreshView();
+      }
+    } catch (error) {
+      status.textContent = error.message;
+    } finally {
+      cancelJob.disabled = false;
+    }
+  }, "quiet");
+  cancelJob.hidden = true;
+  const previewButton = button("Hent Oda-samlinger", () => startPreview().catch((error) => { status.textContent = error.message; }), "primary");
+  previewButton.dataset.collectionFocus = "preview";
+  function draw(nextJob) {
+    job = window.KitchenRecipeCollections.normalizeJob(nextJob);
+    rememberRecipeCollectionJob(job);
+    const entriesById = new Map(job.entries.map((entry) => [entry.id, entry]));
+    for (const id of selectedIds) {
+      const entry = entriesById.get(id);
+      const importingSelection = job.status === "importing" && entry?.status === "importing";
+      if (!entry || (!window.KitchenRecipeCollections.canSelect(entry) && !importingSelection)) selectedIds.delete(id);
+    }
+    const focusKey = document.activeElement?.dataset?.collectionFocus;
+    status.textContent = window.KitchenRecipeCollections.progress(job);
+    errors.replaceChildren(...job.errors.map(() => el("li", "Oda avbrøt innhentingen. Kontroller tilkoblingen og hent samlingene på nytt.")));
+    if (job.truncated)
+      errors.append(el("li", "Oda-resultatet nådde sidegrensen. Listen kan være ufullstendig; hent på nytt senere."));
+    entries.replaceChildren();
+    if (["ready", "importing", "completed", "cancelled", "failed"].includes(job.status)) {
+      if (!job.entries.length) {
+        add(entries, empty(
+          job.errors.length ? "Oda kunne ikke hente oppskriftene" : "Ingen oppskrifter i samlingen",
+          "Kontroller Oda-tilkoblingen, eller prøv å hente samlingen på nytt.",
+        ));
+      }
+      job.entries.forEach((entry) => {
+        const card = el("article", null, "card collection-entry");
+        const heading = el("div", null, "collection-entry-heading");
+        if (window.KitchenRecipeCollections.canSelect(entry)) {
+          const choice = el("label", null, "collection-choice");
+          const checkbox = el("input");
+          checkbox.type = "checkbox";
+          checkbox.checked = selectedIds.has(entry.id);
+          checkbox.dataset.collectionFocus = "entry-" + entry.id;
+          checkbox.setAttribute("aria-label", "Velg oppskriften " + entry.title + " for import");
+          checkbox.addEventListener("change", () => {
+            if (checkbox.checked) selectedIds.add(entry.id);
+            else selectedIds.delete(entry.id);
+            importButton.disabled = selectedIds.size === 0 || !["ready", "completed"].includes(job.status);
+            selectedCount.textContent = `${selectedIds.size} valgte oppskrifter`;
+          });
+          add(choice, checkbox, el("span", entry.title));
+          heading.append(choice);
+        } else add(heading, el("strong", entry.title));
+        const badges = entry.badges.map((badge) => badge === "Liked on Oda" ? "Likt på Oda" : badge === "Ingredients bought on Oda" ? "Ingredienser bestilt på Oda" : badge);
+        badges.forEach((badge) => heading.append(el("span", badge, "badge")));
+        const details = el("p", window.KitchenRecipeCollections.entryStatus(entry.status), "muted");
+        if (typeof entry.metadata?.deliveriesCount === "number" && Number.isFinite(entry.metadata.deliveriesCount) && entry.metadata.deliveriesCount >= 0)
+          details.textContent += " · Bestilt " + formatUiCount(entry.metadata.deliveriesCount) + " ganger";
+        if (entry.status === "failed") details.textContent += " · Kontroller kildelenken eller prøv importen på nytt.";
+        add(card, heading, details);
+        if (entry.source_url) {
+          try {
+            const sourceUrl = new URL(entry.source_url);
+            if (["https:", "http:"].includes(sourceUrl.protocol)) {
+              const link = el("a", "Vis oppskriften hos Oda", "source-link");
+              link.href = sourceUrl.href;
+              link.target = "_blank";
+              link.rel = "noopener noreferrer";
+              add(card, link);
+            }
+          } catch {}
+        }
+        if (entry.image_url) add(card, recipeImage({ title: entry.title, image_url: entry.image_url }));
+        entries.append(card);
+      });
+    }
+    selectedCount.textContent = `${selectedIds.size} valgte oppskrifter`;
+    importButton.disabled = selectedIds.size === 0 || !["ready", "completed"].includes(job.status);
+    retryPreview.hidden = !["failed", "cancelled", "completed", "ready"].includes(job.status);
+    retryPreview.textContent = ["previewing", "importing"].includes(job.status) ? "Hent status på nytt" : "Hent samlingene på nytt";
+    retryPreview.disabled = false;
+    cancelJob.hidden = !["previewing", "importing"].includes(job.status);
+    previewButton.hidden = Boolean(job);
+    if (focusKey) entries.querySelector(`[data-collection-focus="${CSS.escape(focusKey)}"]`)?.focus();
+  }
+  async function startPreview() {
+    if (previewStarting) return;
+    if (!selectedKinds.size) throw new Error("Velg minst én Oda-samling.");
+    const requestedKinds = [...selectedKinds];
+    if (job && JSON.stringify([...job.kinds].sort()) !== JSON.stringify([...requestedKinds].sort()) && selectedIds.size) {
+      selectedIds.clear();
+      status.textContent = "Samlingene er endret, så tidligere valg er fjernet. Velg oppskrifter fra den nye listen.";
+    }
+    clearTimeout(pollTimer);
+    previewStarting = true;
+    const requestGeneration = ++generation;
+    previewButton.disabled = true;
+    retryPreview.disabled = true;
+    importButton.disabled = true;
+    try {
+      const nextJob = window.KitchenRecipeCollections.normalizeJob(
+        await api("/recipe-collections", "POST", { kinds: requestedKinds }),
+      );
+      if (requestGeneration !== generation) return;
+      job = nextJob;
+      draw(job);
+      schedulePoll();
+    } catch (error) {
+      if (requestGeneration !== generation) return;
+      status.textContent = error.message;
+      retryPreview.hidden = false;
+      retryPreview.disabled = false;
+    } finally {
+      previewStarting = false;
+      previewButton.disabled = false;
+    }
+  }
+  function schedulePoll() {
+    clearTimeout(pollTimer);
+    if (!job || !["previewing", "importing"].includes(job.status)) return;
+    const watchedGeneration = generation;
+    const watchedJobId = job.job_id;
+    pollTimer = setTimeout(async () => {
+      if (!root.isConnected || watchedGeneration !== generation || pollOwner !== state.recipeCollectionPollGeneration) return;
+      try {
+        const nextJob = window.KitchenRecipeCollections.normalizeJob(
+          await api("/recipe-collections/" + encodeURIComponent(watchedJobId)),
+        );
+        if (watchedGeneration !== generation || job?.job_id !== watchedJobId || pollOwner !== state.recipeCollectionPollGeneration) return;
+        job = nextJob;
+        draw(job);
+        if (job.status === "completed" || job.status === "cancelled") {
+          state.recipes = await api("/recipes");
+          if (state.view === "recipes") await refreshView();
+        }
+      } catch (error) {
+        if (watchedGeneration !== generation || job?.job_id !== watchedJobId) return;
+        status.textContent = error.message + " Valgene dine er beholdt.";
+        retryPreview.hidden = false;
+        retryPreview.disabled = false;
+        return;
+      }
+      schedulePoll();
+    }, 800);
+  }
+  const selectedCount = el("p", "0 valgte oppskrifter", "muted");
+  add(
+    form,
+    picker,
+    status,
+    errors,
+    entries,
+    selectedCount,
+    el("p", "Oppskrifter som allerede finnes, mangler offentlig kilde eller ikke kan valideres, vises uten valg. Eksisterende oppskrifter blir aldri overskrevet.", "muted"),
+    actions,
+  );
+  add(actions, retryPreview, cancelJob, importButton);
+  add(actions, previewButton);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    startPreview().catch((error) => { status.textContent = error.message; });
+  });
+  add(root, form);
+  if (resumeJobId) {
+    status.textContent = "Henter status for importen …";
+    api("/recipe-collections/" + encodeURIComponent(resumeJobId))
+      .then((response) => {
+        const resumed = window.KitchenRecipeCollections.normalizeJob(response);
+        if (pollOwner !== state.recipeCollectionPollGeneration || !root.isConnected) return;
+        job = resumed;
+        draw(job);
+        schedulePoll();
+      })
+      .catch((error) => {
+        if (pollOwner === state.recipeCollectionPollGeneration) status.textContent = error.message;
+      });
+  }
 }
 function importForm() {
   const root = openDialog("Importer en oppskrift");
@@ -4442,6 +5200,14 @@ function renderSettings(main) {
 $("#modal").addEventListener("cancel", (event) => {
   if (state.cartConfirming) event.preventDefault();
 });
+$("#modal").addEventListener("close", () => {
+  const modal = $("#modal");
+  if (modal.dataset.recipeCollection !== "true") return;
+  delete modal.dataset.recipeCollection;
+  state.view = "recipes";
+  location.hash = "recipes";
+  render();
+});
 document
   .querySelectorAll("[data-view]")
   .forEach((node) =>
@@ -4477,9 +5243,31 @@ function refreshShoppingOnReturn() {
 window.addEventListener("focus", refreshShoppingOnReturn);
 window.addEventListener("pageshow", refreshShoppingOnReturn);
 document.addEventListener("visibilitychange", refreshShoppingOnReturn);
+async function refreshTrackedRecipeCollectionJob() {
+  const jobId = state.recipeCollectionJob?.job_id;
+  if (!jobId || !["previewing", "importing"].includes(state.recipeCollectionJob.status)) return;
+  try {
+    const job = window.KitchenRecipeCollections.normalizeJob(
+      await api("/recipe-collections/" + encodeURIComponent(jobId)),
+    );
+    if (state.recipeCollectionJob?.job_id !== jobId) return;
+    rememberRecipeCollectionJob(job);
+    if (["completed", "cancelled"].includes(job.status)) {
+      state.recipes = await api("/recipes");
+      if (state.view === "recipes") render();
+    }
+  } catch {}
+}
+window.addEventListener("focus", refreshTrackedRecipeCollectionJob);
+window.addEventListener("pageshow", refreshTrackedRecipeCollectionJob);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") void refreshTrackedRecipeCollectionJob();
+});
 $("#modal").addEventListener("close", queuePendingShoppingRefresh);
 async function start() {
   try {
+    let rememberedCollectionId = null;
+    try { rememberedCollectionId = sessionStorage.getItem("recipeCollectionJobId"); } catch {}
     const odaResult = new URLSearchParams(location.search).get("oda");
     const params = new URLSearchParams(location.search);
     const requestedDate = parseDate(params.get("date"));
@@ -4498,6 +5286,15 @@ async function start() {
       api("/recipes"),
     ]);
     await loadConnectionStatus();
+    if (rememberedCollectionId) {
+      try {
+        rememberRecipeCollectionJob(window.KitchenRecipeCollections.normalizeJob(
+          await api("/recipe-collections/" + encodeURIComponent(rememberedCollectionId)),
+        ));
+      } catch {
+        rememberRecipeCollectionJob(null);
+      }
+    }
     const requested = location.hash.slice(1);
     if (odaResult || requested === "basket") state.shoppingPanel = "oda";
     const requestedView = requested === "basket" ? "shopping" : requested;

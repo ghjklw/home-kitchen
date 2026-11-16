@@ -219,6 +219,8 @@
         ? values.source_ingredients.map((item) => ({ ...item }))
         : [],
       provenance: values.provenance || null,
+      ...(values.photo_source ? { photo_source: { ...values.photo_source } } : {}),
+      ...(values.image_attribution ? { image_attribution: { ...values.image_attribution } } : {}),
     };
     const isAdaptedDraft = !mode.isEditing && mode.source === "ai";
     if (isAdaptedDraft)

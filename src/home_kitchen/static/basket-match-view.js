@@ -53,8 +53,8 @@
       searching: "Søker hos Oda",
       matched: "Forslagene er klare",
       no_results: "Ingen treff funnet",
-      search_failed: "Søket mislyktes",
-      search_unavailable: "Søket er ikke tilgjengelig",
+      search_failed: "Produktsøket kunne ikke fullføres. Prøv igjen.",
+      search_unavailable: "Produktsøk er midlertidig utilgjengelig.",
     })[status] || "Søkestatus er ikke tilgjengelig";
   }
 
@@ -75,9 +75,9 @@
     };
   }
 
-  function formatNeedQuantity(need, formatQuantity = (value) => String(value ?? "")) {
+  function formatNeedQuantity(need, formatQuantity = (value) => String(value ?? ""), formatUnit = (value) => String(value ?? "").trim()) {
     const quantity = formatQuantity(need?.quantity);
-    const unit = String(need?.unit ?? "").trim();
+    const unit = formatUnit(need?.unit, need?.quantity);
     return [need?.approximate === true ? "ca. " + quantity : quantity, unit]
       .filter(Boolean)
       .join(" ");

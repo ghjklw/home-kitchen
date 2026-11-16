@@ -464,6 +464,13 @@ _IDENTITY_FAMILIES = (
         100,
     ),
     _IdentityFamily(
+        "coffee-whitener",
+        (),
+        (("unspecified", r"\bcoffee[\s-]+whiteners?\b"),),
+        (),
+        100,
+    ),
+    _IdentityFamily(
         "rice-drink",
         (),
         (("unspecified", r"\b(?:rice\s+milk|rice\s+drink|rismelk|risdrikk)\b"),),

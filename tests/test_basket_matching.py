@@ -795,6 +795,7 @@ def test_unmodeled_semantic_form_qualifiers_stay_unverified_and_untranslated(que
 @pytest.mark.parametrize(
     ("query", "product_name", "expected"),
     [
+        ("coffee", "Coffee Whitener", None),
         ("ground coffee", "Kaffebønner", None),
         ("ground coffee", "Filterkaffe", "compatible"),
         ("malt kaffe", "Kaffebønner", None),

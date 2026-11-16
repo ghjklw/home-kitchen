@@ -47,6 +47,19 @@ ODA_QUERY_BATCH_SIZE = 5
 # is strongest with Bokmål. Keep the source query intact and add one localized
 # query so the provider request and the whole-plan cache remain bounded.
 _BOKMAL_INGREDIENTS = {
+    "all-purpose flour": "hvetemel",
+    "all purpose flour": "hvetemel",
+    "plain flour": "hvetemel",
+    "large eggs": "egg L",
+    "large egg": "egg L",
+    "unsalted butter": "usaltet smør",
+    "whole milk": "helmelk",
+    "granulated sugar": "sukker",
+    "caster sugar": "sukker",
+    "vanilla extract": "vaniljeekstrakt",
+    "vanilla essence": "vaniljeessens",
+    "cocoa powder": "kakaopulver",
+    "hot water": "varmt vann",
     "chicken breast": "kyllingfilet",
     "chicken breasts": "kyllingfilet",
     "chicken thigh": "kyllinglår",
@@ -96,6 +109,11 @@ _BOKMAL_INGREDIENTS = {
     "salmon": "laks",
     "rice": "ris",
     "pasta": "pasta",
+    "wheat flour": "hvetemel",
+    "egg yolks": "eggeplomme",
+    "egg whites": "eggehvite",
+    "powdered sugar": "melis",
+    "icing sugar": "melis",
 }
 _BOKMAL_QUALIFIERS = {
     "fresh": "ferske",
@@ -120,17 +138,173 @@ _QUALIFIER_WORDS = re.compile(
     re.I,
 )
 _TRAILING_FORM_QUALIFIER = re.compile(
-    r"^(.*?)(?:,\s*|\s+)(hakket|finhakket|terninger|malt|hel|fryst|hermetisk|tørket|røkt)$",
+    r"^(.*?)(?:,\s*|\s+)(hakket|finhakket|terninger|malt|hel|fryst|hermetisk|tørket|røkt|"
+    r"for dusting|plus extra for greasing|separated|to taste|as needed)$",
     re.I,
 )
+_RECIPE_INSTRUCTION_SUFFIX = re.compile(
+    r"(?:,\s*|\s+)(?:plus\s+extra\s+for\s+greasing|for\s+greasing|for\s+dusting|"
+    r"separated|to\s+taste|as\s+needed)\s*$",
+    re.I,
+)
+_INGREDIENT_ALIAS_FAMILIES = {
+    "tomato": ("tomatoes",),
+    "tomatoes": ("tomato",),
+    "potato": ("potatoes",),
+    "potatoes": ("potato",),
+    "carrot": ("carrots",),
+    "carrots": ("carrot",),
+    "egg": ("eggs", "large egg", "large eggs"),
+    "eggs": ("egg", "large egg", "large eggs"),
+    "large egg": ("egg", "eggs", "large eggs"),
+    "large eggs": ("egg", "eggs", "large egg"),
+    "chicken breast": ("chicken breasts",),
+    "chicken breasts": ("chicken breast",),
+    "chicken thigh": ("chicken thighs",),
+    "chicken thighs": ("chicken thigh",),
+}
+_FOOD_IDENTITY_RULES: dict[str, tuple[re.Pattern[str], re.Pattern[str] | None]] = {
+    "all-purpose flour": (
+        re.compile(r"\b(?:hvetemel|wheat flour|all[- ]purpose flour|plain flour)\b", re.I),
+        re.compile(r"\b(?:mix|blanding|pannekake|pancake|cake|kake|dough|deig)\b", re.I),
+    ),
+    "all purpose flour": (
+        re.compile(r"\b(?:hvetemel|wheat flour|all[- ]purpose flour|plain flour)\b", re.I),
+        re.compile(r"\b(?:mix|blanding|pannekake|pancake|cake|kake|dough|deig)\b", re.I),
+    ),
+    "plain flour": (
+        re.compile(r"\b(?:hvetemel|wheat flour|all[- ]purpose flour|plain flour)\b", re.I),
+        re.compile(r"\b(?:mix|blanding|pannekake|pancake|cake|kake|dough|deig)\b", re.I),
+    ),
+    "flour": (
+        re.compile(r"\b(?:hvetemel|wheat flour|all[- ]purpose flour|plain flour|flour)\b", re.I),
+        re.compile(r"\b(?:mix|blanding|pannekake|pancake|cake|kake|dough|deig)\b", re.I),
+    ),
+    "large eggs": (
+        re.compile(r"(?=.*\b(?:egg|eggs)\b)(?=.*\b(?:large|store|l|xl|m/l)\b)", re.I),
+        None,
+    ),
+    "large egg": (
+        re.compile(r"(?=.*\b(?:egg|eggs)\b)(?=.*\b(?:large|store|l|xl|m/l)\b)", re.I),
+        None,
+    ),
+    "eggs": (re.compile(r"\b(?:egg|eggs)\b", re.I), None),
+    "egg": (re.compile(r"\b(?:egg|eggs)\b", re.I), None),
+    "unsalted butter": (
+        re.compile(r"(?=.*\b(?:smør|butter)\b)(?=.*\b(?:usaltet|unsalted)\b)", re.I),
+        None,
+    ),
+    "butter": (re.compile(r"\b(?:smør|butter)\b", re.I), None),
+    "whole milk": (re.compile(r"\b(?:helmelk|whole milk|wholemilk)\b", re.I), None),
+    "milk": (re.compile(r"\b(?:melk|milk)\b", re.I), None),
+    "vegetable oil": (
+        re.compile(
+            r"\b(?:matolje|planteolje|rapsolje|solsikkeolje|olivenolje|maisolje|"
+            r"vegetable oil|cooking oil|rapeseed oil|sunflower oil|olive oil|canola oil)\b",
+            re.I,
+        ),
+        re.compile(r"\b(?:shower|dusj|body|hud|hair|hår|massage)\b", re.I),
+    ),
+    "granulated sugar": (
+        re.compile(r"\b(?:sukker|sugar|granulated sugar|caster sugar|white sugar)\b", re.I),
+        re.compile(
+            r"\b(?:candy|candies|sweets|godteri|gummy|gummies|face|faces|sjokolade)\b", re.I
+        ),
+    ),
+    "caster sugar": (
+        re.compile(r"\b(?:sukker|sugar|granulated sugar|caster sugar|white sugar)\b", re.I),
+        re.compile(
+            r"\b(?:candy|candies|sweets|godteri|gummy|gummies|face|faces|sjokolade)\b", re.I
+        ),
+    ),
+    "sugar": (
+        re.compile(r"\b(?:sukker|sugar|granulated sugar|caster sugar|white sugar)\b", re.I),
+        re.compile(
+            r"\b(?:candy|candies|sweets|godteri|gummy|gummies|face|faces|sjokolade)\b", re.I
+        ),
+    ),
+    "vanilla extract": (
+        re.compile(
+            r"\b(?:vaniljeekstrakt|vaniljeessens|vaniljearoma|vanilla extract|vanilla essence)\b",
+            re.I,
+        ),
+        re.compile(r"\b(?:ice cream|icecream|gelato|softis)\b", re.I),
+    ),
+    "vanilla essence": (
+        re.compile(
+            r"\b(?:vaniljeekstrakt|vaniljeessens|vaniljearoma|vanilla extract|vanilla essence)\b",
+            re.I,
+        ),
+        re.compile(r"\b(?:ice cream|icecream|gelato|softis)\b", re.I),
+    ),
+    "cocoa powder": (
+        re.compile(r"\b(?:kakaopulver|cocoa powder|cacao powder)\b", re.I),
+        None,
+    ),
+    "hot water": (re.compile(r"\b(?:varmt vann|hot water)\b", re.I), None),
+}
+
+
+def _clean_ingredient_query(query: str) -> str:
+    cleaned = " ".join(query.split())
+    previous = None
+    while cleaned != previous:
+        previous = cleaned
+        cleaned = _RECIPE_INSTRUCTION_SUFFIX.sub("", cleaned).strip(" ,")
+    return cleaned
+
+
+def _ingredient_identity_terms(query: str) -> tuple[str, ...]:
+    cleaned = _clean_ingredient_query(query)
+    match = _INGREDIENT_PHRASES.search(cleaned)
+    if match is None:
+        return ()
+    alias = match.group(0).casefold()
+    if alias == "hot water" and cleaned.casefold() != "hot water":
+        return ()
+    family = _INGREDIENT_ALIAS_FAMILIES.get(alias, ())
+    aliases = (alias, *family)
+    translations = tuple(
+        _BOKMAL_INGREDIENTS[item] for item in aliases if item in _BOKMAL_INGREDIENTS
+    )
+    return tuple(dict.fromkeys((*aliases, *translations)))
+
+
+def _product_matches_ingredient(query: str, product: ProviderProduct) -> bool:
+    terms = _ingredient_identity_terms(query)
+    if not terms:
+        return True
+    alias_match = _INGREDIENT_PHRASES.search(_clean_ingredient_query(query))
+    assert alias_match is not None
+    alias = alias_match.group(0).casefold()
+    text = " ".join((product.name, product.brand or "")).casefold()
+    rule = _FOOD_IDENTITY_RULES.get(alias)
+    if rule is not None:
+        positive, negative = rule
+        return positive.search(text) is not None and not (
+            negative is not None and negative.search(text) is not None
+        )
+    for term in terms:
+        escaped = re.escape(term)
+        if len(term.split()) == 1:
+            if term.endswith("y"):
+                escaped = re.escape(term[:-1]) + r"(?:y|ies)"
+            elif term.endswith("o"):
+                escaped = re.escape(term) + r"(?:es)?"
+            elif not term.endswith("s"):
+                escaped = re.escape(term) + r"s?"
+        if re.search(rf"(?<!\w){escaped}(?!\w)", text, re.I):
+            return True
+    return False
 
 
 def _bokmal_ingredient_query(query: str) -> str | None:
     """Translate known food terms and common form qualifiers for Oda search."""
     if re.search(r"\bcoffee[\s-]*mate\b", query, re.I):
         return None
+    cleaned = _clean_ingredient_query(query)
     translated, count = _INGREDIENT_PHRASES.subn(
-        lambda match: _BOKMAL_INGREDIENTS[match.group(0).casefold()], query
+        lambda match: _BOKMAL_INGREDIENTS[match.group(0).casefold()], cleaned
     )
     if not count:
         return None
@@ -280,6 +454,8 @@ class OdaSearchAdapter:
             )
 
         def product_is_mismatch(query: str, product: ProviderProduct) -> bool:
+            if not _product_matches_ingredient(query, product):
+                return True
             normalized = " ".join(query.casefold().split())
             text = " ".join((product.name, product.description, product.brand or "")).casefold()
             coffee_need = (

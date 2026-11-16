@@ -403,7 +403,7 @@ async def test_oda_adapter_localizes_imported_ingredients_and_preserves_product_
                     for query, product_id, name in [
                         ("chicken breast, chopped", 101, "Prior query result"),
                         ("hakket kyllingfilet", 102, "Kyllingfilet, hakket"),
-                        ("fresh tomatoes", 201, "Prior tomato result"),
+                        ("fresh tomatoes", 201, "Fresh fruit box"),
                         ("ferske tomater", 202, "Tomater, ferske"),
                         ("creme fraiche", 301, "Prior crème fraîche result"),
                         ("crème fraîche", 302, "Crème fraîche 300 g"),
@@ -419,13 +419,13 @@ async def test_oda_adapter_localizes_imported_ingredients_and_preserves_product_
     )
 
     assert [[product.name for product in group.products] for group in groups] == [
-        ["Prior query result", "Kyllingfilet, hakket"],
-        ["Prior tomato result", "Tomater, ferske"],
+        ["Kyllingfilet, hakket"],
+        ["Tomater, ferske"],
         ["Prior crème fraîche result", "Crème fraîche 300 g"],
     ]
     assert [[product.product_id for product in group.products] for group in groups] == [
-        ["101", "102"],
-        ["201", "202"],
+        ["102"],
+        ["202"],
         ["301", "302"],
     ]
 
@@ -469,6 +469,221 @@ async def test_oda_adapter_rejects_bokmal_coffee_cream_and_tomato_puree():
     assert [product.name for product in groups[1].products] == ["Coffee Mate Original"]
     assert [product.name for product in groups[2].products] == ["Tomater, ferske"]
     assert [product.name for product in groups[3].products] == ["Fresh tomatoes"]
+
+
+@pytest.mark.asyncio
+async def test_oda_adapter_localizes_imported_ingredients_and_rejects_weak_identity_hits():
+    class Oda:
+        def __init__(self):
+            self.calls = 0
+
+        async def search_products(self, actor_id, queries, page, size):
+            expected = [
+                [
+                    "all-purpose flour",
+                    "hvetemel",
+                    "large eggs, separated",
+                    "egg L",
+                    "unsalted butter, plus extra for greasing",
+                    "usaltet smør",
+                    "whole milk",
+                    "helmelk",
+                ],
+                [
+                    "vegetable oil",
+                    "matolje",
+                    "granulated sugar",
+                    "sukker",
+                    "vanilla extract",
+                    "vaniljeekstrakt",
+                    "cocoa powder, for dusting",
+                    "kakaopulver",
+                ],
+            ]
+            assert queries == expected[self.calls]
+            self.calls += 1
+            values = {
+                "all-purpose flour": ["Loop No12 nicotine", "Almond flour"],
+                "hvetemel": ["Siktet hvetemel"],
+                "large eggs, separated": ["Old El Paso Large tortillas"],
+                "egg L": ["Frittgående egg M/L"],
+                "unsalted butter, plus extra for greasing": ["R Lev Vel diapers"],
+                "usaltet smør": ["Usaltet smør"],
+                "whole milk": ["Ritter Sport whole-hazelnut chocolate"],
+                "helmelk": ["Helmelk"],
+                "vegetable oil": ["Nivea shower oil"],
+                "matolje": ["Rapsolje"],
+                "granulated sugar": ["Dr. Oetker Unicorn Sugar Faces"],
+                "sukker": ["Sukker"],
+                "vanilla extract": ["Mövenpick vanilla ice cream"],
+                "vaniljeekstrakt": ["Vaniljeekstrakt"],
+                "cocoa powder, for dusting": ["Gluten-free spaghetti"],
+                "kakaopulver": ["Kakaopulver"],
+            }
+            return {
+                "result": [
+                    {
+                        "query": query,
+                        "hasMore": False,
+                        "products": [
+                            {
+                                "id": index * 10 + product_index,
+                                "name": name,
+                                "description": name,
+                                "price": "10",
+                                "unitPrice": "10",
+                                "unitName": "per item",
+                                "url": f"https://oda.com/no/products/{index}-{product_index}-item",
+                            }
+                            for product_index, name in enumerate(values[query])
+                        ],
+                    }
+                    for index, query in enumerate(queries)
+                ]
+            }
+
+    names = [
+        "all-purpose flour",
+        "large eggs, separated",
+        "unsalted butter, plus extra for greasing",
+        "whole milk",
+        "vegetable oil",
+        "granulated sugar",
+        "vanilla extract",
+        "cocoa powder, for dusting",
+    ]
+    adapter = OdaSearchAdapter(Oda())
+    groups = []
+    for offset in range(0, len(names), 4):
+        groups.extend(
+            await adapter.search_products("household-1", names[offset : offset + 4], 1, 5)
+        )
+    assert [[product.name for product in group.products] for group in groups] == [
+        ["Siktet hvetemel"],
+        ["Frittgående egg M/L"],
+        ["Usaltet smør"],
+        ["Helmelk"],
+        ["Rapsolje"],
+        ["Sukker"],
+        ["Vaniljeekstrakt"],
+        ["Kakaopulver"],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_oda_adapter_keeps_manual_non_food_search_results():
+    class Oda:
+        async def search_products(self, actor_id, queries, page, size):
+            assert queries == ["dish soap"]
+            return {
+                "result": [
+                    {
+                        "query": "dish soap",
+                        "hasMore": False,
+                        "products": [
+                            {
+                                "id": 1,
+                                "name": "Dish soap",
+                                "description": "Dish soap",
+                                "price": "10",
+                                "unitPrice": "10",
+                                "unitName": "per item",
+                                "url": "https://oda.com/no/products/1-dish-soap",
+                            }
+                        ],
+                    }
+                ]
+            }
+
+    groups = await OdaSearchAdapter(Oda()).search_products("household-1", ["dish soap"], 1, 5)
+    assert [product.name for product in groups[0].products] == ["Dish soap"]
+
+
+@pytest.mark.asyncio
+async def test_oda_adapter_rejects_tonic_as_hot_water_but_keeps_original_query():
+    class Oda:
+        async def search_products(self, actor_id, queries, page, size):
+            assert queries == ["hot water", "varmt vann"]
+            return {
+                "result": [
+                    {
+                        "query": query,
+                        "hasMore": False,
+                        "products": [
+                            {
+                                "id": index,
+                                "name": "Raspberry tonic",
+                                "description": "Raspberry tonic",
+                                "price": "10",
+                                "unitPrice": "10",
+                                "unitName": "per item",
+                                "url": f"https://oda.com/no/products/{index}-tonic",
+                            }
+                        ],
+                    }
+                    for index, query in enumerate(queries)
+                ]
+            }
+
+    groups = await OdaSearchAdapter(Oda()).search_products("household-1", ["hot water"], 1, 5)
+    assert groups[0].query == "hot water"
+    assert groups[0].products == []
+
+
+@pytest.mark.asyncio
+async def test_search_cache_only_reuses_semantically_eligible_oda_products():
+    class Oda:
+        def __init__(self):
+            self.calls = 0
+
+        def search_cache_context(self, actor_id):
+            assert actor_id == "household-1"
+            return 1
+
+        async def search_products(self, actor_id, queries, page, size):
+            self.calls += 1
+            assert queries == ["large eggs, separated", "egg L"]
+            return {
+                "result": [
+                    {
+                        "query": query,
+                        "hasMore": False,
+                        "products": [
+                            {
+                                "id": index * 10 + product_index,
+                                "name": name,
+                                "description": name,
+                                "price": "10",
+                                "unitPrice": "10",
+                                "unitName": "per item",
+                                "url": f"https://oda.com/no/products/{index}-{product_index}-item",
+                            }
+                            for product_index, name in enumerate(names)
+                        ],
+                    }
+                    for index, (query, names) in enumerate(
+                        [
+                            ("large eggs, separated", ["Old El Paso Large tortillas"]),
+                            ("egg L", ["Frittgående egg M/L"]),
+                        ]
+                    )
+                ]
+            }
+
+    oda = Oda()
+    service = BasketMatchingService(
+        FakeInventory([line("large eggs, separated", unit="item")]),
+        OdaSearchAdapter(oda),
+        media_fetcher=lambda _: _media(None),
+    )
+    first = await service.find_products("household-1", date(2026, 11, 16), date(2026, 11, 22))
+    second = await service.find_products("household-1", date(2026, 11, 16), date(2026, 11, 22))
+
+    for result in (first, second):
+        assert [candidate.name for candidate in result.needs[0].candidates] == [
+            "Frittgående egg M/L"
+        ]
+    assert oda.calls == 1
 
 
 async def _media(pack_description):

@@ -45,6 +45,12 @@ from fixtures.synthetic_kitchen.purchase_history import (
     coop_receipt_detail_revisions,
     history_failure_scenarios,
     oda_order_receipt_scenarios,
+    rema1000_transaction_pages,
+    synthetic_rema1000_receipt_json,
+    synthetic_rema1000_receipt_revisions,
+    synthetic_rema1000_transactions_json,
+    synthetic_rema1000_unauthenticated_html,
+    synthetic_rema1000_unauthenticated_json,
     synthetic_trumf_receipt_revisions,
     synthetic_trumf_rsc_list_html,
     synthetic_trumf_rsc_receipt_html,
@@ -217,6 +223,44 @@ def test_trumf_rsc_fixtures_and_revisions_structure():
     assert stub.payload["hasReceipt"] is False
     assert refund.lifecycle == "refund_scenario"
     assert refund.payload["belop"] < 0
+
+
+def test_rema1000_fixtures_and_revisions_structure():
+    pages = rema1000_transaction_pages()
+    assert len(pages) == 3
+    first_txs = cast(list[dict[str, Any]], pages[0].response)
+    assert first_txs[0]["receiptId"] == "synthetic-rema-rec-100"
+    assert first_txs[0]["chain"] == "REMA 1000"
+    assert first_txs[0]["totalAmount"] == 184.50
+    assert first_txs[0]["hasReceipt"] is True
+
+    txs_json = synthetic_rema1000_transactions_json()
+    assert "synthetic-rema-rec-100" in txs_json
+    assert "REMA 1000 Vulkan" in txs_json
+
+    rec_json = synthetic_rema1000_receipt_json()
+    assert "FIKTIV REMA 1000 HELMELK 1L" in rec_json
+    assert "10 på 10" in rec_json
+
+    unauth_html = synthetic_rema1000_unauthenticated_html()
+    assert "Logg inn" in unauth_html
+
+    unauth_json = synthetic_rema1000_unauthenticated_json()
+    assert "Unauthorized" in unauth_json
+
+    revisions = synthetic_rema1000_receipt_revisions()
+    base, corrected, stub, refund = revisions
+
+    assert base.provider == "rema1000"
+    assert base.external_id == "synthetic-rema-rec-100"
+    assert base.lifecycle == "completed"
+    assert corrected.external_id == base.external_id
+    assert corrected.lifecycle == "corrected"
+    assert corrected.revision_id != base.revision_id
+    assert stub.lifecycle == "completed"
+    assert stub.payload["hasReceipt"] is False
+    assert refund.lifecycle == "refund_scenario"
+    assert refund.payload["totalAmount"] < 0
 
 
 def test_oda_order_scenarios_keep_internal_lifecycle_separate_from_payload():

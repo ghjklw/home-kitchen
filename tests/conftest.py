@@ -1,8 +1,9 @@
 """Each database test owns an isolated migrated PostgreSQL schema."""
 
+import json
 import os
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, quote_plus
 from uuid import uuid4
 
 import pytest
@@ -40,7 +41,15 @@ def _database_password_replacements():
         return ()
     if not password:
         return ()
-    return tuple(dict.fromkeys((password, quote(password, safe=""))))
+    representations = {
+        password,
+        quote(password, safe=""),
+        quote_plus(password, safe=""),
+        repr(password)[1:-1],
+        ascii(password)[1:-1],
+        json.dumps(password, ensure_ascii=True)[1:-1],
+    }
+    return tuple(sorted(representations, key=len, reverse=True))
 
 
 def _redact_diagnostic_text(value, secrets):

@@ -5,8 +5,10 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import quote, quote_plus
 
 _PASSWORD_MARKER = "__DB_SECRET_REDACTION_CANARY__"
+_ESCAPED_PASSWORD_MARKER = "__DB_SECRET_QUOTE_'_DOUBLE_\"_BACKSLASH_\\_PERCENT_%__"
 
 _PLUGIN_SOURCE = """
 import os
@@ -123,7 +125,9 @@ def test_fixture_failure_output(test_database_url):
 """
 
 
-def _run_nested_pytest(tmp_path: Path, mode: str) -> tuple[subprocess.CompletedProcess[str], Path]:
+def _run_nested_pytest(
+    tmp_path: Path, mode: str, password: str = _PASSWORD_MARKER
+) -> tuple[subprocess.CompletedProcess[str], Path]:
     project = tmp_path / mode
     tests_dir = project / "tests"
     tests_dir.mkdir(parents=True)
@@ -142,7 +146,7 @@ def _run_nested_pytest(tmp_path: Path, mode: str) -> tuple[subprocess.CompletedP
     env = {
         "HOME": str(project),
         "KITCHEN_TEST_DATABASE_URL": (
-            f"postgresql+psycopg://fixture-user:{_PASSWORD_MARKER}@127.0.0.1:1/kitchen_test"
+            f"postgresql+psycopg://fixture-user:{quote(password, safe='')}@127.0.0.1:1/kitchen_test"
         ),
         "PATH": os.defpath,
         "PYTHONPATH": os.pathsep.join((str(project / "src"), str(project))),
@@ -198,3 +202,19 @@ def test_setup_migration_and_consumer_failure_output_redacts_password(
         assert "test_" in output, "isolated schema name should remain visible"
         if needs_driver_failure:
             assert connect_reached.exists(), "probe must reach the patched dialect.connect"
+
+
+def test_python_escaped_password_representations_are_redacted(tmp_path: Path) -> None:
+    result, _ = _run_nested_pytest(tmp_path, "explicit_chain", _ESCAPED_PASSWORD_MARKER)
+    output = result.stdout + result.stderr
+
+    assert result.returncode != 0, "the nested pytest probe must fail deliberately"
+    for representation in (
+        _ESCAPED_PASSWORD_MARKER,
+        quote(_ESCAPED_PASSWORD_MARKER, safe=""),
+        quote_plus(_ESCAPED_PASSWORD_MARKER, safe=""),
+        repr(_ESCAPED_PASSWORD_MARKER)[1:-1],
+        ascii(_ESCAPED_PASSWORD_MARKER)[1:-1],
+    ):
+        assert representation not in output, "an encoded or escaped database password leaked"
+    assert "ValueError: [REDACTED]" in output, "the chained exception should remain useful"

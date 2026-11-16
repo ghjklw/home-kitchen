@@ -279,6 +279,25 @@ h3 {
 .discovery-import-error {
   margin: 8px 0 0;
 }
+.recipe-acquisition-options {
+  align-items: stretch;
+  flex-direction: column;
+}
+.recipe-acquisition-options button {
+  text-align: left;
+}
+.photo-source-evidence {
+  margin: 0 0 16px;
+}
+.photo-source-evidence p {
+  margin: 0 0 6px;
+}
+.recipe-photo-original {
+  display: block;
+  width: 100%;
+  max-height: 70dvh;
+  object-fit: contain;
+}
 .planned-cooking-view .callout {
   margin-top: 14px;
 }

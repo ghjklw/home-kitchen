@@ -107,6 +107,31 @@ test("AI revision keeps an adapted draft editable when quantities need review", 
   });
 });
 
+test("AI revision preserves the private cookbook photo and selected image credit", () => {
+  const photoSource = { id: "photo-id", book_title: "God mat", page: "17" };
+  const imageAttribution = {
+    provider: "wikimedia_commons",
+    provider_id: "image-id",
+    query: "suppe",
+    title: "Soup",
+    image_url: "https://images.example/soup.jpg",
+    source_url: "https://commons.wikimedia.org/wiki/File:Soup.jpg",
+    creator: "Example",
+    license: "CC BY-SA 4.0",
+    license_url: "https://creativecommons.org/licenses/by-sa/4.0/",
+  };
+  const payload = buildRevisionRequest({
+    title: "Suppe",
+    servings: 2,
+    ingredients: [{ name: "gulrot" }],
+    instructions: ["Kok"],
+    photo_source: photoSource,
+    image_attribution: imageAttribution,
+  }, { isEditing: false, source: "ai" }, "gjør den litt mildere");
+  assert.deepEqual(payload.draft.photo_source, photoSource);
+  assert.deepEqual(payload.draft.image_attribution, imageAttribution);
+});
+
 test("AI revision sends complete saved recipes and requires explicit quantities and units", () => {
   const values = {
     title: "Bread", servings: 2,

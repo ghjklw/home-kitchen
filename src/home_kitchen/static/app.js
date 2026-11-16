@@ -1165,7 +1165,7 @@ function mealForm(date = iso(state.selectedDate), recipeId, existingMeal = null)
     add(
       root,
       el("p", "Legg til den første oppskriften, og velg deretter en dag.", "muted"),
-      button("Legg til en oppskrift", () => recipeForm(), "primary"),
+      button("Legg til oppskrift", addRecipeForm, "primary"),
     );
     return;
   }
@@ -1228,11 +1228,7 @@ function renderRecipes(main) {
       "Din egen samling",
       "Oppskrifter å ta vare på.",
       "Hverdagsfavoritter, nye funn og din neste gode middag.",
-      [
-        button("Finn oppskrifter", discoveryForm),
-        button("Importer lenke", importForm),
-        button("+ Legg til oppskrift", () => recipeForm(), "primary"),
-      ],
+      [button("Legg til oppskrift", addRecipeForm, "primary")],
     ),
   );
   if (!recipeAssistantConfigured()) {
@@ -1267,7 +1263,7 @@ function renderRecipes(main) {
         empty(
           "Oppskriftsboken starter her",
           "Legg til en oppskrift du liker, eller importer en fra en lenke. Samlingen bygger du selv.",
-          button("Legg til din første oppskrift", () => recipeForm(), "primary"),
+          button("Legg til din første oppskrift", addRecipeForm, "primary"),
         ),
       );
     else if (!matches.length)
@@ -1325,6 +1321,33 @@ function recipeForm(draft = {}, source = "manual") {
         "p",
         "Kontroller ingrediensene, mengdene og fremgangsmåten før du lagrer.",
         "callout",
+      ),
+    );
+  if (draft.photo_uncertainties?.length)
+    add(
+      root,
+      add(
+        el("section", null, "callout"),
+        el("strong", "Kontroller dette fra bildet"),
+        add(
+          el("ul"),
+          ...draft.photo_uncertainties.map((note) => el("li", note)),
+        ),
+      ),
+    );
+  if (draft.photo_source)
+    add(
+      root,
+      add(
+        el("div", null, "photo-source-evidence"),
+        el(
+          "p",
+          [draft.photo_source.book_title, draft.photo_source.page ? "side " + draft.photo_source.page : ""]
+            .filter(Boolean)
+            .join(" · ") || "Kilde: privat bilde av oppskriftsside",
+          "muted",
+        ),
+        button("Vis originalbildet", () => viewRecipePhoto(draft.photo_source), "quiet"),
       ),
     );
   const form = el("form");
@@ -1510,6 +1533,8 @@ function recipeForm(draft = {}, source = "manual") {
       source_url: draft.source_url || null,
       source_ingredients: sourceIngredients,
       provenance: draft.provenance || null,
+      photo_source: draft.photo_source || null,
+      image_attribution: draft.image_attribution || null,
     };
     await api(
       isEditing ? "/recipes/" + encodeURIComponent(draft.id) : "/recipes",
@@ -1568,6 +1593,8 @@ function recipeForm(draft = {}, source = "manual") {
             image_url: imageUrl.input.value,
             source_ingredients: sourceIngredients,
             provenance: draft.provenance || null,
+            photo_source: draft.photo_source || null,
+            image_attribution: draft.image_attribution || null,
           },
           { isEditing, source },
           prompt.input.value,
@@ -1608,6 +1635,19 @@ function viewRecipe(recipe) {
     el("p", formatUiCount(recipe.servings) + " porsjoner", "muted"),
     el("h3", "Ingredienser"),
   );
+  if (recipe.photo_source) {
+    const citation = [
+      recipe.photo_source.book_title,
+      recipe.photo_source.page ? "side " + recipe.photo_source.page : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    add(
+      body,
+      el("p", citation || "Oppskriftsfoto lagret privat", "muted"),
+      button("Vis originalbildet", () => viewRecipePhoto(recipe.photo_source), "quiet"),
+    );
+  }
   const ingredients = el("ul");
   recipe.ingredients.forEach((item) => {
     const row = el("li");
@@ -1677,6 +1717,123 @@ function viewRecipe(recipe) {
     ),
   );
   add(root, body);
+}
+async function viewRecipePhoto(photoSource) {
+  const root = openDialog("Privat bilde av oppskriftssiden");
+  const status = el("p", "Henter originalbildet …", "muted");
+  add(root, status);
+  let objectUrl = null;
+  const modal = $("#modal");
+  const release = () => {
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    modal.removeEventListener("close", release);
+  };
+  modal.addEventListener("close", release);
+  try {
+    const response = await fetch("/api/recipe-photos/" + encodeURIComponent(photoSource.id), {
+      credentials: "same-origin",
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error("Det private originalbildet er ikke tilgjengelig akkurat nå.");
+    const imageBlob = await response.blob();
+    objectUrl = URL.createObjectURL(imageBlob);
+    if (!modal.open || !status.isConnected) {
+      release();
+      return;
+    }
+    const image = el("img", null, "recipe-photo-original");
+    image.src = objectUrl;
+    image.alt = "Originalt bilde av oppskriftssiden";
+    status.replaceWith(image);
+  } catch (error) {
+    status.textContent = error.message;
+  }
+}
+function addRecipeForm() {
+  const root = openDialog("Legg til oppskrift");
+  add(
+    root,
+    el("p", "Velg hvordan du vil starte. Oppskriften lagres først når du ser over og velger Lagre.", "muted"),
+  );
+  add(
+    root,
+    add(
+      el("div", null, "actions recipe-acquisition-options"),
+      button("Finn oppskrifter fra kilder", discoveryForm),
+      button("Importer fra en lenke", importForm),
+      button("Fotografer en oppskriftsside", recipePhotoForm),
+      button("Skriv inn selv", () => recipeForm(), "quiet"),
+    ),
+  );
+}
+function recipePhotoForm() {
+  const root = openDialog("Fotografer en oppskriftsside");
+  add(
+    root,
+    el(
+      "p",
+      "Bildet lagres privat i husholdningen. KI transkriberer siden til et redigerbart utkast; du kontrollerer det før du lagrer oppskriften.",
+      "callout",
+    ),
+  );
+  if (!recipeAssistantConfigured())
+    add(
+      root,
+      add(
+        el("section", null, "callout connection-prompt"),
+        el("p", "KI-tilkobling er nødvendig for å lese teksten fra bildet."),
+        connectionSettingsButton(),
+      ),
+    );
+  const form = el("form");
+  const image = field("Bilde av oppskriftssiden", "file", "", "JPEG, PNG eller WebP · maks 8 MiB");
+  image.input.accept = "image/jpeg,image/png,image/webp";
+  image.input.capture = "environment";
+  image.input.required = true;
+  const book = field("Kokebok (valgfritt)", "text", "");
+  book.input.maxLength = 300;
+  const page = field("Side (valgfritt)", "text", "");
+  page.input.maxLength = 40;
+  const status = el("p", "", "muted");
+  status.setAttribute("role", "status");
+  const retry = button("Prøv å lese bildet på nytt", async () => {
+    if (!photoSource?.id) return;
+    retry.disabled = true;
+    status.textContent = "Prøver å lese siden på nytt …";
+    try {
+      const result = await api("/recipe-photos/" + encodeURIComponent(photoSource.id) + "/redraft", "POST", {});
+      showPhotoDraft(result);
+    } catch (error) {
+      status.textContent = error.message;
+    } finally {
+      retry.disabled = false;
+    }
+  }, "quiet");
+  retry.hidden = true;
+  let photoSource = null;
+  function showPhotoDraft(result) {
+    photoSource = result?.photo_source || photoSource;
+    if (result?.status === "draft_ready" && result.draft) {
+      const draft = { ...result.draft, photo_uncertainties: result.uncertainties || [] };
+      recipeForm(draft, "ai");
+      return;
+    }
+    status.textContent = "Teksten kunne ikke leses tydelig nok. Kontroller bildet, eller prøv på nytt. Bildet og eventuell tidligere kladd er beholdt.";
+    retry.hidden = !photoSource?.id;
+  }
+  formSubmit(form, "Lag redigerbart utkast", async () => {
+    if (!recipeAssistantConfigured()) throw new Error("Sett opp KI-tilkoblingen i innstillingene før du leser inn bildet.");
+    status.textContent = "Laster opp bildet og leser oppskriften …";
+    retry.hidden = true;
+    const payload = await window.KitchenRecipePhoto.buildUpload(image.input.files?.[0], {
+      book_title: book.input.value,
+      page: page.input.value,
+    });
+    const result = await api("/recipe-photos", "POST", payload);
+    showPhotoDraft(result);
+  });
+  add(form, image.wrap, book.wrap, page.wrap, status, retry);
+  add(root, form);
 }
 function importForm() {
   const root = openDialog("Importer en oppskrift");

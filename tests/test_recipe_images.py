@@ -87,6 +87,18 @@ async def test_commons_request_is_bounded_and_uses_fixed_endpoint() -> None:
     assert result.continuation is not None
 
 
+def test_commons_http_creative_commons_license_url_is_upgraded_safely() -> None:
+    candidate = _page(
+        license_name="CC BY-SA 3.0",
+        license_url="http://creativecommons.org/licenses/by-sa/3.0/",
+    )
+
+    parsed = WikimediaCommonsImageProvider._candidate("tomato", candidate)
+
+    assert parsed is not None
+    assert parsed.license_url == "https://creativecommons.org/licenses/by-sa/3.0/"
+
+
 @pytest.mark.asyncio
 async def test_continuation_is_opaque_and_bound_to_query() -> None:
     captured = []
@@ -113,6 +125,25 @@ async def test_invalid_query_or_result_limit_does_not_call_provider() -> None:
         assert (await provider.search("x" * 201)).status == "unavailable"
         assert (await provider.search("x", limit=11)).status == "unavailable"
     assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_commons_error_envelope_is_unavailable_not_an_empty_search() -> None:
+    async with _client({"error": {"code": "ratelimited", "info": "provider detail"}}) as client:
+        result = await WikimediaCommonsImageProvider(http_client=client).search("tomato")
+
+    assert result.status == "unavailable"
+    assert result.results == []
+    assert result.detail == "Commons could not complete image search."
+
+
+@pytest.mark.asyncio
+async def test_commons_empty_envelope_remains_a_valid_no_results_search() -> None:
+    async with _client({"batchcomplete": ""}) as client:
+        result = await WikimediaCommonsImageProvider(http_client=client).search("no matching image")
+
+    assert result.status == "no_usable_results"
+    assert result.results == []
 
 
 @pytest.mark.asyncio
@@ -152,7 +183,7 @@ async def test_invalid_query_or_result_limit_does_not_call_provider() -> None:
                 ("CC BY-SA-NC 4.0", "https://creativecommons.org/licenses/by-sa/4.0/"),
                 ("GFDL", "https://creativecommons.org/licenses/by/4.0/"),
                 ("GNU Free Documentation License", "https://commons.wikimedia.org/wiki/GFDL"),
-                ("CC BY 4.0", "http://creativecommons.org/licenses/by/4.0/"),
+                ("CC BY 4.0", "http://evil.example/licenses/by/4.0/"),
                 ("CC BY 4.0", "https://creativecommons.org.evil.example/licenses/by/4.0/"),
                 ("CC BY 4.0", "https://creativecommons.org@evil.example/licenses/by/4.0/"),
                 ("CC BY 4.0", "https://creativecommons.org/licenses/by/4.0/?redirect=evil"),

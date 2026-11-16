@@ -29,6 +29,16 @@ from home_kitchen.catalogue.identity import (
 from home_kitchen.catalogue.models import FoodCatalogueItem
 from home_kitchen.catalogue.overview_models import ProductOverview, ProductPreferencesUpdate
 from home_kitchen.catalogue.sku_models import RetailerProductOption, RetailerProductSnapshot
+from home_kitchen.connector_auth import (
+    ConnectorAuthService,
+    CookidooLoginRequest,
+    PKCECompleteRequest,
+    PKCEStartRequest,
+    PKCEStartResponse,
+    TrumfOTPStartRequest,
+    TrumfOTPStartResponse,
+    TrumfOTPVerifyRequest,
+)
 from home_kitchen.features import KitchenFeatures
 from home_kitchen.history import HistoryEntry, HistoryEntryCreate, RetrievedEvidence
 from home_kitchen.integrations import IntegrationInfo
@@ -214,6 +224,24 @@ def _extract_credentials(
 
 def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRouter:
     router = APIRouter(prefix="/api")
+
+    def get_connector_auth() -> ConnectorAuthService:
+        auth = getattr(features, "connector_auth", None)
+        if isinstance(auth, ConnectorAuthService):
+            return auth
+        store = getattr(features, "connector_store", None)
+        integrations = getattr(features, "integrations", None)
+        household_id = getattr(features, "household_id", None)
+        if store is None or integrations is None or household_id is None:
+            raise HTTPException(
+                status_code=503, detail="Tilkoblingsautentisering er ikke tilgjengelig"
+            )
+        return ConnectorAuthService(
+            store=store,
+            integrations=integrations,
+            household_id=household_id,
+            settings=getattr(features, "settings", None),
+        )
 
     def authenticated_actor(request: Request) -> str:
         actor = getattr(request.state, "actor_id", None)
@@ -419,6 +447,83 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
             raise HTTPException(404, f"Ukjent leverandør: {provider_id}")
         features.connector_store.delete_connection(features.household_id, provider_id)
         return Response(status_code=204)
+
+    @router.post("/integrations/{provider_id}/pkce/start")
+    def start_pkce_flow(
+        provider_id: str,
+        request: Request,
+        response: Response,
+        data: PKCEStartRequest | None = None,
+    ) -> PKCEStartResponse:
+        authenticated_actor(request)
+        response.headers["Cache-Control"] = "no-store"
+        return get_connector_auth().start_pkce(
+            provider_id=provider_id,
+            household_id=features.household_id,
+            redirect_uri=data.redirect_uri if data else None,
+        )
+
+    @router.post("/integrations/{provider_id}/pkce/complete")
+    def complete_pkce_flow(
+        provider_id: str,
+        data: PKCECompleteRequest,
+        request: Request,
+        response: Response,
+    ) -> IntegrationInfo:
+        actor = authenticated_actor(request)
+        response.headers["Cache-Control"] = "no-store"
+        return get_connector_auth().complete_pkce(
+            provider_id=provider_id,
+            household_id=features.household_id,
+            actor_id=actor,
+            code=data.code,
+            state=data.state,
+            redirect_url=data.redirect_url,
+        )
+
+    @router.post("/integrations/cookidoo/login")
+    def cookidoo_login(
+        data: CookidooLoginRequest,
+        request: Request,
+        response: Response,
+    ) -> IntegrationInfo:
+        actor = authenticated_actor(request)
+        response.headers["Cache-Control"] = "no-store"
+        return get_connector_auth().login_cookidoo(
+            household_id=features.household_id,
+            actor_id=actor,
+            email=data.email,
+            password=data.password.get_secret_value(),
+            country=data.country,
+        )
+
+    @router.post("/integrations/trumf/login/start")
+    def trumf_login_start(
+        data: TrumfOTPStartRequest,
+        request: Request,
+        response: Response,
+    ) -> TrumfOTPStartResponse:
+        authenticated_actor(request)
+        response.headers["Cache-Control"] = "no-store"
+        return get_connector_auth().start_trumf_otp(
+            household_id=features.household_id,
+            phone=data.phone,
+        )
+
+    @router.post("/integrations/trumf/login/verify")
+    def trumf_login_verify(
+        data: TrumfOTPVerifyRequest,
+        request: Request,
+        response: Response,
+    ) -> IntegrationInfo:
+        actor = authenticated_actor(request)
+        response.headers["Cache-Control"] = "no-store"
+        return get_connector_auth().verify_trumf_otp(
+            household_id=features.household_id,
+            actor_id=actor,
+            session_id=data.session_id,
+            otp=data.otp,
+        )
 
     @router.get("/inventory")
     def inventory() -> list[InventoryItem]:

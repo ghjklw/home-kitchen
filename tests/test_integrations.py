@@ -109,7 +109,7 @@ def test_cookidoo_unconnected_reports_not_configured_with_supported_modes():
 
     assert result.status == "not_configured"
     assert result.auth_mode is None
-    assert result.supported_auth_modes == ["session_cookie", "credentials"]
+    assert result.supported_auth_modes == ["oauth_password", "session_cookie", "credentials"]
     assert "recipe_import" in result.capabilities
     assert "Cookidoo" in result.name
 
@@ -118,18 +118,18 @@ def test_connector_integrations_unconnected_report_not_configured():
     rema = Rema1000Integration().describe("actor-1")
     assert rema.id == "rema1000"
     assert rema.status == "not_configured"
-    assert rema.supported_auth_modes == ["session_token"]
+    assert rema.supported_auth_modes == ["oauth_pkce", "session_token"]
     assert "purchase_history" in rema.capabilities
 
     coop = CoopIntegration().describe("actor-1")
     assert coop.id == "coop"
     assert coop.status == "not_configured"
-    assert coop.supported_auth_modes == ["session_token", "session_cookie"]
+    assert coop.supported_auth_modes == ["oauth_pkce", "session_token", "session_cookie"]
 
     trumf = TrumfIntegration().describe("actor-1")
     assert trumf.id == "trumf"
     assert trumf.status == "not_configured"
-    assert trumf.supported_auth_modes == ["session_cookie"]
+    assert trumf.supported_auth_modes == ["interactive_otp", "session_cookie"]
 
 
 def test_connector_integrations_connected_and_expired_states():

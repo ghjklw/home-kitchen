@@ -1,0 +1,65 @@
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      production-patch-minor:
+        patterns: ["*"]
+        dependency-type: production
+        update-types: [minor, patch]
+      production-major:
+        patterns: ["*"]
+        dependency-type: production
+        update-types: [major]
+      development-patch-minor:
+        patterns: ["*"]
+        dependency-type: development
+        update-types: [minor, patch]
+      development-major:
+        patterns: ["*"]
+        dependency-type: development
+        update-types: [major]
+      security-production-patch-minor:
+        applies-to: security-updates
+        patterns: ["*"]
+        dependency-type: production
+        update-types: [minor, patch]
+      security-production-major:
+        applies-to: security-updates
+        patterns: ["*"]
+        dependency-type: production
+        update-types: [major]
+      security-development-patch-minor:
+        applies-to: security-updates
+        patterns: ["*"]
+        dependency-type: development
+        update-types: [minor, patch]
+      security-development-major:
+        applies-to: security-updates
+        patterns: ["*"]
+        dependency-type: development
+        update-types: [major]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: thursday
+    groups:
+      patch-minor:
+        patterns: ["*"]
+        update-types: [minor, patch]
+      major:
+        patterns: ["*"]
+        update-types: [major]
+      security-patch-minor:
+        applies-to: security-updates
+        patterns: ["*"]
+        update-types: [minor, patch]
+      security-major:
+        applies-to: security-updates
+        patterns: ["*"]
+        update-types: [major]

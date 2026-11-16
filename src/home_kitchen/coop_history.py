@@ -13,6 +13,8 @@ from typing import Any
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict
 
+from home_kitchen.purchase_sync import ProviderOrderRecord
+
 COOP_SCHEMA_SOURCE = "https://gist.github.com/HelgeSverre/80a7f34f874336324184a0c513c2e6a2"
 COOP_SCHEMA_VERSION = "4.17.3"
 
@@ -113,3 +115,21 @@ def parse_receipt_detail(
     if not isinstance(raw, dict):
         raise UnsupportedCoopContract("Coop receipt-detail summary must be an object")
     return CoopReceipt.model_validate({**raw, "revision_id": _revision_id(raw)})
+
+
+def to_provider_order_record(receipt: CoopReceipt) -> ProviderOrderRecord:
+    """Convert one normalized detail snapshot into the neutral immutable record.
+
+    Coop's documented schema has no source update timestamp. The ingestion hash
+    distinguishes changed detail snapshots, while observed_at is recorded by the
+    neutral persistence layer.
+    """
+    external_id = receipt.summary_id or receipt.receipt_id
+    if not external_id:
+        raise UnsupportedCoopContract("Coop receipt has no summaryId or receiptId")
+    return ProviderOrderRecord(
+        external_id=external_id,
+        revision_id=receipt.revision_id,
+        source_updated_at=None,
+        payload=receipt.model_dump(mode="json", by_alias=True),
+    )

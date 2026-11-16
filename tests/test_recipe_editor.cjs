@@ -8,7 +8,7 @@ const {
   parseSourceIngredient,
   rowFromDraft,
   recipeIngredientForSave,
-  retainIngredientIdentityBySourceIndices,
+  prepareAIRevisionForEditor,
 } = require("../src/home_kitchen/static/recipe-editor.js");
 
 test("saves unknown source quantities without inventing an amount", () => {
@@ -144,7 +144,7 @@ test("semantic edits clear only their related identity and preserve explicit nul
   assert.equal(savedNulls.source_unit_expression, null);
 });
 
-test("reconciles AI edits only through unique source ingredient references, independent of row order", () => {
+test("AI redrafts never inherit canonical IDs from source references and preserve only source wording", () => {
   const originals = [
     {
       name: "flour", quantity: "2", unit: "cup", source_indices: [0],
@@ -160,16 +160,38 @@ test("reconciles AI edits only through unique source ingredient references, inde
     { name: "flour", quantity: "3", unit: "ml", source_indices: [0] },
     { name: "ambiguous", quantity: "1", unit: "g", source_indices: [] },
   ];
-  const result = retainIngredientIdentityBySourceIndices(originals, proposed);
-  assert.deepEqual(result[0], {
+  const result = prepareAIRevisionForEditor(originals, proposed);
+  assert.equal(result.identityReviewRequired, true);
+  assert.deepEqual(result.ingredients[0], {
     name: "Fine salt", quantity: "2", unit: "tsp", source_indices: [1],
-    canonical_product_id: null, canonical_unit_id: "tsp-id", source_unit_expression: "teaspoon",
+    canonical_product_id: null, canonical_unit_id: null, source_unit_expression: "teaspoon",
   });
-  assert.deepEqual(result[1], {
+  assert.deepEqual(result.ingredients[1], {
     name: "flour", quantity: "3", unit: "ml", source_indices: [0],
-    canonical_product_id: "flour-id", canonical_unit_id: null, source_unit_expression: "ml",
+    canonical_product_id: null, canonical_unit_id: null, source_unit_expression: null,
   });
-  assert.deepEqual(result[2], proposed[2]);
+  assert.deepEqual(result.ingredients[2], {
+    ...proposed[2],
+    canonical_product_id: null,
+    canonical_unit_id: null,
+  });
+});
+
+test("AI revision keeps source wording for an unmapped unchanged measure without treating it as identity", () => {
+  const result = prepareAIRevisionForEditor(
+    [{ name: "salt", quantity: "1", unit: "tsp", source_indices: [0], source_unit_expression: "Teaspoons" }],
+    [{ name: "salt", quantity: "2", unit: "tsp", source_indices: [0] }],
+  );
+  assert.equal(result.identityReviewRequired, false);
+  assert.deepEqual(result.ingredients[0], {
+    name: "salt",
+    quantity: "2",
+    unit: "tsp",
+    source_indices: [0],
+    canonical_product_id: null,
+    canonical_unit_id: null,
+    source_unit_expression: "Teaspoons",
+  });
 });
 
 test("parses a leading exact decimal and recognized explicit unit", () => {
@@ -298,7 +320,7 @@ test("an unmapped ingredient with source wording alone can still change quantity
     ingredients: [{
       name: "salt",
       quantity: "2",
-      unit: "tsp",
+      unit: "ml",
       original_name: "salt",
       original_unit: "tsp",
       source_unit_expression: "Teaspoons",
@@ -308,10 +330,10 @@ test("an unmapped ingredient with source wording alone can still change quantity
   assert.deepEqual(payload.recipe.ingredients[0], {
     name: "salt",
     quantity: "2",
-    unit: "tsp",
+    unit: "ml",
     category: "Other",
     source_indices: [],
-    source_unit_expression: "Teaspoons",
+    source_unit_expression: "ml",
   });
 });
 

@@ -1589,7 +1589,7 @@ function recipeForm(draft = {}, source = "manual") {
   if (draft.identity_roundtrip_warning)
     add(root, el(
       "p",
-      "KI-utkastet kunne ikke knyttes sikkert til alle lagrede produkt- og enhetsreferanser. Kontroller disse ingrediensene før du lagrer.",
+      "KI-utkastet har ikke bekreftede produkt- og enhetskoblinger. Hvis du lagrer det, fjernes koblingene fra oppskriften. Den lagrede oppskriften er uendret fram til du lagrer.",
       "callout",
     ));
   if (draft.photo_source)
@@ -1964,18 +1964,12 @@ function recipeForm(draft = {}, source = "manual") {
           const sourceIngredients = revisionValues.ingredients.map((item) =>
             window.KitchenRecipeEditor.recipeIngredientForSave(item).item,
           );
-          revisedDraft.ingredients = window.KitchenRecipeEditor.retainIngredientIdentityBySourceIndices(
+          const identityReview = window.KitchenRecipeEditor.prepareAIRevisionForEditor(
             sourceIngredients,
             response.adapted.ingredients,
           );
-          const identityMetadataCount = (items) => items.reduce((count, item) => {
-            if (!item.canonical_product_id && !item.canonical_unit_id) return count;
-            return count + ["canonical_product_id", "canonical_unit_id", "source_unit_expression"]
-              .filter((fieldName) => item[fieldName] !== undefined).length;
-          }, 0);
-          const hadIdentityCount = identityMetadataCount(sourceIngredients);
-          const retainedIdentityCount = identityMetadataCount(revisedDraft.ingredients);
-          revisedDraft.identity_roundtrip_warning = retainedIdentityCount < hadIdentityCount;
+          revisedDraft.ingredients = identityReview.ingredients;
+          revisedDraft.identity_roundtrip_warning = identityReview.identityReviewRequired;
         }
         recipeForm(revisedDraft, isEditing ? source : "ai");
       } catch (error) {

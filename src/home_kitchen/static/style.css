@@ -282,6 +282,83 @@ h3 {
 .single-shopping-list .selected-product {
   margin-top: 8px;
 }
+.single-shopping-list .compact-basket-match {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 13px;
+  margin-top: 4px;
+}
+.compact-match-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  margin-bottom: 0;
+  max-width: 100%;
+  background: var(--accent);
+  color: var(--green);
+}
+.compact-match-badge.match-selected {
+  background: var(--accent);
+  color: var(--green);
+  font-weight: 600;
+}
+.compact-match-badge.match-staged {
+  background: #fdf5e6;
+  color: #7d5200;
+}
+.compact-match-badge.match-candidate {
+  background: #f0f3eb;
+  color: var(--green);
+}
+.compact-match-badge.match-unverified {
+  background: #fef8e7;
+  color: #8a6400;
+}
+.compact-match-badge.match-unresolved {
+  background: #f0f1ec;
+  color: var(--muted);
+}
+.compact-match-badge.match-error {
+  background: #fde8e8;
+  color: #9b1c1c;
+}
+.compact-match-badge.match-busy,
+.compact-match-badge.match-pending {
+  background: #f0f1ec;
+  color: var(--muted);
+}
+.compact-match-action {
+  padding: 2px 8px;
+  font-size: 12px;
+  min-height: 28px;
+}
+.trip-source-details {
+  margin: 12px 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+.trip-source-details > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--green);
+}
+.trip-source-help {
+  margin: 6px 0 10px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.trip-source-choice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+  font-size: 13px;
+}
 .shopping-refresh-controls {
   display: flex;
   align-items: center;

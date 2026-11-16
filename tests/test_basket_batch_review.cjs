@@ -147,6 +147,7 @@ function fixture({ api } = {}) {
     formatUiCount: String,
     api: async (...args) => { requests.push(args); return api ? api(...args) : {}; },
     currentBasketMatchDates: () => ({ start: "2026-11-16", end: "2026-11-22" }),
+    range: () => "?start=2026-11-16&end=2026-11-22",
     notify: (message) => notifications.push(message),
     render: () => {},
     refreshView: async () => {},
@@ -524,4 +525,30 @@ test("candidate package size without recommendation displays localized unit", ()
   };
   const rendered = value.context.renderBasketMatchCandidate(candidate, value.safeNeed);
   assert.match(rendered.text, /Pakke 1 stk\. · antall er ikke beregnet/u);
+});
+
+test("opening batch review with a target need targets that need section", () => {
+  const value = fixture();
+  value.context.openBasketBatchReview(value.safeNeed.id);
+  const sections = allNodes(value.modal.root).filter((node) => node.className?.includes("basket-batch-need"));
+  const target = sections.find((node) => node.dataset?.needId === value.safeNeed.id);
+  assert.ok(target, "targeted need section exists with matching data-need-id");
+  assert.match(target.text, /Yoghurt/u);
+  const focusable = target.find((node) => ["button", "input", "summary"].includes(node.tagName?.toLowerCase()));
+  assert.ok(focusable, "interactive control inside target section exists");
+  assert.equal(focusable.focused, true, "interactive control inside target section is focused");
+  assert.equal(value.document.activeElement, focusable, "activeElement updated to targeted control");
+});
+
+test("batch review allows removing a saved product selection", async () => {
+  const value = fixture();
+  value.context.openBasketBatchReview();
+  const removeButtons = allNodes(value.modal.root).filter(
+    (node) => node.tagName === "button" && node.textContent === "Fjern produktvalg",
+  );
+  assert.ok(removeButtons.length > 0, "has remove buttons for saved selections");
+  await removeButtons[0].action();
+  assert.equal(value.requests.length, 1);
+  assert.equal(value.requests[0][0], "/basket/selections/need-safe/old-1?start=2026-11-16&end=2026-11-22");
+  assert.equal(value.requests[0][1], "DELETE");
 });

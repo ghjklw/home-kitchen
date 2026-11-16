@@ -300,3 +300,54 @@ test("uncertain save restores cached form values and resends the identical reque
   await afterRefresh.submit.listeners.click();
   assert.deepEqual(JSON.parse(JSON.stringify(calls[1].body)), JSON.parse(JSON.stringify(calls[0].body)));
 });
+
+test("source closure choices provide clear Bokmål guidance, accessible labels, and preserve unselected sources", async () => {
+  const line = {
+    ...makeLine("need-g", "Mel", "g", "meal"),
+    captures: [{ id: "cap-1", label: "Ekstra mel til baking", regular_id: "reg-mel" }],
+    source_quantities: [
+      { kind: "meal", source_id: "meal-1", quantity: "400", unit: "g" },
+      { kind: "capture", source_id: "cap-1", quantity: "100", unit: "g" },
+    ],
+  };
+  const calls = [];
+  const ui = renderCompletion({
+    lines: [line],
+    meals: [{ id: "meal-1", recipe_id: "rec-1", date: "2026-11-17" }],
+    recipes: [{ id: "rec-1", title: "Brødbakst" }],
+    api: async (endpoint, method, body) => { calls.push({ endpoint, method, body }); return {}; },
+  });
+
+  const helpText = ui.nodes.find((node) => node.className?.includes?.("trip-source-help"));
+  assert.ok(helpText, "guidance text exists");
+  assert.match(helpText.textContent, /Uavkryssede bidrag forblir åpne/u);
+
+  const mealCheck = ui.nodes.find(
+    (n) => n.tagName === "input" && n.attributes?.["aria-label"]?.includes?.("Brødbakst"),
+  );
+  assert.ok(mealCheck, "meal source checkbox has accessible label");
+  assert.equal(mealCheck.attributes["aria-label"], "Lukk måltidsbehov: Brødbakst · 2026-11-17 (400 g)");
+
+  const captureCheck = ui.nodes.find(
+    (n) => n.tagName === "input" && n.attributes?.["aria-label"]?.includes?.("Ekstra mel til baking"),
+  );
+  assert.ok(captureCheck, "capture source checkbox has accessible label");
+  assert.equal(captureCheck.attributes["aria-label"], "Lukk hurtigtillegg: Ekstra mel til baking (100 g)");
+
+  const regCheck = ui.nodes.find(
+    (n) => n.tagName === "input" && n.attributes?.["aria-label"]?.includes?.("Oppdater sist kjøpt"),
+  );
+  assert.ok(regCheck, "regular update checkbox has accessible label");
+  assert.equal(regCheck.attributes["aria-label"], "Oppdater sist kjøpt for hverdagsvare: Ekstra mel til baking");
+
+  labeled(ui, "Registrer faktisk kjøp: Mel").checked = true;
+  mealCheck.checked = true;
+
+  await ui.submit.listeners.click();
+
+  assert.equal(calls.length, 1);
+  const purchase = calls[0].body.purchases[0];
+  assert.equal(purchase.need_id, "need-g");
+  assert.deepEqual(JSON.parse(JSON.stringify(purchase.close_meal_ids)), ["meal-1"], "only selected meal is closed");
+  assert.equal(purchase.close_capture_ids, undefined, "unselected capture source is omitted and preserved open");
+});

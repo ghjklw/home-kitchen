@@ -205,6 +205,30 @@ test("actual recipe modal keeps manual edits made in A while AI is pending", asy
   assert.match(value.content.text, /Oppskriften ble endret mens KI-forslaget ble laget/u);
 });
 
+test("failed actual recipe revision keeps form edits and never saves the original", async () => {
+  const value = fixture();
+  const revise = openEditor(value, {
+    id: "recipe-a",
+    title: "Saved recipe title",
+    servings: 2,
+    ingredients: [{ name: "salt", quantity: "1", unit: "tsp" }],
+    instructions: ["Cook A"],
+  });
+  input(value, "Hva vil du endre?").value = "Make it simpler";
+  const pending = revise.action();
+  input(value, "Oppskriftsnavn").value = "Unsaved manual title";
+  input(value, "Mengde").value = "5";
+
+  value.context.aiResponse.reject(new Error("AI request failed"));
+  await pending;
+
+  assert.equal(value.modal.open, true);
+  assert.equal(input(value, "Oppskriftsnavn").value, "Unsaved manual title");
+  assert.equal(input(value, "Mengde").value, "5");
+  assert.match(value.content.text, /AI request failed/u);
+  assert.equal(value.requests.some((request) => request[0] === "/recipes/recipe-a"), false);
+});
+
 test("active actual recipe modal applies AI review and retains metadata semantics on explicit save", async () => {
   const value = fixture();
   const revise = openEditor(value, {

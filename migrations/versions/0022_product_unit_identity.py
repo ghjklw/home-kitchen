@@ -3,8 +3,8 @@
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0021_product_unit_identity"
-down_revision = "0020_trip_source_closures"
+revision = "0022_product_unit_identity"
+down_revision = "0021_nullable_source_time"
 branch_labels = None
 depends_on = None
 

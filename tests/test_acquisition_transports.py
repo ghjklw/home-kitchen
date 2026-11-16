@@ -322,6 +322,7 @@ async def test_mcp_acquisition_tools_are_registered_actor_scoped_and_never_retur
         assert {
             "upload_recipe_photo",
             "redraft_recipe_photo",
+            "discard_recipe_photo",
             "preview_recipe_collections",
             "get_recipe_collection_preview",
             "import_recipe_collection_selection",
@@ -350,6 +351,10 @@ async def test_mcp_acquisition_tools_are_registered_actor_scoped_and_never_retur
             await app.state.mcp._tool_manager.call_tool(
                 "redraft_recipe_photo", {"photo_id": photo_id}
             )
+            discarded = await app.state.mcp._tool_manager.call_tool(
+                "discard_recipe_photo", {"photo_id": photo_id}
+            )
+            assert discarded.structured_content["deleted"] is True
 
             preview = await app.state.mcp._tool_manager.call_tool(
                 "preview_recipe_collections", {"kinds": ["liked"]}

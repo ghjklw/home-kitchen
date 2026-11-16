@@ -11,6 +11,7 @@ from home_kitchen.models import (
     RegularItem,
     ShoppingItem,
     ShoppingLine,
+    ShoppingSourceQuantity,
     UnquantifiedNeed,
     WeekShopping,
 )
@@ -34,6 +35,11 @@ def need_id(start: date, end: date, name: str, unit: str) -> UUID:
     )
 
 
+# Window, need, source kind, source ID: closing one source never closes another
+# source for the same product or a requirement in a later shopping window.
+ClosedSourceKey = tuple[date, date, UUID, str, UUID]
+
+
 @dataclass(frozen=True)
 class ShoppingContext:
     meals: list[Meal]
@@ -42,6 +48,9 @@ class ShoppingContext:
     regulars: list[RegularItem]
     active_confirmations: set[UUID]
     today: date
+    start: date | None = None
+    end: date | None = None
+    closed_sources: set[ClosedSourceKey] = field(default_factory=set)
 
 
 @dataclass
@@ -93,13 +102,19 @@ class PlannedRecipes:
                     continue
                 # Ingredient validation guarantees a unit for measured amounts.
                 assert unit is not None
+                scaled_quantity = scale_quantity(quantity, meal.servings, recipe.servings)
                 result.lines.append(
                     ShoppingLine(
                         name=ingredient.name,
-                        quantity=scale_quantity(quantity, meal.servings, recipe.servings),
+                        quantity=scaled_quantity,
                         unit=unit,
                         category=ingredient.category,
                         origins=[f"meal:{meal.id}"],
+                        source_quantities=[
+                            ShoppingSourceQuantity(
+                                kind="meal", source_id=meal.id, quantity=scaled_quantity, unit=unit
+                            )
+                        ],
                         approximate=estimate.approximate if estimate else False,
                         provenance=estimate.provenance if estimate else None,
                         source_url=estimate.source_url if estimate else None,
@@ -120,6 +135,14 @@ class QuickAdditions:
                     unit=item.unit,
                     category=item.category,
                     origins=[f"item:{item.id}"],
+                    source_quantities=[
+                        ShoppingSourceQuantity(
+                            kind="capture",
+                            source_id=item.id,
+                            quantity=item.quantity,
+                            unit=item.unit,
+                        )
+                    ],
                 )
                 for item in context.captures
                 if not item.completed
@@ -143,6 +166,14 @@ class RegularItems:
                         unit=item.unit,
                         category=item.category,
                         origins=[f"regular:{item.id}"],
+                        source_quantities=[
+                            ShoppingSourceQuantity(
+                                kind="regular",
+                                source_id=item.id,
+                                quantity=item.quantity,
+                                unit=item.unit,
+                            )
+                        ],
                     )
                 )
             elif (context.today - item.last_purchased).days >= item.interval_days:
@@ -169,16 +200,61 @@ class ShoppingBuilder:
             contribution = contributor.contribute(context)
             for line in contribution.lines:
                 quantity, unit = canonicalize_quantity(line.quantity, line.unit)
+                sources = []
+                origins = list(line.origins)
+                for source in line.source_quantities:
+                    source_quantity, source_unit = canonicalize_quantity(
+                        source.quantity, source.unit
+                    )
+                    if context.start is not None and context.end is not None:
+                        source_key = (
+                            context.start,
+                            context.end,
+                            need_id(context.start, context.end, line.name, unit),
+                            source.kind,
+                            source.source_id,
+                        )
+                        if source_key in context.closed_sources:
+                            quantity = add_exact(quantity, -source_quantity)
+                            origin_kind = "item" if source.kind == "capture" else source.kind
+                            closed_origin = f"{origin_kind}:{source.source_id}"
+                            origins = [origin for origin in origins if origin != closed_origin]
+                            continue
+                    sources.append(
+                        source.model_copy(update={"quantity": source_quantity, "unit": source_unit})
+                    )
+                if quantity <= 0:
+                    continue
                 key = (normalize_need_text(line.name), unit)
                 if key not in totals:
                     totals[key] = line.model_copy(
-                        update={"quantity": quantity, "unit": unit}, deep=True
+                        update={
+                            "quantity": quantity,
+                            "unit": unit,
+                            "source_quantities": sources,
+                            "origins": origins,
+                        },
+                        deep=True,
                     )
                 else:
                     totals[key].quantity = add_exact(totals[key].quantity, quantity)
+                    for source in sources:
+                        existing = next(
+                            (
+                                item
+                                for item in totals[key].source_quantities
+                                if (item.kind, item.source_id, item.unit)
+                                == (source.kind, source.source_id, source.unit)
+                            ),
+                            None,
+                        )
+                        if existing is None:
+                            totals[key].source_quantities.append(source.model_copy(deep=True))
+                        else:
+                            existing.quantity = add_exact(existing.quantity, source.quantity)
                     if totals[key].category == "Other":
                         totals[key].category = line.category
-                    totals[key].origins = list(dict.fromkeys(totals[key].origins + line.origins))
+                    totals[key].origins = list(dict.fromkeys(totals[key].origins + origins))
                     totals[key].approximate = totals[key].approximate or line.approximate
                     if line.provenance and line.provenance not in (totals[key].provenance or ""):
                         totals[key].provenance = "; ".join(

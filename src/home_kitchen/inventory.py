@@ -11,9 +11,9 @@ from sqlalchemy import text
 
 from home_kitchen.context import history_context
 from home_kitchen.history import HistoryEntryCreate, HistoryRepository
-from home_kitchen.models import NonBlank, RegularItem, UnquantifiedNeed
+from home_kitchen.models import NonBlank, RegularItem, ShoppingSourceQuantity, UnquantifiedNeed
 from home_kitchen.service import KitchenService
-from home_kitchen.shopping import need_id, normalize_need_text
+from home_kitchen.shopping import ClosedSourceKey, need_id, normalize_need_text
 from home_kitchen.units import add_exact, canonicalize_quantity, compatible_units, normalize_unit
 
 StockQuantity = Annotated[Decimal, Field(ge=0, allow_inf_nan=False)]
@@ -46,6 +46,7 @@ class PurchasePlanLine(BaseModel):
     covered_quantity: StockQuantity
     to_buy_quantity: StockQuantity
     origins: list[str]
+    source_quantities: list[ShoppingSourceQuantity] = Field(default_factory=list)
     approximate: bool = False
     provenance: str | None = None
     source_url: HttpUrl | None = None
@@ -257,8 +258,36 @@ class InventoryService:
                 connection=connection,
             )
 
-    def plan(self, start: date, end: date) -> PurchasePlan:
-        week = self.kitchen.shopping_list(start, end, today=date.today())
+    def plan(
+        self,
+        start: date,
+        end: date,
+        *,
+        closed_sources: set[ClosedSourceKey] | None = None,
+    ) -> PurchasePlan:
+        if closed_sources is None:
+            with self.engine.connect() as connection:
+                rows = connection.execute(
+                    text(
+                        "SELECT week_start,week_end,need_id,source_kind,source_id "
+                        "FROM kitchen_trip_source_closures "
+                        "WHERE week_start=:start AND week_end=:end"
+                    ),
+                    {"start": start, "end": end},
+                ).mappings()
+                closed_sources = {
+                    (
+                        row["week_start"],
+                        row["week_end"],
+                        row["need_id"],
+                        row["source_kind"],
+                        row["source_id"],
+                    )
+                    for row in rows
+                }
+        week = self.kitchen.shopping_list(
+            start, end, today=date.today(), closed_sources=closed_sources
+        )
         stock = {
             (normalize_need_text(item.name), normalize_need_text(item.unit)): item
             for item in self.list()
@@ -284,6 +313,7 @@ class InventoryService:
                     covered_quantity=covered,
                     to_buy_quantity=add_exact(requirement.quantity, -covered),
                     origins=requirement.origins,
+                    source_quantities=requirement.source_quantities,
                     approximate=requirement.approximate,
                     provenance=requirement.provenance,
                     source_url=requirement.source_url,

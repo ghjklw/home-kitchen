@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import UTC, date, datetime
 from unittest.mock import AsyncMock
 
 import pytest
@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from fastmcp import Client
 
 from home_kitchen.app import create_app
-from home_kitchen.basket.matching import BasketMatchResult
+from home_kitchen.basket.matching import BasketCandidate, BasketMatchResult, NeedMatchResult
 from home_kitchen.basket.repository import BasketService
 from home_kitchen.context import HistoryContext, history_context
 from home_kitchen.models import ShoppingItemCreate
@@ -167,5 +167,76 @@ async def test_basket_matching_mcp_tool_contract_and_read_only(test_database_url
         )
         assert matching.await_args.kwargs == {"page": 2, "size": 3}
         assert mcp_read_only_state(app) == before
+    finally:
+        history_context.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_mcp_batch_product_selection_uses_current_match_evidence(test_database_url):
+    app = app_for(test_database_url)
+    item = app.state.features.kitchen.add_item(
+        ShoppingItemCreate(name="Milk", quantity=1, unit="l")
+    )
+    start, end = date.fromisoformat(START), date.fromisoformat(END)
+    need = app.state.features.inventory.plan(start, end).purchase_lines[0]
+    candidate_id = "oda:verified-job-candidate"
+    candidate = BasketCandidate(
+        id=candidate_id,
+        provider="oda",
+        product_id="milk-123",
+        name="Milk 1L",
+        description="",
+        product_url="https://oda.com/no/products/milk-123/",
+        pack_quantity=need.to_buy_quantity,
+        pack_unit=need.unit,
+        pack_metadata_status="unverified",
+        match_query="milk",
+        match_reason="exact quantity and unit",
+    )
+    matched_need = NeedMatchResult(
+        need_id=need.id,
+        name=need.name,
+        quantity=need.to_buy_quantity,
+        unit=need.unit,
+        page=1,
+        has_more=False,
+        candidates=[candidate],
+    )
+    app.state.features.basket_jobs.resolve_batch_candidates = AsyncMock(
+        return_value={(need.id, candidate_id): (matched_need, candidate, datetime.now(UTC))}
+    )
+    token = history_context.set(HistoryContext(actor_id="mcp-household", channel="mcp"))
+    try:
+        async with Client(app.state.mcp) as client:
+            tool_names = {tool.name for tool in await client.list_tools()}
+            assert "select_basket_products" in tool_names
+            result = await client.call_tool(
+                "select_basket_products",
+                {
+                    "data": {
+                        "start": START,
+                        "end": END,
+                        "job_id": "owned-current-job",
+                        "selections": [
+                            {
+                                "need_id": str(need.id),
+                                "candidate_id": candidate_id,
+                                "packages": 1,
+                            }
+                        ],
+                    }
+                },
+            )
+        assert not result.is_error
+        assert app.state.features.basket_jobs.resolve_batch_candidates.await_args.args == (
+            "mcp-household",
+            "owned-current-job",
+            start,
+            end,
+            [(need.id, candidate_id)],
+        )
+        review = BasketService(app.state.service, app.state.features.history).review(start, end)
+        assert review.needs[0].selections[0].product.product_id == "milk-123"
+        assert app.state.features.kitchen.list_items()[0].id == item.id
     finally:
         history_context.reset(token)

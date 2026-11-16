@@ -2480,7 +2480,7 @@ function addRecipeForm() {
       button("Finn oppskrifter fra kilder", discoveryForm),
       button("Importer fra en lenke", importForm),
       button("Fotografer en oppskriftsside", recipePhotoForm),
-      button("Importer oppskrifter fra Oda", recipeCollectionForm),
+      button("Importer oppskrifter fra Oda", () => recipeCollectionForm()),
       button("Skriv inn selv", () => recipeForm(), "quiet"),
     ),
   );
@@ -2589,6 +2589,7 @@ function recipeCollectionConnectionPrompt() {
   return section;
 }
 function recipeCollectionForm(resumeJobId = null) {
+  const activeResumeJobId = typeof resumeJobId === "string" && resumeJobId ? resumeJobId : null;
   const root = openDialog("Importer oppskrifter fra Oda");
   const collectionModal = $("#modal");
   collectionModal.dataset.recipeCollection = "true";
@@ -2663,12 +2664,12 @@ function recipeCollectionForm(resumeJobId = null) {
   }, "primary");
   importButton.textContent = "Bekreft og importer valgte oppskrifter";
   importButton.disabled = true;
-  const retryPreview = button("Hent samlingene på nytt", async () => {
+  const retryPreview = button("Hent samlingene på nytt", () => {
     if (job && ["previewing", "importing"].includes(job.status)) {
       schedulePoll();
       return;
     }
-    await startPreview();
+    startPreview().catch(showCollectionError);
   }, "quiet");
   retryPreview.hidden = true;
   const cancelJob = button("Avbryt innhenting/import", async () => {
@@ -2708,7 +2709,10 @@ function recipeCollectionForm(resumeJobId = null) {
     }
     const focusKey = document.activeElement?.dataset?.collectionFocus;
     status.textContent = window.KitchenRecipeCollections.progress(job);
-    errors.replaceChildren(...job.errors.map(() => el("li", "Oda avbrøt innhentingen. Kontroller tilkoblingen og hent samlingene på nytt.")));
+    const messages = window.KitchenRecipeCollections.errorMessages
+      ? window.KitchenRecipeCollections.errorMessages(job)
+      : [...new Set(job.errors)];
+    errors.replaceChildren(...messages.map((message) => el("li", message)));
     if (job.truncated)
       errors.append(el("li", "Oda-resultatet nådde sidegrensen. Listen kan være ufullstendig; hent på nytt senere."));
     entries.replaceChildren();
@@ -2863,12 +2867,12 @@ function recipeCollectionForm(resumeJobId = null) {
   add(actions, previewButton);
   form.addEventListener("submit", (event) => {
     event.preventDefault();
-    startPreview().catch((error) => { status.textContent = error.message; });
+    startPreview().catch(showCollectionError);
   });
   add(root, form);
-  if (resumeJobId) {
+  if (activeResumeJobId) {
     status.textContent = "Henter status for importen …";
-    api("/recipe-collections/" + encodeURIComponent(resumeJobId))
+    api("/recipe-collections/" + encodeURIComponent(activeResumeJobId))
       .then((response) => {
         const resumed = window.KitchenRecipeCollections.normalizeJob(response);
         if (pollOwner !== state.recipeCollectionPollGeneration || !root.isConnected) return;

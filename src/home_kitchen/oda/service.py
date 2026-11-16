@@ -284,13 +284,13 @@ class OdaService:
         except (InvalidToken, ValueError):
             raise OdaError("Oda authorization cannot be read; connect again", 400) from None
 
-    def access_token(self, actor_id: str) -> str:
+    def access_token(self, actor_id: str, *, force_refresh: bool = False) -> str:
         repository = self._repository()
         try:
             with repository.locked_connection(actor_id) as (connection, token):
                 if token is None:
                     raise OdaError("Connect your Oda account first", 409)
-                if token["expires_at"] <= time.time() + 30:
+                if force_refresh or token["expires_at"] <= time.time() + 30:
                     if not token.get("refresh_token"):
                         raise OdaError("Your Oda connection expired; connect again", 409)
                     response = self._json(
@@ -351,109 +351,151 @@ class OdaService:
         }:
             raise OdaError("This Oda action is not supported", 400)
         token = await asyncio.to_thread(self.access_token, actor_id)
-        try:
-            async with Client(RESOURCE, auth=token, timeout=20) as client:
-                tools = {tool.name: tool for tool in await client.list_tools()}
-                if name not in tools:
-                    raise OdaError("The Oda read-only tool is unavailable")
-                if (
-                    tools[name].annotations is None
-                    or tools[name].annotations.readOnlyHint is not True
-                ):
-                    raise OdaError("The Oda tool is no longer advertised as read-only")
-                schema = tools[name].inputSchema
-                properties = schema.get("properties", {})
-                if (
-                    schema.get("type") != "object"
-                    or schema.get("additionalProperties") is not False
-                ):
-                    raise OdaError("The Oda tool schema changed; review is required")
-                if name in {"get_orders", "order_tracking"}:
-                    try:
-                        validate_history_tool(name, schema, tools[name].outputSchema)
-                    except (ValueError, TypeError, KeyError, AttributeError):
-                        raise OdaError("The Oda order schema changed; review is required") from None
-                if name == "product_search" and (
-                    set(schema.get("required", [])) != {"queries"}
-                    or properties.get("queries", {}).get("type") != "array"
-                    or properties.get("queries", {}).get("items", {}).get("type") != "string"
-                    or properties.get("queries", {}).get("maxItems") != 10
-                ):
-                    raise OdaError("The Oda search schema changed; review is required")
-                if name == "get_cart" and schema.get("required"):
-                    raise OdaError("The Oda cart schema changed; review is required")
-                if name in {"recipe_search", "get_liked_recipes", "get_purchased_recipes"}:
-                    query = properties.get("query", {})
-                    page = properties.get("page", {})
-                    size = properties.get("size", {})
-                    output = tools[name].outputSchema
-                    output_properties = output.get("properties", {})
-                    recipes = output_properties.get("recipes", {})
-                    recipe_properties = recipes.get("items", {}).get("properties", {})
-                    recipe_required = set(recipes.get("items", {}).get("required", []))
-                    collection_tool = name in {"get_liked_recipes", "get_purchased_recipes"}
-                    expected_required = set() if collection_tool else {"query"}
-
-                    def has_types(field: str, expected: set[str]) -> bool:
-                        field_schema = recipe_properties.get(field, {})
-                        types = field_schema.get("type", [])
-                        if isinstance(types, str):
-                            types = [types]
-                        if isinstance(types, list) and expected.issubset(set(types)):
-                            return True
-                        alternatives = field_schema.get("anyOf", [])
-                        return expected.issubset(
-                            {item.get("type") for item in alternatives if isinstance(item, dict)}
-                        )
-
+        for attempt in range(2):
+            try:
+                async with Client(RESOURCE, auth=token, timeout=20) as client:
+                    tools = {tool.name: tool for tool in await client.list_tools()}
+                    if name not in tools:
+                        raise OdaError("The Oda read-only tool is unavailable")
                     if (
-                        set(schema.get("required", [])) != expected_required
-                        or (collection_tool and set(properties) != {"page", "size"})
-                        or (not collection_tool and query.get("type") != "string")
-                        or page.get("type") != "integer"
-                        or (page.get("minimum"), page.get("maximum")) != (1, 50)
-                        or size.get("type") != "integer"
-                        or (size.get("minimum"), size.get("maximum")) != (1, 20)
-                        or output.get("type") != "object"
-                        or set(output.get("required", [])) != {"hasMore", "recipes"}
-                        or output_properties.get("hasMore", {}).get("type") != "boolean"
-                        or recipes.get("type") != "array"
-                        or not {"id", "title"}.issubset(recipe_required)
-                        or recipe_properties.get("id", {}).get("type") != "integer"
-                        or recipe_properties.get("title", {}).get("type") != "string"
-                        or (
-                            not collection_tool
-                            and (
-                                "likeCount" not in recipe_required
-                                or recipe_properties.get("likeCount", {}).get("type") != "integer"
-                            )
-                        )
-                        or (
-                            collection_tool
-                            and any(
-                                not has_types(field, expected_types)
-                                for field, expected_types in {
-                                    "url": {"string", "null"},
-                                    "providerName": {"string", "null"},
-                                    "imageUrl": {"string", "null"},
-                                    "deliveriesCount": {"integer"},
-                                }.items()
-                            )
-                        )
+                        tools[name].annotations is None
+                        or tools[name].annotations.readOnlyHint is not True
                     ):
-                        raise OdaError("The Oda recipe schema changed; review is required")
-                result = await client.call_tool(name, arguments, raise_on_error=True)
-                if result.structured_content is not None:
-                    return result.structured_content
-                if len(result.content) == 1 and result.content[0].type == "text":
-                    decoded = json.loads(result.content[0].text)
-                    if isinstance(decoded, dict):
-                        return decoded
-                raise OdaError("Oda returned an unsupported read-only response")
-        except OdaError:
-            raise
-        except Exception:
-            raise OdaError("Oda could not complete the read-only request") from None
+                        raise OdaError("The Oda tool is no longer advertised as read-only")
+                    schema = tools[name].inputSchema
+                    properties = schema.get("properties", {})
+                    if (
+                        schema.get("type") != "object"
+                        or schema.get("additionalProperties") is not False
+                    ):
+                        raise OdaError("The Oda tool schema changed; review is required")
+                    if name in {"get_orders", "order_tracking"}:
+                        try:
+                            validate_history_tool(name, schema, tools[name].outputSchema)
+                        except (ValueError, TypeError, KeyError, AttributeError):
+                            raise OdaError(
+                                "The Oda order schema changed; review is required"
+                            ) from None
+                    if name == "product_search" and (
+                        set(schema.get("required", [])) != {"queries"}
+                        or properties.get("queries", {}).get("type") != "array"
+                        or properties.get("queries", {}).get("items", {}).get("type") != "string"
+                        or properties.get("queries", {}).get("maxItems") != 10
+                    ):
+                        raise OdaError("The Oda search schema changed; review is required")
+                    if name == "get_cart" and schema.get("required"):
+                        raise OdaError("The Oda cart schema changed; review is required")
+                    if name in {"recipe_search", "get_liked_recipes", "get_purchased_recipes"}:
+                        query = properties.get("query", {})
+                        page = properties.get("page", {})
+                        size = properties.get("size", {})
+                        output = tools[name].outputSchema
+                        output_properties = output.get("properties", {})
+                        recipes = output_properties.get("recipes", {})
+                        recipe_properties = recipes.get("items", {}).get("properties", {})
+                        recipe_required = set(recipes.get("items", {}).get("required", []))
+                        collection_tool = name in {"get_liked_recipes", "get_purchased_recipes"}
+                        expected_required = set() if collection_tool else {"query"}
+
+                        def has_types(
+                            field: str, expected: set[str], props: dict = recipe_properties
+                        ) -> bool:
+                            field_schema = props.get(field, {})
+                            types = field_schema.get("type", [])
+                            if isinstance(types, str):
+                                types = [types]
+                            if isinstance(types, list) and expected.issubset(set(types)):
+                                return True
+                            alternatives = field_schema.get("anyOf", [])
+                            return expected.issubset(
+                                {
+                                    item.get("type")
+                                    for item in alternatives
+                                    if isinstance(item, dict)
+                                }
+                            )
+
+                        if (
+                            set(schema.get("required", [])) != expected_required
+                            or (
+                                collection_tool
+                                and not {"page", "size"}
+                                <= set(properties)
+                                <= {"page", "size", "intent"}
+                            )
+                            or (not collection_tool and query.get("type") != "string")
+                            or page.get("type") != "integer"
+                            or (page.get("minimum"), page.get("maximum")) != (1, 50)
+                            or size.get("type") != "integer"
+                            or (size.get("minimum"), size.get("maximum")) != (1, 20)
+                            or output.get("type") != "object"
+                            or set(output.get("required", [])) != {"hasMore", "recipes"}
+                            or output_properties.get("hasMore", {}).get("type") != "boolean"
+                            or recipes.get("type") != "array"
+                            or not {"id", "title"}.issubset(recipe_required)
+                            or recipe_properties.get("id", {}).get("type") != "integer"
+                            or recipe_properties.get("title", {}).get("type") != "string"
+                            or (
+                                not collection_tool
+                                and (
+                                    "likeCount" not in recipe_required
+                                    or recipe_properties.get("likeCount", {}).get("type")
+                                    != "integer"
+                                )
+                            )
+                            or (
+                                collection_tool
+                                and any(
+                                    not has_types(field, expected_types)
+                                    for field, expected_types in {
+                                        "url": {"string", "null"},
+                                        "providerName": {"string", "null"},
+                                        "imageUrl": {"string", "null"},
+                                        "deliveriesCount": {"integer"},
+                                    }.items()
+                                )
+                            )
+                        ):
+                            raise OdaError("The Oda recipe schema changed; review is required")
+                    result = await client.call_tool(name, arguments, raise_on_error=True)
+                    if result.structured_content is not None:
+                        return result.structured_content
+                    if len(result.content) == 1 and result.content[0].type == "text":
+                        decoded = json.loads(result.content[0].text)
+                        if isinstance(decoded, dict):
+                            return decoded
+                    raise OdaError("Oda returned an unsupported read-only response")
+            except httpx.HTTPStatusError as error:
+                if error.response.status_code == 401 and attempt == 0:
+                    try:
+                        token = await asyncio.to_thread(
+                            self.access_token, actor_id, force_refresh=True
+                        )
+                        continue
+                    except OdaError:
+                        raise
+                    except Exception:
+                        raise OdaError("Your Oda connection expired; connect again", 409) from None
+                if error.response.status_code == 401:
+                    raise OdaError("Your Oda connection expired; connect again", 409) from None
+                raise OdaError("Oda could not complete the read-only request") from None
+            except OdaError:
+                raise
+            except Exception as error:
+                if "401" in str(error) and attempt == 0:
+                    try:
+                        token = await asyncio.to_thread(
+                            self.access_token, actor_id, force_refresh=True
+                        )
+                        continue
+                    except OdaError:
+                        raise
+                    except Exception:
+                        raise OdaError("Your Oda connection expired; connect again", 409) from None
+                if "401" in str(error):
+                    raise OdaError("Your Oda connection expired; connect again", 409) from None
+                raise OdaError("Oda could not complete the read-only request") from None
+        raise OdaError("Oda could not complete the read-only request")
 
     async def search_products(
         self, actor_id: str, queries: list[str], page: int = 1, size: int = 5

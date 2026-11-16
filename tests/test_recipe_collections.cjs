@@ -1,7 +1,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { canSelect, completionCounts, connectionGuidance, connectionMessage, entryStatus, importPayload, normalizeJob, progress } = require("../src/home_kitchen/static/recipe-collections.js");
+const { canSelect, collectionErrorMessage, completionCounts, connectionGuidance, connectionMessage, entryStatus, errorMessages, importPayload, normalizeJob, progress } = require("../src/home_kitchen/static/recipe-collections.js");
 
 const fixture = {
   job_id: "job-1",
@@ -67,4 +67,49 @@ test("shows Settings guidance only for known Oda setup or authorization states",
   assert.equal(connectionGuidance({ configured: true, connected: true }, new Error("Fikk ikke kontakt med kjøkkenet"), reconnect), null);
   assert.match(connectionMessage("connect_required"), /Oda-kontoen er ikke tilkoblet/u);
   assert.match(connectionMessage("reconnect_required"), /ny godkjenning/u);
+});
+
+test("translates collection error messages and deduplicates rendered errors", () => {
+  assert.equal(
+    collectionErrorMessage("Could not finish Liked on Oda; preview again to retry."),
+    "Kunne ikke hente likte oppskrifter fra Oda. Prøv å hente på nytt.",
+  );
+  assert.equal(
+    collectionErrorMessage("Could not finish Ingredients bought on Oda; preview again to retry."),
+    "Kunne ikke hente oppskrifter med bestilte ingredienser fra Oda. Prøv å hente på nytt.",
+  );
+  assert.equal(
+    collectionErrorMessage("Collection connection changed or became unavailable; preview again."),
+    "Oda-tilkoblingen ble endret eller er utilgjengelig. Hent samlingene på nytt.",
+  );
+  assert.equal(
+    collectionErrorMessage("Your Oda connection expired; connect again"),
+    "Oda-tilkoblingen utløp. Koble til på nytt i Innstillinger.",
+  );
+
+  const jobWithDualFailures = {
+    errors: [
+      "Could not finish Liked on Oda; preview again to retry.",
+      "Could not finish Ingredients bought on Oda; preview again to retry.",
+    ],
+  };
+  const translated = errorMessages(jobWithDualFailures);
+  assert.equal(translated.length, 2);
+  assert.equal(translated[0], "Kunne ikke hente likte oppskrifter fra Oda. Prøv å hente på nytt.");
+  assert.equal(translated[1], "Kunne ikke hente oppskrifter med bestilte ingredienser fra Oda. Prøv å hente på nytt.");
+  assert.notEqual(translated[0], translated[1]);
+
+  const jobWithDuplicates = {
+    errors: [
+      "Could not finish Liked on Oda; preview again to retry.",
+      "Could not finish Liked on Oda; preview again to retry.",
+      "Collection connection changed or became unavailable; preview again.",
+    ],
+  };
+  const deduplicated = errorMessages(jobWithDuplicates);
+  assert.equal(deduplicated.length, 2);
+  assert.deepEqual(deduplicated, [
+    "Kunne ikke hente likte oppskrifter fra Oda. Prøv å hente på nytt.",
+    "Oda-tilkoblingen ble endret eller er utilgjengelig. Hent samlingene på nytt.",
+  ]);
 });

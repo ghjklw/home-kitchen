@@ -128,6 +128,25 @@ async def test_invalid_query_or_result_limit_does_not_call_provider() -> None:
 
 
 @pytest.mark.asyncio
+async def test_commons_error_envelope_is_unavailable_not_an_empty_search() -> None:
+    async with _client({"error": {"code": "ratelimited", "info": "provider detail"}}) as client:
+        result = await WikimediaCommonsImageProvider(http_client=client).search("tomato")
+
+    assert result.status == "unavailable"
+    assert result.results == []
+    assert result.detail == "Commons could not complete image search."
+
+
+@pytest.mark.asyncio
+async def test_commons_empty_envelope_remains_a_valid_no_results_search() -> None:
+    async with _client({"batchcomplete": ""}) as client:
+        result = await WikimediaCommonsImageProvider(http_client=client).search("no matching image")
+
+    assert result.status == "no_usable_results"
+    assert result.results == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "candidate",
     [

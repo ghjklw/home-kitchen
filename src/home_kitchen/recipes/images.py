@@ -444,6 +444,10 @@ class WikimediaCommonsImageProvider:
             return RecipeImageSearch(
                 status="unavailable", detail="Commons returned invalid or oversized metadata."
             )
+        if "error" in payload:
+            return RecipeImageSearch(
+                status="unavailable", detail="Commons could not complete image search."
+            )
         query_data = payload.get("query")
         pages = query_data.get("pages", []) if isinstance(query_data, Mapping) else []
         if not isinstance(pages, list):

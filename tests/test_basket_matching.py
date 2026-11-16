@@ -677,6 +677,7 @@ async def test_oda_adapter_rejects_tonic_as_hot_water_but_keeps_original_query()
     [
         ("sukker", "Unicorn Sugar Faces", False),
         ("hvetemel", "Loop No12 Red S8 All White", False),
+        ("hvetemel", "Siktet hvetemel", True),
         ("usaltet smør", "R Lev Vel diapers", False),
         ("granulated sugar", "Sugar Decorations", False),
         ("whole milk", "Whole Milk Chocolate", False),
@@ -698,6 +699,11 @@ async def test_oda_adapter_rejects_tonic_as_hot_water_but_keeps_original_query()
         ("basmatiris", "Basmatiris", True),
         ("basmati rice", "Jasminris", False),
         ("low-fat milk", "Tine Helmelk", False),
+        ("caster sugar", "Caster Sugar", True),
+        ("caster sugar", "Powdered Sugar", False),
+        ("powdered sugar", "Powdered Sugar", True),
+        ("powdered sugar", "Caster Sugar", False),
+        ("sugar", "Caster Sugar", True),
     ],
 )
 def test_ingredient_identity_handles_bokmal_compounds_and_product_classes(
@@ -722,6 +728,12 @@ def test_manual_and_unknown_searches_are_retained_as_unverified():
     assert _bokmal_ingredient_query("olive oil shower gel") is None
     assert _identity_status("olive oil shower gel", shower_gel) == "unverified"
     assert _identity_status("unmapped pantry term", unknown) == "unverified"
+    assert _bokmal_ingredient_query("almond flour") is None
+    assert _identity_status("almond flour", unknown) == "unverified"
+    assert _bokmal_ingredient_query("coconut milk") is None
+    assert _identity_status("coconut milk", unknown) == "unverified"
+    assert _bokmal_ingredient_query("gluten-free flour") is None
+    assert _identity_status("gluten-free flour", unknown) == "unverified"
     assert (
         ProviderProduct(
             provider="oda", product_id="missing", name="Unknown", description=""

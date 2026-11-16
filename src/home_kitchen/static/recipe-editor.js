@@ -247,7 +247,7 @@
     };
   }
 
-  function retainIngredientIdentityBySourceIndices(originalIngredients, proposedIngredients) {
+  function prepareAIRevisionForEditor(originalIngredients, proposedIngredients) {
     const keyFor = (item) => {
       const indices = Array.isArray(item?.source_indices) ? item.source_indices : [];
       if (!indices.length || indices.some((value) => !Number.isSafeInteger(value) || value < 0)) return null;
@@ -267,24 +267,30 @@
       indexes.push(index);
       proposals.set(key, indexes);
     });
-    return (Array.isArray(proposedIngredients) ? proposedIngredients : []).map((item) => {
+    const ingredients = (Array.isArray(proposedIngredients) ? proposedIngredients : []).map((item) => {
       const key = keyFor(item);
       const original = key === null ? null : originals.get(key);
       const proposalIndexes = key === null ? null : proposals.get(key);
-      if (!original || proposalIndexes?.length !== 1) return { ...item };
-      const nameChanged = String(item.name ?? "").trim().toLocaleLowerCase("nb") !==
-        String(original.name ?? "").trim().toLocaleLowerCase("nb");
       const unitChanged = String(item.unit ?? "").trim().toLocaleLowerCase("nb") !==
-        String(original.unit ?? "").trim().toLocaleLowerCase("nb");
-      const restored = { ...item };
-      if (Object.prototype.hasOwnProperty.call(original, "canonical_product_id"))
-        restored.canonical_product_id = nameChanged ? null : original.canonical_product_id;
-      if (Object.prototype.hasOwnProperty.call(original, "canonical_unit_id"))
-        restored.canonical_unit_id = unitChanged ? null : original.canonical_unit_id;
-      if (Object.prototype.hasOwnProperty.call(original, "source_unit_expression"))
-        restored.source_unit_expression = unitChanged ? (item.unit ?? null) : original.source_unit_expression;
-      return restored;
+        String(original?.unit ?? "").trim().toLocaleLowerCase("nb");
+      const uniquelyLinked = Boolean(original && proposalIndexes?.length === 1);
+      const revised = {
+        ...item,
+        canonical_product_id: null,
+        canonical_unit_id: null,
+      };
+      if (uniquelyLinked && !unitChanged &&
+          Object.prototype.hasOwnProperty.call(original, "source_unit_expression"))
+        revised.source_unit_expression = original.source_unit_expression;
+      else if (uniquelyLinked && Object.prototype.hasOwnProperty.call(original, "source_unit_expression"))
+        revised.source_unit_expression = null;
+      return revised;
     });
+    return {
+      ingredients,
+      identityReviewRequired: (Array.isArray(originalIngredients) ? originalIngredients : [])
+        .some((item) => item.canonical_product_id != null || item.canonical_unit_id != null),
+    };
   }
 
   root.KitchenRecipeEditor = {
@@ -292,7 +298,7 @@
     isPositiveQuantity,
     normalizeQuantity,
     parseSourceIngredient,
-    retainIngredientIdentityBySourceIndices,
+    prepareAIRevisionForEditor,
     rowFromDraft,
     recipeIngredientForSave,
   };

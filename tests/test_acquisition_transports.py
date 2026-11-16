@@ -384,9 +384,7 @@ async def test_mcp_acquisition_tools_are_registered_actor_scoped_and_never_retur
             assert "data_base64" not in result_json and '"data"' not in result_json
             upload_result = upload.structured_content
             photo_id = upload_result["photo_source"]["id"]
-            await app.state.mcp.call_tool(
-                "redraft_recipe_photo", {"photo_id": photo_id}
-            )
+            await app.state.mcp.call_tool("redraft_recipe_photo", {"photo_id": photo_id})
             discarded = await app.state.mcp.call_tool(
                 "discard_recipe_photo", {"photo_id": photo_id}
             )
@@ -422,17 +420,13 @@ async def test_mcp_acquisition_tools_are_registered_actor_scoped_and_never_retur
         token = history_context.set(HistoryContext(actor_id="bob", channel="mcp"))
         try:
             with pytest.raises(ToolError):
-                await app.state.mcp.call_tool(
-                    "get_recipe_collection_preview", {"job_id": job_id}
-                )
+                await app.state.mcp.call_tool("get_recipe_collection_preview", {"job_id": job_id})
         finally:
             history_context.reset(token)
 
         token = history_context.set(HistoryContext(actor_id="alice", channel="mcp"))
         try:
-            own = await app.state.mcp.call_tool(
-                "get_recipe_collection_preview", {"job_id": job_id}
-            )
+            own = await app.state.mcp.call_tool("get_recipe_collection_preview", {"job_id": job_id})
             assert own.structured_content["status"] in {"ready", "completed"}
             cancelled = await app.state.mcp.call_tool(
                 "cancel_recipe_collection", {"job_id": job_id}

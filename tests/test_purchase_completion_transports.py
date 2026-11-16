@@ -62,9 +62,7 @@ async def test_mcp_completion_reviews_and_batches_explicit_purchases_idempotentl
         mcp = client.app.state.mcp
         token = history_context.set(HistoryContext(actor_id="mcp-test-actor", channel="mcp"))
         try:
-            review_result = await mcp.call_tool(
-                "review_store_trip_completion", period
-            )
+            review_result = await mcp.call_tool("review_store_trip_completion", period)
             review = review_result.structured_content
             assert review["start"] == today
             assert review["end"] == today

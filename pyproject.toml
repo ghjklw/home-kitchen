@@ -11,7 +11,7 @@ dependencies = [
   "psycopg[binary]>=3.2,<4",
   "alembic>=1.15,<2",
   "fastapi>=0.115,<1",
-  "fastmcp>=2.14,<3",
+  "fastmcp>=3.4.11,<4",
   "httpx>=0.28,<1",
   "pydantic>=2.11,<3",
   "pydantic-settings>=2.9,<3",
@@ -20,6 +20,7 @@ dependencies = [
   "recipe-scrapers>=15,<16",
   "uvicorn>=0.34,<1",
   "pillow>=11",
+  "py-key-value-aio>=0.4.6,<0.5",
 ]
 
 [dependency-groups]

@@ -3,6 +3,8 @@ import hashlib
 import logging
 import re
 import time
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlencode, urlsplit
 from uuid import uuid4
 
@@ -12,8 +14,10 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
-from fastmcp.server.auth.oauth_proxy import JTIMapping, UpstreamTokenSet
+from fastmcp.server.auth.jwt_issuer import JWTIssuer
+from fastmcp.server.auth.oauth_proxy.models import JTIMapping, UpstreamTokenSet
 from fastmcp.server.auth.providers.jwt import JWTVerifier
+from mcp.server.auth.provider import RefreshToken, TokenError
 from pydantic import ValidationError
 from sqlalchemy import create_engine, func, select
 
@@ -67,6 +71,30 @@ def test_oauth_configuration_is_explicit_complete_and_canonical():
     ):
         with pytest.raises(ValidationError):
             oauth_settings(url, **changes)
+
+
+@pytest.mark.asyncio
+async def test_refresh_verification_accepts_only_refresh_token_use_before_storage():
+    provider = HouseholdAzureProvider.__new__(HouseholdAzureProvider)
+    provider._jwt_issuer = JWTIssuer(BASE, BASE + "/", b"test-only-signing-material-32-bytes")
+    provider._jti_mapping_store = SimpleNamespace(get=AsyncMock(return_value=None))
+    client = SimpleNamespace(client_id="test-client")
+    scopes = ["Kitchen.Access"]
+    for issue, reaches_storage in (
+        (provider.jwt_issuer.issue_access_token, False),
+        (provider.jwt_issuer.issue_refresh_token, True),
+    ):
+        token = issue(client.client_id, scopes, "test-jti", expires_in=300)
+        with pytest.raises(TokenError):
+            await provider.exchange_refresh_token(
+                client,
+                RefreshToken(token=token, client_id=client.client_id, scopes=scopes),
+                scopes,
+            )
+        if reaches_storage:
+            provider._jti_mapping_store.get.assert_awaited_once_with("test-jti")
+        else:
+            provider._jti_mapping_store.get.assert_not_awaited()
 
 
 @pytest.fixture
@@ -187,7 +215,7 @@ def test_discovery_challenge_and_dcr_redirects(test_database_url):
         assert metadata["code_challenge_methods_supported"] == ["S256"]
         assert metadata["token_endpoint_auth_methods_supported"] == ["none"]
         assert metadata["authorization_endpoint"] == BASE + "/authorize"
-        denied = client.get(
+        denied = client.post(
             "/mcp/",
             headers={
                 "x-auth-request-user": "spoofed",
@@ -498,6 +526,20 @@ def test_browser_oauth_consent_pkce_callback_and_one_use_code(
         }
         assert upstream["code_challenge_method"] == ["S256"]
         assert upstream["code_challenge"] != [challenge]
+        # A valid state/code in another browser cannot complete consent or
+        # consume the transaction belonging to the browser that approved it.
+        other_browser = TestClient(app, base_url="https://kitchen.example")
+        try:
+            denied_callback = other_browser.get(
+                "/mcp/auth/callback",
+                params={"code": "test-upstream-code", "state": upstream["state"][0]},
+                follow_redirects=False,
+            )
+        finally:
+            other_browser.close()
+        assert denied_callback.status_code == 403
+        assert not exchanges
+        assert not closed
         callback = client.get(
             "/mcp/auth/callback",
             params={"code": "test-upstream-code", "state": upstream["state"][0]},
@@ -514,6 +556,7 @@ def test_browser_oauth_consent_pkce_callback_and_one_use_code(
             )
             return
         assert callback.status_code == 302
+        assert "__Host-MCP_CONSENT_BINDING" not in client.cookies
         returned = parse_qs(urlsplit(callback.headers["location"]).query)
         assert returned["state"] == ["client-state"]
         assert exchanges[0]["redirect_uri"] == BASE + "/auth/callback"
@@ -528,7 +571,7 @@ def test_browser_oauth_consent_pkce_callback_and_one_use_code(
         }
         assert (
             client.post("/mcp/token", data={**exchange, "code_verifier": "wrong"}).status_code
-            == 400
+            == 401
         )
         tokens = client.post("/mcp/token", data=exchange)
         assert tokens.status_code == 200
@@ -558,7 +601,9 @@ def test_browser_oauth_consent_pkce_callback_and_one_use_code(
             registration["client_id"], ["Kitchen.Access"], payload["jti"], expires_in=-1
         )
         assert use_bearer(expired).status_code == 401
-        assert client.post("/mcp/token", data=exchange).status_code == 400
+        replayed_code = client.post("/mcp/token", data=exchange)
+        assert replayed_code.status_code == 401
+        assert replayed_code.json()["error"] == "invalid_grant"
         refresh_request = {
             "grant_type": "refresh_token",
             "client_id": registration["client_id"],
@@ -568,7 +613,9 @@ def test_browser_oauth_consent_pkce_callback_and_one_use_code(
         refreshed = client.post("/mcp/token", data=refresh_request)
         assert refreshed.status_code == 200
         assert refreshed.json()["refresh_token"] != tokens.json()["refresh_token"]
-        assert client.post("/mcp/token", data=refresh_request).status_code == 400
+        replayed_refresh = client.post("/mcp/token", data=refresh_request)
+        assert replayed_refresh.status_code == 401
+        assert replayed_refresh.json()["error"] == "invalid_grant"
         assert use_bearer(tokens.json()["access_token"]).status_code == 200
         assert use_bearer(refreshed.json()["refresh_token"]).status_code == 401
         assert len(closed) == 2
@@ -580,7 +627,8 @@ def test_browser_oauth_consent_pkce_callback_and_one_use_code(
                 "refresh_token": refreshed.json()["refresh_token"],
             },
         )
-        assert denied_refresh.status_code == 400
+        assert denied_refresh.status_code == 401
+        assert denied_refresh.json()["error"] == "invalid_grant"
         assert "access_token" not in denied_refresh.json()
         assert len(closed) == 3
         auth_logs = "\n".join(

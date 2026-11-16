@@ -5,8 +5,8 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 
 from cryptography.fernet import Fernet, InvalidToken
+from key_value.aio._utils.managed_entry import ManagedEntry
 from key_value.aio.stores.base import BaseStore
-from key_value.shared.utils.managed_entry import ManagedEntry
 from sqlalchemy import Column, DateTime, MetaData, Table, Text, delete, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import Engine

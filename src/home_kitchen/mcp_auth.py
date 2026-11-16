@@ -9,9 +9,10 @@ from urllib.parse import urlencode, urlsplit
 
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 from fastmcp.server.auth import AccessToken
-from fastmcp.server.auth.oauth_proxy import (
+from fastmcp.server.auth.oauth_proxy.models import (
     ClientCode,
     JTIMapping,
+    ProxyDCRClient,
     RefreshTokenMetadata,
     UpstreamTokenSet,
 )
@@ -97,6 +98,13 @@ class HouseholdAzureProvider(AzureProvider):
             require_authorization_consent=True,
         )
 
+    def _required_upstream_client_secret(self) -> str:
+        # Azure is configured as a confidential client; fail closed if that
+        # invariant changes rather than silently sending an unauthenticated request.
+        if self._upstream_client_secret is None:
+            raise ValueError("Upstream client secret is required")
+        return self._upstream_client_secret.get_secret_value()
+
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
         # FastMCP otherwise defers this allowlist check until authorization and
         # persists arbitrary registrations first. Reject them at registration.
@@ -158,15 +166,12 @@ class HouseholdAzureProvider(AzureProvider):
         if client is not None:
             # Apply the current allowlist to clients registered before a policy
             # change as well as new clients. Preserve the SDK's redirect checks.
-            from fastmcp.server.auth.oauth_proxy import ProxyDCRClient
-
             if isinstance(client, ProxyDCRClient):
                 client.allowed_redirect_uri_patterns = self.client_redirects
         return client
 
     async def load_access_token(self, token: str) -> AccessToken | None:
-        # FastMCP 2.14 validates both token kinds identically and stores refresh
-        # JTIs alongside access JTIs. Reject refresh JWTs before the token swap.
+        # Reject refresh JWTs before the upstream token lookup.
         try:
             payload = self.jwt_issuer.verify_token(token)
             if payload.get("token_use") not in (None, "access"):
@@ -255,8 +260,18 @@ class HouseholdAzureProvider(AzureProvider):
         if request.query_params.get("error") or not code or not state:
             return JSONResponse({"detail": "MCP sign-in failed"}, status_code=400)
         try:
-            transaction = await self.storage.take(state, collection="mcp-oauth-transactions")
+            transaction = await self.storage.get(state, collection="mcp-oauth-transactions")
             if transaction is None or not transaction.get("proxy_code_verifier"):
+                return JSONResponse({"detail": "MCP sign-in expired"}, status_code=400)
+            # Preserve FastMCP 3's callback binding: only the browser that
+            # approved consent may complete the upstream authorization.
+            consent_token = transaction.get("consent_token")
+            if not consent_token or not self._verify_consent_binding_cookie(
+                request, state, consent_token
+            ):
+                return JSONResponse({"detail": "Invalid consent session"}, status_code=403)
+            transaction = await self.storage.take(state, collection="mcp-oauth-transactions")
+            if transaction is None:
                 return JSONResponse({"detail": "MCP sign-in expired"}, status_code=400)
             # Recheck current redirect policy before delivering a code, including
             # for transactions started before an operator tightened the policy.
@@ -264,7 +279,7 @@ class HouseholdAzureProvider(AzureProvider):
                 return JSONResponse({"detail": "MCP client is not allowed"}, status_code=400)
             async with AsyncOAuth2Client(
                 client_id=self._upstream_client_id,
-                client_secret=self._upstream_client_secret.get_secret_value(),
+                client_secret=self._required_upstream_client_secret(),
                 token_endpoint_auth_method=self._token_endpoint_auth_method,
                 timeout=30,
             ) as client:
@@ -295,7 +310,7 @@ class HouseholdAzureProvider(AzureProvider):
                 ),
                 ttl=300,
             )
-            return RedirectResponse(
+            response = RedirectResponse(
                 transaction["client_redirect_uri"]
                 + "?"
                 + urlencode(
@@ -306,6 +321,8 @@ class HouseholdAzureProvider(AzureProvider):
                 ),
                 status_code=302,
             )
+            self._clear_consent_binding_cookie(request, response, state)
+            return response
         except Exception:
             # Provider exception strings can contain credentials or code-bearing
             # request URLs. Never echo or log them, including chained tracebacks.
@@ -425,7 +442,9 @@ class HouseholdAzureProvider(AzureProvider):
 
     async def exchange_refresh_token(self, client, refresh_token: RefreshToken, scopes):
         try:
-            payload = self.jwt_issuer.verify_token(refresh_token.token)
+            payload = self.jwt_issuer.verify_token(
+                refresh_token.token, expected_token_use="refresh"
+            )
             if payload.get("token_use") != "refresh":
                 raise ValueError("Invalid token type")
             if not set(scopes).issubset(refresh_token.scopes):
@@ -450,7 +469,7 @@ class HouseholdAzureProvider(AzureProvider):
             await self._jti_mapping_store.delete(payload["jti"])
             async with AsyncOAuth2Client(
                 client_id=self._upstream_client_id,
-                client_secret=self._upstream_client_secret.get_secret_value(),
+                client_secret=self._required_upstream_client_secret(),
                 token_endpoint_auth_method=self._token_endpoint_auth_method,
                 timeout=30,
             ) as session:

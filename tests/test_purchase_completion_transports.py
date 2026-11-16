@@ -62,9 +62,7 @@ async def test_mcp_completion_reviews_and_batches_explicit_purchases_idempotentl
         mcp = client.app.state.mcp
         token = history_context.set(HistoryContext(actor_id="mcp-test-actor", channel="mcp"))
         try:
-            review_result = await mcp._tool_manager.call_tool(
-                "review_store_trip_completion", period
-            )
+            review_result = await mcp.call_tool("review_store_trip_completion", period)
             review = review_result.structured_content
             assert review["start"] == today
             assert review["end"] == today
@@ -92,15 +90,15 @@ async def test_mcp_completion_reviews_and_batches_explicit_purchases_idempotentl
                     },
                 ],
             }
-            saved = await mcp._tool_manager.call_tool("complete_store_trip", {"data": request})
+            saved = await mcp.call_tool("complete_store_trip", {"data": request})
             completed = saved.structured_content
             assert completed["idempotency_key"] == request["idempotency_key"]
             assert len(completed["lines"]) == 2
             assert {line["need"]["name"] for line in completed["lines"]} == {"Milk", "Coffee"}
 
-            replay = await mcp._tool_manager.call_tool("complete_store_trip", {"data": request})
+            replay = await mcp.call_tool("complete_store_trip", {"data": request})
             assert replay.structured_content == completed
-            trips = await mcp._tool_manager.call_tool("list_completed_store_trips", {})
+            trips = await mcp.call_tool("list_completed_store_trips", {})
             assert len(trips.structured_content) == 1
         finally:
             history_context.reset(token)

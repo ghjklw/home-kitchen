@@ -1,7 +1,7 @@
 """Household recipes, meal planning, and deliberate shopping suggestions."""
 
 from collections import Counter
-from datetime import date, time
+from datetime import UTC, date, datetime, time
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -16,12 +16,16 @@ from .models import (
     PurchaseEstimate,
     Recipe,
     RecipeCreate,
+    RecipeTranslation,
     RegularItem,
     ShoppingItem,
     ShoppingItemCreate,
     WeekShopping,
 )
+from .recipes.language import detect_recipe_language
 from .recipes.source_quantities import normalize_source_quantity, source_ingredient_parts
+from .recipes.translation import RecipeTranslator, compute_recipe_version
+from .settings import Settings
 from .shopping import ClosedSourceKey, ShoppingBuilder, ShoppingContext, default_shopping_builder
 from .store import Store
 from .units import scale_quantity
@@ -36,6 +40,8 @@ class KitchenService:
         shopping_builder: ShoppingBuilder | None = None,
         identity_service: CanonicalIdentityService | None = None,
         store: Store | None = None,
+        translator: RecipeTranslator | None = None,
+        settings: Settings | None = None,
     ):
         if store is not None:
             self.store = store
@@ -45,13 +51,20 @@ class KitchenService:
         self.identities = identity_service or CanonicalIdentityService(
             PostgresIdentityRepository(self.store.engine)
         )
+        self.translator = translator
+        self.settings = settings
 
     def create_recipe(self, data: RecipeCreate) -> Recipe:
         resolved_data = self._resolve_recipe_identities_on_create(data)
         self._validate_canonical_identities(resolved_data)
+        source_language = data.source_language
+        if not source_language:
+            source_language = detect_recipe_language(resolved_data)
         # Image credit is written only by the authenticated candidate-selection flow.
         recipe = Recipe(
-            id=uuid4(), **self._recipe_values(resolved_data, exclude={"image_attribution"})
+            id=uuid4(),
+            source_language=source_language,
+            **self._recipe_values(resolved_data, exclude={"image_attribution", "source_language"}),
         )
         self.store.save("recipe", recipe)
         return recipe
@@ -65,7 +78,14 @@ class KitchenService:
     def update_recipe(self, recipe_id: UUID, data: RecipeCreate) -> Recipe:
         existing = self.get_recipe(recipe_id)
         self._validate_canonical_identities(data)
-        values = self._recipe_values(data, exclude={"image_attribution"})
+        source_language = data.source_language
+        if not source_language:
+            detected = detect_recipe_language(data)
+            if detected != "und" or not existing.source_language:
+                source_language = detected
+            else:
+                source_language = existing.source_language
+        values = self._recipe_values(data, exclude={"image_attribution", "source_language"})
         values["ingredients"] = self._retain_omitted_ingredient_identity_fields(
             data, existing, values["ingredients"]
         )
@@ -76,7 +96,7 @@ class KitchenService:
         values["image_attribution"] = (
             existing.image_attribution if data.image_url == existing.image_url else None
         )
-        recipe = Recipe(id=recipe_id, **values)
+        recipe = Recipe(id=recipe_id, source_language=source_language, **values)
         self.store.save("recipe", recipe)
         return recipe
 
@@ -308,6 +328,82 @@ class KitchenService:
         if any(meal.recipe_id == recipe_id for meal in self.store.list("meal", Meal)):
             raise ValueError("Remove planned meals before deleting this recipe")
         self.store.delete("recipe", recipe_id)
+
+    def get_recipe_translation(
+        self, recipe_id: UUID, target_locale: str
+    ) -> RecipeTranslation | None:
+        recipe = self.get_recipe(recipe_id)
+        current_version = compute_recipe_version(recipe)
+        translation = self.store.get_recipe_translation(recipe_id, target_locale.strip().casefold())
+        if translation is None:
+            return None
+        is_stale = translation.recipe_version != current_version
+        return translation.model_copy(update={"is_stale": is_stale})
+
+    def list_recipe_translations(self, recipe_id: UUID) -> list[RecipeTranslation]:
+        recipe = self.get_recipe(recipe_id)
+        current_version = compute_recipe_version(recipe)
+        translations = self.store.list_recipe_translations(recipe_id)
+        return [
+            t.model_copy(update={"is_stale": t.recipe_version != current_version})
+            for t in translations
+        ]
+
+    async def translate_recipe(
+        self, recipe_id: UUID, target_locale: str, force: bool = False
+    ) -> RecipeTranslation:
+        recipe = self.get_recipe(recipe_id)
+        target_locale = target_locale.strip().casefold()
+        current_version = compute_recipe_version(recipe)
+
+        if not force:
+            existing = self.store.get_recipe_translation(recipe_id, target_locale, current_version)
+            if existing is not None:
+                return existing.model_copy(update={"is_stale": False})
+
+        # Identity translation if recipe is already in the requested target language
+        if recipe.source_language and recipe.source_language.casefold() == target_locale:
+            translation = RecipeTranslation(
+                id=uuid4(),
+                recipe_id=recipe_id,
+                target_locale=target_locale,
+                recipe_version=current_version,
+                title=recipe.title,
+                instructions=recipe.instructions,
+                ingredients=recipe.ingredients,
+                provider="source",
+                model="source-language",
+                created_at=datetime.now(UTC),
+                is_stale=False,
+            )
+            self.store.save_recipe_translation(translation)
+            return translation
+
+        translator = self.translator
+        if translator is None:
+            if self.settings and self.settings.ai_configured:
+                from home_kitchen.recipes.translation import AIRecipeTranslator
+
+                translator = AIRecipeTranslator(self.settings)
+            else:
+                raise ValueError("Configure an AI model and API credential to translate recipes")
+
+        payload = await translator.translate(recipe, target_locale)
+        translation = RecipeTranslation(
+            id=uuid4(),
+            recipe_id=recipe_id,
+            target_locale=target_locale,
+            recipe_version=current_version,
+            title=payload.title,
+            instructions=payload.instructions,
+            ingredients=payload.ingredients,
+            provider=payload.provider,
+            model=payload.model,
+            created_at=datetime.now(UTC),
+            is_stale=False,
+        )
+        self.store.save_recipe_translation(translation)
+        return translation
 
     def plan_meal(self, data: MealCreate) -> Meal:
         self.get_recipe(data.recipe_id)

@@ -31,6 +31,8 @@ from home_kitchen.models import (
     PlannedMealRecipe,
     Recipe,
     RecipeCreate,
+    RecipeTranslation,
+    RecipeTranslationRequest,
     RegularItem,
     ShoppingItem,
     ShoppingItemCreate,
@@ -70,10 +72,13 @@ class PlanRequest(BaseModel):
 
 
 def create_app(
-    settings: Settings | None = None, ai: Agent[None, RecipeCreate] | None = None
+    settings: Settings | None = None,
+    ai: Agent[None, RecipeCreate] | None = None,
+    service: KitchenService | None = None,
 ) -> FastAPI:
     settings = settings or Settings()
-    service = KitchenService(settings.database_url.get_secret_value())
+    if service is None:
+        service = KitchenService(settings.database_url.get_secret_value(), settings=settings)
 
     def load_household() -> Household:
         value = service.store.get_setting("household")
@@ -171,6 +176,38 @@ def create_app(
     def delete_recipe(recipe_id: UUID) -> dict[str, bool]:
         service.delete_recipe(recipe_id)
         return {"deleted": True}
+
+    @app.get("/api/recipes/{recipe_id}/translations/{locale}")
+    def get_recipe_translation(recipe_id: UUID, locale: str) -> RecipeTranslation:
+        try:
+            translation = service.get_recipe_translation(recipe_id, locale)
+        except KeyError:
+            raise HTTPException(404, f"Recipe not found: {recipe_id}") from None
+        if translation is None:
+            raise HTTPException(404, f"Recipe translation not found for locale {locale!r}")
+        return translation
+
+    @app.get("/api/recipes/{recipe_id}/translations")
+    def list_recipe_translations(recipe_id: UUID) -> list[RecipeTranslation]:
+        try:
+            return service.list_recipe_translations(recipe_id)
+        except KeyError:
+            raise HTTPException(404, f"Recipe not found: {recipe_id}") from None
+
+    @app.post("/api/recipes/{recipe_id}/translate")
+    async def translate_recipe(
+        recipe_id: UUID, request: RecipeTranslationRequest
+    ) -> RecipeTranslation:
+        try:
+            return await service.translate_recipe(
+                recipe_id, request.target_locale, force=request.force
+            )
+        except KeyError:
+            raise HTTPException(404, f"Recipe not found: {recipe_id}") from None
+        except ValueError as exc:
+            if "Configure an AI model" in str(exc):
+                raise HTTPException(503, str(exc)) from exc
+            raise HTTPException(400, str(exc)) from exc
 
     @app.get("/api/meals")
     def list_meals(start: date, end: date) -> list[Meal]:

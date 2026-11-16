@@ -35,12 +35,12 @@ test("rejects duplicate, blank, too-long, and excessive category orders", () => 
 });
 
 test("provides connection status and authentication labels without credentials", () => {
-  assert.equal(integrationStatusLabel("connected"), "Connected");
-  assert.equal(integrationStatusLabel("not_configured"), "Setup required");
-  assert.equal(integrationAuthLabel("federation"), "Managed identity federation");
-  assert.equal(integrationAuthLabel("api_key"), "API key");
-  assert.equal(integrationAuthLabel("api_key", true), "API key configured (secret hidden)");
-  assert.equal(integrationAuthLabel("unknown"), "Not reported");
+  assert.equal(integrationStatusLabel("connected"), "Tilkoblet");
+  assert.equal(integrationStatusLabel("not_configured"), "Oppsett kreves");
+  assert.equal(integrationAuthLabel("federation"), "Føderert administrert identitet");
+  assert.equal(integrationAuthLabel("api_key"), "API-nøkkel");
+  assert.equal(integrationAuthLabel("api_key", true), "API-nøkkel er satt opp (hemmeligheten er skjult)");
+  assert.equal(integrationAuthLabel("unknown"), "Ikke oppgitt");
   assert.equal(odaNeedsReconnect("Your Oda connection expired; connect again"), true);
   assert.equal(odaNeedsReconnect("This requires you to connect your Oda account first"), true);
   assert.equal(odaNeedsReconnect("Oda product search returned no matches"), false);
@@ -62,14 +62,14 @@ test("keeps integration and Oda status independently when one endpoint fails", (
   assert.equal(partialOdaFailure.integrations, integrationRows);
   assert.equal(partialOdaFailure.integrationsError, null);
   assert.equal(partialOdaFailure.oda, null);
-  assert.match(partialOdaFailure.odaStatusError, /Oda status is unavailable/);
+  assert.match(partialOdaFailure.odaStatusError, /Oda-status er ikke tilgjengelig/);
 
   const partialIntegrationFailure = connectionStatusSnapshot(
     { status: "rejected", reason: new Error("offline") },
     { status: "fulfilled", value: { configured: true, connected: true, detail: "Connected" } },
   );
   assert.deepEqual(partialIntegrationFailure.integrations, []);
-  assert.match(partialIntegrationFailure.integrationsError, /Integration status is unavailable/);
+  assert.match(partialIntegrationFailure.integrationsError, /Tilkoblingsstatus er ikke tilgjengelig/);
   assert.equal(partialIntegrationFailure.oda.connected, true);
   assert.equal(partialIntegrationFailure.odaStatusError, null);
 });
@@ -79,13 +79,13 @@ test("reports malformed successful endpoint payloads as unavailable", () => {
     { status: "fulfilled", value: { unexpected: true } },
     { status: "fulfilled", value: [] },
   );
-  assert.match(snapshot.integrationsError, /Integration status is unavailable/);
-  assert.match(snapshot.odaStatusError, /Oda status is unavailable/);
+  assert.match(snapshot.integrationsError, /Tilkoblingsstatus er ikke tilgjengelig/);
+  assert.match(snapshot.odaStatusError, /Oda-status er ikke tilgjengelig/);
 
   const emptyOda = connectionStatusSnapshot(
     { status: "fulfilled", value: [] },
     { status: "fulfilled", value: {} },
   );
   assert.equal(emptyOda.integrationsError, null);
-  assert.match(emptyOda.odaStatusError, /Oda status is unavailable/);
+  assert.match(emptyOda.odaStatusError, /Oda-status er ikke tilgjengelig/);
 });

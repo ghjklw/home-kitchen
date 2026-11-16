@@ -135,7 +135,18 @@ class BasketMatchJobs:
             end,
             page,
             size,
-            tuple((line.id, line.name, line.to_buy_quantity, line.unit) for line in lines),
+            tuple(
+                (
+                    line.id,
+                    line.name,
+                    line.to_buy_quantity,
+                    line.unit,
+                    line.approximate,
+                    line.provenance,
+                    line.source_url,
+                )
+                for line in lines
+            ),
         )
         now = self.clock()
         for job in self._jobs.values():
@@ -177,6 +188,9 @@ class BasketMatchJobs:
                     has_more=False,
                     candidates=[],
                     status="pending",
+                    approximate=line.approximate,
+                    provenance=line.provenance,
+                    source_url=line.source_url,
                 )
                 for line in lines[:MAX_NEEDS]
             ],

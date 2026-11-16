@@ -7,7 +7,6 @@ import re
 import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from decimal import Decimal
 from typing import Literal, Protocol
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
@@ -18,7 +17,8 @@ from sqlalchemy.dialects.postgresql import JSONB, insert
 
 from home_kitchen.history import HistoryEntryCreate, HistoryRepository
 from home_kitchen.imports import ImportedDraft, import_recipe, validate_url
-from home_kitchen.models import Ingredient, Recipe, RecipeSource, SourceIngredient
+from home_kitchen.models import Ingredient, PurchaseEstimate, Recipe, RecipeSource, SourceIngredient
+from home_kitchen.recipes.source_quantities import source_ingredient_parts
 from home_kitchen.service import KitchenService
 from home_kitchen.store import entity_values, metadata, recipes
 
@@ -157,20 +157,20 @@ class _Job:
 
 
 def source_ingredient(raw: str, index: int) -> Ingredient:
-    """Only recognize an explicit positive decimal followed by a known unit and name."""
-    match = re.fullmatch(
-        r"\s*([0-9]+(?:[.,][0-9]+)?)\s+(kg|g|mg|l|dl|cl|ml|ss|ts|stk|item)\.?\s+(.+?)\s*",
-        raw,
-        re.IGNORECASE,
+    """Preserve the cooking measure and attach only published estimates."""
+    name, parsed = source_ingredient_parts(raw)
+    estimate = (
+        PurchaseEstimate.model_validate(parsed.purchase_estimate.__dict__)
+        if parsed.purchase_estimate is not None
+        else None
     )
-    if match and Decimal(match[1].replace(",", ".")) > 0:
-        return Ingredient(
-            name=match[3],
-            quantity=Decimal(match[1].replace(",", ".")),
-            unit=match[2],
-            source_indices=[index],
-        )
-    return Ingredient(name=raw, quantity=None, unit=None, source_indices=[index])
+    return Ingredient(
+        name=name,
+        quantity=parsed.quantity,
+        unit=parsed.unit,
+        source_indices=[index],
+        purchase_estimate=estimate,
+    )
 
 
 class CollectionService:

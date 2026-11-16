@@ -8,7 +8,13 @@ from sqlalchemy import text
 from home_kitchen.basket.models import ProductSnapshot, SelectedProduct
 from home_kitchen.basket.repository import BasketService
 from home_kitchen.history import HistoryRepository
-from home_kitchen.models import ShoppingItemCreate
+from home_kitchen.models import (
+    Ingredient,
+    MealCreate,
+    RecipeCreate,
+    ShoppingItemCreate,
+    SourceIngredient,
+)
 from home_kitchen.service import KitchenService
 
 
@@ -42,6 +48,26 @@ def test_whitespace_variations_merge_into_one_stable_basket_need(test_database_u
     assert review.needs[0].need.id == original.id
     assert review.needs[0].need.quantity == Decimal(3)
     assert len(review.needs[0].need.origins) == 2
+    kitchen.store.engine.dispose()
+
+
+def test_basket_need_preserves_approximate_source_evidence(test_database_url):
+    kitchen = KitchenService(test_database_url)
+    recipe = kitchen.create_recipe(
+        RecipeCreate(
+            title="Boller",
+            servings=2,
+            ingredients=[Ingredient(name="sukker", quantity=1, unit="dl", source_indices=[0])],
+            instructions=["Rør"],
+            source_ingredients=[SourceIngredient(index=0, text="1 dl sukker")],
+        )
+    )
+    kitchen.plan_meal(MealCreate(date=date(2026, 5, 4), recipe_id=recipe.id, servings=2))
+    basket = BasketService(kitchen, HistoryRepository(kitchen.store.engine))
+    need = basket.review(date(2026, 5, 4), date(2026, 5, 10)).needs[0].need
+    assert need.approximate is True
+    assert "1 dl sukker" in need.provenance
+    assert str(need.source_url).startswith("https://www.matprat.no/")
     kitchen.store.engine.dispose()
 
 

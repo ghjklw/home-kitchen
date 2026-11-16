@@ -4,12 +4,12 @@
   function buildPlannedCookingView(response) {
     const sourceRecipe = response?.source_recipe;
     if (!response?.meal || !sourceRecipe || !Array.isArray(response.ingredients))
-      throw new Error("The planned recipe could not be opened. Your saved recipe is unchanged.");
+      throw new Error("Den planlagte oppskriften kunne ikke åpnes. Den lagrede oppskriften er uendret.");
     const servings = Number(response.servings);
     if (!Number.isInteger(servings) || servings < 1)
-      throw new Error("The planned serving count is unavailable. Your saved recipe is unchanged.");
+      throw new Error("Antall porsjoner for måltidet er ikke tilgjengelig. Den lagrede oppskriften er uendret.");
     if (!Array.isArray(sourceRecipe.instructions) || !sourceRecipe.instructions.length)
-      throw new Error("This recipe has no cooking instructions yet.");
+      throw new Error("Denne oppskriften har ingen fremgangsmåte ennå.");
     return {
       meal: response.meal,
       sourceRecipe,
@@ -19,13 +19,13 @@
   }
 
   function formatPlannedIngredient(item, formatQuantity = (value) => value) {
-    const name = String(item?.name || "Ingredient").trim();
+    const name = String(item?.name || "Ingrediens").trim();
     const unit = String(item?.unit || "").trim();
     if (item?.quantity == null || !unit) {
-      const text = "Quantity not specified · " + name;
+      const text = "Mengde ikke oppgitt · " + name;
       return {
         text,
-        accessibleLabel: "Quantity not specified for " + name,
+        accessibleLabel: "Mengde ikke oppgitt for " + name,
         copyText: text,
       };
     }
@@ -34,41 +34,41 @@
     const text = displayQuantity + " " + unit + " " + name;
     const spokenUnit =
       {
-        g: "grams",
-        kg: "kilograms",
-        mg: "milligrams",
-        ml: "milliliters",
-        cl: "centiliters",
-        dl: "deciliters",
-        l: "liters",
-        tsp: "teaspoons",
-        tbsp: "tablespoons",
-        item: "items",
-        items: "items",
-        pc: "pieces",
-        pcs: "pieces",
-        stk: "pieces",
-        pinch: "pinch",
-        pinches: "pinches",
+        g: "gram",
+        kg: "kilogram",
+        mg: "milligram",
+        ml: "milliliter",
+        cl: "centiliter",
+        dl: "desiliter",
+        l: "liter",
+        tsp: "teskjeer",
+        tbsp: "spiseskjeer",
+        item: "stk.",
+        items: "stk.",
+        pc: "stk.",
+        pcs: "stk.",
+        stk: "stk.",
+        pinch: "klype",
+        pinches: "klyper",
       }[unit.toLowerCase()] || unit;
     return {
       text,
-      accessibleLabel: "Amount: " + displayQuantity + " " + spokenUnit + " " + name,
+      accessibleLabel: "Mengde: " + displayQuantity + " " + spokenUnit + " " + name,
       copyText: text,
     };
   }
 
   function formatPlannedIngredientList(view, formatQuantity = (value) => value) {
-    const title = String(view?.sourceRecipe?.title || "Recipe").trim();
+    const title = String(view?.sourceRecipe?.title || "Oppskrift").trim();
     const ingredients = (view?.ingredients || []).map((item) =>
       formatPlannedIngredient(item, formatQuantity).copyText,
     );
     return [
       title,
-      "For " + view.servings + " servings",
+      "Til " + view.servings + " porsjoner",
       "",
-      "Ingredients:",
-      ...(ingredients.length ? ingredients.map((item) => "- " + item) : ["- No ingredients listed"]),
+      "Ingredienser:",
+      ...(ingredients.length ? ingredients.map((item) => "- " + item) : ["- Ingen ingredienser oppført"]),
     ].join("\n");
   }
 

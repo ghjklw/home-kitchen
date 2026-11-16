@@ -40,22 +40,22 @@
     const [, days = "0", hours = "0", minutes = "0", seconds = "0"] = match;
     const parts = [];
     if (Number(days)) parts.push(days + " d");
-    if (Number(hours)) parts.push(hours + " hr");
+    if (Number(hours)) parts.push(hours + " t");
     if (Number(minutes)) parts.push(minutes + " min");
-    if (Number(seconds) && !Number(days) && !Number(hours) && !Number(minutes))
-      parts.push(seconds + " sec");
+      if (Number(seconds) && !Number(days) && !Number(hours) && !Number(minutes))
+        parts.push(seconds + " sek");
     return parts.join(" ") || "0 min";
   }
 
   function statusLabel(status) {
     return ({
-      pending: "Waiting to search",
-      searching: "Searching Oda",
-      matched: "Suggestions ready",
-      no_results: "No matches found",
-      search_failed: "Search failed",
-      search_unavailable: "Search unavailable",
-    })[status] || "Search status unavailable";
+      pending: "Venter på søk",
+      searching: "Søker hos Oda",
+      matched: "Forslagene er klare",
+      no_results: "Ingen treff funnet",
+      search_failed: "Søket mislyktes",
+      search_unavailable: "Søket er ikke tilgjengelig",
+    })[status] || "Søkestatus er ikke tilgjengelig";
   }
 
   function selectionRecommendation(candidate, needUnit) {
@@ -75,11 +75,37 @@
     };
   }
 
+  function formatNeedQuantity(need, formatQuantity = (value) => String(value ?? "")) {
+    const quantity = formatQuantity(need?.quantity);
+    const unit = String(need?.unit ?? "").trim();
+    return [need?.approximate === true ? "ca. " + quantity : quantity, unit]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  function sourceUrl(value) {
+    if (typeof value !== "string" || !value.trim()) return null;
+    try {
+      const parsed = new URL(value);
+      if (
+        parsed.protocol !== "https:" ||
+        parsed.username ||
+        parsed.password
+      )
+        return null;
+      return parsed.href;
+    } catch {
+      return null;
+    }
+  }
+
   root.KitchenBasketMatchView = {
     formatDuration,
+    formatNeedQuantity,
     mergeNeedPages,
     planKey,
     selectionRecommendation,
+    sourceUrl,
     statusLabel,
   };
   if (typeof module !== "undefined" && module.exports)

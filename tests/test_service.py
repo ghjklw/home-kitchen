@@ -5,7 +5,13 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from home_kitchen.models import Ingredient, MealCreate, RecipeCreate, ShoppingItemCreate
+from home_kitchen.models import (
+    Ingredient,
+    MealCreate,
+    RecipeCreate,
+    ShoppingItemCreate,
+    SourceIngredient,
+)
 from home_kitchen.service import KitchenService
 
 
@@ -42,15 +48,131 @@ def test_scaled_meals_capture_and_incompatible_units(service):
     assert soup.instructions == ["Chop", "Cook"]
 
 
-def test_meal_boundaries_occupied_slot_and_unknown_recipe(service):
+def test_imported_source_estimate_is_derived_and_used_for_shopping(service):
+    imported = service.create_recipe(
+        RecipeCreate(
+            title="Boller",
+            servings=2,
+            ingredients=[
+                Ingredient(
+                    name="sukker",
+                    quantity=None,
+                    unit=None,
+                    source_indices=[0],
+                    purchase_estimate={
+                        "quantity": 999,
+                        "unit": "kg",
+                        "approximate": False,
+                        "provenance": "untrusted client value",
+                    },
+                )
+            ],
+            instructions=["Rør"],
+            source_ingredients=[SourceIngredient(index=0, text="1 dl sukker")],
+        )
+    )
+    estimate = imported.ingredients[0].purchase_estimate
+    assert estimate is not None
+    assert estimate.quantity == Decimal("90")
+    assert estimate.unit == "g"
+    assert estimate.approximate is True
+    assert "Matprat" in estimate.provenance
+
+    service.plan_meal(MealCreate(date=date(2026, 1, 4), recipe_id=imported.id, servings=4))
+    lines = service.shopping_list(date(2026, 1, 4), date(2026, 1, 4), date(2026, 1, 4)).lines
+    assert [(line.name, line.quantity, line.unit) for line in lines] == [
+        ("sukker", Decimal("180"), "g")
+    ]
+    line = lines[0]
+    assert line.approximate is True
+    assert "1 dl sukker" in line.provenance
+    assert str(line.source_url).startswith("https://www.matprat.no/")
+
+    service.add_item(ShoppingItemCreate(name="sukker", quantity=10, unit="g"))
+    mixed_line = service.shopping_list(date(2026, 1, 4), date(2026, 1, 4), date(2026, 1, 4)).lines[
+        0
+    ]
+    assert mixed_line.quantity == Decimal("190")
+    assert mixed_line.approximate is True
+    assert "1 dl sukker" in mixed_line.provenance
+
+    planned = service.meal_recipe(service.list_meals(date(2026, 1, 4), date(2026, 1, 4))[0].id)
+    assert planned.ingredients[0].quantity is None
+    assert planned.ingredients[0].purchase_estimate.quantity == Decimal("180")
+
+
+def test_estimates_follow_current_ingredient_name_and_measure_not_stale_source(service):
+    changed_measure = service.create_recipe(
+        RecipeCreate(
+            title="More sugar",
+            servings=2,
+            ingredients=[Ingredient(name="sukker", quantity=1, unit="dl", source_indices=[0])],
+            instructions=["Rør"],
+            source_ingredients=[SourceIngredient(index=0, text="1 dl sukker")],
+        )
+    )
+    changed_measure = service.update_recipe(
+        changed_measure.id,
+        RecipeCreate(
+            title="More sugar",
+            servings=2,
+            ingredients=[Ingredient(name="sukker", quantity=2, unit="dl", source_indices=[0])],
+            instructions=["Rør"],
+            source_ingredients=[SourceIngredient(index=0, text="1 dl sukker")],
+        ),
+    )
+    substituted = service.create_recipe(
+        RecipeCreate(
+            title="Substitution",
+            servings=2,
+            ingredients=[Ingredient(name="mandelmel", quantity=1, unit="dl", source_indices=[0])],
+            instructions=["Rør"],
+            source_ingredients=[SourceIngredient(index=0, text="1 dl sukker")],
+        )
+    )
+
+    assert changed_measure.ingredients[0].purchase_estimate.quantity == Decimal("180")
+    assert "1 dl sukker" in changed_measure.ingredients[0].purchase_estimate.provenance
+    assert substituted.ingredients[0].purchase_estimate is None
+
+    service.plan_meal(MealCreate(date=date(2026, 1, 5), recipe_id=changed_measure.id, servings=4))
+    planned = service.meal_recipe(service.list_meals(date(2026, 1, 5), date(2026, 1, 5))[0].id)
+    assert planned.ingredients[0].quantity == Decimal("4")
+    assert planned.ingredients[0].purchase_estimate.quantity == Decimal("360")
+
+
+def test_unmapped_spoon_measure_stays_unquantified_for_shopping(service):
+    recipe_with_spoon = service.create_recipe(
+        RecipeCreate(
+            title="Salted",
+            servings=2,
+            ingredients=[Ingredient(name="salt", quantity=1, unit="ss", source_indices=[0])],
+            instructions=["Rør"],
+            source_ingredients=[SourceIngredient(index=0, text="1 ss salt")],
+        )
+    )
+    service.plan_meal(MealCreate(date=date(2026, 1, 6), recipe_id=recipe_with_spoon.id, servings=2))
+    result = service.shopping_list(date(2026, 1, 6), date(2026, 1, 6), date(2026, 1, 6))
+    assert result.lines == []
+    assert [(need.name, need.unit) for need in result.unquantified] == [("salt", "ss")]
+
+
+def test_meal_boundaries_allow_multiple_entries_and_reject_unknown_recipe(service):
     soup = recipe(service)
     for day in (1, 2, 3):
         service.plan_meal(MealCreate(date=date(2026, 1, day), recipe_id=soup.id, servings=2))
-    with pytest.raises(ValueError, match="already planned"):
-        service.plan_meal(MealCreate(date=date(2026, 1, 2), recipe_id=soup.id, servings=4))
+    later = service.plan_meal(
+        MealCreate(
+            date=date(2026, 1, 2),
+            recipe_id=soup.id,
+            servings=4,
+            label="Ettermiddag",
+        )
+    )
     meals = service.list_meals(date(2026, 1, 2), date(2026, 1, 3))
-    assert [meal.date.day for meal in meals] == [2, 3]
+    assert [meal.date.day for meal in meals] == [2, 2, 3]
     assert meals[0].servings == 2
+    assert meals[1] == later
     with pytest.raises(KeyError):
         service.plan_meal(MealCreate(date=date(2026, 1, 2), recipe_id=uuid4(), servings=2))
     with pytest.raises(ValueError):

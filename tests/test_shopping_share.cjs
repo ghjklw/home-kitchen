@@ -19,7 +19,7 @@ test("formats a date-titled remaining list with category headings and exact deci
 
   assert.equal(
     text,
-      "Kitchen shopping list · Nov 16–22, 2026\n\nProduce:\n  - Carrots — 0.13 kg",
+      "Kitchen shopping list · Nov 16–22, 2026\n\nProduce:\n  - Carrots — 0,13 kg",
   );
 });
 
@@ -31,7 +31,7 @@ test("excludes checked, zero-covered, and invalid quantity lines", () => {
   ];
 
   assert.ok(lines.every((line) => !isRemainingShoppingLine(line)));
-  assert.equal(formatRemainingShoppingText("Week", lines), "Week\n\nNo items remaining.");
+  assert.equal(formatRemainingShoppingText("Week", lines), "Week\n\nIngen varer gjenstår.");
 });
 
 test("accepts canonical exponential decimals from the backend for remaining lines", () => {
@@ -50,7 +50,7 @@ test("uses a configured category order and readable decimal amounts", () => {
 
   assert.equal(
     text,
-    "Week\n\nProduce:\n  - Apples — 10.25 item\n  - zucchini — 1.5 kg\n\nPantry:\n  - Oats — 2 bag",
+    "Week\n\nProduce:\n  - Apples — 10,25 item\n  - zucchini — 1,5 kg\n\nPantry:\n  - Oats — 2 bag",
   );
 });
 

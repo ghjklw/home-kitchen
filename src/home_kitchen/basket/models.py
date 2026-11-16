@@ -21,6 +21,9 @@ class PurchaseNeed(BaseModel):
     unit: NonBlank
     origins: list[str] = Field(default_factory=list)
     category: NonBlank = "Other"
+    approximate: bool = False
+    provenance: str | None = None
+    source_url: HttpUrl | None = None
 
     @field_validator("unit")
     @classmethod

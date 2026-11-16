@@ -9,7 +9,13 @@ from sqlalchemy import text
 from home_kitchen.context import HistoryContext, history_context
 from home_kitchen.history import HistoryRepository
 from home_kitchen.inventory import InventoryItemCreate, InventoryService
-from home_kitchen.models import Ingredient, MealCreate, RecipeCreate, ShoppingItemCreate
+from home_kitchen.models import (
+    Ingredient,
+    MealCreate,
+    RecipeCreate,
+    ShoppingItemCreate,
+    SourceIngredient,
+)
 from home_kitchen.service import KitchenService
 from home_kitchen.shopping import need_id
 
@@ -58,6 +64,25 @@ def test_gross_owned_net_quantities_and_category_groups(services):
     assert inventory.plan(START, END) == plan
     with pytest.raises(ValueError, match="end must be on or after start"):
         inventory.plan(END, START)
+
+
+def test_purchase_plan_preserves_approximate_source_evidence(services):
+    kitchen, inventory, _ = services
+    recipe = kitchen.create_recipe(
+        RecipeCreate(
+            title="Boller",
+            servings=2,
+            ingredients=[Ingredient(name="sukker", quantity=1, unit="dl", source_indices=[0])],
+            instructions=["Rør"],
+            source_ingredients=[SourceIngredient(index=0, text="1 dl sukker")],
+        )
+    )
+    kitchen.plan_meal(MealCreate(date=START, recipe_id=recipe.id, servings=2))
+    sugar = next(line for line in inventory.plan(START, END).lines if line.name == "sukker")
+    assert sugar.required_quantity == Decimal("90")
+    assert sugar.approximate is True
+    assert "1 dl sukker" in sugar.provenance
+    assert str(sugar.source_url).startswith("https://www.matprat.no/")
 
 
 def test_unit_separation_zero_net_and_absolute_quantity_upsert(services):

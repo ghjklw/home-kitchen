@@ -31,7 +31,7 @@ def test_empty_household_recipe_meal_shopping_and_restart(test_database_url):
             "children_ages": [],
             "dietary_preferences": [],
             "default_servings": 2,
-            "language": "en",
+            "language": "nb",
             "shopping_category_order": Household().shopping_category_order,
         }
         assert client.get("/api/items").json() == []
@@ -154,14 +154,32 @@ def test_regular_item_api_accepts_interval_and_records_purchase(test_database_ur
         assert purchase.json()["last_purchased"] == "2026-01-05"
 
 
-def test_planning_occupied_slot_preserves_existing_meal(test_database_url):
+def test_meal_plan_adds_duplicates_and_updates_only_target_id(test_database_url):
     with make_client(test_database_url) as client:
         recipe = client.post("/api/recipes", json=recipe_payload()).json()
         data = {"date": "2027-01-11", "recipe_id": recipe["id"], "servings": 2}
         original = client.post("/api/meals", json=data)
-        conflict = client.post("/api/meals", json={**data, "servings": 4})
-        assert conflict.status_code == 409
-        assert "already planned" in conflict.json()["detail"]
+        second = client.post(
+            "/api/meals",
+            json={**data, "label": "Ettermiddag", "scheduled_time": "16:30"},
+        )
+        assert second.status_code == 201
+        assert second.json()["recipe_id"] == original.json()["recipe_id"]
+        assert second.json()["scheduled_time"] == "16:30:00"
+        legacy = client.post("/api/meals", json={**data, "slot": "breakfast"})
+        assert legacy.status_code == 201
+        assert legacy.json()["label"] == "Frokost"
+
         meals = client.get("/api/meals?start=2027-01-11&end=2027-01-11").json()
-        assert meals == [original.json()]
-        assert client.post("/api/meals", json={**data, "slot": "lunch"}).status_code == 201
+        assert len(meals) == 3
+        update = client.put(
+            f"/api/meals/{original.json()['id']}",
+            json={**data, "servings": 5, "label": "Middag"},
+        )
+        assert update.status_code == 200
+        assert update.json()["id"] == original.json()["id"]
+        meals = client.get("/api/meals?start=2027-01-11&end=2027-01-11").json()
+        assert len(meals) == 3
+        assert next(row for row in meals if row["id"] == second.json()["id"])["servings"] == 2
+        unknown = "00000000-0000-0000-0000-000000000002"
+        assert client.put(f"/api/meals/{unknown}", json=data).status_code == 404

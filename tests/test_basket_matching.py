@@ -65,6 +65,9 @@ def line(name="carrot", quantity="1", unit="kg", index=1):
             "name": name,
             "to_buy_quantity": Decimal(quantity),
             "unit": unit,
+            "approximate": False,
+            "provenance": None,
+            "source_url": None,
         },
     )()
 
@@ -364,6 +367,108 @@ async def test_oda_adapter_expands_and_filters_known_false_food_matches():
     ]
     assert groups[0].has_more is True
     assert [product.name for product in groups[1].products] == ["Tomatoes", "Tomat"]
+
+
+async def test_oda_adapter_localizes_imported_ingredients_and_preserves_product_identity():
+    class Oda:
+        async def search_products(self, actor_id, queries, page, size):
+            assert queries == [
+                "chicken breast, chopped",
+                "hakket kyllingfilet",
+                "fresh tomatoes",
+                "ferske tomater",
+                "creme fraiche",
+                "crème fraîche",
+            ]
+
+            def product(product_id, name):
+                return {
+                    "id": product_id,
+                    "name": name,
+                    "description": "1 pk",
+                    "brand": "Oda",
+                    "price": "39.90",
+                    "unitPrice": "39.90",
+                    "unitName": "per pk",
+                    "url": f"https://oda.com/no/products/{product_id}-item",
+                }
+
+            return {
+                "result": [
+                    {
+                        "query": query,
+                        "hasMore": False,
+                        "products": [product(product_id, name)],
+                    }
+                    for query, product_id, name in [
+                        ("chicken breast, chopped", 101, "Prior query result"),
+                        ("hakket kyllingfilet", 102, "Kyllingfilet, hakket"),
+                        ("fresh tomatoes", 201, "Prior tomato result"),
+                        ("ferske tomater", 202, "Tomater, ferske"),
+                        ("creme fraiche", 301, "Prior crème fraîche result"),
+                        ("crème fraîche", 302, "Crème fraîche 300 g"),
+                    ]
+                ]
+            }
+
+    groups = await OdaSearchAdapter(Oda()).search_products(
+        "household-1",
+        ["chicken breast, chopped", "fresh tomatoes", "creme fraiche"],
+        1,
+        5,
+    )
+
+    assert [[product.name for product in group.products] for group in groups] == [
+        ["Prior query result", "Kyllingfilet, hakket"],
+        ["Prior tomato result", "Tomater, ferske"],
+        ["Prior crème fraîche result", "Crème fraîche 300 g"],
+    ]
+    assert [[product.product_id for product in group.products] for group in groups] == [
+        ["101", "102"],
+        ["201", "202"],
+        ["301", "302"],
+    ]
+
+
+async def test_oda_adapter_rejects_bokmal_coffee_cream_and_tomato_puree():
+    class Oda:
+        async def search_products(self, actor_id, queries, page, size):
+            assert queries == ["kaffe", "Coffee Mate", "tomater", "tomatoes"]
+            groups = {
+                "kaffe": ["Kaffefløte", "Filterkaffe"],
+                "Coffee Mate": ["Coffee Mate Original"],
+                "tomater": ["Tomatpuré", "Tomater, ferske"],
+                "tomatoes": ["Tomato paste", "Fresh tomatoes"],
+            }
+            return {
+                "result": [
+                    {
+                        "query": query,
+                        "hasMore": False,
+                        "products": [
+                            {
+                                "id": product_id,
+                                "name": name,
+                                "description": name,
+                                "price": "10",
+                                "unitPrice": "10",
+                                "unitName": "per item",
+                                "url": f"https://oda.com/no/products/{product_id}-item",
+                            }
+                            for product_id, name in enumerate(groups[query], start=1)
+                        ],
+                    }
+                    for query in queries
+                ]
+            }
+
+    groups = await OdaSearchAdapter(Oda()).search_products(
+        "household-1", ["kaffe", "Coffee Mate", "tomater", "tomatoes"], 1, 5
+    )
+    assert [product.name for product in groups[0].products] == ["Filterkaffe"]
+    assert [product.name for product in groups[1].products] == ["Coffee Mate Original"]
+    assert [product.name for product in groups[2].products] == ["Tomater, ferske"]
+    assert [product.name for product in groups[3].products] == ["Fresh tomatoes"]
 
 
 async def _media(pack_description):

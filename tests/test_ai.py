@@ -78,14 +78,14 @@ async def test_recommendation_rejects_hallucinated_recipe_or_date(meal_overrides
 
 
 @pytest.mark.asyncio
-async def test_recommendation_rejects_duplicate_date_and_slot():
+async def test_recommendation_allows_duplicate_date_and_recipe():
     item = recipe()
     meal = {"date": "2026-03-02", "slot": "dinner", "recipe_id": str(item.id), "servings": 4}
     agent = build_planner(
         Settings(local_dev=True), TestModel(custom_output_args={"meals": [meal, meal]})
     )
-    with pytest.raises(ValueError, match="duplicate meal slot"):
-        await recommend_plan(agent, Household(), [item], date(2026, 3, 2))
+    draft = await recommend_plan(agent, Household(), [item], date(2026, 3, 2))
+    assert len(draft.meals) == 2
 
 
 @pytest.mark.asyncio

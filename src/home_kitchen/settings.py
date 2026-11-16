@@ -46,7 +46,7 @@ class Household(BaseModel):
     children_ages: list[Annotated[int, Field(ge=0, le=17)]] = Field(default_factory=list)
     dietary_preferences: list[Text] = Field(default_factory=list)
     default_servings: int = Field(default=2, ge=1, le=100)
-    language: Text = "en"
+    language: Text = "nb"
     shopping_category_order: list[
         Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
     ] = Field(

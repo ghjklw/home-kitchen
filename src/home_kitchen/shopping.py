@@ -65,11 +65,26 @@ class PlannedRecipes:
         for meal in context.meals:
             recipe = context.recipes[meal.recipe_id]
             for ingredient in recipe.ingredients:
-                if ingredient.quantity is None:
+                estimate = ingredient.purchase_estimate
+                quantity = estimate.quantity if estimate is not None else ingredient.quantity
+                unit = estimate.unit if estimate is not None else ingredient.unit
+                if (
+                    quantity is None
+                    or unit is None
+                    or unit
+                    in {
+                        "klype",
+                        "håndfull",
+                        "etter smak",
+                        "ss",
+                        "ts",
+                    }
+                    and estimate is None
+                ):
                     result.unquantified.append(
                         UnquantifiedNeed(
                             name=ingredient.name,
-                            unit=ingredient.unit,
+                            unit=unit,
                             category=ingredient.category,
                             origins=[f"meal:{meal.id}"],
                             source_indices=ingredient.source_indices,
@@ -77,16 +92,17 @@ class PlannedRecipes:
                     )
                     continue
                 # Ingredient validation guarantees a unit for measured amounts.
-                assert ingredient.unit is not None
+                assert unit is not None
                 result.lines.append(
                     ShoppingLine(
                         name=ingredient.name,
-                        quantity=scale_quantity(
-                            ingredient.quantity, meal.servings, recipe.servings
-                        ),
-                        unit=ingredient.unit,
+                        quantity=scale_quantity(quantity, meal.servings, recipe.servings),
+                        unit=unit,
                         category=ingredient.category,
                         origins=[f"meal:{meal.id}"],
+                        approximate=estimate.approximate if estimate else False,
+                        provenance=estimate.provenance if estimate else None,
+                        source_url=estimate.source_url if estimate else None,
                     )
                 )
         return result
@@ -163,6 +179,22 @@ class ShoppingBuilder:
                     if totals[key].category == "Other":
                         totals[key].category = line.category
                     totals[key].origins = list(dict.fromkeys(totals[key].origins + line.origins))
+                    totals[key].approximate = totals[key].approximate or line.approximate
+                    if line.provenance and line.provenance not in (totals[key].provenance or ""):
+                        totals[key].provenance = "; ".join(
+                            value for value in (totals[key].provenance, line.provenance) if value
+                        )
+                    if totals[key].source_url is None:
+                        totals[key].source_url = line.source_url
+                    elif line.source_url and line.source_url != totals[key].source_url:
+                        totals[key].provenance = "; ".join(
+                            value
+                            for value in (
+                                totals[key].provenance,
+                                f"Additional source: {line.source_url}",
+                            )
+                            if value
+                        )
             suggestions.update({item.id: item for item in contribution.suggestions})
             unquantified.extend(contribution.unquantified)
         return WeekShopping(

@@ -86,8 +86,13 @@ def build_mcp(
         annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False}
     )
     def plan_meal(data: MealCreate) -> Meal:
-        """Plan a recipe for a date and meal slot."""
+        """Add a recipe to a date, with optional label and scheduled time."""
         return service.plan_meal(data)
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True})
+    def update_meal(meal_id: UUID, data: MealCreate) -> Meal:
+        """Update only the planned meal identified by meal_id."""
+        return service.update_meal(meal_id, data)
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True})
     def remove_meal(meal_id: UUID) -> dict[str, bool]:

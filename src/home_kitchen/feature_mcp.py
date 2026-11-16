@@ -164,10 +164,10 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
     def propose_meal_plan(meals: list[MealCreate]) -> ProposalRead:
-        """Prepare a bounded multi-meal proposal with explicit dates, slots and servings.
+        """Prepare a bounded multi-meal proposal with dates, servings and optional labels/times.
 
-        Show every meal for review; this saves no planned meals. Occupied slots
-        conflict rather than overwrite. Confirm separately after user approval.
+        Show every meal for review; this saves no planned meals and never replaces existing
+        entries. Confirm separately after user approval.
         """
         return features.plan_proposals.create(actor(), meals)
 
@@ -180,8 +180,8 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
     def confirm_meal_plan(proposal_id: UUID, reviewed: bool = False) -> ProposalRead:
         """Apply all proposed meals atomically ONLY after explicit user review.
 
-        Do not infer reviewed=True from a planning request. Stale sources or
-        occupied slots require a new reviewed proposal; retries reuse applied IDs.
+        Do not infer reviewed=True from a planning request. Stale sources require a new
+        reviewed proposal; retries reuse applied IDs.
         """
         return features.plan_proposals.confirm(proposal_id, actor(), reviewed=reviewed)
 

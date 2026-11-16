@@ -2,13 +2,16 @@
 
 import asyncio
 import threading
+from datetime import date
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import select
 
 from home_kitchen.history import HistoryRepository
 from home_kitchen.imports import ImportedDraft
-from home_kitchen.models import RecipeCreate
+from home_kitchen.inventory import InventoryService
+from home_kitchen.models import MealCreate, RecipeCreate
 from home_kitchen.recipes.collections import (
     CollectionEntry,
     CollectionPage,
@@ -270,7 +273,7 @@ async def test_cancel_and_generation_change_never_save_inflight(kitchen):
 )
 def test_ambiguous_quantities_remain_raw_and_unquantified(raw):
     ingredient = source_ingredient(raw, 0)
-    assert ingredient.name == raw
+    assert ingredient.name == ("salt" if raw == "0 g salt" else raw)
     assert ingredient.quantity is None and ingredient.unit is None
 
 
@@ -429,5 +432,54 @@ async def test_concurrent_jobs_share_exact_source_recipe(kitchen):
         assert len(kitchen.list_recipes()) == 1
         assert results[0].entries[0].recipe_id == results[1].entries[0].recipe_id
         assert len(service.history.list()) == 1
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_oda_collection_estimate_is_separate_and_used_by_planned_shopping(kitchen):
+    imported = ImportedDraft(
+        title="Sukkerkake",
+        servings=2,
+        ingredients=["1 dl sukker", "1 klype salt"],
+        instructions=["Rør sammen"],
+        source_url=URL,
+    )
+
+    async def extract(url):
+        return imported
+
+    provider = Provider({("liked", 1): CollectionPage(entries=[entry()], has_more=False)})
+    service = make_service(kitchen, provider, extract)
+    try:
+        job = await service.start_preview("alice", ["liked"])
+        await settle(service, "alice", job.job_id)
+        await service.start_import("alice", job.job_id, ["731"], True)
+        await settle(service, "alice", job.job_id)
+
+        saved = kitchen.list_recipes()[0]
+        assert [(item.quantity, item.unit) for item in saved.ingredients] == [
+            (Decimal("1"), "dl"),
+            (Decimal("1"), "klype"),
+        ]
+        assert saved.ingredients[0].purchase_estimate.quantity == Decimal("90")
+        assert saved.ingredients[0].purchase_estimate.unit == "g"
+        assert saved.ingredients[1].purchase_estimate is None
+        assert [item.text for item in saved.source_ingredients] == imported.ingredients
+
+        kitchen.plan_meal(MealCreate(date=date(2026, 11, 16), recipe_id=saved.id, servings=2))
+        shopping = kitchen.shopping_list(
+            date(2026, 11, 16), date(2026, 11, 22), today=date(2026, 11, 16)
+        )
+        assert [(line.name, line.quantity, line.unit) for line in shopping.lines] == [
+            ("sukker", Decimal("90"), "g")
+        ]
+        assert [(need.name, need.unit) for need in shopping.unquantified] == [("salt", "klype")]
+        purchase = (
+            InventoryService(kitchen).plan(date(2026, 11, 16), date(2026, 11, 22)).purchase_lines[0]
+        )
+        assert purchase.approximate is True
+        assert "1 dl sukker" in purchase.provenance
+        assert str(purchase.source_url).startswith("https://www.matprat.no/")
     finally:
         await service.close()

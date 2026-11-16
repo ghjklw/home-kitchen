@@ -46,21 +46,21 @@
   function integrationStatusLabel(status) {
     return (
       {
-        connected: "Connected",
-        configured: "Configured",
-        not_configured: "Setup required",
-        unavailable: "Unavailable",
-      }[status] || "Status unknown"
+        connected: "Tilkoblet",
+        configured: "Satt opp",
+        not_configured: "Oppsett kreves",
+        unavailable: "Ikke tilgjengelig",
+      }[status] || "Ukjent status"
     );
   }
 
   function integrationAuthLabel(mode, configured = false) {
     return (
       {
-        delegated_user_pkce: "Your Oda account (OAuth)",
-        federation: "Managed identity federation",
-        api_key: configured ? "API key configured (secret hidden)" : "API key",
-      }[mode] || "Not reported"
+        delegated_user_pkce: "Oda-kontoen din (OAuth)",
+        federation: "Føderert administrert identitet",
+        api_key: configured ? "API-nøkkel er satt opp (hemmeligheten er skjult)" : "API-nøkkel",
+      }[mode] || "Ikke oppgitt"
     );
   }
 
@@ -86,10 +86,10 @@
       oda: odaOk ? odaValue : null,
       integrationsError: integrationResponse
         ? null
-        : "Integration status is unavailable. You can retry without leaving this page.",
+        : "Tilkoblingsstatus er ikke tilgjengelig. Du kan prøve igjen uten å forlate siden.",
       odaStatusError: odaOk
         ? null
-        : "Oda status is unavailable. Other connection details remain available.",
+        : "Oda-status er ikke tilgjengelig. De andre tilkoblingsdetaljene vises fortsatt.",
     };
   }
 

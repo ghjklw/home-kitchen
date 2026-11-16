@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Annotated
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, HttpUrl, field_validator
 from sqlalchemy import text
 
 from home_kitchen.context import history_context
@@ -46,6 +46,9 @@ class PurchasePlanLine(BaseModel):
     covered_quantity: StockQuantity
     to_buy_quantity: StockQuantity
     origins: list[str]
+    approximate: bool = False
+    provenance: str | None = None
+    source_url: HttpUrl | None = None
 
 
 class PurchasePlan(BaseModel):
@@ -281,6 +284,9 @@ class InventoryService:
                     covered_quantity=covered,
                     to_buy_quantity=add_exact(requirement.quantity, -covered),
                     origins=requirement.origins,
+                    approximate=requirement.approximate,
+                    provenance=requirement.provenance,
+                    source_url=requirement.source_url,
                 )
             )
         return PurchasePlan(

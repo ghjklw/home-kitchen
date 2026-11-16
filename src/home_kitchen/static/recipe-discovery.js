@@ -7,11 +7,11 @@
     { id: "matprat", label: "Matprat" },
   ];
   const STATUSES = {
-    ok: "Search completed",
-    connection_required: "Connect this source to search",
-    unsupported: "Search is not supported for this source",
-    unavailable: "Source is temporarily unavailable",
-    timed_out: "Source search timed out",
+    ok: "Søket er fullført",
+    connection_required: "Koble til kilden for å søke",
+    unsupported: "Søk støttes ikke for denne kilden",
+    unavailable: "Kilden er midlertidig utilgjengelig",
+    timed_out: "Søket etter kilder tok for lang tid",
   };
 
   function safeHttpsUrl(value) {
@@ -27,12 +27,12 @@
 
   function buildRequest(queryValue, selectedSources = SOURCES.map((source) => source.id)) {
     const query = String(queryValue ?? "").trim();
-    if (!query) throw new Error("Enter ingredients or a dish to find recipes.");
-    if (query.length > 200) throw new Error("Keep the recipe search under 200 characters.");
+    if (!query) throw new Error("Skriv inn ingredienser eller en rett for å finne oppskrifter.");
+    if (query.length > 200) throw new Error("Søket kan ikke være lengre enn 200 tegn.");
     const sources = [...new Set(Array.isArray(selectedSources) ? selectedSources : [])].filter((source) =>
       SOURCES.some((item) => item.id === source),
     );
-    if (!sources.length) throw new Error("Choose at least one recipe source.");
+    if (!sources.length) throw new Error("Velg minst én oppskriftskilde.");
     return { query, sources, limit: 10 };
   }
 
@@ -43,8 +43,8 @@
         const source = SOURCES.find((entry) => entry.id === item.source);
         return {
           source: source?.id || "unknown",
-          label: source?.label || "Recipe source",
-          status: STATUSES[item.status] || "Source status unavailable",
+          label: source?.label || "Oppskriftskilde",
+          status: STATUSES[item.status] || "Kildestatus er ikke tilgjengelig",
           detail: typeof item.detail === "string" ? item.detail : "",
           resultCount: Number.isInteger(item.result_count) ? item.result_count : 0,
           indexUrl: safeHttpsUrl(item.index_url),

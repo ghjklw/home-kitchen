@@ -40,7 +40,7 @@ from home_kitchen.recipes import RecipeDraftRequest
 from home_kitchen.recommendations import PlanDraft
 from home_kitchen.service import KitchenService
 from home_kitchen.settings import Household, Settings
-from home_kitchen.store import MealSlotOccupied
+from home_kitchen.store import MealIDConflict
 
 
 class Completion(BaseModel):
@@ -121,8 +121,8 @@ def create_app(
     async def missing(_request: Request, _exc: Exception):
         return JSONResponse({"detail": "Item not found"}, status_code=404)
 
-    @app.exception_handler(MealSlotOccupied)
-    async def meal_conflict(_request: Request, exc: MealSlotOccupied):
+    @app.exception_handler(MealIDConflict)
+    async def meal_conflict(_request: Request, exc: MealIDConflict):
         return JSONResponse({"detail": str(exc)}, status_code=409)
 
     @app.exception_handler(ValueError)
@@ -174,6 +174,10 @@ def create_app(
     @app.post("/api/meals", status_code=201)
     def plan_meal(data: MealCreate) -> Meal:
         return service.plan_meal(data)
+
+    @app.put("/api/meals/{meal_id}")
+    def update_meal(meal_id: UUID, data: MealCreate) -> Meal:
+        return service.update_meal(meal_id, data)
 
     @app.get("/api/meals/{meal_id}/recipe")
     def get_meal_recipe(meal_id: UUID) -> PlannedMealRecipe:

@@ -1,12 +1,13 @@
 """Household recipes, meal planning, and deliberate shopping suggestions."""
 
-from datetime import date
+from datetime import date, time
 from uuid import UUID, uuid4
 
 from .models import (
     Meal,
     MealCreate,
     PlannedMealRecipe,
+    PurchaseEstimate,
     Recipe,
     RecipeCreate,
     RegularItem,
@@ -14,9 +15,12 @@ from .models import (
     ShoppingItemCreate,
     WeekShopping,
 )
+from .recipes.source_quantities import normalize_source_quantity, source_ingredient_parts
 from .shopping import ShoppingBuilder, ShoppingContext, default_shopping_builder
 from .store import Store
 from .units import scale_quantity
+
+_PURCHASABLE_SOURCE_UNITS = frozenset({"g", "kg", "mg", "ml", "cl", "dl", "l", "stk", "item"})
 
 
 class KitchenService:
@@ -26,7 +30,7 @@ class KitchenService:
 
     def create_recipe(self, data: RecipeCreate) -> Recipe:
         # Image credit is written only by the authenticated candidate-selection flow.
-        recipe = Recipe(id=uuid4(), **data.model_dump(exclude={"image_attribution"}))
+        recipe = Recipe(id=uuid4(), **self._recipe_values(data, exclude={"image_attribution"}))
         self.store.save("recipe", recipe)
         return recipe
 
@@ -38,13 +42,70 @@ class KitchenService:
 
     def update_recipe(self, recipe_id: UUID, data: RecipeCreate) -> Recipe:
         existing = self.get_recipe(recipe_id)
-        values = data.model_dump(exclude={"image_attribution"})
+        values = self._recipe_values(data, exclude={"image_attribution"})
         values["image_attribution"] = (
             existing.image_attribution if data.image_url == existing.image_url else None
         )
         recipe = Recipe(id=recipe_id, **values)
         self.store.save("recipe", recipe)
         return recipe
+
+    @staticmethod
+    def _recipe_values(data: RecipeCreate, *, exclude: set[str]) -> dict:
+        """Derive purchase estimates only from explicitly linked source rows."""
+        values = data.model_dump(exclude=exclude)
+        source_rows = {row.index: row.text for row in data.source_ingredients}
+        ingredients = []
+        for ingredient in data.ingredients:
+            item = ingredient.model_dump()
+            estimate = None
+            if len(ingredient.source_indices) == 1:
+                source_text = source_rows.get(ingredient.source_indices[0])
+                if source_text is not None:
+                    source_name, parsed_source = source_ingredient_parts(source_text)
+                    normalized_name = " ".join(ingredient.name.casefold().split())
+                    linked_name = " ".join(source_name.casefold().split())
+                    if normalized_name == linked_name and ingredient.unit not in {
+                        "klype",
+                        "håndfull",
+                        "etter smak",
+                    }:
+                        quantity = ingredient.quantity or parsed_source.quantity
+                        unit = ingredient.unit or parsed_source.unit
+                        if quantity is not None and unit is not None:
+                            parsed_current = normalize_source_quantity(
+                                f"{quantity} {unit} {ingredient.name}", ingredient.name
+                            )
+                            if unit in {"klype", "håndfull", "etter smak"}:
+                                parsed_current = None
+                            if parsed_current is not None:
+                                if parsed_current.purchase_estimate is not None:
+                                    values_for_estimate = parsed_current.purchase_estimate.__dict__
+                                elif unit in _PURCHASABLE_SOURCE_UNITS:
+                                    values_for_estimate = {
+                                        "quantity": quantity,
+                                        "unit": unit,
+                                        "approximate": False,
+                                        "provenance": "Current recipe measure",
+                                        "source_url": None,
+                                    }
+                                else:
+                                    values_for_estimate = None
+                                if values_for_estimate is not None:
+                                    values_for_estimate = dict(values_for_estimate)
+                                    values_for_estimate["provenance"] = (
+                                        f"{values_for_estimate['provenance']}; "
+                                        f"original source text: {source_text}"
+                                    )
+                                    estimate = PurchaseEstimate.model_validate(
+                                        values_for_estimate
+                                    ).model_dump()
+            # Treat estimates as derived data: never accept an unsupported amount
+            # supplied by a client or model, and keep the recipe's cooking measure.
+            item["purchase_estimate"] = estimate
+            ingredients.append(item)
+        values["ingredients"] = ingredients
+        return values
 
     def delete_recipe(self, recipe_id: UUID) -> None:
         self.get_recipe(recipe_id)
@@ -58,11 +119,20 @@ class KitchenService:
         self.store.save("meal", meal)
         return meal
 
+    def update_meal(self, meal_id: UUID, data: MealCreate) -> Meal:
+        self.get_recipe(data.recipe_id)
+        self.store.get("meal", meal_id, Meal)
+        meal = Meal(id=meal_id, **data.model_dump())
+        self.store.update_meal(meal)
+        return meal
+
     def list_meals(self, start: date, end: date) -> list[Meal]:
         self._validate_range(start, end)
         return sorted(
             (meal for meal in self.store.list("meal", Meal) if start <= meal.date <= end),
-            key=lambda meal: (meal.date, meal.slot),
+            # Store.list is ordered by the persistent insertion position. The stable sort
+            # keeps that agenda order for untimed entries and uses explicit times where set.
+            key=lambda meal: (meal.date, meal.scheduled_time or time.max),
         )
 
     def meal_recipe(self, meal_id: UUID) -> PlannedMealRecipe:
@@ -79,7 +149,20 @@ class KitchenService:
                             scale_quantity(ingredient.quantity, meal.servings, recipe.servings)
                             if ingredient.quantity is not None
                             else None
-                        )
+                        ),
+                        "purchase_estimate": (
+                            ingredient.purchase_estimate.model_copy(
+                                update={
+                                    "quantity": scale_quantity(
+                                        ingredient.purchase_estimate.quantity,
+                                        meal.servings,
+                                        recipe.servings,
+                                    )
+                                }
+                            )
+                            if ingredient.purchase_estimate is not None
+                            else None
+                        ),
                     }
                 )
                 for ingredient in recipe.ingredients

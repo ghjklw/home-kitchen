@@ -21,6 +21,7 @@ class Node {
     this.value = "";
     this.disabled = false;
     this.parentNode = null;
+    this.listeners = {};
   }
   append(child) {
     child.parentNode = this;
@@ -32,7 +33,10 @@ class Node {
     children.forEach((child) => this.append(child));
   }
   setAttribute(key, value) { this.attributes[key] = String(value); }
-  focus() {}
+  removeAttribute(key) { delete this.attributes[key]; }
+  addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); }
+  dispatchEvent(type) { (this.listeners[type] || []).forEach((listener) => listener({ target: this })); }
+  focus() { this.focused = true; }
   get isConnected() {
     if (this.parentNode) return this.parentNode.isConnected;
     return this.connected === true;
@@ -109,9 +113,20 @@ function fixture() {
       return { input, wrap };
     },
     formSubmit(form, label, action) {
-      form.submitAction = action;
+      const error = new Node("p", "", "form-error");
+      form.append(error);
+      const submit = async () => {
+        try {
+          await action();
+        } catch (caught) {
+          error.textContent = caught.message;
+          throw caught;
+        }
+      };
+      form.submitAction = submit;
       form.submitLabel = label;
-      submitActions.push(action);
+      submitActions.push(submit);
+      return error;
     },
     recipeAssistantConfigured: () => true,
     connectionSettingsButton: () => new Node("button", "Settings"),
@@ -227,6 +242,79 @@ test("failed actual recipe revision keeps form edits and never saves the origina
   assert.equal(input(value, "Mengde").value, "5");
   assert.match(value.content.text, /AI request failed/u);
   assert.equal(value.requests.some((request) => request[0] === "/recipes/recipe-a"), false);
+});
+
+test("recipe validation associates each field error, focuses the first invalid field, and preserves unknown amounts", async () => {
+  const value = fixture();
+  value.context.recipeForm({
+    title: "Soup",
+    servings: 2,
+    ingredients: [{ name: "salt", quantity: "1", unit: "" }],
+    instructions: ["Cook"],
+  }, "manual");
+  const name = input(value, "Navn");
+  const quantity = input(value, "Mengde");
+  const unit = input(value, "Enhet");
+  const save = value.submitActions.at(-1);
+  const summary = value.content.find((node) => node.className === "form-error");
+
+  await assert.rejects(save(), /Rett ingrediensfeltene/u);
+  assert.match(summary.textContent, /Rett ingrediensfeltene/u);
+  assert.equal(unit.attributes["aria-invalid"], "true");
+  assert.equal(unit.focused, true);
+  const unitError = value.content.find((node) =>
+    node.tagName === "span" && node.textContent === "Oppgi enheten når du har oppgitt en mengde.",
+  );
+  assert.ok(unitError);
+  assert.equal(unit.attributes["aria-describedby"], unitError.id);
+  unit.value = "tsp";
+  unit.dispatchEvent("input");
+  assert.equal(unit.attributes["aria-invalid"], "false");
+  assert.equal(unit.attributes["aria-describedby"], undefined);
+  assert.equal(value.content.find((node) => node.id === unitError.id), null);
+  assert.equal(summary.textContent, "");
+
+  name.value = "";
+  quantity.value = "bad";
+  await assert.rejects(save(), /Rett ingrediensfeltene/u);
+  assert.match(summary.textContent, /Rett ingrediensfeltene/u);
+  assert.equal(name.attributes["aria-invalid"], "true");
+  assert.equal(name.focused, true);
+  const nameError = value.content.find((node) =>
+    node.tagName === "span" && node.textContent === "Oppgi navnet på ingrediensen.",
+  );
+  assert.ok(nameError);
+  assert.equal(name.attributes["aria-describedby"], nameError.id);
+  assert.equal(quantity.attributes["aria-invalid"], "true");
+  const quantityError = value.content.find((node) =>
+    node.tagName === "span" && node.textContent.startsWith("Oppgi en gyldig positiv mengde"),
+  );
+  assert.ok(quantityError);
+  assert.equal(quantity.attributes["aria-describedby"], quantityError.id);
+
+  name.value = "salt";
+  name.dispatchEvent("input");
+  assert.equal(name.attributes["aria-invalid"], "false");
+  assert.equal(name.attributes["aria-describedby"], undefined);
+  assert.equal(quantity.attributes["aria-invalid"], "true");
+  assert.equal(quantity.attributes["aria-describedby"], quantityError.id);
+  assert.match(summary.textContent, /Rett ingrediensfeltene/u);
+  quantity.value = "";
+  quantity.dispatchEvent("input");
+  assert.equal(quantity.attributes["aria-invalid"], "false");
+  assert.equal(quantity.attributes["aria-describedby"], undefined);
+  assert.equal(value.content.find((node) => node.id === quantityError.id), null);
+  assert.equal(summary.textContent, "");
+  unit.value = "";
+  unit.dispatchEvent("input");
+  await save();
+  assert.equal(name.attributes["aria-invalid"], "false");
+  assert.equal(name.attributes["aria-describedby"], undefined);
+  assert.equal(quantity.attributes["aria-invalid"], "false");
+  assert.equal(quantity.attributes["aria-describedby"], undefined);
+  assert.equal(unit.attributes["aria-invalid"], "false");
+  assert.equal(unit.attributes["aria-describedby"], undefined);
+  assert.equal(value.requests.some((request) => request[0] === "/recipes"), true);
 });
 
 test("active actual recipe modal applies AI review and retains metadata semantics on explicit save", async () => {

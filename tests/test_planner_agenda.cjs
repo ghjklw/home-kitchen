@@ -18,11 +18,15 @@ function sourceFunction(name) {
 const mealSlotLabel = new Function(
   `return (${sourceFunction("mealSlotLabel")})`,
 )();
+const formatUiTime = new Function(
+  `return (${sourceFunction("formatUiTime")})`,
+)();
 const mealAgendaMetadata = new Function(
   "formatServings",
   "mealSlotLabel",
+  "formatUiTime",
   `return (${sourceFunction("mealAgendaMetadata")})`,
-)((value) => String(value) + (Number(value) === 1 ? " porsjon" : " porsjoner"), mealSlotLabel);
+)((value) => String(value) + (Number(value) === 1 ? " porsjon" : " porsjoner"), mealSlotLabel, formatUiTime);
 const buildMealWriteRequest = new Function(
   `return (${sourceFunction("buildMealWriteRequest")})`,
 )();
@@ -45,7 +49,7 @@ test("selects all existing meals for one date without sorting or mutating them",
 test("formats selected-date rows using labels and scheduled times, with legacy slots localized", () => {
   const rows = agendaMeals(
     [
-      { id: "a", date: "2026-11-18", label: "Matpakke", scheduled_time: "12:30", servings: 3 },
+      { id: "a", date: "2026-11-18", label: "Matpakke", scheduled_time: "12:30:00", servings: 3 },
       { id: "b", date: "2026-11-19", label: "Middag", scheduled_time: null, servings: 2 },
       { id: "c", date: "2026-11-18", slot: "breakfast", servings: 1 },
     ],

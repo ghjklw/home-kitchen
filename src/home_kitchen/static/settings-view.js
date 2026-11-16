@@ -43,6 +43,18 @@
     return { value: normalized, error: null };
   }
 
+  function createShoppingCategoryRow(value, displayLabel) {
+    return { value, originalValue: value, displayValue: displayLabel(value) };
+  }
+
+  function editShoppingCategoryRow(row, displayValue, displayLabel) {
+    return {
+      ...row,
+      displayValue,
+      value: displayValue === displayLabel(row.originalValue) ? row.originalValue : displayValue,
+    };
+  }
+
   function integrationStatusLabel(status) {
     return (
       {
@@ -103,6 +115,8 @@
     DEFAULT_SHOPPING_CATEGORY_ORDER,
     moveShoppingCategory,
     normalizeShoppingCategoryOrder,
+    createShoppingCategoryRow,
+    editShoppingCategoryRow,
     integrationStatusLabel,
     integrationAuthLabel,
     normalizeIntegrationResponse,

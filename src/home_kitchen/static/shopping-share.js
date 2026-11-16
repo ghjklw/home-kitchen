@@ -41,7 +41,7 @@
       if (!isRemainingShoppingLine(line)) return;
       const name = cleanLine(line.name);
       const categoryValue = cleanLine(line.category) || "Other";
-      const category = categoryValue === "Other" ? "Annet" : categoryValue;
+      const category = categoryValue;
       const quantity = decimalText(line.to_buy_quantity);
       const unit = cleanLine(line.unit);
       if (!name || !quantity) return;
@@ -67,12 +67,15 @@
             compareText(a.unit, b.unit) ||
             compareText(a.to_buy_quantity, b.to_buy_quantity),
         );
-        return `${category}:\n${items
+        const categoryLabel = root.KitchenShoppingView?.categoryLabel?.(category) ||
+          (category === "Other" ? "Annet" : category);
+        return `${categoryLabel}:\n${items
           .map(({ name, to_buy_quantity, unit }) => {
             const quantity =
               root.KitchenShoppingView?.formatQuantityForDisplay?.(to_buy_quantity) ||
               to_buy_quantity;
-            return `  - ${name} — ${quantity}${unit ? ` ${unit}` : ""}`;
+            const displayUnit = root.KitchenShoppingView?.displayUnit?.(unit, false, to_buy_quantity) || unit;
+            return `  - ${name} — ${quantity}${displayUnit ? ` ${displayUnit}` : ""}`;
           })
           .join("\n")}`;
       });

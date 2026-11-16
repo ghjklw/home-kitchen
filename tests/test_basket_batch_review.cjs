@@ -63,6 +63,8 @@ function fixture({ api } = {}) {
       [safeNeed.id]: { 1: { match_job_id: "job-current", status: "matched", candidates: [safeCandidate] } },
       [unclearNeed.id]: { 1: { match_job_id: "job-current", status: "matched", candidates: [{ id: "oda:202", available: true }] } },
     },
+    basketMatchObservedAt: {},
+    basketMatchCurrentPage: {},
     basketMatchBusy: {},
     basketMatchErrors: {},
     basketBatchReviewJobId: "job-current",
@@ -91,8 +93,13 @@ function fixture({ api } = {}) {
         formatNeedQuantity: (need) => `${need.quantity} ${need.unit}`,
         statusLabel: (status) => status,
       },
-      KitchenShoppingView: { formatQuantityForDisplay: (value) => String(value) },
+      KitchenShoppingView: {
+        formatQuantityForDisplay: (value) => String(value),
+        formatQuantityForAccessibility: (value) => String(value),
+        displayUnit: (unit) => unit,
+      },
     },
+    formatUiNeedQuantity: (need) => `${need.quantity} ${need.unit}`,
     currentBasketMatchNeeds: () => [safeNeed, unclearNeed],
     openDialog: () => {
       modal.open = true;
@@ -122,6 +129,8 @@ function fixture({ api } = {}) {
     render: () => {},
     refreshView: async () => {},
     startBasketMatchJob: async () => {},
+    showBasketMatchPage: () => {},
+    dateLabel: () => "Nov 16, 2026",
   };
   const functions = [
     "basketBatchRecommendation",
@@ -129,6 +138,8 @@ function fixture({ api } = {}) {
     "toggleBasketBatchChoice",
     "renderBasketMatchCandidate",
     "openBasketBatchReview",
+    "renderBasketBatchReview",
+    "renderBasketMatchNeed",
     "saveBasketBatchChoices",
   ].map(functionSource).join("\n");
   vm.runInNewContext(functions, context);
@@ -252,4 +263,121 @@ test("a late response for an old period cannot clear choices from the new period
   assert.equal(value.state.basketBatchChoices["need-new"].candidate_id, "oda:303");
   assert.equal(value.state.basketBatchChoices["need-safe"], undefined);
   assert.match(value.notifications[0], /2026-11-16/u);
+});
+
+function allNodes(node) {
+  return [node, ...node.children.flatMap(allNodes)];
+}
+
+function addAlternatives(value) {
+  const candidates = value.state.basketMatchPages[value.safeNeed.id][1].candidates;
+  candidates.unshift({ id: "oda:bad-first", name: "Unclear first", available: true });
+  candidates.push(
+    { ...value.safeCandidate, id: "oda:102", name: "Alternative yoghurt" },
+    { ...value.safeCandidate, id: "oda:103", name: "Third yoghurt" },
+    { ...value.safeCandidate, id: "oda:unavailable", name: "Unavailable yoghurt", available: false },
+  );
+  value.state.basketMatchPages[value.unclearNeed.id][1].candidates.push(
+    { id: "oda:203", name: "Another unclear tomato", available: true },
+    { id: "oda:204", name: "Unavailable tomato", available: false },
+  );
+}
+
+test("collective summary counts actionable needs once and reports eligible alternatives separately", () => {
+  const value = fixture();
+  const needs = [];
+  for (let index = 0; index < 25; index += 1) {
+    const need = { id: `need-${index}`, name: `Vare ${index}`, quantity: "250", unit: "ml" };
+    needs.push(need);
+    const count = index < 10 ? 3 : index < 18 ? 4 : 0;
+    const candidates = Array.from({ length: count }, (_, candidateIndex) => ({
+      id: `oda:${index}:${candidateIndex}`,
+      name: `Produkt ${index}:${candidateIndex}`,
+      pack_unit: "ml",
+      recommended_packages: 1,
+      recommended_fulfillment_quantity: "250",
+      available: true,
+    }));
+    value.state.basketMatchPages[need.id] = {
+      1: { match_job_id: "job-current", status: count ? "matched" : "no_results", candidates },
+    };
+  }
+  value.context.currentBasketMatchNeeds = () => needs;
+  const root = new Node("main");
+  value.context.renderBasketBatchReview(root);
+  assert.match(root.text, /18 varer har forslag som kan velges samlet/u);
+  assert.match(root.text, /7 varer må stå over eller avklares/u);
+  assert.match(root.text, /44 ekstra valgbare alternativer/u);
+  assert.equal(value.requests.length, 0);
+  assert.deepEqual(Object.keys(value.state.basketBatchChoices), []);
+});
+
+test("collective review shows one eligible primary and collapsed alternatives per need", () => {
+  const value = fixture();
+  addAlternatives(value);
+  value.context.openBasketBatchReview();
+  const sections = allNodes(value.modal.root).filter((node) => node.className === "basket-batch-need");
+  const primary = sections[0].children.filter((node) => node.className === "basket-batch-option");
+  assert.equal(primary.length, 1);
+  assert.match(primary[0].text, /Yoghurt 500 g/u);
+  const alternatives = sections[0].find((node) => node.className === "basket-batch-alternatives");
+  assert.ok(alternatives);
+  assert.ok(!alternatives.open);
+  assert.match(alternatives.text, /Flere treff \(4\)/u);
+  const unresolved = sections[1];
+  assert.equal((unresolved.text.match(/Kan stå over:/gu) || []).length, 1);
+  assert.equal(unresolved.children.filter((node) => node.className === "basket-batch-option").length, 0);
+  const unresolvedMatches = unresolved.find((node) => node.className === "basket-batch-alternatives");
+  assert.ok(!unresolvedMatches.open);
+  assert.match(unresolvedMatches.text, /Vis uavklarte treff \(3\)/u);
+  assert.equal(allNodes(unresolved).filter((node) => node.attributes["aria-pressed"] !== undefined).length, 0);
+  assert.equal(value.requests.length, 0);
+  assert.deepEqual(Object.keys(value.state.basketBatchChoices), []);
+  assert.equal(value.state.basket.needs[0].selections.length, 2);
+});
+
+test("selecting an alternative promotes it to the primary without saving", () => {
+  const value = fixture();
+  addAlternatives(value);
+  value.context.openBasketBatchReview();
+  let alternatives = value.modal.root.find((node) => node.className === "basket-batch-alternatives");
+  alternatives.open = true;
+  const option = alternatives.find((node) => node.className === "basket-batch-option" && node.text.includes("Alternative yoghurt"));
+  option.find((node) => node.tagName === "button").action();
+  assert.equal(value.state.basketBatchChoices[value.safeNeed.id].candidate_id, "oda:102");
+  assert.equal(Object.keys(value.state.basketBatchChoices).length, 1);
+  const section = value.modal.root.find((node) => node.className === "basket-batch-need");
+  const primary = section.children.find((node) => node.className === "basket-batch-option");
+  assert.match(primary.text, /Alternative yoghurt/u);
+  assert.equal(primary.find((node) => node.tagName === "button").attributes["aria-pressed"], "true");
+  assert.equal(value.requests.length, 0);
+  assert.equal(value.state.basket.needs[0].selections.length, 2);
+});
+
+test("busy and stale matches do not count as actionable needs", () => {
+  const value = fixture();
+  addAlternatives(value);
+  value.state.basketMatchBusy[value.safeNeed.id] = { page: 1 };
+  let root = new Node("main");
+  value.context.renderBasketBatchReview(root);
+  assert.match(root.text, /0 varer har forslag som kan velges samlet/u);
+  assert.match(root.text, /2 varer må stå over eller avklares/u);
+  value.state.basketBatchNeedsRefresh = true;
+  root = new Node("main");
+  value.context.renderBasketBatchReview(root);
+  assert.match(root.text, /0 varer har forslag som kan velges samlet/u);
+  assert.doesNotMatch(root.text, /ekstra valgbare alternativer/u);
+  assert.equal(value.requests.length, 0);
+});
+
+test("provider pagination detail renders in Bokmål without mutating provider evidence", () => {
+  const value = fixture();
+  const result = value.state.basketMatchPages[value.safeNeed.id][1];
+  result.detail = "More provider results are available on the next page.";
+  result.has_more = true;
+  const root = value.context.renderBasketMatchNeed(value.safeNeed);
+  assert.match(root.text, /Flere treff fra leverandøren er tilgjengelige på neste side/u);
+  assert.doesNotMatch(root.text, /More provider results/u);
+  assert.equal(result.detail, "More provider results are available on the next page.");
+  assert.equal(value.requests.length, 0);
 });

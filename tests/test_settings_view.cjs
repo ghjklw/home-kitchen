@@ -7,6 +7,8 @@ const {
   integrationStatusLabel,
   moveShoppingCategory,
   normalizeShoppingCategoryOrder,
+  createShoppingCategoryRow,
+  editShoppingCategoryRow,
   normalizeIntegrationResponse,
   connectionStatusSnapshot,
   odaNeedsReconnect,
@@ -17,6 +19,27 @@ test("moves a category without mutating the saved order", () => {
   assert.deepEqual(moveShoppingCategory(order, 2, 0), ["Dairy", "Produce", "Bakery"]);
   assert.deepEqual(order, ["Produce", "Bakery", "Dairy"]);
   assert.deepEqual(moveShoppingCategory(order, 0, -1), order);
+});
+
+test("local category display labels preserve canonical values until the user renames them", () => {
+  const label = (value) => ({ Produce: "Frukt og grønt", Dairy: "Meieri" })[value] || value;
+  const row = createShoppingCategoryRow("Produce", label);
+  assert.deepEqual(row, {
+    value: "Produce",
+    originalValue: "Produce",
+    displayValue: "Frukt og grønt",
+  });
+  assert.deepEqual(editShoppingCategoryRow(row, "Frukt og grønt", label), row);
+  assert.deepEqual(editShoppingCategoryRow(row, "Grønnsaker", label), {
+    value: "Grønnsaker",
+    originalValue: "Produce",
+    displayValue: "Grønnsaker",
+  });
+  assert.deepEqual(editShoppingCategoryRow({ value: "Hverdagsmat", originalValue: "Hverdagsmat", displayValue: "Hverdagsmat" }, "Hverdagsmat", label), {
+    value: "Hverdagsmat",
+    originalValue: "Hverdagsmat",
+    displayValue: "Hverdagsmat",
+  });
 });
 
 test("normalizes category names and preserves an explicit alphabetical order", () => {

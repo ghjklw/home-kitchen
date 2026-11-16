@@ -3335,6 +3335,41 @@ function renderTripCompletion(main) {
     lineForms.push({ line, bought, quantity, unit, exact, productSelect, packCount, sourceChecks, reason });
     add(main, section);
   });
+  const retry = state.tripCompletionRetry?.token === review.review_token
+    ? state.tripCompletionRetry
+    : null;
+  if (retry) {
+    date.value = retry.payload.purchased_on || date.value;
+    lineForms.forEach(({ line, bought, quantity, unit, exact, productSelect, packCount, sourceChecks, reason }) => {
+      const purchase = retry.payload.purchases.find((item) => item.need_id === line.id);
+      if (purchase) {
+        bought.checked = true;
+        quantity.value = purchase.quantity == null ? "" : String(purchase.quantity);
+        unit.value = purchase.unit == null ? "" : String(purchase.unit);
+        if (purchase.product) {
+          exact.checked = true;
+          const selectedIndex = (line.selected_products || []).findIndex(({ product }) =>
+            product.provider === purchase.product.provider && product.product_id === purchase.product.product_id,
+          );
+          if (selectedIndex >= 0) productSelect.value = String(selectedIndex);
+          packCount.value = String(purchase.product.packages ?? "");
+        }
+      }
+      sourceChecks.forEach(({ source, input, regularPurchase }) => {
+        const sourceField = window.KitchenTripCompletion.purchaseSourceField(source.kind);
+        input.checked = Boolean(purchase?.[sourceField]?.includes(source.source_id)) ||
+          retry.payload.source_closures.some((closure) =>
+            closure.need_id === line.id && closure.source_kind === source.kind && closure.source_id === source.source_id,
+          );
+        if (regularPurchase) {
+          const capture = (line.captures || []).find((item) => item.id === source.source_id);
+          regularPurchase.checked = Boolean(capture && purchase?.regular_ids?.includes(capture.regular_id));
+        }
+      });
+      const closure = retry.payload.source_closures.find((item) => item.need_id === line.id);
+      if (closure) reason.value = closure.resolution;
+    });
+  }
   add(main, controls);
   const submit = button("Lagre registrering", async () => {
     const actual = [], sourceClosures = [];
@@ -3351,7 +3386,7 @@ function renderTripCompletion(main) {
           const product = window.KitchenTripCompletion.exactProductPurchase(line, productSelect.value, packCount.value);
           if (!product) { notify(`Velg et vist produkt og skriv inn antall pakker for ${line.name}.`, true); return; }
           purchase.product = product;
-        } else if (quantity.value.trim() || unit.value.trim() !== (line.unit || "")) {
+        } else if (quantity.value.trim() || unit.value.trim()) {
           if (!quantity.value.trim() || !unit.value.trim()) { notify(`Fyll inn både mengde og enhet for ${line.name}, eller la begge stå tomme.`, true); return; }
           purchase.quantity = quantity.value; purchase.unit = unit.value.trim();
         }
@@ -3377,6 +3412,7 @@ function renderTripCompletion(main) {
       : { start: review.start, end: review.end, review_token: review.review_token, reviewed: true, idempotency_key: crypto.randomUUID(), purchased_on: date.value, purchases: actual, source_closures: sourceClosures };
     state.tripCompletionRetry = { key: payload.idempotency_key, token: review.review_token, payload };
     submit.disabled = true;
+    main.querySelectorAll("input, select").forEach((control) => { control.disabled = true; });
     try {
       await api("/store-trip/completions", "POST", payload);
       state.tripCompletionRetry = null;
@@ -3387,6 +3423,10 @@ function renderTripCompletion(main) {
         state.tripCompletionRetry = null;
         await refreshView();
         notify("Behovene endret seg. Gjennomgangen er oppdatert; kontroller den før du lagrer.", true);
+      } else if (error.status === 422) {
+        state.tripCompletionRetry = null;
+        main.querySelectorAll("input, select").forEach((control) => { control.disabled = false; });
+        notify(error.message + " Rett opp feltene og prøv igjen.", true);
       } else notify(error.message + " Prøv igjen for å gjenta samme registrering.", true);
     } finally { submit.disabled = false; }
   }, "primary");

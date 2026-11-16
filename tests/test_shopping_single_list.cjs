@@ -72,6 +72,7 @@ function renderFixture(overrides = {}) {
     openDialog: () => new Node("dialog"),
     renderShoppingConnectionPrompt: () => {},
     renderBasketMatchSummary: () => new Node("section"),
+    renderBasketBatchReview: () => {},
     renderBasketMatchNeed: () => new Node("section"),
     renderPurchaseEvidence: (value) => value.provenance ? new Node("details", "Om mengdegrunnlaget") : null,
     categoryLabel: (value) => value,

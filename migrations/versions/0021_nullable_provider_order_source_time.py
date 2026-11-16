@@ -3,7 +3,7 @@
 from alembic import op
 from sqlalchemy import text
 
-revision = "0021_nullable_provider_order_source_time"
+revision = "0021_nullable_source_time"
 down_revision = "0020_trip_source_closures"
 branch_labels = None
 depends_on = None

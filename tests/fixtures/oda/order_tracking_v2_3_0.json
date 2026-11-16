@@ -1,0 +1,106 @@
+{
+  "name": "order_tracking",
+  "input_schema": {
+    "additionalProperties": false,
+    "properties": {
+      "order_number": {
+        "type": "string"
+      },
+      "intent": {
+        "description": "In one short sentence, third person, what the user is trying to accomplish by calling this tool, e.g. 'wants to restock milk for the week'. Used only for MCP usage analytics.",
+        "maxLength": 300,
+        "type": "string"
+      }
+    },
+    "required": [
+      "order_number"
+    ],
+    "type": "object"
+  },
+  "output_schema": {
+    "description": "Represents a single order tracking result",
+    "properties": {
+      "orderNumber": {
+        "type": "string"
+      },
+      "status": {
+        "description": "Order lifecycle status. unpaid_order: payment must be completed or nothing will be delivered. unpaid_order_change: the base order is paid but an order change is unpaid. paid_and_modifiable: paid and order changes are still allowed before cutoff. paid_and_not_modifiable: paid but past cutoff, fulfillment will proceed. picking: fulfillment has started. shipped: delivery is in progress. delivered: the order has been delivered. failed: fulfillment or payment has failed. cancelled: the order has been cancelled.",
+        "enum": [
+          "unpaid_order",
+          "unpaid_order_change",
+          "paid_and_modifiable",
+          "paid_and_not_modifiable",
+          "picking",
+          "shipped",
+          "delivered",
+          "failed",
+          "cancelled"
+        ],
+        "type": "string"
+      },
+      "deliveryProgress": {
+        "anyOf": [
+          {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "The progress of the delivery, as a percentage of the total delivery distance. Only available is in shipped state."
+      },
+      "stopsBefore": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "The number of stops before the order is due to be delivered. Only available is in shipped state."
+      },
+      "deliveryWindow": {
+        "anyOf": [
+          {
+            "properties": {
+              "start": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "end": {
+                "format": "date-time",
+                "type": "string"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ],
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "The delivery window for the order. Only available is in shipped state."
+      }
+    },
+    "required": [
+      "orderNumber",
+      "status"
+    ],
+    "type": "object"
+  },
+  "annotations": {
+    "title": "Track order status",
+    "readOnlyHint": true,
+    "destructiveHint": null,
+    "idempotentHint": null,
+    "openWorldHint": null
+  }
+}

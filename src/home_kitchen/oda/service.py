@@ -18,6 +18,7 @@ from sqlalchemy.engine import Engine
 from home_kitchen.settings import Settings
 
 from .models import OdaSearchResponse
+from .purchase_history import OrdersResponse, TrackingResponse, validate_history_tool
 from .repository import OdaRepository
 
 RESOURCE = "https://oda.com/mcp"
@@ -345,6 +346,8 @@ class OdaService:
             "recipe_search",
             "get_liked_recipes",
             "get_purchased_recipes",
+            "get_orders",
+            "order_tracking",
         }:
             raise OdaError("This Oda action is not supported", 400)
         token = await asyncio.to_thread(self.access_token, actor_id)
@@ -365,6 +368,11 @@ class OdaService:
                     or schema.get("additionalProperties") is not False
                 ):
                     raise OdaError("The Oda tool schema changed; review is required")
+                if name in {"get_orders", "order_tracking"}:
+                    try:
+                        validate_history_tool(name, schema, tools[name].outputSchema)
+                    except (ValueError, TypeError, KeyError, AttributeError):
+                        raise OdaError("The Oda order schema changed; review is required") from None
                 if name == "product_search" and (
                     set(schema.get("required", [])) != {"queries"}
                     or properties.get("queries", {}).get("type") != "array"
@@ -512,3 +520,32 @@ class OdaService:
             raise OdaError(
                 "The Oda recipe collection response changed; review is required"
             ) from None
+
+    async def list_orders(self, actor_id: str, page: int = 1, size: int = 20) -> dict:
+        """Read provider summaries; presence and dates do not establish payment."""
+        if (
+            type(page) is not int
+            or type(size) is not int
+            or not 1 <= page <= 50
+            or not 1 <= size <= 20
+        ):
+            raise OdaError("Oda order pagination is outside the supported range", 400)
+        payload = await self._read(actor_id, "get_orders", {"page": page, "size": size})
+        try:
+            OrdersResponse.model_validate(payload)
+            return payload
+        except ValueError:
+            raise OdaError("The Oda order response changed; review is required") from None
+
+    async def track_order(self, actor_id: str, order_number: str) -> dict:
+        """Read the exact lifecycle status, without asserting purchase completion."""
+        if not order_number.strip() or len(order_number) > 512:
+            raise OdaError("Provide a supported Oda order number", 400)
+        payload = await self._read(actor_id, "order_tracking", {"order_number": order_number})
+        try:
+            tracking = TrackingResponse.model_validate(payload)
+            if tracking.orderNumber != order_number:
+                raise ValueError
+            return payload
+        except ValueError:
+            raise OdaError("The Oda tracking response changed; review is required") from None

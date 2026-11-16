@@ -32,12 +32,14 @@ const state = {
   cartConfirming: false,
   cartProposalHandled: false,
   cartProposalBlocked: false,
-  shoppingPanel: "needs",
+  shoppingPanel: "single",
+  shoppingGrouping: "category",
   shoppingLastRefreshedAt: null,
   shoppingRefreshInFlight: false,
   shoppingRefreshPending: false,
   shoppingRefreshLastEventAt: 0,
   shoppingRefreshRequestCount: 0,
+  shoppingLoadSequence: 0,
   shoppingWriteInFlight: 0,
   basket: null,
   items: [],
@@ -144,6 +146,9 @@ async function api(path, method = "GET", body) {
               ? "Det finnes ingen oppskrifter å planlegge med. Legg til en oppskrift og prøv igjen."
               : "Forespørselen kunne ikke fullføres. Prøv igjen."),
     );
+    error.status = response.status;
+    error.detail = detail;
+    error.path = path;
     if (Number.isFinite(data?.retry_after_seconds))
       error.retryAfterSeconds = Math.max(0, data.retry_after_seconds);
     throw error;
@@ -543,6 +548,9 @@ function shouldRefreshShopping(view, visibility, modalOpen, formOpen) {
     !formOpen
   );
 }
+function isCurrentShoppingLoad(view, activeSequence, requestSequence, currentPeriod, requestPeriod) {
+  return view === "shopping" && activeSequence === requestSequence && currentPeriod === requestPeriod;
+}
 function shoppingRefreshLabel() {
   if (state.shoppingRefreshInFlight) return "Oppdaterer …";
   if (!state.shoppingLastRefreshedAt) return "Ikke oppdatert ennå";
@@ -605,8 +613,18 @@ async function refreshShoppingIfSafe(force = false) {
   }
 }
 async function refreshView() {
-  const matchingVisible = state.view === "shopping" && state.shoppingPanel === "oda";
+  const matchingVisible = state.view === "shopping" && ["single", "oda"].includes(state.shoppingPanel);
   const refreshingShopping = state.view === "shopping";
+  const shoppingLoadSequence = refreshingShopping ? ++state.shoppingLoadSequence : null;
+  const shoppingRange = refreshingShopping ? range() : null;
+  const shoppingLoadIsCurrent = () =>
+    !refreshingShopping || isCurrentShoppingLoad(
+      state.view,
+      state.shoppingLoadSequence,
+      shoppingLoadSequence,
+      range(),
+      shoppingRange,
+    );
   if (refreshingShopping) {
     state.shoppingRefreshPending = false;
     state.shoppingRefreshRequestCount += 1;
@@ -617,12 +635,13 @@ async function refreshView() {
     if (state.view === "settings") await loadConnectionStatus();
     if (state.view === "shopping") {
       const results = await Promise.all([
-        api("/shopping" + range()),
-        api("/purchase-plan" + range()),
+        api("/shopping" + shoppingRange),
+        api("/purchase-plan" + shoppingRange),
         api("/items"),
         api("/regular-items"),
         api("/inventory"),
       ]);
+      if (!shoppingLoadIsCurrent()) return false;
       [
         state.shopping,
         state.purchasePlan,
@@ -631,20 +650,39 @@ async function refreshView() {
         state.inventory,
       ] = results;
       if (state.shoppingPanel === "oda") {
-        [state.basket, state.oda] = await Promise.all([
-          api("/basket" + range()),
+        const [basket, oda] = await Promise.all([
+          api("/basket" + shoppingRange),
           api("/oda/status"),
         ]);
+        if (!shoppingLoadIsCurrent()) return false;
+        state.basket = basket;
+        state.oda = oda;
+        if (state.oda?.connected) ensureBasketMatches();
+        else resetBasketMatching();
+      } else if (state.shoppingPanel === "single") {
+        const [storeTrip, meals, basket, oda] = await Promise.all([
+          api("/store-trip" + shoppingRange),
+          api("/meals" + shoppingRange),
+          api("/basket" + shoppingRange),
+          api("/oda/status"),
+        ]);
+        if (!shoppingLoadIsCurrent()) return false;
+        [state.storeTrip, state.meals, state.basket, state.oda] = [storeTrip, meals, basket, oda];
         if (state.oda?.connected) ensureBasketMatches();
         else resetBasketMatching();
       } else if (state.shoppingPanel === "in_store") {
-        state.storeTrip = await api("/store-trip" + range());
+        const storeTrip = await api("/store-trip" + shoppingRange);
+        if (!shoppingLoadIsCurrent()) return false;
+        state.storeTrip = storeTrip;
       }
+      if (!shoppingLoadIsCurrent()) return false;
       state.shoppingLastRefreshedAt = Date.now();
     }
+    if (!shoppingLoadIsCurrent()) return false;
     render();
     return true;
   } catch (error) {
+    if (!shoppingLoadIsCurrent()) return false;
     notify(error.message, true);
     if (matchingVisible)
       Object.values(state.basketMatchJobs).forEach((record) =>
@@ -724,7 +762,7 @@ function ensureBasketMatches() {
   }
   if (!needs.length) return;
   if (!state.basketMatchStarted && !state.basketMatchGlobalError) {
-    void startBasketMatchJob({ initial: true, renderAfter: false });
+    void startBasketMatchJob({ initial: true, renderAfter: state.shoppingPanel === "single" });
     return;
   }
   Object.values(state.basketMatchJobs).forEach((record) => {
@@ -764,7 +802,7 @@ function scheduleBasketMatchPoll(record) {
     !record.jobId ||
     !["queued", "running"].includes(record.status) ||
     state.view !== "shopping" ||
-    state.shoppingPanel !== "oda" ||
+    !["single", "oda"].includes(state.shoppingPanel) ||
     !navigator.onLine ||
     !isCurrentBasketMatchRecord(record) ||
     record.timer
@@ -905,7 +943,7 @@ function navigate(view) {
   if (view === "basket") {
     state.shoppingPanel = "oda";
     view = "shopping";
-  }
+  } else if (view === "shopping") state.shoppingPanel = "single";
   state.view = view;
   location.hash = view;
   refreshView();
@@ -2156,6 +2194,31 @@ function recipePhotoForm() {
   add(form, image.wrap, book.wrap, page.wrap, status, retry);
   add(root, form);
 }
+function recipeCollectionConnectionPrompt() {
+  const section = add(el("section", null, "callout connection-prompt"));
+  if (!state.oda) {
+    add(section, el("p", "Oda-status kan ikke bekreftes akkurat nå. Prøv å oppdatere status eller åpne Innstillinger."));
+    add(section, connectionSettingsButton("Åpne Oda-innstillinger"));
+    add(section, button("Prøv å hente Oda-status på nytt", async () => {
+      try {
+        state.oda = await api("/oda/status");
+        if (state.oda?.connected) recipeCollectionForm();
+        else {
+          const replacement = recipeCollectionConnectionPrompt();
+          section.replaceWith(replacement);
+        }
+      } catch (error) {
+        notify(error.message, true);
+      }
+    }, "quiet"));
+    return section;
+  }
+  const message = state.oda.configured === false
+    ? window.KitchenRecipeCollections.connectionMessage("setup_required")
+    : window.KitchenRecipeCollections.connectionMessage("connect_required");
+  add(section, el("p", message), connectionSettingsButton("Åpne Oda-innstillinger"));
+  return section;
+}
 function recipeCollectionForm(resumeJobId = null) {
   const root = openDialog("Importer oppskrifter fra Oda");
   const collectionModal = $("#modal");
@@ -2172,14 +2235,7 @@ function recipeCollectionForm(resumeJobId = null) {
     el("p", "Ingenting importeres før du bekrefter valget. Etter bekreftelse fortsetter importen selv om du lukker dette vinduet. Du kan følge fremdriften i Oppskrifter og avbryte gjenstående arbeid; oppskrifter som allerede er importert, beholdes.", "callout"),
   );
   if (!state.oda?.connected && !resumeJobId) {
-    add(
-      root,
-      add(
-        el("section", null, "callout connection-prompt"),
-        el("p", "Koble til Oda i innstillingene for å hente dine oppskriftssamlinger."),
-        connectionSettingsButton("Åpne Oda-innstillinger"),
-      ),
-    );
+    add(root, recipeCollectionConnectionPrompt());
     return;
   }
   const form = el("form");
@@ -2201,6 +2257,7 @@ function recipeCollectionForm(resumeJobId = null) {
   }
   const status = el("p", "Velg én eller begge samlinger, og hent en liste til gjennomgang.", "muted");
   status.setAttribute("role", "status");
+  const connectionNotice = el("div");
   const errors = el("ul", null, "collection-errors");
   errors.setAttribute("role", "alert");
   const entries = el("div", null, "collection-entries");
@@ -2231,7 +2288,7 @@ function recipeCollectionForm(resumeJobId = null) {
       schedulePoll();
     } catch (error) {
       if (importGeneration !== generation || job?.job_id !== importJobId) return;
-      status.textContent = error.message;
+      showCollectionError(error);
       importButton.disabled = selectedIds.size === 0 || !["ready", "completed"].includes(job.status);
     }
   }, "primary");
@@ -2262,16 +2319,17 @@ function recipeCollectionForm(resumeJobId = null) {
         if (state.view === "recipes") await refreshView();
       }
     } catch (error) {
-      status.textContent = error.message;
+      showCollectionError(error);
     } finally {
       cancelJob.disabled = false;
     }
   }, "quiet");
   cancelJob.hidden = true;
-  const previewButton = button("Hent Oda-samlinger", () => startPreview().catch((error) => { status.textContent = error.message; }), "primary");
+  const previewButton = button("Hent Oda-samlinger", () => startPreview().catch(showCollectionError), "primary");
   previewButton.dataset.collectionFocus = "preview";
   function draw(nextJob) {
     job = window.KitchenRecipeCollections.normalizeJob(nextJob);
+    connectionNotice.replaceChildren();
     rememberRecipeCollectionJob(job);
     const entriesById = new Map(job.entries.map((entry) => [entry.id, entry]));
     for (const id of selectedIds) {
@@ -2343,6 +2401,23 @@ function recipeCollectionForm(resumeJobId = null) {
     previewButton.hidden = Boolean(job);
     if (focusKey) entries.querySelector(`[data-collection-focus="${CSS.escape(focusKey)}"]`)?.focus();
   }
+  function showCollectionError(error) {
+    connectionNotice.replaceChildren();
+    const guidance = window.KitchenRecipeCollections.connectionGuidance(
+      state.oda,
+      error,
+      window.KitchenSettingsView.odaNeedsReconnect,
+    );
+    if (guidance) {
+      add(connectionNotice, add(
+        el("section", null, "callout connection-prompt"),
+        el("p", window.KitchenRecipeCollections.connectionMessage(guidance)),
+        connectionSettingsButton("Åpne Oda-innstillinger"),
+      ));
+    } else {
+      status.textContent = error.message + " Valgene dine er beholdt. Prøv igjen.";
+    }
+  }
   async function startPreview() {
     if (previewStarting) return;
     if (!selectedKinds.size) throw new Error("Velg minst én Oda-samling.");
@@ -2367,7 +2442,7 @@ function recipeCollectionForm(resumeJobId = null) {
       schedulePoll();
     } catch (error) {
       if (requestGeneration !== generation) return;
-      status.textContent = error.message;
+      showCollectionError(error);
       retryPreview.hidden = false;
       retryPreview.disabled = false;
     } finally {
@@ -2395,7 +2470,7 @@ function recipeCollectionForm(resumeJobId = null) {
         }
       } catch (error) {
         if (watchedGeneration !== generation || job?.job_id !== watchedJobId) return;
-        status.textContent = error.message + " Valgene dine er beholdt.";
+        showCollectionError(error);
         retryPreview.hidden = false;
         retryPreview.disabled = false;
         return;
@@ -2408,6 +2483,7 @@ function recipeCollectionForm(resumeJobId = null) {
     form,
     picker,
     status,
+    connectionNotice,
     errors,
     entries,
     selectedCount,
@@ -2752,23 +2828,41 @@ function categoryLabel(category) {
 }
 function shoppingSections() {
   const nav = el("div", null, "section-tabs");
-  [
-    ["needs", "Behov"],
-    ["oda", "Oda"],
-    ["in_store", "I butikken"],
-    ["pantry", "Hjemme"],
-  ].forEach(([key, label]) => {
-    const tab = button(
-      label,
-      async () => {
-        state.shoppingPanel = key;
-        await refreshView();
-      },
-      state.shoppingPanel === key ? "primary" : "quiet",
-    );
-    if (state.shoppingPanel === key) tab.setAttribute("aria-current", "page");
-    nav.append(tab);
-  });
+  if (state.shoppingPanel === "single") {
+    const more = el("details", null, "shopping-more");
+    add(more, el("summary", "Flere handlelistevalg"));
+    const actions = add(el("div", null, "actions"));
+    [
+      ["needs", "Administrer handlebehov og hverdagsvarer"],
+      ["oda", "Se over Oda-handlekurven"],
+      ["pantry", "Administrer det du har hjemme"],
+      ["in_store", "Del handlelisten eller se plukkstatus"],
+    ].forEach(([key, label]) => actions.append(button(label, async () => {
+      state.shoppingPanel = key;
+      await refreshView();
+    }, "quiet small")));
+    add(more, actions);
+    nav.append(more);
+  } else {
+    [
+      ["single", "Handleliste"],
+      ["needs", "Behov og forslag"],
+      ["oda", "Oda-handlekurv"],
+      ["in_store", "Del og plukk"],
+      ["pantry", "Hjemme"],
+    ].forEach(([key, label]) => {
+      const tab = button(
+        label,
+        async () => {
+          state.shoppingPanel = key;
+          await refreshView();
+        },
+        state.shoppingPanel === key ? "primary" : "quiet",
+      );
+      if (state.shoppingPanel === key) tab.setAttribute("aria-current", "page");
+      nav.append(tab);
+    });
+  }
   const refresh = button(
     state.shoppingRefreshInFlight ? "Oppdaterer …" : "Oppdater",
     () => refreshShoppingIfSafe(true),
@@ -3074,20 +3168,184 @@ function renderInventory(main) {
   });
   add(main, list);
 }
+function renderSingleShoppingList(main) {
+  const trip = state.storeTrip || { lines: [], checked_count: 0, total_count: 0, unquantified: [] };
+  const lines = trip.lines || [];
+  const progressData = window.KitchenShoppingView.pickupProgress(trip.checked_count, trip.total_count);
+  const progress = el("progress");
+  progress.max = 100;
+  progress.value = progressData.percent;
+  progress.setAttribute("aria-label", "Fremdrift for plukking på handleturen");
+  const toolbar = add(el("div", null, "trip-toolbar"), add(el("div", null, "trip-progress"), el("strong", progressData.label), progress));
+  const remaining = lines.filter(window.KitchenShoppingShare.isRemainingShoppingLine);
+  const copy = button("Kopier varer som gjenstår", async () => {
+    const text = window.KitchenShoppingShare.formatRemainingShoppingText(
+      "Handleliste · " + dateLabel(day(0), { month: "short", day: "numeric" }) + " – " + dateLabel(day(6), { month: "short", day: "numeric", year: "numeric" }),
+      lines,
+      state.household.shopping_category_order || [],
+    );
+    try {
+      if (typeof navigator.clipboard?.writeText !== "function") throw new Error("clipboard-unavailable");
+      await navigator.clipboard.writeText(text);
+      notify("Varene som gjenstår, er kopiert.");
+    } catch {
+      const root = openDialog("Kopier handlelisten");
+      const content = el("textarea");
+      content.setAttribute("aria-label", "Varer som gjenstår på handlelisten");
+      content.readOnly = true;
+      content.rows = Math.min(16, Math.max(6, text.split("\n").length));
+      content.value = text;
+      add(root, el("p", "Merk teksten og kopier den til en annen app.", "muted"), content);
+      content.focus();
+      content.select();
+    }
+  }, "quiet small");
+  copy.disabled = remaining.length === 0;
+  add(toolbar, add(el("div", null, "actions shopping-share-actions"), copy));
+  add(main, toolbar);
+  renderShoppingConnectionPrompt(main);
+
+  if (state.oda?.connected && lines.length) {
+    const status = renderBasketMatchSummary();
+    status.classList.add("inline-matching-summary");
+    add(main, status);
+  }
+  if (trip.unquantified?.length) {
+    const unquantified = el("details", null, "shopping-info");
+    add(unquantified, el("summary", formatUiCount(trip.unquantified.length) + " behov må avklares før de kan vises som mengder"));
+    const list = el("ul");
+    trip.unquantified.forEach((need) => add(list, el("li", [need.name, need.unit, categoryLabel(need.category)].filter(Boolean).join(" · "))));
+    add(unquantified, list);
+    add(main, unquantified);
+  }
+  if (!lines.length) {
+    add(main, empty(
+      "Ingen varer gjenstår for denne perioden",
+      "Planlegg et måltid eller legg til et handlebehov for å fylle på listen.",
+      button("Planlegg et måltid", () => navigate("week"), "primary"),
+    ));
+    return;
+  }
+
+  const grouping = add(el("div", null, "shopping-grouping"), el("span", "Sorter etter", "muted"));
+  [["category", "Kategori"], ["meal", "Måltid"]].forEach(([key, label]) => {
+    const option = button(label, () => {
+      state.shoppingGrouping = key;
+      render();
+    }, state.shoppingGrouping === key ? "primary small" : "quiet small");
+    option.setAttribute("aria-pressed", String(state.shoppingGrouping === key));
+    grouping.append(option);
+  });
+  add(main, grouping);
+
+  const mergedLines = window.KitchenShoppingView.mergeActionableLines(lines, state.basket?.needs || []);
+  const groups = window.KitchenShoppingView.actionableGroups(
+    mergedLines,
+    state.household.shopping_category_order || [],
+    state.meals,
+    state.shoppingGrouping,
+    state.recipes,
+  );
+  for (const [groupName, entries] of groups) {
+    const section = add(el("section", null, "panel category-section actionable-shopping-group"), el("h2", groupName));
+    const list = el("ul", null, "list single-shopping-list");
+    entries.forEach(({ line, match }) => {
+      const row = el("li", null, line.checked ? "completed actionable-shopping-item" : "actionable-shopping-item");
+      const check = el("input");
+      check.type = "checkbox";
+      check.checked = Boolean(line.checked);
+      check.setAttribute("aria-label", (check.checked ? "Fjern avkryssing for " : "Merk som plukket: ") + line.name);
+      check.addEventListener("change", async () => {
+        check.disabled = true;
+        state.shoppingWriteInFlight += 1;
+        try {
+          await api("/store-trip/items/" + encodeURIComponent(line.id) + range(), "PUT", { checked: check.checked });
+          await refreshView();
+        } catch (error) {
+          check.checked = Boolean(line.checked);
+          notify(error.message, true);
+        } finally {
+          state.shoppingWriteInFlight = Math.max(0, state.shoppingWriteInFlight - 1);
+          check.disabled = false;
+          queuePendingShoppingRefresh();
+        }
+      });
+      const detail = add(el("div", null, "detail"), el("strong", line.name));
+      const amount = window.KitchenBasketMatchView.formatNeedQuantity(
+        { quantity: String(line.to_buy_quantity ?? "0"), unit: line.unit, approximate: line.approximate === true },
+        (quantity) => window.KitchenShoppingView.formatQuantityForDisplay(quantity),
+      );
+      const summary = el("small", amount + " å kjøpe" + (line.category ? " · " + categoryLabel(line.category) : ""));
+      summary.setAttribute("aria-label", (line.approximate ? "Omtrentlig mengde: ca. " : "Nøyaktig mengde: ") + String(line.to_buy_quantity ?? "0") + (line.unit ? " " + line.unit : "") + " å kjøpe");
+      add(detail, summary);
+      const mealOrigins = window.KitchenShoppingView.mealOriginNames(line.origins, state.meals, state.recipes);
+      const extraOrigins = (line.origins || []).filter((origin) => typeof origin === "string" && !origin.startsWith("meal:"));
+      const originLabels = [...mealOrigins, ...(extraOrigins.some((origin) => origin.startsWith("item:")) ? ["Hurtigtillegg"] : []), ...(extraOrigins.some((origin) => origin.startsWith("regular:")) ? ["Hverdagsvare"] : [])];
+      if (originLabels.length) add(detail, el("small", "Til: " + [...new Set(originLabels)].join(" · "), "muted"));
+      const evidence = renderPurchaseEvidence(line);
+      if (evidence) add(detail, evidence);
+      add(row, check, detail);
+      if (state.oda?.connected && match?.need) {
+        const matchView = renderBasketMatchNeed(match.need);
+        matchView.classList.add("inline-basket-match");
+        if (match.selections?.length) {
+          const selected = el("details", null, "shopping-selected-products");
+          add(selected, el("summary", formatUiCount(match.selections.length) + " lagrede Oda-valg"));
+          match.selections.forEach((selection) => {
+            if (!selection.product) return;
+            const chosen = add(el("div", null, "selected-product"), basketProduct(selection.product, selection.packages));
+            add(chosen, button("Fjern produktvalg", async () => {
+              try {
+                await api("/basket/selections/" + encodeURIComponent(match.need.id) + "/" + encodeURIComponent(selection.product.product_id) + range(), "DELETE");
+                state.cartProposalHandled = false;
+                await refreshView();
+              } catch (error) {
+                notify(error.message, true);
+              }
+            }, "quiet small"));
+            selected.append(chosen);
+          });
+          matchView.append(selected);
+        }
+        const refine = el("details", null, "oda-manual-search");
+        add(refine, el("summary", "Søk eller juster hos Oda"), odaSearchForNeed(match.need));
+        matchView.append(refine);
+        add(row, matchView);
+      }
+      list.append(row);
+    });
+    add(section, list);
+    main.append(section);
+  }
+  const basket = state.basket || { needs: [] };
+  const proposalRequest = odaCartProposalRequest(basket);
+  if (state.oda?.connected && basket.ready_for_review && proposalRequest.additions.length && !proposalRequest.issue) {
+    add(main, add(el("section", null, "panel oda-cart-panel"),
+      el("h2", "Oda-handlekurven er klar for gjennomgang"),
+      el("p", "Dette åpner en eksplisitt kontroll av varene. Kjøkken gjennomfører ikke betaling eller bestilling.", "muted"),
+      button("Se over valgte produkter", () => { state.shoppingPanel = "oda"; render(); }, "primary"),
+    ));
+  }
+}
 function renderShopping(main) {
+  const single = state.shoppingPanel === "single";
   const inStore = state.shoppingPanel === "in_store";
   const isOda = state.shoppingPanel === "oda";
   const isPantry = state.shoppingPanel === "pantry";
   const heading = title(
     "Handleliste",
-    inStore
+    single
+      ? "Handlelisten"
+      : inStore
       ? "Handletur i butikk"
       : isOda
         ? "Oda-produkter"
         : isPantry
           ? "Hjemme"
           : "Handlelisten.",
-    inStore
+    single
+      ? "Varer som gjenstår etter det dere har hjemme."
+      : inStore
       ? "Plukk varene som gjenstår denne uken."
       : isOda
         ? "Se over produktvalgene for denne uken."
@@ -3102,8 +3360,9 @@ function renderShopping(main) {
             : button("+ Legg til handlebehov", () => itemForm(), "primary"),
         ],
   );
-  if (inStore) heading.classList.add("shopping-compact-header");
+  if (inStore || single) heading.classList.add("shopping-compact-header");
   add(main, heading, weekControls(), shoppingSections());
+  if (single) return renderSingleShoppingList(main);
   if (state.shoppingPanel === "in_store") return renderInStore(main);
   if (state.shoppingPanel === "oda") return renderBasket(main);
   if (state.shoppingPanel === "pantry") return renderInventory(main);
@@ -4196,7 +4455,7 @@ function renderBasketMatchSummary() {
   }).length;
   const summary = busyCount
     ? "Søker etter produkter for " + formatUiCount(busyCount) + " av " + formatUiCount(needs.length) + " varer …"
-    : foundCount + " of " + needs.length + " items have product suggestions.";
+    : formatUiCount(foundCount) + " av " + formatUiCount(needs.length) + " varer har produktforslag.";
   const panel = add(
     el("section", null, "panel basket-match-summary"),
     el("h2", "Produktforslag"),
@@ -4210,7 +4469,7 @@ function renderBasketMatchSummary() {
   if (state.basketMatchSkippedNeedCount)
     add(panel, el("p", formatUiCount(state.basketMatchSkippedNeedCount) + " flere varer ble utelatt på grunn av søkegrensen.", "muted"));
   const refresh = button(
-    state.basketMatchGlobalRefreshing ? "Oppdaterer treff …" : "Oppdater alle treff",
+    state.basketMatchGlobalRefreshing ? "Oppdaterer treff …" : "Oppdater alle produkttreff",
     () => void startBasketMatchJob({ forceRefresh: true }),
     "quiet small",
   );
@@ -4251,7 +4510,7 @@ function renderBasketMatchNeed(need) {
     add(panel, renderBasketMatchCandidate(result.candidates[0], need));
     if (result.candidates.length > 1) {
       const alternatives = el("details", null, "basket-match-alternatives");
-      add(alternatives, el("summary", "Other matches (" + (result.candidates.length - 1) + ")"));
+      add(alternatives, el("summary", "Flere treff (" + formatUiCount(result.candidates.length - 1) + ")"));
       const list = el("div", null, "basket-match-candidates");
       result.candidates.slice(1).forEach((candidate) =>
         list.append(renderBasketMatchCandidate(candidate, need)),
@@ -4263,7 +4522,7 @@ function renderBasketMatchNeed(need) {
   const actions = el("div", null, "actions basket-match-actions");
   if (error || ["search_failed", "search_unavailable"].includes(result?.status)) {
     const retry = button(
-      busy ? "Søker …" : "Prøv denne varen igjen",
+      busy ? "Søker …" : "Prøv varetreffet på nytt",
       () => void startBasketMatchJob({ needIds: [id], forceRefresh: true, page: 1 }),
       "quiet small",
     );
@@ -4332,7 +4591,7 @@ function renderBasketMatchCandidate(candidate, need) {
   else if (candidate.available === false) add(more, el("p", "Oda oppgir at varen ikke er tilgjengelig.", "muted"));
   if (media.detail) add(more, el("p", media.detail, "muted"));
   if (productUrl) {
-    const link = el("a", "View Oda reference ↗");
+    const link = el("a", "Se Oda-produktet ↗");
     link.href = productUrl;
     link.target = "_blank";
     link.rel = "noopener noreferrer";
@@ -5218,6 +5477,8 @@ window.addEventListener("hashchange", () => {
   const panelChanged = view === "basket" && state.shoppingPanel !== "oda";
   if (view === "basket") state.shoppingPanel = "oda";
   const nextView = view === "basket" ? "shopping" : view;
+  if (nextView === "shopping" && view !== "basket" && nextView !== state.view)
+    state.shoppingPanel = "single";
   if (
     ["week", "recipes", "shopping", "settings"].includes(nextView) &&
     (nextView !== state.view || panelChanged)

@@ -1,7 +1,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { canSelect, completionCounts, entryStatus, importPayload, normalizeJob, progress } = require("../src/home_kitchen/static/recipe-collections.js");
+const { canSelect, completionCounts, connectionGuidance, connectionMessage, entryStatus, importPayload, normalizeJob, progress } = require("../src/home_kitchen/static/recipe-collections.js");
 
 const fixture = {
   job_id: "job-1",
@@ -56,4 +56,15 @@ test("reports completed, pre-existing, and failed recipes separately after parti
     ],
   });
   assert.deepEqual(completionCounts(job), { imported: 1, already: 1, failed: 1 });
+});
+
+test("shows Settings guidance only for known Oda setup or authorization states", () => {
+  const reconnect = (message) => /Oda authorization expired/iu.test(message);
+  assert.equal(connectionGuidance({ configured: false, connected: false }, new Error("failed"), reconnect), "setup_required");
+  assert.equal(connectionGuidance({ configured: true, connected: false }, new Error("failed"), reconnect), "connect_required");
+  assert.equal(connectionGuidance({ configured: true, connected: true }, new Error("Oda authorization expired"), reconnect), "reconnect_required");
+  assert.equal(connectionGuidance({ configured: true, connected: true }, Object.assign(new Error("Login required"), { status: 401 }), reconnect), null);
+  assert.equal(connectionGuidance({ configured: true, connected: true }, new Error("Fikk ikke kontakt med kjøkkenet"), reconnect), null);
+  assert.match(connectionMessage("connect_required"), /Oda-kontoen er ikke tilkoblet/u);
+  assert.match(connectionMessage("reconnect_required"), /ny godkjenning/u);
 });

@@ -138,6 +138,58 @@
     return groups;
   }
 
+  function mergeActionableLines(tripLines, basketNeeds) {
+    const matches = new Map(
+      (Array.isArray(basketNeeds) ? basketNeeds : [])
+        .map((entry) => [String(entry?.need?.id ?? ""), entry])
+        .filter(([id]) => id),
+    );
+    return (Array.isArray(tripLines) ? tripLines : []).map((line) => ({
+      line,
+      match: matches.get(String(line?.id ?? "")) || null,
+    }));
+  }
+
+  function actionableGroups(lines, categoryOrder = [], meals = [], groupBy = "category", recipes = []) {
+    if (groupBy !== "meal") {
+      const wrapped = (Array.isArray(lines) ? lines : []).map((entry) => ({
+        ...entry,
+        category: (entry?.line || entry)?.category,
+        name: (entry?.line || entry)?.name,
+      }));
+      return groupedByCategory(wrapped, categoryOrder);
+    }
+    const recipeTitles = new Map((Array.isArray(recipes) ? recipes : []).map((recipe) => [String(recipe.id), recipe.title]));
+    const mealTitles = new Map(
+      (Array.isArray(meals) ? meals : []).map((meal) => [String(meal.id), meal.recipe?.title || meal.title || recipeTitles.get(String(meal.recipe_id)) || "Måltid"]),
+    );
+    const groups = new Map();
+    (Array.isArray(lines) ? lines : []).forEach((entry) => {
+      const line = entry?.line || entry;
+      const mealIds = [...new Set((line?.origins || [])
+        .filter((origin) => typeof origin === "string" && origin.startsWith("meal:"))
+        .map((origin) => origin.slice(5)))];
+      const title = mealIds.length > 1
+        ? "Flere måltider"
+        : mealIds.length === 1
+          ? mealTitles.get(mealIds[0]) || "Planlagt måltid"
+          : "Andre varer";
+      if (!groups.has(title)) groups.set(title, []);
+      groups.get(title).push(entry);
+    });
+    return new Map([...groups.entries()].sort(([left], [right]) => left.localeCompare(right, "nb")));
+  }
+
+  function mealOriginNames(origins = [], meals = [], recipes = []) {
+    const recipeTitles = new Map((Array.isArray(recipes) ? recipes : []).map((recipe) => [String(recipe.id), recipe.title]));
+    const titles = new Map(
+      (Array.isArray(meals) ? meals : []).map((meal) => [String(meal.id), meal.recipe?.title || meal.title || recipeTitles.get(String(meal.recipe_id)) || "Planlagt måltid"]),
+    );
+    return [...new Set((Array.isArray(origins) ? origins : [])
+      .filter((origin) => typeof origin === "string" && origin.startsWith("meal:"))
+      .map((origin) => titles.get(origin.slice(5)) || "Planlagt måltid"))];
+  }
+
   root.KitchenShoppingView = {
     basketPriceSummary,
     formatQuantityForDisplay,
@@ -146,6 +198,9 @@
     groupedByCategory,
     hasSelectedProducts,
     isPositiveDecimal,
+    actionableGroups,
+    mealOriginNames,
+    mergeActionableLines,
     normalizeDecimalText,
     pickupProgress,
   };

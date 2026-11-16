@@ -62,7 +62,14 @@ def test_batch_api_resolves_only_job_candidates_and_rejects_unknown_packages(tes
                 "start": str(start),
                 "end": str(end),
                 "job_id": seed(unknown),
-                "selections": [{"need_id": need_id, "candidate_id": unknown.id, "packages": 2}],
+                "selections": [
+                    {
+                        "need_id": need_id,
+                        "candidate_id": unknown.id,
+                        "packages": 2,
+                        "confirm_identity": True,
+                    }
+                ],
             },
         )
         assert refused.status_code == 409
@@ -88,7 +95,7 @@ def test_batch_api_resolves_only_job_candidates_and_rejects_unknown_packages(tes
             pack_metadata_status="unverified",
             match_query="Pasta",
             match_reason="Search result",
-            identity_status="compatible",
+            identity_status="unverified",
         )
         job_id = seed(safe)
         old_selection = client.put(
@@ -128,13 +135,46 @@ def test_batch_api_resolves_only_job_candidates_and_rejects_unknown_packages(tes
             },
         )
         assert response.status_code == 422
-        accepted = client.put(
+        unconfirmed = client.put(
             "/api/basket/selections/batch",
             json={
                 "start": str(start),
                 "end": str(end),
                 "job_id": job_id,
                 "selections": [{"need_id": need_id, "candidate_id": safe.id, "packages": 2}],
+            },
+        )
+        assert unconfirmed.status_code == 409
+        assert "identity is unverified" in unconfirmed.json()["detail"].casefold()
+        basket_after_rejection = client.get(
+            "/api/basket", params={"start": start, "end": end}
+        ).json()
+        assert (
+            basket_after_rejection["needs"][0]["selections"][0]["product"]["product_id"]
+            == "old-choice"
+        )
+        with features.kitchen.store.engine.connect() as connection:
+            rejected_event_count = connection.execute(
+                text(
+                    "SELECT count(*) FROM kitchen_history "
+                    "WHERE structured->>'action' = 'basket_product_selected'"
+                )
+            ).scalar_one()
+        assert rejected_event_count == 1
+        accepted = client.put(
+            "/api/basket/selections/batch",
+            json={
+                "start": str(start),
+                "end": str(end),
+                "job_id": job_id,
+                "selections": [
+                    {
+                        "need_id": need_id,
+                        "candidate_id": safe.id,
+                        "packages": 2,
+                        "confirm_identity": True,
+                    }
+                ],
             },
         )
         assert accepted.status_code == 200, accepted.json()
@@ -156,7 +196,14 @@ def test_batch_api_resolves_only_job_candidates_and_rejects_unknown_packages(tes
                 "start": str(start),
                 "end": str(end),
                 "job_id": job_id,
-                "selections": [{"need_id": need_id, "candidate_id": safe.id, "packages": 2}],
+                "selections": [
+                    {
+                        "need_id": need_id,
+                        "candidate_id": safe.id,
+                        "packages": 2,
+                        "confirm_identity": True,
+                    }
+                ],
             },
         )
         assert retried.status_code == 200
@@ -209,7 +256,6 @@ def test_batch_api_counts_known_mass_sku_as_pack_but_rejects_tomato_item_guess(t
             pack_metadata_status="unverified",
             match_query="coffee",
             match_reason="Search result",
-            identity_status="compatible",
         )
         tomato = BasketCandidate(
             id="oda:tomato-500g",
@@ -277,7 +323,12 @@ def test_batch_api_counts_known_mass_sku_as_pack_but_rejects_tomato_item_guess(t
                 "end": str(end),
                 "job_id": job_id,
                 "selections": [
-                    {"need_id": coffee_need["id"], "candidate_id": coffee.id, "packages": 1}
+                    {
+                        "need_id": coffee_need["id"],
+                        "candidate_id": coffee.id,
+                        "packages": 1,
+                        "confirm_identity": True,
+                    }
                 ],
             },
         )

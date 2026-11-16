@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime
+from datetime import date
 from unittest.mock import AsyncMock
 
 import pytest
@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from fastmcp import Client
 
 from home_kitchen.app import create_app
+from home_kitchen.basket.jobs import BasketMatchJob, _Job
 from home_kitchen.basket.matching import BasketCandidate, BasketMatchResult, NeedMatchResult
 from home_kitchen.basket.repository import BasketService
 from home_kitchen.context import HistoryContext, history_context
@@ -192,6 +193,7 @@ async def test_mcp_batch_product_selection_uses_current_match_evidence(test_data
         pack_metadata_status="unverified",
         match_query="milk",
         match_reason="exact quantity and unit",
+        identity_status="unverified",
     )
     matched_need = NeedMatchResult(
         need_id=need.id,
@@ -202,15 +204,30 @@ async def test_mcp_batch_product_selection_uses_current_match_evidence(test_data
         has_more=False,
         candidates=[candidate],
     )
-    app.state.features.basket_jobs.resolve_batch_candidates = AsyncMock(
-        return_value={(need.id, candidate_id): (matched_need, candidate, datetime.now(UTC))}
+    features = app.state.features
+    features.basket_jobs.scope_provider = lambda actor_id: 1
+    now = features.basket_jobs.clock()
+    job_id = "owned-current-job"
+    features.basket_jobs._jobs[job_id] = _Job(
+        actor="mcp-household",
+        scope=1,
+        fingerprint=(),
+        created=now,
+        value=BasketMatchJob(
+            job_id=job_id,
+            status="complete",
+            start=start,
+            end=end,
+            needs=[matched_need],
+        ),
+        finished=now,
     )
     token = history_context.set(HistoryContext(actor_id="mcp-household", channel="mcp"))
     try:
         async with Client(app.state.mcp) as client:
             tool_names = {tool.name for tool in await client.list_tools()}
             assert "select_basket_products" in tool_names
-            result = await client.call_tool(
+            unconfirmed = await client.call_tool(
                 "select_basket_products",
                 {
                     "data": {
@@ -226,15 +243,48 @@ async def test_mcp_batch_product_selection_uses_current_match_evidence(test_data
                         ],
                     }
                 },
+                raise_on_error=False,
             )
-        assert not result.is_error
-        assert app.state.features.basket_jobs.resolve_batch_candidates.await_args.args == (
-            "mcp-household",
-            "owned-current-job",
-            start,
-            end,
-            [(need.id, candidate_id)],
-        )
+            assert unconfirmed.is_error
+            bypass = await client.call_tool(
+                "select_basket_products",
+                {
+                    "data": {
+                        "start": START,
+                        "end": END,
+                        "job_id": job_id,
+                        "reviewed": True,
+                        "selections": [
+                            {
+                                "need_id": str(need.id),
+                                "candidate_id": candidate_id,
+                                "packages": 1,
+                            }
+                        ],
+                    }
+                },
+                raise_on_error=False,
+            )
+            assert bypass.is_error
+            confirmed = await client.call_tool(
+                "select_basket_products",
+                {
+                    "data": {
+                        "start": START,
+                        "end": END,
+                        "job_id": job_id,
+                        "selections": [
+                            {
+                                "need_id": str(need.id),
+                                "candidate_id": candidate_id,
+                                "packages": 1,
+                                "confirm_identity": True,
+                            }
+                        ],
+                    }
+                },
+            )
+        assert not confirmed.is_error
         review = BasketService(app.state.service, app.state.features.history).review(start, end)
         assert review.needs[0].selections[0].product.product_id == "milk-123"
         assert app.state.features.kitchen.list_items()[0].id == item.id

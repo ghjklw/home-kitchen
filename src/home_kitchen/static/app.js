@@ -1449,7 +1449,10 @@ function renderRecipes(main) {
       "Din egen samling",
       "Oppskrifter å ta vare på.",
       "Hverdagsfavoritter, nye funn og din neste gode middag.",
-      [button("Legg til oppskrift", addRecipeForm, "primary")],
+      [
+        button("Ukartlagte råvarer", () => unmappedIngredientsDialog(), "quiet"),
+        button("Legg til oppskrift", addRecipeForm, "primary"),
+      ],
     ),
   );
   if (!recipeAssistantConfigured()) {
@@ -2135,6 +2138,7 @@ function viewRecipe(recipe) {
       el("div", null, "actions"),
       button("Planlegg et måltid", () => mealForm(undefined, recipe.id), "primary"),
       button("Rediger oppskrift", () => recipeForm(recipe, recipe.source || "manual"), "quiet"),
+      button("Kartlegg råvarer", () => unmappedIngredientsDialog({ recipeId: recipe.id }), "quiet"),
       recipe.source === "manual"
         ? button("Finn et bilde", () => recipeImageSearchForm(recipe), "quiet")
         : null,
@@ -2418,6 +2422,24 @@ async function viewRecipePhoto(photoSource) {
   } catch (error) {
     if (modal.open && status.isConnected) status.textContent = error.message;
   }
+}
+function unmappedIngredientsDialog(options = {}) {
+  const root = openDialog("Ukartlagte ingredienser");
+  const modal = $("#modal");
+  modal.dataset.kind = "unmapped-ingredients";
+  return window.KitchenUnmappedIngredientsView.renderReviewDialog(root, {
+    ...options,
+    api,
+    notify,
+    locale: state.household?.language || "nb",
+    onMapped: async () => {
+      try {
+        state.recipes = await api("/recipes");
+        if (state.view === "recipes") render();
+      } catch {}
+    },
+    onClose: () => modal.close(),
+  });
 }
 function addRecipeForm() {
   const root = openDialog("Legg til oppskrift");
@@ -6637,6 +6659,18 @@ function renderSettings(main) {
     if (first) navigate("week");
   });
   add(main, form);
+  const unmappedSection = el("section", null, "panel unmapped-ingredients-settings");
+  add(
+    unmappedSection,
+    el("h2", "Råvarer og måleenheter"),
+    el(
+      "p",
+      "Koble ingredienser i oppskriftene dine til kanoniske råvarer og måleenheter. Dette gjør det mulig å gjenkjenne råvarer på tvers av oppskrifter og språk, uten å endre den opprinnelige oppskriftsteksten.",
+      "muted",
+    ),
+    button("Gjennomgå ukartlagte råvarer", () => unmappedIngredientsDialog(), "quiet"),
+  );
+  add(main, unmappedSection);
   main.append(renderConnectionSettings());
 }
 $("#modal").addEventListener("cancel", (event) => {

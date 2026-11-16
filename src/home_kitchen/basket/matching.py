@@ -261,9 +261,9 @@ _IDENTITY_FAMILIES = (
             ("melis", "powdered", None),
         ),
         (
-            ("granulated", r"\b(?:granulated sugar|white sugar|sukker|sugar)\b"),
             ("caster", r"\bcaster sugar\b"),
             ("powdered", r"\b(?:powdered sugar|icing sugar|melis)\b"),
+            ("granulated", r"\b(?:granulated sugar|white sugar|sukker|sugar)\b"),
         ),
         ("granulated", "caster", "powdered"),
         20,
@@ -495,6 +495,22 @@ _EXPLICIT_MANUAL_INTENT = re.compile(
     r"\b(?:shower\s+(?:gel|oil)|dusjgel[eé]|body\s+wash|dish\s+soap|coffee\s+mate|peanut\s+butter|peanøttsmør)\b",
     re.I,
 )
+_ALLOWED_QUERY_QUALIFIERS = frozenset(
+    {
+        *_BOKMAL_QUALIFIERS,
+        *_BOKMAL_QUALIFIERS.values(),
+        "for",
+        "dusting",
+        "plus",
+        "extra",
+        "greasing",
+        "separated",
+        "to",
+        "taste",
+        "as",
+        "needed",
+    }
+)
 
 
 def _clean_ingredient_query(query: str) -> str:
@@ -514,6 +530,10 @@ def _query_identity(
         return None
     match = _QUERY_IDENTITY_PATTERN.search(cleaned)
     if match is None:
+        return None
+    residue = cleaned[: match.start()] + " " + cleaned[match.end() :]
+    residue_words = re.sub(r"[,;]+", " ", residue).split()
+    if any(word.casefold() not in _ALLOWED_QUERY_QUALIFIERS for word in residue_words):
         return None
     return _QUERY_IDENTITIES[match.group(0).casefold()]
 
@@ -559,6 +579,8 @@ def _bokmal_ingredient_query(query: str) -> str | None:
     cleaned = _clean_ingredient_query(query)
     identity_match = _QUERY_IDENTITY_PATTERN.search(cleaned)
     identity = _query_identity(cleaned)
+    if identity_match is not None and identity is None:
+        return None
     if identity_match is not None and identity is not None:
         localized = identity[2]
         if localized:

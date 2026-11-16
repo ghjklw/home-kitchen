@@ -48,6 +48,7 @@ class PostgresIdentityRepository:
     ) -> None:
         table, fk = self._table(kind)
         with self.engine.begin() as connection:
+            self._require_identity(connection, kind, identity_id)
             connection.execute(
                 text(f"""INSERT INTO {table} (locale, context, normalized_alias, alias, {fk}, reviewed)
                     VALUES (:locale, :context, :normalized, :alias, :identity_id, false)
@@ -66,6 +67,7 @@ class PostgresIdentityRepository:
     ) -> None:
         table, fk = self._table(kind)
         with self.engine.begin() as connection:
+            self._require_identity(connection, kind, identity_id)
             connection.execute(
                 text(
                     f"DELETE FROM {table} WHERE locale=:locale AND context=:context AND normalized_alias=:normalized"
@@ -87,6 +89,19 @@ class PostgresIdentityRepository:
                     "identity_id": identity_id,
                 },
             )
+
+    @staticmethod
+    def _require_identity(connection, kind: str, identity_id: UUID) -> None:
+        PostgresIdentityRepository._table(kind)
+        identity_table = (
+            "kitchen_canonical_products" if kind == "product" else "kitchen_canonical_units"
+        )
+        exists = connection.execute(
+            text(f"SELECT 1 FROM {identity_table} WHERE id=:identity_id"),
+            {"identity_id": identity_id},
+        ).first()
+        if exists is None:
+            raise ValueError(f"Unknown canonical {kind} identity")
 
     def resolve(
         self, kind: str, locale: str, context: str, alias: str

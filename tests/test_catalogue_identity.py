@@ -109,7 +109,10 @@ def test_identity_api_reuses_products_resolves_aliases_and_preserves_recipe_payl
     from home_kitchen.app import create_app
     from home_kitchen.settings import Settings
 
-    with TestClient(create_app(Settings(local_dev=True, database_url=test_database_url))) as client:
+    with TestClient(
+        create_app(Settings(local_dev=True, database_url=test_database_url)),
+        client=("127.0.0.1", 5000),
+    ) as client:
         first = client.post(
             "/api/catalogue/identities/products",
             json={"canonical_name": "Tomato", "variant": "fresh"},
@@ -158,6 +161,33 @@ def test_identity_api_reuses_products_resolves_aliases_and_preserves_recipe_payl
         assert resolved.json()["status"] == "resolved"
         assert resolved.json()["candidates"][0]["id"] == first.json()["id"]
 
+        unit = client.post("/api/catalogue/identities/units", json={"canonical_name": "gram"})
+        assert unit.status_code == 201
+        unit_alias_path = f"/api/catalogue/aliases/unit/{unit.json()['id']}"
+        assert (
+            client.post(
+                unit_alias_path,
+                json={"alias": "g", "locale": "nb", "context": "recipe"},
+            ).status_code
+            == 201
+        )
+        unit_result = client.get(
+            "/api/catalogue/aliases/unit",
+            params={"alias": "g", "locale": "nb", "context": "recipe"},
+        )
+        assert unit_result.json()["status"] == "resolved"
+        assert unit_result.json()["candidates"][0]["id"] == unit.json()["id"]
+
+        nonexistent_id = "00000000-0000-0000-0000-000000000001"
+        for path in (
+            f"/api/catalogue/aliases/product/{unit.json()['id']}",
+            f"/api/catalogue/aliases/unit/{nonexistent_id}",
+        ):
+            invalid_alias = client.post(
+                path, json={"alias": "bad", "locale": "nb", "context": "recipe"}
+            )
+            assert invalid_alias.status_code == 422
+
         recipe = client.post(
             "/api/recipes",
             json={
@@ -179,3 +209,37 @@ def test_identity_api_reuses_products_resolves_aliases_and_preserves_recipe_payl
         assert recipe.json()["ingredients"][0]["unit"] == "handfuls"
         assert recipe.json()["ingredients"][0]["source_unit_expression"] == "Handfuls"
         assert recipe.json()["ingredients"][0]["canonical_product_id"] == first.json()["id"]
+        invalid_recipe = client.post(
+            "/api/recipes",
+            json={
+                "title": "Invalid link",
+                "servings": 1,
+                "ingredients": [
+                    {
+                        "name": "Tomato",
+                        "quantity": "1",
+                        "unit": "item",
+                        "canonical_product_id": nonexistent_id,
+                    }
+                ],
+                "instructions": ["Cook"],
+            },
+        )
+        assert invalid_recipe.status_code == 422
+        invalid_update = client.put(
+            f"/api/recipes/{recipe.json()['id']}",
+            json={
+                "title": "Invalid update",
+                "servings": 1,
+                "ingredients": [
+                    {
+                        "name": "Tomato",
+                        "quantity": "1",
+                        "unit": "item",
+                        "canonical_unit_id": first.json()["id"],
+                    }
+                ],
+                "instructions": ["Cook"],
+            },
+        )
+        assert invalid_update.status_code == 422

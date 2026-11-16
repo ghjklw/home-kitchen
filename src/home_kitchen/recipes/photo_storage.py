@@ -238,7 +238,12 @@ class PhotoRecipeService:
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
-            await task
+            try:
+                await task
+            except Exception:
+                # The thread must finish before its resources can be released,
+                # but its failure must not replace the caller's cancellation.
+                pass
             raise
 
     def _save(self, photo: StoredPhoto) -> None:

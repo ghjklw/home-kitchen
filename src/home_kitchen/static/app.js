@@ -9,6 +9,8 @@ const state = {
   purchasePlan: { lines: [], suggestions: [] },
   inventory: [],
   storeTrip: null,
+  tripCompletionReview: null,
+  tripCompletionRetry: null,
   oda: null,
   odaStatusError: null,
   odaSearch: {},
@@ -58,6 +60,20 @@ const state = {
   recipeCollectionJob: null,
   recipeCollectionStatusNode: null,
   recipeCollectionPollGeneration: 0,
+};
+window.KitchenTripCompletion = {
+  purchaseSourceField(kind) {
+    return kind === "meal" ? "close_meal_ids" : kind === "capture" ? "close_capture_ids" : kind === "regular" ? "regular_ids" : null;
+  },
+  exactProductPurchase(line, selectionValue, packageCount) {
+    if (selectionValue === "" || selectionValue === null || selectionValue === undefined) return null;
+    const selectionIndex = Number(selectionValue);
+    if (!Number.isInteger(selectionIndex) || selectionIndex < 0) return null;
+    const selection = line?.selected_products?.[selectionIndex];
+    const packages = Number(packageCount);
+    if (!selection || !Number.isInteger(packages) || packages < 1 || packages > 99) return null;
+    return { provider: selection.product.provider, product_id: selection.product.product_id, packages };
+  },
 };
 let noticeTimer;
 function el(tag, text, className) {
@@ -689,6 +705,12 @@ async function refreshView() {
         const storeTrip = await api("/store-trip" + shoppingRange);
         if (!shoppingLoadIsCurrent()) return false;
         state.storeTrip = storeTrip;
+      } else if (state.shoppingPanel === "complete_trip") {
+        const completionReview = await api("/store-trip/completion-review" + shoppingRange);
+        if (!shoppingLoadIsCurrent()) return false;
+        if (state.tripCompletionRetry?.token !== completionReview.review_token)
+          state.tripCompletionRetry = null;
+        state.tripCompletionReview = completionReview;
       }
       if (!shoppingLoadIsCurrent()) return false;
       state.shoppingLastRefreshedAt = Date.now();
@@ -3028,6 +3050,7 @@ function shoppingSections() {
       ["needs", "Behov og forslag"],
       ["oda", "Oda-handlekurv"],
       ["in_store", "Del og plukk"],
+      ["complete_trip", "Registrer handletur"],
       ["pantry", "Hjemme"],
     ].forEach(([key, label]) => {
       const tab = button(
@@ -3155,6 +3178,10 @@ function renderInStore(main) {
     main,
     add(el("div", null, "trip-toolbar"), progressSummary, add(el("div", null, "actions shopping-share-actions"), share, copy)),
   );
+  add(main, button("Registrer handletur", async () => {
+    state.shoppingPanel = "complete_trip";
+    await refreshView();
+  }, "quiet"));
   const pickupInfo = el("details", null, "shopping-info");
   add(
     pickupInfo,
@@ -3244,6 +3271,130 @@ function renderInStore(main) {
     main.append(section);
   });
   add(main, pickupInfo);
+}
+
+function renderTripCompletion(main) {
+  const review = state.tripCompletionReview;
+  if (!review) {
+    add(main, empty("Gjennomgangen er ikke lastet", "Oppdater for å hente dagens behov."));
+    return;
+  }
+  add(main, el("p", "Planlagt behov vises som kontekst. Det blir aldri registrert som kjøpt mengde automatisk. Registrer bare det du faktisk kjøpte; la resten stå urørt." , "muted"));
+  if (state.tripCompletionRetry?.token === review.review_token) add(main, el("p", "Forrige lagring kan ha nådd kjøkkenet. Feltene er låst og nytt forsøk sender nøyaktig samme registrering med samme idempotensnøkkel.", "muted"));
+  const date = el("input"); date.type = "date"; date.value = iso(new Date()); date.required = true;
+  date.max = iso(new Date()); date.setAttribute("aria-label", "Kjøpsdato");
+  const controls = add(el("section", null, "panel"), el("h2", "Faktiske kjøp"), el("label", "Kjøpsdato"), date);
+  const lineForms = [];
+  (review.lines || []).forEach((line) => {
+    const section = add(el("section", null, "panel trip-completion-line"), el("h3", line.name));
+    add(section, el("p", `Planlagt behov: ${formatUiQuantity(line.to_buy_quantity)} ${line.unit} · kontekst, ikke faktisk kjøp.`, "muted"));
+    const bought = el("input"); bought.type = "checkbox"; bought.setAttribute("aria-label", `Registrer faktisk kjøp: ${line.name}`);
+    add(section, add(el("label"), bought, el("span", "Jeg kjøpte denne varen")));
+    const quantity = el("input"); quantity.type = "number"; quantity.min = "0.0000001"; quantity.step = "any"; quantity.placeholder = "Ukjent"; quantity.setAttribute("aria-label", `Faktisk mengde kjøpt: ${line.name}`);
+    const unit = el("input"); unit.placeholder = line.unit || "Enhet"; unit.setAttribute("aria-label", `Enhet for faktisk kjøp: ${line.name}`);
+    add(section, el("label", "Faktisk mengde (valgfritt)"), quantity, el("label", "Enhet (valgfritt)"), unit);
+    const exact = el("input"); exact.type = "checkbox"; exact.setAttribute("aria-label", `Kjøp eksakt produkt for ${line.name}`);
+    add(section, add(el("label"), exact, el("span", "Jeg kjøpte et av de viste produktene")));
+    const productSelect = el("select");
+    productSelect.append(new Option("Velg vist produkt", ""));
+    (line.selected_products || []).forEach((entry, index) => {
+      const p = entry.product;
+      const option = new Option(`${p.name} · ${p.pack_quantity} ${p.pack_unit} per pakke · ${p.provider} / ${p.product_id}`, String(index));
+      productSelect.append(option);
+    });
+    const packCount = el("input"); packCount.type = "number"; packCount.min = "1"; packCount.max = "99"; packCount.step = "1"; packCount.placeholder = "Antall pakker"; packCount.setAttribute("aria-label", `Antall pakker kjøpt: ${line.name}`);
+    const productDetails = el("div");
+    productSelect.addEventListener("change", () => {
+      productDetails.replaceChildren();
+      const entry = line.selected_products?.[Number(productSelect.value)];
+      if (!entry) return;
+      const p = entry.product;
+      if (p.image_url) { const img = el("img"); img.src = p.image_url; img.alt = `Bilde av ${p.name}`; img.width = 72; productDetails.append(img); }
+      add(productDetails, el("p", `${p.name} · ${p.provider} / ${p.product_id} · ${p.pack_quantity} ${p.pack_unit} per pakke`));
+      if (p.url) { const link = el("a", "Åpne produktreferanse"); link.href = p.url; link.rel = "noopener noreferrer"; link.target = "_blank"; productDetails.append(link); }
+    });
+    add(section, productSelect, packCount, productDetails);
+    const sourceChecks = [];
+    (line.source_quantities || []).forEach((source) => {
+      const input = el("input"); input.type = "checkbox";
+      const label = source.kind === "meal" ? "Lukk måltidsbehov" : source.kind === "capture" ? "Lukk hurtigtillegg" : "Lukk fast vare";
+      add(section, add(el("label"), input, el("span", `${label} · ${formatUiQuantity(source.quantity)} ${source.unit}`)));
+      let regularPurchase = null;
+      if (source.kind === "capture") {
+        const capture = (line.captures || []).find((item) => item.id === source.source_id);
+        if (capture?.regular_id) {
+          regularPurchase = el("input"); regularPurchase.type = "checkbox";
+          add(section, add(el("label"), regularPurchase, el("span", "Oppdater sist kjøpt for den tilknyttede hverdagsvaren")));
+        }
+      }
+      sourceChecks.push({ source, input, regularPurchase });
+    });
+    const reason = el("select");
+    [["", "Velg hvorfor dette behovet lukkes"], ["already_have", "Hadde den allerede"], ["not_needed", "Trengte den ikke"], ["unavailable", "Var utilgjengelig"], ["other", "Annet"]].forEach(([value, label]) => reason.append(new Option(label, value)));
+    add(section, el("label", "Lukk uten å registrere kjøp"), reason);
+    lineForms.push({ line, bought, quantity, unit, exact, productSelect, packCount, sourceChecks, reason });
+    add(main, section);
+  });
+  add(main, controls);
+  const submit = button("Lagre registrering", async () => {
+    const actual = [], sourceClosures = [];
+    if (!date.value) { notify("Oppgi datoen for handleturen.", true); return; }
+    for (const form of lineForms) {
+      const { line, bought, quantity, unit, exact, productSelect, packCount, sourceChecks, reason } = form;
+      if (bought.checked && exact.checked && (quantity.value.trim() || unit.value.trim())) { notify(`Velg enten eksakt produkt eller faktisk mengde med enhet for ${line.name}.`, true); return; }
+      if (bought.checked && reason.value) { notify(`Velg enten faktisk kjøp eller en avslutning uten kjøp for ${line.name}.`, true); return; }
+      if (!bought.checked && sourceChecks.some(({ regularPurchase }) => regularPurchase?.checked)) { notify(`Oppdatering av sist kjøpt gjelder bare et faktisk kjøp av ${line.name}.`, true); return; }
+      const selectedSources = sourceChecks.filter(({ input }) => input.checked).map(({ source }) => source);
+      if (bought.checked) {
+        const purchase = { need_id: line.id };
+        if (exact.checked) {
+          const product = window.KitchenTripCompletion.exactProductPurchase(line, productSelect.value, packCount.value);
+          if (!product) { notify(`Velg et vist produkt og skriv inn antall pakker for ${line.name}.`, true); return; }
+          purchase.product = product;
+        } else if (quantity.value.trim() || unit.value.trim() !== (line.unit || "")) {
+          if (!quantity.value.trim() || !unit.value.trim()) { notify(`Fyll inn både mengde og enhet for ${line.name}, eller la begge stå tomme.`, true); return; }
+          purchase.quantity = quantity.value; purchase.unit = unit.value.trim();
+        }
+        sourceChecks.filter(({ input }) => input.checked).forEach(({ source, regularPurchase }) => {
+          const field = window.KitchenTripCompletion.purchaseSourceField(source.kind);
+          if (field) (purchase[field] ||= []).push(source.source_id);
+          if (regularPurchase?.checked) {
+            const capture = (line.captures || []).find((item) => item.id === source.source_id);
+            if (capture?.regular_id) (purchase.regular_ids ||= []).push(capture.regular_id);
+          }
+        });
+        actual.push(purchase);
+      } else if (reason.value) {
+        if (!selectedSources.length) { notify(`Velg hvilke bidrag som lukkes for ${line.name}.`, true); return; }
+        selectedSources.forEach((source) => sourceClosures.push({ need_id: line.id, source_kind: source.kind, source_id: source.source_id, resolution: reason.value }));
+      } else if (selectedSources.length) {
+        notify(`Velg hvorfor valgte bidrag lukkes for ${line.name}, eller fjern avkrysningen.`, true); return;
+      }
+    }
+    if (!actual.length && !sourceClosures.length) { notify("Registrer et faktisk kjøp eller velg bidrag som lukkes uten kjøp.", true); return; }
+    const payload = state.tripCompletionRetry?.token === review.review_token
+      ? state.tripCompletionRetry.payload
+      : { start: review.start, end: review.end, review_token: review.review_token, reviewed: true, idempotency_key: crypto.randomUUID(), purchased_on: date.value, purchases: actual, source_closures: sourceClosures };
+    state.tripCompletionRetry = { key: payload.idempotency_key, token: review.review_token, payload };
+    submit.disabled = true;
+    try {
+      await api("/store-trip/completions", "POST", payload);
+      state.tripCompletionRetry = null;
+      await refreshView();
+      notify("Handleturen er registrert.");
+    } catch (error) {
+      if (/Shopping needs changed|need is no longer current|source is no longer current/i.test(error.message)) {
+        state.tripCompletionRetry = null;
+        await refreshView();
+        notify("Behovene endret seg. Gjennomgangen er oppdatert; kontroller den før du lagrer.", true);
+      } else notify(error.message + " Prøv igjen for å gjenta samme registrering.", true);
+    } finally { submit.disabled = false; }
+  }, "primary");
+  if (state.tripCompletionRetry?.token === review.review_token) {
+    submit.textContent = "Prøv lagring igjen";
+    main.querySelectorAll("input, select").forEach((control) => { control.disabled = true; });
+  }
+  add(main, submit);
 }
 function inventoryForm(item = {}) {
   const root = openDialog(
@@ -3803,6 +3954,7 @@ function renderSingleShoppingList(main) {
 function renderShopping(main) {
   const single = state.shoppingPanel === "single";
   const inStore = state.shoppingPanel === "in_store";
+  const completeTrip = state.shoppingPanel === "complete_trip";
   const isOda = state.shoppingPanel === "oda";
   const isPantry = state.shoppingPanel === "pantry";
   const heading = title(
@@ -3811,6 +3963,8 @@ function renderShopping(main) {
       ? "Handlelisten"
       : inStore
       ? "Handletur i butikk"
+      : completeTrip
+        ? "Registrer handletur"
       : isOda
         ? "Oda-produkter"
         : isPantry
@@ -3820,12 +3974,14 @@ function renderShopping(main) {
       ? "Varer som gjenstår etter det dere har hjemme."
       : inStore
       ? "Plukk varene som gjenstår denne uken."
+      : completeTrip
+        ? "Registrer faktiske kjøp og valgte behovsavslutninger."
       : isOda
         ? "Se over produktvalgene for denne uken."
         : isPantry
           ? "Mengdene du har her, trekkes fra handlebehovet."
           : "Listen samler planlagte måltider, hverdagsvarer og det du legger til.",
-    inStore || isOda
+    inStore || completeTrip || isOda
       ? []
       : [
           isPantry
@@ -3833,10 +3989,11 @@ function renderShopping(main) {
             : button("+ Legg til handlebehov", () => itemForm(), "primary"),
         ],
   );
-  if (inStore || single) heading.classList.add("shopping-compact-header");
+  if (inStore || completeTrip || single) heading.classList.add("shopping-compact-header");
   add(main, heading, weekControls(), shoppingSections());
   if (single) return renderSingleShoppingList(main);
   if (state.shoppingPanel === "in_store") return renderInStore(main);
+  if (completeTrip) return renderTripCompletion(main);
   if (state.shoppingPanel === "oda") return renderBasket(main);
   if (state.shoppingPanel === "pantry") return renderInventory(main);
   const columns = el("div", null, "two-columns");

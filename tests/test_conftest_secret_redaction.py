@@ -41,7 +41,9 @@ def pytest_runtest_setup(item):
         nonlocal engine_count
         engine_count += 1
         engine = original_create_engine(url, **kwargs)
-        if mode == "setup_failure" or (mode == "alembic_failure" and engine_count == 2):
+        if mode == "setup_failure" or (
+            mode in {"alembic_failure", "consumer_failure"} and engine_count == 2
+        ):
             def fail_connect(*args, **connect_params):
                 Path(os.environ["REDACTION_CONNECT_REACHED"]).write_text("reached")
                 raise OperationalError(
@@ -52,7 +54,12 @@ def pytest_runtest_setup(item):
 
             # Patch only dialect.connect; no socket or database access occurs.
             engine.dialect.connect = fail_connect
-        elif mode in {"alembic_failure", "test_failure"}:
+            if mode == "setup_failure":
+                def fail_dispose():
+                    raise RuntimeError("synthetic cleanup failure")
+
+                engine.dispose = fail_dispose
+        elif mode in {"alembic_failure", "consumer_failure", "test_failure"}:
             # The admin engine's schema DDL is a no-op in these probes. The
             # Alembic engine remains a real SQLAlchemy Engine in alembic_failure.
             engine.begin = lambda: _Transaction()
@@ -61,7 +68,7 @@ def pytest_runtest_setup(item):
     fixture_module.create_engine = create_probe_engine
     sqlalchemy.create_engine = create_probe_engine
 
-    if mode == "test_failure":
+    if mode in {"consumer_failure", "test_failure"}:
         fixture_module.command.upgrade = lambda *_args: None
 """
 
@@ -69,6 +76,7 @@ _PROBE_SOURCE = """
 import os
 
 import pytest
+import sqlalchemy
 from sqlalchemy.engine import make_url
 
 
@@ -80,6 +88,13 @@ def test_fixture_failure_output(test_database_url):
             f"deliberate test stage=consumer schema={schema} "
             f"database_url={test_database_url!r}"
         )
+    if os.environ["REDACTION_PROBE_MODE"] == "consumer_failure":
+        engine = sqlalchemy.create_engine(test_database_url)
+        try:
+            with engine.connect():
+                pass
+        finally:
+            engine.dispose()
 """
 
 
@@ -136,6 +151,7 @@ def test_setup_migration_and_consumer_failure_output_redacts_password(
     for mode, stage, needs_driver_failure in (
         ("setup_failure", "create schema", True),
         ("alembic_failure", "Alembic migration", True),
+        ("consumer_failure", "synthetic connect failure", True),
         ("test_failure", "stage=consumer", False),
     ):
         result, connect_reached = _run_nested_pytest(tmp_path, mode)
@@ -144,6 +160,8 @@ def test_setup_migration_and_consumer_failure_output_redacts_password(
         assert result.returncode != 0, "the nested pytest probe must fail deliberately"
         assert _PASSWORD_MARKER not in output, "database password marker leaked into pytest output"
         assert stage in output, "failure stage should remain visible"
-        assert "schema=test_" in output, "isolated schema context should remain visible"
+        if mode in {"setup_failure", "alembic_failure"}:
+            assert "error=OperationalError" in output, "safe exception class should remain visible"
+        assert "test_" in output, "isolated schema name should remain visible"
         if needs_driver_failure:
             assert connect_reached.exists(), "probe must reach the patched dialect.connect"

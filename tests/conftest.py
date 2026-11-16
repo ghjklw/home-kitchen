@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from urllib.parse import quote
 from uuid import uuid4
 
 import pytest
@@ -22,10 +23,76 @@ class _RedactedDatabaseURL(str):
         return f"{type(self).__name__}({safe_url!r})"
 
 
-def _raise_database_fixture_error(stage, schema):
+def _raise_database_fixture_error(stage, schema, error_type="unknown error"):
     raise RuntimeError(
-        f"Disposable PostgreSQL test fixture failed during {stage} (schema={schema})"
+        "Disposable PostgreSQL test fixture failed during "
+        f"{stage} (schema={schema}; error={error_type})"
     ) from None
+
+
+def _database_password_replacements():
+    database_url = os.environ.get("KITCHEN_TEST_DATABASE_URL")
+    if not database_url:
+        return ()
+    try:
+        password = make_url(database_url).password
+    except Exception:
+        return ()
+    if not password:
+        return ()
+    return tuple(dict.fromkeys((password, quote(password, safe=""))))
+
+
+def _redact_diagnostic_text(value, secrets):
+    if not isinstance(value, str):
+        return value
+    for secret in secrets:
+        value = value.replace(secret, "[REDACTED]")
+    return value
+
+
+def _redact_pytest_report(report, secrets):
+    if not secrets:
+        return
+    report.sections = [
+        (name, _redact_diagnostic_text(content, secrets)) for name, content in report.sections
+    ]
+    longrepr = report.longrepr
+    traceback = getattr(longrepr, "reprtraceback", None)
+    if traceback is None:
+        return
+    traceback.extraline = _redact_diagnostic_text(traceback.extraline, secrets)
+    for entry in traceback.reprentries:
+        if hasattr(entry, "lines"):
+            entry.lines = tuple(_redact_diagnostic_text(line, secrets) for line in entry.lines)
+        locals_repr = getattr(entry, "reprlocals", None)
+        if locals_repr is not None:
+            locals_repr.lines = tuple(
+                _redact_diagnostic_text(line, secrets) for line in locals_repr.lines
+            )
+        args_repr = getattr(entry, "reprfuncargs", None)
+        if args_repr is not None:
+            args_repr.args = tuple(
+                (name, _redact_diagnostic_text(str(value), secrets))
+                for name, value in args_repr.args
+            )
+        fileloc = getattr(entry, "reprfileloc", None)
+        if fileloc is not None:
+            fileloc.message = _redact_diagnostic_text(fileloc.message, secrets)
+    crash = getattr(longrepr, "reprcrash", None)
+    if crash is not None:
+        crash.message = _redact_diagnostic_text(crash.message, secrets)
+    if hasattr(longrepr, "sections"):
+        longrepr.sections = [
+            (name, _redact_diagnostic_text(content, secrets), sep)
+            for name, content, sep in longrepr.sections
+        ]
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    _redact_pytest_report(outcome.get_result(), _database_password_replacements())
 
 
 @pytest.fixture
@@ -37,17 +104,24 @@ def test_database_url():
     schema = "test_" + uuid4().hex
     admin = None
     schema_created = False
+    setup_failure = False
     try:
         try:
             admin = create_engine(base_url)
-        except Exception:
-            _raise_database_fixture_error("create admin engine", schema)
+        except Exception as error:
+            error_type = type(error).__name__
+            setup_failure = True
+            del error
+            _raise_database_fixture_error("create admin engine", schema, error_type)
         try:
             with admin.begin() as connection:
                 connection.execute(text(f'CREATE SCHEMA "{schema}"'))
             schema_created = True
-        except Exception:
-            _raise_database_fixture_error("create schema", schema)
+        except Exception as error:
+            error_type = type(error).__name__
+            setup_failure = True
+            del error
+            _raise_database_fixture_error("create schema", schema, error_type)
         try:
             url = make_url(base_url).update_query_dict({"options": f"-csearch_path={schema}"})
             database_url = _RedactedDatabaseURL(url.render_as_string(hide_password=False))
@@ -56,8 +130,11 @@ def test_database_url():
             # password-redacted repr in any setup exception or pytest traceback.
             config.attributes["database_url"] = url
             command.upgrade(config, "head")
-        except Exception:
-            _raise_database_fixture_error("Alembic migration", schema)
+        except Exception as error:
+            error_type = type(error).__name__
+            setup_failure = True
+            del error
+            _raise_database_fixture_error("Alembic migration", schema, error_type)
         yield database_url
     finally:
         if admin is not None:
@@ -66,12 +143,16 @@ def test_database_url():
                     with admin.begin() as connection:
                         connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
             except Exception:
-                _raise_database_fixture_error("drop schema", schema)
+                if not setup_failure:
+                    _raise_database_fixture_error("drop schema", schema)
             finally:
                 try:
                     admin.dispose()
-                except Exception:
-                    _raise_database_fixture_error("dispose admin engine", schema)
+                except Exception as error:
+                    error_type = type(error).__name__
+                    del error
+                    if not setup_failure:
+                        _raise_database_fixture_error("dispose admin engine", schema, error_type)
 
 
 @pytest.fixture(autouse=True)

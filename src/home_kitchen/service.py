@@ -16,7 +16,7 @@ from .models import (
     WeekShopping,
 )
 from .recipes.source_quantities import normalize_source_quantity, source_ingredient_parts
-from .shopping import ShoppingBuilder, ShoppingContext, default_shopping_builder
+from .shopping import ClosedSourceKey, ShoppingBuilder, ShoppingContext, default_shopping_builder
 from .store import Store
 from .units import scale_quantity
 
@@ -210,7 +210,14 @@ class KitchenService:
         )
         return self.store.confirm(item_id, item)
 
-    def shopping_list(self, start: date, end: date, today: date) -> WeekShopping:
+    def shopping_list(
+        self,
+        start: date,
+        end: date,
+        today: date,
+        *,
+        closed_sources: set[ClosedSourceKey] | None = None,
+    ) -> WeekShopping:
         self._validate_range(start, end)
         context = ShoppingContext(
             meals=self.list_meals(start, end),
@@ -219,6 +226,9 @@ class KitchenService:
             regulars=self.list_regular_items(),
             active_confirmations=self.store.active_confirmations(),
             today=today,
+            start=start,
+            end=end,
+            closed_sources=closed_sources or set(),
         )
         return self.shopping_builder.build(context)
 

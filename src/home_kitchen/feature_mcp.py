@@ -4,11 +4,13 @@ import asyncio
 import base64
 import binascii
 from datetime import date
+from decimal import Decimal, InvalidOperation
 from uuid import UUID
 
 from fastmcp import FastMCP
+from pydantic import BaseModel, ConfigDict, Field
 
-from home_kitchen.basket import BasketReview, SelectedProduct
+from home_kitchen.basket import BasketReview, ProductSnapshot, SelectedProduct
 from home_kitchen.basket.jobs import BasketMatchJob
 from home_kitchen.basket.matching import BasketMatchResult
 from home_kitchen.basket.repository import BasketService
@@ -34,6 +36,23 @@ from home_kitchen.recipes.collections import CollectionKind
 from home_kitchen.recipes.discovery import RecipeDiscoveryRequest, RecipeDiscoveryResponse
 from home_kitchen.recipes.images import MAX_RESULTS
 from home_kitchen.recipes.photos import MAX_PHOTO_BYTES
+
+
+class BasketBatchSelectionInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    need_id: UUID
+    candidate_id: str = Field(min_length=1, max_length=200)
+    packages: int = Field(gt=0, le=99)
+
+
+class BasketBatchSelectionInputEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    start: date
+    end: date
+    job_id: str = Field(min_length=1, max_length=64)
+    selections: list[BasketBatchSelectionInput] = Field(min_length=1, max_length=100)
 
 
 def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: BasketService) -> None:
@@ -69,6 +88,11 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
     async def redraft_recipe_photo(photo_id: UUID) -> dict:
         """Retry transcription of this household's private stored recipe photo."""
         return (await features.recipe_photos.redraft(photo_id, actor())).model_dump(mode="json")
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True})
+    async def discard_recipe_photo(photo_id: UUID) -> dict[str, bool]:
+        """Discard this household's temporary recipe photo and its private image."""
+        return {"deleted": await features.recipe_photos.discard(photo_id, actor())}
 
     @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
     async def preview_recipe_collections(kinds: list[CollectionKind]) -> dict:
@@ -311,9 +335,11 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
     def complete_store_trip(data: TripCompletionCreate) -> CompletedTrip:
         """Record ONLY purchases the user explicitly confirms actually happened.
 
-        Show actual quantities and exact source captures/regulars to reconcile.
-        reviewed=True requires explicit confirmation. Use a fresh review_token and
-        stable idempotency_key for retries. Does not infer stock or payment from picking.
+        Show actual quantities when known and exact source captures/regulars/meals to
+        reconcile. A quantity-unknown purchase remains explicit; source closures such
+        as already_have or not_needed do not create purchase evidence. reviewed=True
+        requires explicit confirmation. Use a fresh review_token and stable
+        idempotency_key for retries. Does not infer stock or payment from picking.
         """
         actor()
         return features.trip_completion.complete(data)
@@ -383,6 +409,70 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
         """
         return await features.basket_matching.find_products(
             actor(), start, end, page=page, size=size
+        )
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
+    async def select_basket_products(data: BasketBatchSelectionInputEnvelope) -> BasketReview:
+        """Save reviewed exact products from a current basket match job atomically.
+
+        Each need may have one product selection. Match job ownership, age, period,
+        and package details are checked again before anything is persisted.
+        """
+        actor_id = actor()
+        if data.end < data.start:
+            raise ValueError("end date must be on or after start date")
+        references = [(item.need_id, item.candidate_id) for item in data.selections]
+        if len({need_id for need_id, _ in references}) != len(references):
+            raise ValueError("Select at most one product for each purchase need")
+        if len(set(references)) != len(references):
+            raise ValueError("Do not select a product more than once for a need")
+        resolved = await features.basket_jobs.resolve_batch_candidates(
+            actor_id, data.job_id, data.start, data.end, references
+        )
+        selections = []
+        evidence = {}
+        for item in data.selections:
+            matched_need, candidate, observed_at = resolved[(item.need_id, item.candidate_id)]
+            if (
+                candidate.pack_quantity is None
+                or candidate.pack_unit is None
+                or candidate.pack_metadata_status != "unverified"
+            ):
+                raise ValueError("A selected product has unknown package details.")
+            price = None
+            if candidate.price is not None:
+                try:
+                    price = Decimal(candidate.price)
+                except InvalidOperation:
+                    price = None
+            selections.append(
+                SelectedProduct(
+                    need_id=item.need_id,
+                    product=ProductSnapshot(
+                        provider=candidate.provider,
+                        product_id=candidate.product_id,
+                        name=candidate.name,
+                        brand=candidate.brand,
+                        url=candidate.product_url,
+                        image_url=candidate.media.image_url if candidate.media else None,
+                        pack_quantity=candidate.pack_quantity,
+                        pack_unit=candidate.pack_unit,
+                        price=price,
+                        currency="NOK",
+                        available=candidate.available,
+                        observed_at=observed_at,
+                    ),
+                    packages=item.packages,
+                )
+            )
+            evidence[item.need_id] = matched_need
+        return await asyncio.to_thread(
+            basket.select_batch,
+            data.start,
+            data.end,
+            selections,
+            evidence,
+            channel="mcp",
         )
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})

@@ -216,12 +216,22 @@ class RegularItem(ShoppingItemCreate):
     last_purchased: date | None = None
 
 
+class ShoppingSourceQuantity(BaseModel):
+    """One source's planned contribution, independent of any actual purchase."""
+
+    kind: Literal["meal", "capture", "regular"]
+    source_id: UUID
+    quantity: Quantity
+    unit: NonBlank
+
+
 class ShoppingLine(BaseModel):
     name: NonBlank
     quantity: Quantity
     unit: NonBlank
     category: NonBlank = "Other"
     origins: list[str]
+    source_quantities: list[ShoppingSourceQuantity] = Field(default_factory=list)
     approximate: bool = False
     provenance: NonBlank | None = None
     source_url: HttpUrl | None = None

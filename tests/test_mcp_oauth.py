@@ -215,7 +215,7 @@ def test_discovery_challenge_and_dcr_redirects(test_database_url):
         assert metadata["code_challenge_methods_supported"] == ["S256"]
         assert metadata["token_endpoint_auth_methods_supported"] == ["none"]
         assert metadata["authorization_endpoint"] == BASE + "/authorize"
-        denied = client.get(
+        denied = client.post(
             "/mcp/",
             headers={
                 "x-auth-request-user": "spoofed",
@@ -568,7 +568,7 @@ def test_browser_oauth_consent_pkce_callback_and_one_use_code(
         }
         assert (
             client.post("/mcp/token", data={**exchange, "code_verifier": "wrong"}).status_code
-            == 400
+            == 401
         )
         tokens = client.post("/mcp/token", data=exchange)
         assert tokens.status_code == 200
@@ -598,7 +598,9 @@ def test_browser_oauth_consent_pkce_callback_and_one_use_code(
             registration["client_id"], ["Kitchen.Access"], payload["jti"], expires_in=-1
         )
         assert use_bearer(expired).status_code == 401
-        assert client.post("/mcp/token", data=exchange).status_code == 400
+        replayed_code = client.post("/mcp/token", data=exchange)
+        assert replayed_code.status_code == 401
+        assert replayed_code.json()["error"] == "invalid_grant"
         refresh_request = {
             "grant_type": "refresh_token",
             "client_id": registration["client_id"],
@@ -608,7 +610,9 @@ def test_browser_oauth_consent_pkce_callback_and_one_use_code(
         refreshed = client.post("/mcp/token", data=refresh_request)
         assert refreshed.status_code == 200
         assert refreshed.json()["refresh_token"] != tokens.json()["refresh_token"]
-        assert client.post("/mcp/token", data=refresh_request).status_code == 400
+        replayed_refresh = client.post("/mcp/token", data=refresh_request)
+        assert replayed_refresh.status_code == 401
+        assert replayed_refresh.json()["error"] == "invalid_grant"
         assert use_bearer(tokens.json()["access_token"]).status_code == 200
         assert use_bearer(refreshed.json()["refresh_token"]).status_code == 401
         assert len(closed) == 2
@@ -620,7 +624,8 @@ def test_browser_oauth_consent_pkce_callback_and_one_use_code(
                 "refresh_token": refreshed.json()["refresh_token"],
             },
         )
-        assert denied_refresh.status_code == 400
+        assert denied_refresh.status_code == 401
+        assert denied_refresh.json()["error"] == "invalid_grant"
         assert "access_token" not in denied_refresh.json()
         assert len(closed) == 3
         auth_logs = "\n".join(

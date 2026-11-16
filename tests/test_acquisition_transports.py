@@ -369,11 +369,11 @@ async def test_mcp_acquisition_tools_are_registered_actor_scoped_and_never_retur
 
         token = history_context.set(HistoryContext(actor_id="alice", channel="mcp"))
         try:
-            searched = await app.state.mcp._tool_manager.call_tool(
+            searched = await app.state.mcp.call_tool(
                 "search_recipe_images", {"query": "tomato soup"}
             )
             assert searched.structured_content["search"]["results"]
-            upload = await app.state.mcp._tool_manager.call_tool(
+            upload = await app.state.mcp.call_tool(
                 "upload_recipe_photo",
                 {
                     "data_base64": base64.b64encode(png_bytes()).decode(),
@@ -384,21 +384,21 @@ async def test_mcp_acquisition_tools_are_registered_actor_scoped_and_never_retur
             assert "data_base64" not in result_json and '"data"' not in result_json
             upload_result = upload.structured_content
             photo_id = upload_result["photo_source"]["id"]
-            await app.state.mcp._tool_manager.call_tool(
+            await app.state.mcp.call_tool(
                 "redraft_recipe_photo", {"photo_id": photo_id}
             )
-            discarded = await app.state.mcp._tool_manager.call_tool(
+            discarded = await app.state.mcp.call_tool(
                 "discard_recipe_photo", {"photo_id": photo_id}
             )
             assert discarded.structured_content["deleted"] is True
 
-            preview = await app.state.mcp._tool_manager.call_tool(
+            preview = await app.state.mcp.call_tool(
                 "preview_recipe_collections", {"kinds": ["liked"]}
             )
             preview_result = preview.structured_content
             job_id = preview_result["job_id"]
             await asyncio.sleep(0.05)
-            ready = await app.state.mcp._tool_manager.call_tool(
+            ready = await app.state.mcp.call_tool(
                 "get_recipe_collection_preview", {"job_id": job_id}
             )
             ready_result = ready.structured_content
@@ -406,11 +406,11 @@ async def test_mcp_acquisition_tools_are_registered_actor_scoped_and_never_retur
             from fastmcp.exceptions import ToolError
 
             with pytest.raises(ToolError):
-                await app.state.mcp._tool_manager.call_tool(
+                await app.state.mcp.call_tool(
                     "import_recipe_collection_selection",
                     {"job_id": job_id, "selected_ids": ["731"], "reviewed": False},
                 )
-            allowed_import = await app.state.mcp._tool_manager.call_tool(
+            allowed_import = await app.state.mcp.call_tool(
                 "import_recipe_collection_selection",
                 {"job_id": job_id, "selected_ids": ["731"], "reviewed": True},
             )
@@ -422,7 +422,7 @@ async def test_mcp_acquisition_tools_are_registered_actor_scoped_and_never_retur
         token = history_context.set(HistoryContext(actor_id="bob", channel="mcp"))
         try:
             with pytest.raises(ToolError):
-                await app.state.mcp._tool_manager.call_tool(
+                await app.state.mcp.call_tool(
                     "get_recipe_collection_preview", {"job_id": job_id}
                 )
         finally:
@@ -430,11 +430,11 @@ async def test_mcp_acquisition_tools_are_registered_actor_scoped_and_never_retur
 
         token = history_context.set(HistoryContext(actor_id="alice", channel="mcp"))
         try:
-            own = await app.state.mcp._tool_manager.call_tool(
+            own = await app.state.mcp.call_tool(
                 "get_recipe_collection_preview", {"job_id": job_id}
             )
             assert own.structured_content["status"] in {"ready", "completed"}
-            cancelled = await app.state.mcp._tool_manager.call_tool(
+            cancelled = await app.state.mcp.call_tool(
                 "cancel_recipe_collection", {"job_id": job_id}
             )
             assert cancelled.structured_content["status"] == "cancelled"

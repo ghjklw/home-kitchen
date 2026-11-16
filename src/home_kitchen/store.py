@@ -2,6 +2,7 @@
 
 from collections.abc import Generator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from typing import TypeVar
 from uuid import UUID
 
@@ -137,6 +138,9 @@ class Store:
         if make_url(database_url).drivername != "postgresql+psycopg":
             raise ValueError("database_url must use postgresql+psycopg")
         self.engine = create_engine(database_url, pool_pre_ping=True)
+        # Set by KitchenFeatures after the server household is resolved. Saves
+        # then validate photo ownership against the same scope as photo reads.
+        self.photo_household_id: UUID | None = None
 
     @contextmanager
     def connection(self) -> Generator[Connection]:
@@ -156,11 +160,24 @@ class Store:
             if isinstance(entity, Recipe) and entity.photo_source is not None:
                 from .recipes.photo_storage import recipe_photos
 
-                exists = connection.execute(
-                    select(recipe_photos.c.id).where(recipe_photos.c.id == entity.photo_source.id)
-                ).scalar_one_or_none()
-                if exists is None:
+                # Serialize reference creation with discard/expiry by locking
+                # the photo row in this transaction before saving the recipe.
+                query = select(recipe_photos.c.id).where(
+                    recipe_photos.c.id == entity.photo_source.id
+                )
+                if self.photo_household_id is not None:
+                    query = query.where(recipe_photos.c.household_id == self.photo_household_id)
+                photo_id = connection.execute(query.with_for_update()).scalar_one_or_none()
+                if photo_id is None:
                     raise ValueError("Photo source was not found")
+                connection.execute(
+                    recipe_photos.update()
+                    .where(
+                        recipe_photos.c.id == photo_id,
+                        recipe_photos.c.retained_at.is_(None),
+                    )
+                    .values(retained_at=datetime.now(UTC))
+                )
             previous = None
             if isinstance(entity, RegularItem):
                 previous = connection.execute(

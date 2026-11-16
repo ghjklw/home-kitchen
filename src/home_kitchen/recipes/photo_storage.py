@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import threading
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
-from sqlalchemy import Column, DateTime, Integer, LargeBinary, Table, Text, Uuid, select
+from sqlalchemy import Column, DateTime, Integer, LargeBinary, Table, Text, Uuid, exists, select
 from sqlalchemy.engine import Engine
 
 from home_kitchen.models import PhotoSource
@@ -25,7 +26,7 @@ from home_kitchen.recipes.photos import (
     validate_photo,
 )
 from home_kitchen.settings import Household, Settings
-from home_kitchen.store import metadata
+from home_kitchen.store import metadata, recipes
 
 recipe_photos = Table(
     "recipe_photos",
@@ -41,10 +42,16 @@ recipe_photos = Table(
     Column("page", Text),
     Column("created_by", Text, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("last_draft_activity_at", DateTime(timezone=True), nullable=False, index=True),
+    Column("retained_at", DateTime(timezone=True)),
 )
 
 # All service instances share the decoder admission limit. No waiting queue holds images.
 _PROCESSING = threading.Lock()
+_LOG = logging.getLogger(__name__)
+PHOTO_DRAFT_TTL = timedelta(hours=24)
+PHOTO_CLEANUP_INTERVAL = 60 * 60
+PHOTO_CLEANUP_BATCH_SIZE = 100
 
 
 class StoredPhoto(ValidatedPhoto):
@@ -55,6 +62,8 @@ class StoredPhoto(ValidatedPhoto):
     page: str | None = None
     created_by: str
     created_at: datetime
+    last_draft_activity_at: datetime
+    retained_at: datetime | None = None
 
     @property
     def photo_source(self) -> PhotoSource:
@@ -99,13 +108,15 @@ class PhotoRecipeService:
             raise ValueError("Photo processing is busy; try again shortly")
         try:
             photo = await self._offload(validate_photo, data, mime_type)
+            now = datetime.now(UTC)
             stored = StoredPhoto(
                 **photo.model_dump(),
                 **source.model_dump(),
                 household_id=self.household_id,
                 sha256=hashlib.sha256(photo.data).hexdigest(),
                 created_by=actor_id,
-                created_at=datetime.now(UTC),
+                created_at=now,
+                last_draft_activity_at=now,
             )
             await self._offload(self._save, stored)
             return await self._extract(stored, actor_id)
@@ -122,10 +133,98 @@ class PhotoRecipeService:
         if not _PROCESSING.acquire(blocking=False):
             raise ValueError("Photo processing is busy; try again shortly")
         try:
-            stored = await self._offload(self._get, photo_id)
+            stored = await self._offload(self._refresh, photo_id)
             return await self._extract(stored, actor_id)
         finally:
             _PROCESSING.release()
+
+    async def discard(self, photo_id: UUID, actor_id: str) -> bool:
+        self._actor(actor_id)
+        return await self._offload(self._discard, UUID(str(photo_id)))
+
+    def _locked_photo(self, connection, photo_id: UUID):
+        row = (
+            connection.execute(
+                select(recipe_photos)
+                .where(
+                    recipe_photos.c.id == photo_id,
+                    recipe_photos.c.household_id == self.household_id,
+                )
+                .with_for_update()
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            raise KeyError(str(photo_id))
+        return row
+
+    def _refresh(self, photo_id: UUID) -> StoredPhoto:
+        with self.engine.begin() as connection:
+            row = dict(self._locked_photo(connection, photo_id))
+            row["last_draft_activity_at"] = datetime.now(UTC)
+            connection.execute(
+                recipe_photos.update()
+                .where(
+                    recipe_photos.c.id == photo_id,
+                    recipe_photos.c.household_id == self.household_id,
+                )
+                .values(last_draft_activity_at=row["last_draft_activity_at"])
+            )
+        return StoredPhoto.model_validate(row)
+
+    def _delete_unreferenced(self, connection, photo_id: UUID) -> bool:
+        # Called only with the photo row locked. Recipe saves acquire the same
+        # lock before attaching a reference; the FK provides a final DB guard.
+        return (
+            connection.execute(
+                recipe_photos.delete()
+                .where(
+                    recipe_photos.c.id == photo_id,
+                    recipe_photos.c.household_id == self.household_id,
+                    recipe_photos.c.retained_at.is_(None),
+                    ~exists(select(recipes.c.id).where(recipes.c.photo_source_id == photo_id)),
+                )
+                .returning(recipe_photos.c.id)
+            ).scalar_one_or_none()
+            is not None
+        )
+
+    def _discard(self, photo_id: UUID) -> bool:
+        with self.engine.begin() as connection:
+            self._locked_photo(connection, photo_id)
+            return self._delete_unreferenced(connection, photo_id)
+
+    def cleanup(self, now: datetime | None = None) -> int:
+        """Delete expired drafts in this household; one atomic, retryable batch."""
+        cutoff = (now or datetime.now(UTC)) - PHOTO_DRAFT_TTL
+        with self.engine.begin() as connection:
+            ids = connection.scalars(
+                select(recipe_photos.c.id)
+                .where(
+                    recipe_photos.c.household_id == self.household_id,
+                    recipe_photos.c.retained_at.is_(None),
+                    recipe_photos.c.last_draft_activity_at <= cutoff,
+                    ~exists(
+                        select(recipes.c.id).where(recipes.c.photo_source_id == recipe_photos.c.id)
+                    ),
+                )
+                .order_by(recipe_photos.c.id)
+                .limit(PHOTO_CLEANUP_BATCH_SIZE)
+                .with_for_update(skip_locked=True)
+            ).all()
+            return sum(self._delete_unreferenced(connection, photo_id) for photo_id in ids)
+
+    async def cleanup_forever(self, interval: float = PHOTO_CLEANUP_INTERVAL) -> None:
+        # Runs in each Uvicorn worker at startup and hourly. Row locks make
+        # multiple workers safe; failures leave rows for the next scheduled run.
+        while True:
+            try:
+                while await self._offload(self.cleanup) == PHOTO_CLEANUP_BATCH_SIZE:
+                    pass
+            except Exception:
+                _LOG.warning("Recipe photo cleanup failed; will retry on the next run")
+            await asyncio.sleep(interval)
 
     @staticmethod
     def _actor(actor_id: str) -> None:

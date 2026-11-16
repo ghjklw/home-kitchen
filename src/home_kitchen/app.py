@@ -1,6 +1,7 @@
 """Shared household actions for the PWA, REST clients and AI assistants."""
 
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 from datetime import date
 from pathlib import Path
 from typing import Annotated
@@ -91,10 +92,14 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        cleanup = asyncio.create_task(features.recipe_photos.cleanup_forever())
         try:
             async with mcp_app.lifespan(app):
                 yield
         finally:
+            cleanup.cancel()
+            with suppress(asyncio.CancelledError):
+                await cleanup
             try:
                 await close_ai_clients(settings)
             finally:

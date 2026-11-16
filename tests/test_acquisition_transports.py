@@ -98,7 +98,7 @@ class CollectionProvider:
         OdaCollectionProvider.validate_source(self, entry)
 
 
-def app_for(database_url, *, local_dev=True):
+def app_for(database_url, *, local_dev=True, household_id=None):
     auth_settings = (
         {}
         if local_dev
@@ -108,6 +108,8 @@ def app_for(database_url, *, local_dev=True):
             "entra_allowed_group": UUID("00000000-0000-0000-0000-000000000002"),
         }
     )
+    if local_dev and household_id is not None:
+        auth_settings["entra_allowed_group"] = household_id
     app = create_app(Settings(local_dev=local_dev, database_url=database_url, **auth_settings))
     app.state.features.recipe_images.provider = ImageProvider()
     app.state.features.recipe_collections.provider = CollectionProvider()
@@ -397,3 +399,48 @@ async def test_mcp_acquisition_tools_are_registered_actor_scoped_and_never_retur
             assert cancelled.structured_content["status"] == "cancelled"
         finally:
             history_context.reset(token)
+
+
+def test_photo_discard_rest_contract_preserves_saved_sources(test_database_url):
+    app = app_for(test_database_url)
+    with TestClient(app, client=("127.0.0.1", 5000)) as client:
+        body = {
+            "mime_type": "image/png",
+            "data_base64": base64.b64encode(png_bytes()).decode(),
+        }
+        abandoned = client.post("/api/recipe-photos", json=body)
+        assert abandoned.status_code == 201
+        abandoned_id = abandoned.json()["photo_source"]["id"]
+        other_household = app_for(test_database_url, household_id=UUID(int=1))
+        with TestClient(other_household, client=("127.0.0.1", 5000)) as other_client:
+            cross_household = other_client.delete(f"/api/recipe-photos/{abandoned_id}")
+            assert cross_household.status_code == 404
+            assert cross_household.json() == {"detail": "Item not found"}
+
+        deleted = client.delete(f"/api/recipe-photos/{abandoned_id}")
+        assert deleted.status_code == 200
+        assert deleted.json() == {"deleted": True}
+        missing = client.delete(f"/api/recipe-photos/{abandoned_id}")
+        assert missing.status_code == 404
+        assert missing.json() == {"detail": "Item not found"}
+
+        saved = client.post("/api/recipe-photos", json=body)
+        assert saved.status_code == 201
+        source = saved.json()["photo_source"]
+        recipe = client.post(
+            "/api/recipes",
+            json={
+                "title": "Soup",
+                "servings": 2,
+                "ingredients": [
+                    {"name": "Tomato", "quantity": "1", "unit": "item", "source_indices": [0]}
+                ],
+                "instructions": ["Simmer"],
+                "source_ingredients": [{"index": 0, "text": "tomato"}],
+                "photo_source": source,
+            },
+        )
+        assert recipe.status_code == 201, recipe.text
+        protected = client.delete(f"/api/recipe-photos/{source['id']}")
+        assert protected.status_code == 200
+        assert protected.json() == {"deleted": False}

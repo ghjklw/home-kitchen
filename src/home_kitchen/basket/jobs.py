@@ -30,6 +30,7 @@ class BasketMatchJob(BasketMatchResult):
     job_id: str
     status: Literal["queued", "running", "complete", "failed"] = "queued"
     detail: str | None = None
+    observed_at: datetime | None = None
     needs: list[NeedMatchResult] = Field(default_factory=list)
 
 
@@ -297,6 +298,8 @@ class BasketMatchJobs:
                 raise RuntimeError("Provider context changed")
             job.value.needs = [need.model_copy(deep=True) for need in result.needs]
             job.value.skipped_need_count = result.skipped_need_count
+            job.observed_at = datetime.now(UTC)
+            job.value.observed_at = job.observed_at
             job.value.status = "complete"
         except asyncio.CancelledError:
             raise
@@ -309,7 +312,6 @@ class BasketMatchJobs:
                     need.detail = SAFE_ERROR
         finally:
             job.finished = self.clock()
-            job.observed_at = datetime.now(UTC)
 
     async def close(self) -> None:
         self._closed = True

@@ -20,6 +20,7 @@ const state = {
   basketMatchCurrentPage: {},
   basketMatchBusy: {},
   basketMatchErrors: {},
+  basketMatchObservedAt: {},
   basketMatchJobs: {},
   basketMatchStartSequence: 0,
   basketMatchStarted: false,
@@ -717,6 +718,7 @@ function resetBasketMatching() {
   state.basketMatchCurrentPage = {};
   state.basketMatchBusy = {};
   state.basketMatchErrors = {};
+  state.basketMatchObservedAt = {};
   state.basketMatchJobs = {};
   state.basketMatchStarted = false;
   state.basketMatchGlobalError = "";
@@ -782,6 +784,11 @@ function applyBasketMatchSnapshot(job, record) {
   (job.needs || []).forEach((need) => {
     const id = String(need.need_id);
     if (record.needVersions[id] !== state.basketMatchNeedVersions[id]) return;
+    if (job.status === "complete" && ["matched", "no_results"].includes(need.status) &&
+        typeof job.observed_at === "string" && !Number.isNaN(new Date(job.observed_at).valueOf())) {
+      state.basketMatchObservedAt[id] ||= {};
+      state.basketMatchObservedAt[id][need.page || 1] = job.observed_at;
+    }
     const terminal = !["pending", "searching"].includes(need.status);
     if (terminal) {
       state.basketMatchCurrentPage[id] = need.page || 1;
@@ -4493,6 +4500,13 @@ function renderBasketMatchNeed(need) {
     el("section", null, "basket-match-need"),
     el("h3", "Foreslåtte produkter"),
   );
+  const observedAt = state.basketMatchObservedAt[id]?.[result?.page || currentPage];
+  if (observedAt) {
+    add(panel, el("p", "Tilgjengelighet sist observert: " + dateLabel(new Date(observedAt), {
+      year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+    }) + ". Tilgjengeligheten kan endre seg. Oppdater treffene før du går gjennom og godkjenner produktvalg.", "muted"));
+  }
+
   if (busy) {
     add(panel, el("p", busy.page > currentPage ? "Laster side " + formatUiCount(busy.page) + " …" : "Søker hos Oda …", "muted"));
   } else if (error) {

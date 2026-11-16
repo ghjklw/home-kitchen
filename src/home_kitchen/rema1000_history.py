@@ -439,9 +439,7 @@ def parse_transactions(
     try:
         return [Rema1000Transaction.model_validate(item) for item in raw_list]
     except Exception as err:
-        raise UnsupportedRema1000Contract(
-            f"Invalid transaction in Rema 1000 list: {err}"
-        ) from err
+        raise UnsupportedRema1000Contract(f"Invalid transaction in Rema 1000 list: {err}") from err
 
 
 def parse_receipt(
@@ -558,9 +556,7 @@ def parse_receipt(
     try:
         return Rema1000Receipt.model_validate(enriched)
     except Exception as err:
-        raise UnsupportedRema1000Contract(
-            f"Invalid Rema 1000 receipt structure: {err}"
-        ) from err
+        raise UnsupportedRema1000Contract(f"Invalid Rema 1000 receipt structure: {err}") from err
 
 
 def build_transaction_receipt_stub(transaction: Rema1000Transaction) -> Rema1000Receipt:

@@ -1,0 +1,40 @@
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      production-patch-minor:
+        patterns: ["*"]
+        dependency-type: production
+        update-types: [minor, patch]
+      development-patch-minor:
+        patterns: ["*"]
+        dependency-type: development
+        update-types: [minor, patch]
+      security-production-patch-minor:
+        applies-to: security-updates
+        patterns: ["*"]
+        dependency-type: production
+        update-types: [minor, patch]
+      security-development-patch-minor:
+        applies-to: security-updates
+        patterns: ["*"]
+        dependency-type: development
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: thursday
+    groups:
+      patch-minor:
+        patterns: ["*"]
+        update-types: [minor, patch]
+      security-patch-minor:
+        applies-to: security-updates
+        patterns: ["*"]
+        update-types: [minor, patch]

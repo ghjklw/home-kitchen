@@ -528,12 +528,15 @@ def test_browser_oauth_consent_pkce_callback_and_one_use_code(
         assert upstream["code_challenge"] != [challenge]
         # A valid state/code in another browser cannot complete consent or
         # consume the transaction belonging to the browser that approved it.
-        with TestClient(app, base_url="https://kitchen.example") as other_browser:
+        other_browser = TestClient(app, base_url="https://kitchen.example")
+        try:
             denied_callback = other_browser.get(
                 "/mcp/auth/callback",
                 params={"code": "test-upstream-code", "state": upstream["state"][0]},
                 follow_redirects=False,
             )
+        finally:
+            other_browser.close()
         assert denied_callback.status_code == 403
         assert not exchanges
         assert not closed

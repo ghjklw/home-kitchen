@@ -1,4 +1,17 @@
 repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: check-case-conflict
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: detect-private-key
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
   - repo: local
     hooks:
       - id: ruff-check
@@ -17,3 +30,14 @@ repos:
         language: system
         pass_filenames: false
         files: ^(src/|pyproject.toml|uv.lock)
+      - id: check-js-syntax
+        name: Check frontend JavaScript syntax
+        entry: bash -c 'for script in "$@"; do node --check "$script" || exit 1; done' --
+        language: system
+        files: ^src/home_kitchen/static/.*\.js$
+      - id: node-test
+        name: Frontend JavaScript unit tests
+        entry: node --test tests/*.cjs
+        language: system
+        pass_filenames: false
+        files: ^(src/home_kitchen/static/.*\.js|tests/.*\.cjs)$

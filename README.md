@@ -18,6 +18,21 @@ If the default cache is read-only, set `UV_CACHE_DIR` to a writable, disk-backed
 
 FastAPI publishes the current route schema at `/openapi.json` and its interactive reference at `/docs`.
 
+## Development and checks
+
+Run local static checks and tests using `uv`:
+
+```sh
+# Static checks (formatting, linting, typing, frontend JS, and diff hygiene)
+uv run pre-commit run --all-files
+
+# Fast unit tests (network-free, requires no database)
+uv run pytest -m "not integration" -q
+
+# DB-backed integration tests (requires disposable PostgreSQL)
+KITCHEN_TEST_DATABASE_URL='postgresql+psycopg://kitchen:kitchen@127.0.0.1:5432/kitchen_test' uv run pytest -m integration -q
+```
+
 ## What it does
 
 - Lets a household configure its name, adults, children's ages, preferred language, serving size, and dietary preferences. No household data or recipes are preloaded.

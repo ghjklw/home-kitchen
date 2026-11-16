@@ -51,6 +51,7 @@ function harness() {
     add: (parent, ...children) => { children.filter(Boolean).forEach((child) => parent.append(child)); return parent; },
     button: (text, action) => { const button = new Node("button", text); button.action = action; return button; },
     renderBasketMatchCandidate: () => new Node("article", "candidate"),
+    $: () => ({ open: false, dataset: {}, close() { this.open = false; } }),
   };
   vm.runInNewContext([
     "isCurrentBasketMatchRecord", "resetBasketMatching", "ensureBasketMatches",

@@ -48,6 +48,7 @@ async function render({ draft = { meals, notes: ["Bruk opp restene"] }, respond,
     ${sourceFunction("el")}
     ${sourceFunction("add")}
     ${sourceFunction("button")}
+    function recentFeedbackPanel() { return { node: { tagName: "section", children: [], attributes: {}, textContent: "" } }; }
     return (${sourceFunction("suggestWeek")});
   `)(
     { createElement: (tag) => new Node(tag) },

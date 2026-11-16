@@ -4615,13 +4615,13 @@ function chooseMatchedCandidate(candidate, need) {
   const root = openDialog("Bekreft produkt og pakningsstørrelse");
   add(
     root,
-    el("p", "This saves a product choice for basket review only. It does not add anything to your Oda cart. Oda pack details are unverified; check them before saving.", "callout"),
+    el("p", "Dette lagrer produktvalget bare for handlekurvgjennomgangen. Det legger ingenting i Oda-handlekurven. Pakningsdetaljene fra Oda er ikke verifisert; kontroller dem før du lagrer.", "callout"),
     el("h3", candidate.name),
     candidate.brand ? el("p", candidate.brand, "muted") : null,
     candidate.pack_description ? el("p", "Oda pack description: " + candidate.pack_description, "muted") : null,
     hasRecommendation
       ? el("p", "Suggested count: " + recommendedPackages + " packs for " + recommendedFulfillment + " " + need.unit + ". Review or change the values below.", "muted")
-      : el("p", "No reliable package count is available. Enter the per-pack amount in " + need.unit + " and choose a package count.", "muted"),
+      : el("p", "Det finnes ikke et pålitelig antall per pakke. Oppgi mengden per pakke i " + need.unit + " og velg antall pakker.", "muted"),
   );
   const form = el("form");
   const packages = field("Antall pakker", "number", hasRecommendation ? recommendedPackages : "");

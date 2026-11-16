@@ -167,3 +167,139 @@ def test_batch_api_resolves_only_job_candidates_and_rejects_unknown_packages(tes
                 )
             ).scalar_one()
         assert retried_event_count == event_count == 2
+
+
+def test_batch_api_counts_known_mass_sku_as_pack_but_rejects_tomato_item_guess(test_database_url):
+    app = create_app(Settings(local_dev=True, database_url=test_database_url))
+    actor = "local-development"
+    start, end = date(2026, 11, 16), date(2026, 11, 22)
+    with TestClient(app, client=("127.0.0.1", 5000)) as client:
+        assert (
+            client.post(
+                "/api/items", json={"name": "Coffee", "quantity": "1", "unit": "pack"}
+            ).status_code
+            == 201
+        )
+        assert (
+            client.post(
+                "/api/items", json={"name": "Tomato", "quantity": "1.333", "unit": "item"}
+            ).status_code
+            == 201
+        )
+        needs = client.get("/api/basket", params={"start": start, "end": end}).json()["needs"]
+        by_name = {entry["need"]["name"].casefold(): entry["need"] for entry in needs}
+        coffee_need, tomato_need = by_name["coffee"], by_name["tomato"]
+        features = app.state.features
+        features.basket_jobs.scope_provider = lambda current_actor: 1
+        now = features.basket_jobs.clock()
+
+        coffee = BasketCandidate(
+            id="oda:coffee-500g",
+            provider="oda",
+            product_id="coffee-500g",
+            name="Coffee 500 g",
+            description="500 g",
+            product_url="https://oda.com/no/products/coffee-500g",
+            price="99.00",
+            pack_description="500 g",
+            pack_quantity=Decimal("500"),
+            pack_unit="g",
+            pack_metadata_source="oda_description",
+            pack_metadata_status="unverified",
+            match_query="coffee",
+            match_reason="Search result",
+        )
+        tomato = BasketCandidate(
+            id="oda:tomato-500g",
+            provider="oda",
+            product_id="tomato-500g",
+            name="Tomatoes 500 g",
+            description="500 g",
+            product_url="https://oda.com/no/products/tomato-500g",
+            price="39.00",
+            pack_description="500 g",
+            pack_quantity=Decimal("500"),
+            pack_unit="g",
+            pack_metadata_source="oda_description",
+            pack_metadata_status="unverified",
+            match_query="tomato",
+            match_reason="Search result",
+        )
+        matches = [
+            NeedMatchResult(
+                need_id=coffee_need["id"],
+                name="Coffee",
+                quantity=Decimal("1"),
+                unit="pack",
+                page=1,
+                has_more=False,
+                candidates=[coffee],
+            ),
+            NeedMatchResult(
+                need_id=tomato_need["id"],
+                name="Tomato",
+                quantity=Decimal("1.333"),
+                unit="item",
+                page=1,
+                has_more=False,
+                candidates=[tomato],
+                approximate=True,
+                provenance="recipe-derived estimate",
+                source_url="https://example.test/recipe/tomato",
+            ),
+        ]
+        job_id = str(uuid4())
+        job = BasketMatchJob(job_id=job_id, status="complete", start=start, end=end, needs=matches)
+        features.basket_jobs._jobs[job_id] = _Job(actor, 1, (), now, job, finished=now)
+
+        rejected = client.put(
+            "/api/basket/selections/batch",
+            json={
+                "start": str(start),
+                "end": str(end),
+                "job_id": job_id,
+                "selections": [
+                    {"need_id": coffee_need["id"], "candidate_id": coffee.id, "packages": 1},
+                    {"need_id": tomato_need["id"], "candidate_id": tomato.id, "packages": 1},
+                ],
+            },
+        )
+        assert rejected.status_code == 409
+        after_rejection = client.get("/api/basket", params={"start": start, "end": end}).json()
+        assert all(not entry["selections"] for entry in after_rejection["needs"])
+
+        accepted = client.put(
+            "/api/basket/selections/batch",
+            json={
+                "start": str(start),
+                "end": str(end),
+                "job_id": job_id,
+                "selections": [
+                    {"need_id": coffee_need["id"], "candidate_id": coffee.id, "packages": 1}
+                ],
+            },
+        )
+        assert accepted.status_code == 200, accepted.json()
+        accepted_needs = {
+            entry["need"]["name"].casefold(): entry for entry in accepted.json()["needs"]
+        }
+        saved_coffee, saved_tomato = accepted_needs["coffee"], accepted_needs["tomato"]
+        assert saved_coffee["need"]["name"] == "Coffee"
+        assert saved_coffee["allocated_quantity"] == "1"
+        assert saved_coffee["selections"][0]["product"]["pack_quantity"] == "500"
+        assert saved_coffee["selections"][0]["product"]["pack_unit"] == "g"
+        assert saved_tomato["need"]["name"] == "Tomato"
+        assert saved_tomato["selections"] == []
+        with features.kitchen.store.engine.connect() as connection:
+            event = connection.execute(
+                text(
+                    "SELECT structured FROM kitchen_history "
+                    "WHERE structured->>'action' = 'basket_product_selected' "
+                    "AND structured->>'product_id' = :product_id"
+                ),
+                {"product_id": "coffee-500g"},
+            ).scalar_one()
+        assert event["allocated_quantity"] == "1"
+        assert event["allocated_unit"] == "pack"
+        assert event["pack_quantity"] == "500"
+        assert event["pack_unit"] == "g"

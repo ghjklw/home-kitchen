@@ -13,8 +13,9 @@ from home_kitchen.inventory import InventoryService
 from home_kitchen.models import ShoppingLine, WeekShopping
 from home_kitchen.service import KitchenService
 from home_kitchen.shopping import need_id
+from home_kitchen.units import canonicalize_quantity
 
-from .evaluation import evaluate_basket
+from .evaluation import evaluate_basket, selection_allocation
 from .matching import NeedMatchResult
 from .models import BasketReview, PurchaseNeed, SelectedProduct
 
@@ -92,16 +93,12 @@ class BasketService:
             raise ValueError(f"selection references unknown need: {selection.need_id}")
         selection = _unverified(selection)
         need = need_by_id[selection.need_id]
-        if selection.product.pack_unit != need.unit:
-            raise ValueError(
-                f"incompatible units for {selection.product.name}: "
-                f"{selection.product.pack_unit} cannot satisfy {need.unit}"
-            )
+        allocated = selection_allocation(need, selection)
+        _, allocated_unit = canonicalize_quantity(need.quantity, need.unit)
 
         now = datetime.now(UTC)
         selection_id = _selection_id(start, end, selection)
         payload = selection.model_dump(mode="json")
-        allocated = selection.product.pack_quantity * selection.packages
         event = HistoryEntryCreate(
             channel=channel,
             kind="domain_event",
@@ -117,6 +114,7 @@ class BasketService:
                 "pack_quantity": str(selection.product.pack_quantity),
                 "pack_unit": selection.product.pack_unit,
                 "allocated_quantity": str(allocated),
+                "allocated_unit": allocated_unit,
                 "need_quantity": str(need.quantity),
             },
         )
@@ -196,10 +194,11 @@ class BasketService:
                 or matched.unit.casefold() != need.unit.casefold()
             ):
                 raise ValueError("Shopping needs changed. Refresh matches and try again.")
-            if selection.product.pack_quantity <= 0 or selection.product.pack_unit != need.unit:
+            if selection.product.pack_quantity <= 0:
                 raise ValueError(
                     "Product package is unknown or incompatible with the current need."
                 )
+            selection_allocation(need, selection)
             safe.append(_unverified(selection))
 
         existing_rows = self._load(start, end)
@@ -284,6 +283,8 @@ class BasketService:
                     },
                 )
                 need = need_by_id[selection.need_id]
+                allocated = selection_allocation(need, selection)
+                _, allocated_unit = canonicalize_quantity(need.quantity, need.unit)
                 self.history.record(
                     HistoryEntryCreate(
                         channel=channel,
@@ -299,9 +300,8 @@ class BasketService:
                             "packages": selection.packages,
                             "pack_quantity": str(selection.product.pack_quantity),
                             "pack_unit": selection.product.pack_unit,
-                            "allocated_quantity": str(
-                                selection.product.pack_quantity * selection.packages
-                            ),
+                            "allocated_quantity": str(allocated),
+                            "allocated_unit": allocated_unit,
                             "need_quantity": str(need.quantity),
                         },
                     ),

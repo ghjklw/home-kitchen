@@ -3,6 +3,8 @@
 from datetime import date, time
 from uuid import UUID, uuid4
 
+from sqlalchemy import bindparam, text
+
 from .models import (
     Meal,
     MealCreate,
@@ -29,6 +31,7 @@ class KitchenService:
         self.shopping_builder = shopping_builder or default_shopping_builder()
 
     def create_recipe(self, data: RecipeCreate) -> Recipe:
+        self._validate_canonical_identities(data)
         # Image credit is written only by the authenticated candidate-selection flow.
         recipe = Recipe(id=uuid4(), **self._recipe_values(data, exclude={"image_attribution"}))
         self.store.save("recipe", recipe)
@@ -42,6 +45,7 @@ class KitchenService:
 
     def update_recipe(self, recipe_id: UUID, data: RecipeCreate) -> Recipe:
         existing = self.get_recipe(recipe_id)
+        self._validate_canonical_identities(data)
         values = self._recipe_values(data, exclude={"image_attribution"})
         values["image_attribution"] = (
             existing.image_attribution if data.image_url == existing.image_url else None
@@ -49,6 +53,29 @@ class KitchenService:
         recipe = Recipe(id=recipe_id, **values)
         self.store.save("recipe", recipe)
         return recipe
+
+    def _validate_canonical_identities(self, data: RecipeCreate) -> None:
+        product_ids = {
+            item.canonical_product_id for item in data.ingredients if item.canonical_product_id
+        }
+        unit_ids = {item.canonical_unit_id for item in data.ingredients if item.canonical_unit_id}
+        with self.store.engine.connect() as connection:
+            for kind, table, identities in (
+                ("product", "kitchen_canonical_products", product_ids),
+                ("unit", "kitchen_canonical_units", unit_ids),
+            ):
+                if not identities:
+                    continue
+                existing = set(
+                    connection.execute(
+                        text(f"SELECT id FROM {table} WHERE id IN :ids").bindparams(
+                            bindparam("ids", expanding=True)
+                        ),
+                        {"ids": list(identities)},
+                    ).scalars()
+                )
+                if existing != identities:
+                    raise ValueError(f"Recipe contains an unknown canonical {kind} identity")
 
     @staticmethod
     def _recipe_values(data: RecipeCreate, *, exclude: set[str]) -> dict:

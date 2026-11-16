@@ -5631,6 +5631,7 @@ function renderSettings(main) {
   let categoryRows = (household.shopping_category_order || []).map((value) => ({
     key: String(nextCategoryKey++),
     value,
+    displayValue: categoryLabel(value),
   }));
   const categoryEditor = add(
     el("section", null, "category-order-settings"),
@@ -5651,29 +5652,29 @@ function renderSettings(main) {
       const input = el("input");
       input.type = "text";
       input.maxLength = 100;
-      input.value = row.value;
+      input.value = row.displayValue;
       input.setAttribute("aria-label", "Kategori på plass " + formatUiCount(index + 1));
       input.dataset.focusKey = "shopping-category-" + row.key;
-      input.addEventListener("input", () => { row.value = input.value; });
+      input.addEventListener("input", () => { row.value = input.value; row.displayValue = input.value; });
       const moveUp = button("Flytt opp", () => {
         categoryRows = window.KitchenSettingsView.moveShoppingCategory(categoryRows, index, index - 1);
         renderCategoryRows("shopping-category-" + row.key);
       }, "quiet category-order-move");
       moveUp.disabled = index === 0;
-      moveUp.setAttribute("aria-label", "Flytt " + row.value + " opp");
+      moveUp.setAttribute("aria-label", "Flytt " + row.displayValue + " opp");
       const moveDown = button("Flytt ned", () => {
         categoryRows = window.KitchenSettingsView.moveShoppingCategory(categoryRows, index, index + 1);
         renderCategoryRows("shopping-category-" + row.key);
       }, "quiet category-order-move");
       moveDown.disabled = index === categoryRows.length - 1;
-      moveDown.setAttribute("aria-label", "Flytt " + row.value + " ned");
+      moveDown.setAttribute("aria-label", "Flytt " + row.displayValue + " ned");
       const remove = button("Fjern", () => {
         categoryRows = categoryRows.filter((category) => category.key !== row.key);
         const next = categoryRows[Math.min(index, categoryRows.length - 1)];
         renderCategoryRows(next ? "shopping-category-" + next.key : null);
         if (!next) categoryEntry.input.focus();
       }, "quiet category-order-remove");
-      remove.setAttribute("aria-label", "Fjern " + row.value);
+      remove.setAttribute("aria-label", "Fjern " + row.displayValue);
       add(item, input, moveUp, moveDown, remove);
       categoryList.append(item);
     });
@@ -5681,7 +5682,7 @@ function renderSettings(main) {
       categoryList.querySelector('[data-focus-key="' + focusKey + '"]')?.focus({ preventScroll: true });
   };
   renderCategoryRows();
-  const categoryEntry = field("Legg til en kategori", "text", "", "For eksempel: Bakery eller Household.");
+  const categoryEntry = field("Legg til en kategori", "text", "", "For eksempel: Bakeri eller Husholdning.");
   categoryEntry.input.maxLength = 100;
   categoryEntry.input.dataset.focusKey = "new-shopping-category";
   const categoryError = el("p", "", "form-error");
@@ -5705,12 +5706,16 @@ function renderSettings(main) {
       categoryError.textContent = "Du kan legge til opptil 64 kategorier.";
       return;
     }
-    if (normalized.error === "duplicate" || normalized.value?.some((category) => category.toLowerCase() === value.toLowerCase())) {
+    if (
+      normalized.error === "duplicate" ||
+      categoryRows.some((row) => row.displayValue.toLowerCase() === value.toLowerCase()) ||
+      normalized.value?.some((category) => category.toLowerCase() === value.toLowerCase())
+    ) {
       categoryError.textContent = "Hver kategori må ha et unikt navn.";
       categoryEntry.input.focus();
       return;
     }
-    categoryRows.push({ key: String(nextCategoryKey++), value });
+    categoryRows.push({ key: String(nextCategoryKey++), value, displayValue: value });
     categoryEntry.input.value = "";
     categoryError.textContent = "";
     renderCategoryRows();
@@ -5726,6 +5731,7 @@ function renderSettings(main) {
     categoryRows = window.KitchenSettingsView.DEFAULT_SHOPPING_CATEGORY_ORDER.map((value) => ({
       key: String(nextCategoryKey++),
       value,
+      displayValue: categoryLabel(value),
     }));
     categoryError.textContent = "";
     renderCategoryRows();

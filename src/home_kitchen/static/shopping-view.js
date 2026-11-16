@@ -119,7 +119,21 @@
 
   function categoryLabel(category) {
     const value = String(category ?? "").trim();
-    return ({ Produce: "Frukt og grønt", Chilled: "Kjølevarer", Pantry: "Tørrvarer", Other: "Annet" })[value] || value || "Annet";
+    return ({
+      Produce: "Frukt og grønt",
+      Bakery: "Bakeri",
+      Meat: "Kjøtt",
+      Seafood: "Sjømat",
+      Fish: "Fisk",
+      Dairy: "Meieri",
+      Chilled: "Kjølevarer",
+      Pantry: "Tørrvarer",
+      Spices: "Krydder",
+      Drinks: "Drikke",
+      Household: "Husholdning",
+      Frozen: "Frysevarer",
+      Other: "Annet",
+    })[value] || value || "Annet";
   }
 
   function isPositiveDecimal(value) {

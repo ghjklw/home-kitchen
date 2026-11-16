@@ -152,8 +152,18 @@ test("formats Oda units and curated category labels for Bokmål display only", (
   assert.equal(formatNeedQuantity("1", "pack"), "1 pakke");
   assert.equal(formatNeedQuantity("2.5", "pack", true), "2,5 pakker");
   assert.equal(categoryLabel("Produce"), "Frukt og grønt");
+  assert.equal(categoryLabel("Bakery"), "Bakeri");
+  assert.equal(categoryLabel("Meat"), "Kjøtt");
+  assert.equal(categoryLabel("Seafood"), "Sjømat");
+  assert.equal(categoryLabel("Fish"), "Fisk");
+  assert.equal(categoryLabel("Dairy"), "Meieri");
   assert.equal(categoryLabel("Chilled"), "Kjølevarer");
   assert.equal(categoryLabel("Pantry"), "Tørrvarer");
+  assert.equal(categoryLabel("Spices"), "Krydder");
+  assert.equal(categoryLabel("Drinks"), "Drikke");
+  assert.equal(categoryLabel("Household"), "Husholdning");
+  assert.equal(categoryLabel("Frozen"), "Frysevarer");
+  assert.equal(categoryLabel("Other"), "Annet");
   assert.equal(categoryLabel("Min egen kategori"), "Min egen kategori");
 });
 

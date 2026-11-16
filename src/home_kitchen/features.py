@@ -9,6 +9,11 @@ from pydantic_ai import Agent
 
 from home_kitchen.basket.jobs import BasketMatchJobs
 from home_kitchen.basket.matching import BasketMatchingService, OdaSearchAdapter
+from home_kitchen.catalogue.overview_repository import (
+    MemoryProductOverviewRepository,
+    PostgresProductOverviewRepository,
+)
+from home_kitchen.catalogue.overview_service import ProductOverviewService
 from home_kitchen.catalogue.repository import PostgresFoodCatalogueRepository
 from home_kitchen.catalogue.service import FoodCatalogueService
 from home_kitchen.catalogue.sku_repository import PostgresCatalogueSkuRepository
@@ -79,6 +84,18 @@ class KitchenFeatures:
             [OdaIntegration(self.oda), AIIntegration(settings), CookidooIntegration()]
         )
         self.inventory = InventoryService(kitchen, self.history)
+        if kitchen.store.engine is not None:
+            self.product_overview_repo = PostgresProductOverviewRepository(kitchen.store.engine)
+        else:
+            self.product_overview_repo = MemoryProductOverviewRepository()
+        self.product_overview = ProductOverviewService(
+            repository=self.product_overview_repo,
+            identities=self.catalogue_identities,
+            inventory=self.inventory,
+            history=self.history,
+            catalogue_skus=self.catalogue_skus,
+            household_id=self.household_id,
+        )
         self.basket_matching = BasketMatchingService(self.inventory, OdaSearchAdapter(self.oda))
         self.basket_jobs = BasketMatchJobs(
             self.basket_matching, self.inventory, self.oda.search_cache_context

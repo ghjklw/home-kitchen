@@ -1,6 +1,29 @@
 """Shared, source-attributed reference foods for household grocery workflows."""
 
 from home_kitchen.catalogue.models import FoodCatalogueItem
+from home_kitchen.catalogue.overview_models import (
+    ExcludedOdaSku,
+    ExcludedOdaSkuInput,
+    PreferredOdaSku,
+    PreferredOdaSkuInput,
+    ProductAliasItem,
+    ProductOverview,
+    ProductPreferencesUpdate,
+    ProductStockOverview,
+    PurchaseEvidenceRecord,
+    PurchaseFrequencyOverview,
+    StockItemDetail,
+)
+from home_kitchen.catalogue.overview_repository import (
+    MemoryProductOverviewRepository,
+    PostgresProductOverviewRepository,
+    ProductOverviewRepository,
+)
+from home_kitchen.catalogue.overview_service import (
+    ProductOverviewService,
+    compute_purchase_frequency,
+    resolve_display_name,
+)
 from home_kitchen.catalogue.repository import PostgresFoodCatalogueRepository
 from home_kitchen.catalogue.seeds import (
     REFERENCE_SEED_NAMESPACE,
@@ -30,14 +53,28 @@ from home_kitchen.catalogue.sku_repository import PostgresCatalogueSkuRepository
 from home_kitchen.catalogue.sku_service import CatalogueSkuService
 
 __all__ = [
+    "REFERENCE_SEED_NAMESPACE",
+    "REFERENCE_SEED_VERSION",
     "CatalogueSkuService",
+    "ExcludedOdaSku",
+    "ExcludedOdaSkuInput",
     "ExplicitPurchaseEvidence",
     "FoodCatalogueItem",
     "FoodCatalogueService",
+    "MemoryProductOverviewRepository",
     "PostgresCatalogueSkuRepository",
     "PostgresFoodCatalogueRepository",
-    "REFERENCE_SEED_NAMESPACE",
-    "REFERENCE_SEED_VERSION",
+    "PostgresProductOverviewRepository",
+    "PreferredOdaSku",
+    "PreferredOdaSkuInput",
+    "ProductAliasItem",
+    "ProductOverview",
+    "ProductOverviewRepository",
+    "ProductOverviewService",
+    "ProductPreferencesUpdate",
+    "ProductStockOverview",
+    "PurchaseEvidenceRecord",
+    "PurchaseFrequencyOverview",
     "ReferenceCategory",
     "ReferenceProduct",
     "ReferenceUnit",
@@ -45,6 +82,8 @@ __all__ = [
     "RetailerProductSnapshot",
     "SeedResult",
     "SeedVersion",
+    "StockItemDetail",
+    "compute_purchase_frequency",
     "get_default_walking_order",
     "get_reference_categories",
     "get_reference_category",
@@ -53,5 +92,6 @@ __all__ = [
     "reference_category_id",
     "reference_product_id",
     "reference_unit_id",
+    "resolve_display_name",
     "seed_reference_data",
 ]

@@ -5,6 +5,7 @@ import binascii
 import json
 from datetime import date
 from decimal import Decimal, InvalidOperation
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
@@ -26,6 +27,7 @@ from home_kitchen.catalogue.identity import (
     UnmappedIngredient,
 )
 from home_kitchen.catalogue.models import FoodCatalogueItem
+from home_kitchen.catalogue.overview_models import ProductOverview, ProductPreferencesUpdate
 from home_kitchen.catalogue.sku_models import RetailerProductOption, RetailerProductSnapshot
 from home_kitchen.features import KitchenFeatures
 from home_kitchen.history import HistoryEntry, HistoryEntryCreate, RetrievedEvidence
@@ -367,6 +369,43 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
             kind, data.locale, data.context, data.alias, identity_id
         )
         return Response(status_code=204)
+
+    @router.get("/catalogue/overview")
+    def catalogue_overview(
+        q: str | None = Query(default=None, max_length=200),
+        locale: str = Query(default="nb", min_length=2, max_length=20),
+    ) -> list[ProductOverview]:
+        return features.product_overview.get_overview(query=q, locale=locale)
+
+    @router.get("/catalogue/overview/{product_id}")
+    def catalogue_product_overview(
+        product_id: UUID,
+        locale: str = Query(default="nb", min_length=2, max_length=20),
+    ) -> ProductOverview:
+        try:
+            return features.product_overview.get_product_overview(product_id, locale=locale)
+        except KeyError:
+            raise HTTPException(404, "Canonical product not found") from None
+
+    @router.get("/catalogue/products/{product_id}/preferences")
+    def get_catalogue_product_preferences(product_id: UUID) -> dict[str, Any]:
+        try:
+            pref, exc = features.product_overview.get_preferences(product_id)
+            return {"preferred_oda_skus": pref, "excluded_oda_skus": exc}
+        except KeyError:
+            raise HTTPException(404, "Canonical product not found") from None
+
+    @router.put("/catalogue/products/{product_id}/preferences")
+    def update_catalogue_product_preferences(
+        product_id: UUID,
+        data: ProductPreferencesUpdate,
+        request: Request,
+    ) -> ProductOverview:
+        actor = getattr(request.state, "actor_id", None) or "local"
+        try:
+            return features.product_overview.update_preferences(product_id, data, actor_id=actor)
+        except KeyError:
+            raise HTTPException(404, "Canonical product not found") from None
 
     @router.get("/catalogue/unmapped-ingredients")
     @router.get("/catalogue/identities/unmapped")

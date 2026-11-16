@@ -970,7 +970,7 @@ function render() {
       main,
       el(
         "p",
-        "You’re offline. Reconnect to load or save household changes.",
+        "Du er frakoblet. Koble til igjen for å laste inn eller lagre endringer for husholdningen.",
         "callout offline",
       ),
     );
@@ -4629,7 +4629,7 @@ function chooseMatchedCandidate(candidate, need) {
   packages.input.max = "999";
   packages.input.step = "1";
   packages.input.required = true;
-  const amount = field("Amount per package (" + need.unit + ")", "number", recommendation?.packQuantity || "");
+  const amount = field("Mengde per pakke (" + need.unit + ")", "number", recommendation?.packQuantity || "");
   amount.input.min = "0.000001";
   amount.input.step = "any";
   amount.input.required = true;
@@ -5489,7 +5489,7 @@ window.addEventListener("hashchange", () => {
 });
 window.addEventListener("offline", () => {
   notify(
-    "You’re offline. Reconnect before saving changes. Your open form stays here.",
+    "Du er frakoblet. Koble til igjen før du lagrer endringene. Det åpne skjemaet blir liggende her.",
     true,
   );
 });

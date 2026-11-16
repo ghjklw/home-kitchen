@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import date
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime
 from typing import Literal
 from uuid import UUID, uuid4
 
@@ -16,6 +16,7 @@ from starlette.concurrency import run_in_threadpool
 from home_kitchen.basket.matching import (
     MAX_NEEDS,
     MAX_RESULTS_PER_NEED,
+    BasketCandidate,
     BasketMatchingService,
     BasketMatchResult,
     NeedMatchResult,
@@ -41,6 +42,7 @@ class _Job:
     value: BasketMatchJob
     finished: float | None = None
     task: asyncio.Task | None = None
+    observed_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 class BasketMatchJobs:
@@ -216,6 +218,55 @@ class BasketMatchJobs:
             raise KeyError(job_id)
         return job.value.model_copy(deep=True)
 
+    async def resolve_batch_candidates(
+        self,
+        actor: str,
+        job_id: str,
+        start: date,
+        end: date,
+        references: list[tuple[UUID, str]],
+    ) -> dict[tuple[UUID, str], tuple[NeedMatchResult, BasketCandidate, datetime]]:
+        """Resolve only current, actor-owned candidates from a completed search snapshot."""
+        self._actor(actor)
+        job = self._jobs.get(job_id)
+        if job is None or job.actor != actor:
+            raise KeyError(job_id)
+        scope = await run_in_threadpool(self.scope_provider, actor)
+        self._prune(actor, scope)
+        if self._jobs.get(job_id) is not job:
+            raise ValueError(
+                "Product matches expired or provider context changed. Refresh matches."
+            )
+        if job.scope != scope or scope is None:
+            raise ValueError(
+                "Product matches expired or provider context changed. Refresh matches."
+            )
+        if (job.value.start, job.value.end) != (start, end):
+            raise ValueError("Product matches belong to a different shopping period.")
+        if job.value.status != "complete" or job.finished is None:
+            raise ValueError("Wait for product matching to finish before saving selections.")
+        if self.clock() - job.finished >= self.ttl_seconds:
+            raise ValueError("Product matches expired. Refresh matches.")
+        by_need = {need.need_id: need for need in job.value.needs}
+        resolved: dict[tuple[UUID, str], tuple[NeedMatchResult, BasketCandidate, datetime]] = {}
+        for need_id, candidate_id in references:
+            need = by_need.get(need_id)
+            candidate = (
+                next((item for item in need.candidates if item.id == candidate_id), None)
+                if need is not None
+                else None
+            )
+            if need is None or candidate is None or need.status != "matched":
+                raise ValueError(
+                    "A selected product match is stale or unavailable. Refresh matches."
+                )
+            resolved[(need_id, candidate_id)] = (
+                need.model_copy(deep=True),
+                candidate.model_copy(deep=True),
+                job.observed_at,
+            )
+        return resolved
+
     async def _run(self, job: _Job, plan: PurchasePlan, page: int, size: int, refresh: bool):
         async def current() -> bool:
             scope = await run_in_threadpool(self.scope_provider, job.actor)
@@ -258,6 +309,7 @@ class BasketMatchJobs:
                     need.detail = SAFE_ERROR
         finally:
             job.finished = self.clock()
+            job.observed_at = datetime.now(UTC)
 
     async def close(self) -> None:
         self._closed = True

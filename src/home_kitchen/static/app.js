@@ -1954,27 +1954,34 @@ function recipeForm(draft = {}, source = "manual") {
           { isEditing, source },
           prompt.input.value,
         );
-        const response = await api("/recipe-drafts/ai", "POST", payload);
-        if (!response?.adapted)
-          throw new Error("KI-en ga ikke et redigerbart utkast. Oppskriften din er uendret.");
-        const revisedDraft = isEditing
-          ? { ...response.adapted, id: draft.id }
-          : response.adapted;
-        if (isEditing) {
-          const sourceIngredients = revisionValues.ingredients.map((item) =>
-            window.KitchenRecipeEditor.recipeIngredientForSave(item).item,
-          );
-          const identityReview = window.KitchenRecipeEditor.prepareAIRevisionForEditor(
-            sourceIngredients,
-            response.adapted.ingredients,
-          );
-          revisedDraft.ingredients = identityReview.ingredients;
-          revisedDraft.identity_roundtrip_warning = identityReview.identityReviewRequired;
-        }
-        recipeForm(revisedDraft, isEditing ? source : "ai");
+        await window.KitchenRecipeEditor.applyRevisionIfActive(
+          api("/recipe-drafts/ai", "POST", payload),
+          () => revise.isConnected && $("#modal").open,
+          (response) => {
+            if (!response?.adapted)
+              throw new Error("KI-en ga ikke et redigerbart utkast. Oppskriften din er uendret.");
+            const revisedDraft = isEditing
+              ? { ...response.adapted, id: draft.id }
+              : response.adapted;
+            if (isEditing) {
+              const sourceIngredients = revisionValues.ingredients.map((item) =>
+                window.KitchenRecipeEditor.recipeIngredientForSave(item).item,
+              );
+              const identityReview = window.KitchenRecipeEditor.prepareAIRevisionForEditor(
+                sourceIngredients,
+                response.adapted.ingredients,
+              );
+              revisedDraft.ingredients = identityReview.ingredients;
+              revisedDraft.identity_roundtrip_warning = identityReview.identityReviewRequired;
+            }
+            recipeForm(revisedDraft, isEditing ? source : "ai");
+          },
+        );
       } catch (error) {
-        revisionError.textContent = error.message;
-        revisionSettings.hidden = false;
+        if (revise.isConnected && $("#modal").open) {
+          revisionError.textContent = error.message;
+          revisionSettings.hidden = false;
+        }
       } finally {
         if (revise.isConnected) revise.disabled = false;
       }

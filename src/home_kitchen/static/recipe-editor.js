@@ -293,8 +293,16 @@
     };
   }
 
+  async function applyRevisionIfActive(responsePromise, isActive, apply) {
+    const response = await responsePromise;
+    if (!isActive()) return false;
+    await apply(response);
+    return true;
+  }
+
   root.KitchenRecipeEditor = {
     buildRevisionRequest,
+    applyRevisionIfActive,
     isPositiveQuantity,
     normalizeQuantity,
     parseSourceIngredient,

@@ -1,0 +1,220 @@
+"""Exercise database fixture failures through pytest with synthetic credentials."""
+
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from urllib.parse import quote, quote_plus
+
+_PASSWORD_MARKER = "__DB_SECRET_REDACTION_CANARY__"
+_ESCAPED_PASSWORD_MARKER = "__DB_SECRET_QUOTE_'_DOUBLE_\"_BACKSLASH_\\_PERCENT_%__"
+
+_PLUGIN_SOURCE = """
+import os
+import sys
+from pathlib import Path
+
+import sqlalchemy
+from sqlalchemy.exc import OperationalError
+
+
+class _Connection:
+    def execute(self, *_args, **_kwargs):
+        return None
+
+
+class _Transaction:
+    def __enter__(self):
+        return _Connection()
+
+    def __exit__(self, *_args):
+        return False
+
+
+def pytest_runtest_setup(item):
+    fixture = item._fixtureinfo.name2fixturedefs["test_database_url"][-1].func
+    fixture_module = sys.modules[fixture.__module__]
+    mode = os.environ["REDACTION_PROBE_MODE"]
+    original_create_engine = sqlalchemy.create_engine
+    engine_count = 0
+
+    def create_probe_engine(url, **kwargs):
+        nonlocal engine_count
+        engine_count += 1
+        engine = original_create_engine(url, **kwargs)
+        if mode == "setup_failure" or (
+            mode in {"alembic_failure", "consumer_failure"} and engine_count == 2
+        ):
+            def fail_connect(*args, **connect_params):
+                Path(os.environ["REDACTION_CONNECT_REACHED"]).write_text("reached")
+                raise OperationalError(
+                    "synthetic connect failure",
+                    connect_params,
+                    RuntimeError("synthetic driver failure"),
+                )
+
+            # Patch only dialect.connect; no socket or database access occurs.
+            engine.dialect.connect = fail_connect
+            if mode == "setup_failure":
+                def fail_dispose():
+                    raise RuntimeError("synthetic cleanup failure")
+
+                engine.dispose = fail_dispose
+        elif mode in {
+            "alembic_failure",
+            "captured_output",
+            "consumer_failure",
+            "explicit_chain",
+            "implicit_chain",
+            "test_failure",
+        }:
+            # The admin engine's schema DDL is a no-op in these probes. The
+            # Alembic engine remains a real SQLAlchemy Engine in alembic_failure.
+            engine.begin = lambda: _Transaction()
+        return engine
+
+    fixture_module.create_engine = create_probe_engine
+    sqlalchemy.create_engine = create_probe_engine
+
+    if mode in {
+        "captured_output",
+        "consumer_failure",
+        "explicit_chain",
+        "implicit_chain",
+        "test_failure",
+    }:
+        fixture_module.command.upgrade = lambda *_args: None
+"""
+
+_PROBE_SOURCE = """
+import os
+
+import pytest
+import sqlalchemy
+from sqlalchemy.engine import make_url
+
+
+def test_fixture_failure_output(test_database_url):
+    options = make_url(test_database_url).query["options"]
+    schema = options.split("search_path=", 1)[1]
+    if os.environ["REDACTION_PROBE_MODE"] == "test_failure":
+        pytest.fail(
+            f"deliberate test stage=consumer schema={schema} "
+            f"database_url={test_database_url!r}"
+        )
+    if os.environ["REDACTION_PROBE_MODE"] == "consumer_failure":
+        engine = sqlalchemy.create_engine(test_database_url)
+        try:
+            with engine.connect():
+                pass
+        finally:
+            engine.dispose()
+    if os.environ["REDACTION_PROBE_MODE"] in {"explicit_chain", "implicit_chain"}:
+        secret = make_url(os.environ["KITCHEN_TEST_DATABASE_URL"]).password
+        try:
+            raise ValueError(secret)
+        except ValueError as cause:
+            if os.environ["REDACTION_PROBE_MODE"] == "explicit_chain":
+                raise RuntimeError("safe outer diagnosis") from cause
+            raise RuntimeError("safe outer diagnosis")
+    if os.environ["REDACTION_PROBE_MODE"] == "captured_output":
+        secret = make_url(os.environ["KITCHEN_TEST_DATABASE_URL"]).password
+        print(f"synthetic log password={secret}")
+        raise RuntimeError("safe log diagnosis")
+"""
+
+
+def _run_nested_pytest(
+    tmp_path: Path, mode: str, password: str = _PASSWORD_MARKER
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    project = tmp_path / mode
+    tests_dir = project / "tests"
+    tests_dir.mkdir(parents=True)
+    shutil.copyfile(Path(__file__).with_name("conftest.py"), tests_dir / "conftest.py")
+    shutil.copytree(Path(__file__).parents[1] / "migrations", project / "migrations")
+    (project / "src").mkdir()
+    shutil.copytree(
+        Path(__file__).parents[1] / "src" / "home_kitchen",
+        project / "src" / "home_kitchen",
+    )
+    shutil.copyfile(Path(__file__).parents[1] / "alembic.ini", project / "alembic.ini")
+    (project / "redaction_probe.py").write_text(_PLUGIN_SOURCE)
+    (tests_dir / "test_probe.py").write_text(_PROBE_SOURCE)
+    connect_reached = project / "connect-reached"
+
+    env = {
+        "HOME": str(project),
+        "KITCHEN_TEST_DATABASE_URL": (
+            f"postgresql+psycopg://fixture-user:{quote(password, safe='')}@127.0.0.1:1/kitchen_test"
+        ),
+        "PATH": os.defpath,
+        "PYTHONPATH": os.pathsep.join((str(project / "src"), str(project))),
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+        "REDACTION_PROBE_MODE": mode,
+        "REDACTION_CONNECT_REACHED": str(connect_reached),
+    }
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "redaction_probe",
+            "--showlocals",
+            "-q",
+            "tests/test_probe.py",
+        ],
+        cwd=project,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result, connect_reached
+
+
+def test_setup_migration_and_consumer_failure_output_redacts_password(
+    tmp_path: Path,
+) -> None:
+    for mode, stage, needs_driver_failure in (
+        ("setup_failure", "create schema", True),
+        ("alembic_failure", "Alembic migration", True),
+        ("consumer_failure", "synthetic connect failure", True),
+        ("captured_output", "safe log diagnosis", False),
+        ("explicit_chain", "safe outer diagnosis", False),
+        ("implicit_chain", "safe outer diagnosis", False),
+        ("test_failure", "stage=consumer", False),
+    ):
+        result, connect_reached = _run_nested_pytest(tmp_path, mode)
+        output = result.stdout + result.stderr
+
+        assert result.returncode != 0, "the nested pytest probe must fail deliberately"
+        assert _PASSWORD_MARKER not in output, "database password marker leaked into pytest output"
+        assert stage in output, "failure stage should remain visible"
+        if mode in {"explicit_chain", "implicit_chain"}:
+            assert "ValueError: [REDACTED]" in output, "chained cause should remain useful"
+        if mode == "captured_output":
+            assert "Captured stdout" in output
+            assert "password=[REDACTED]" in output
+        if mode in {"setup_failure", "alembic_failure"}:
+            assert "error=OperationalError" in output, "safe exception class should remain visible"
+        assert "test_" in output, "isolated schema name should remain visible"
+        if needs_driver_failure:
+            assert connect_reached.exists(), "probe must reach the patched dialect.connect"
+
+
+def test_python_escaped_password_representations_are_redacted(tmp_path: Path) -> None:
+    result, _ = _run_nested_pytest(tmp_path, "explicit_chain", _ESCAPED_PASSWORD_MARKER)
+    output = result.stdout + result.stderr
+
+    assert result.returncode != 0, "the nested pytest probe must fail deliberately"
+    for representation in (
+        _ESCAPED_PASSWORD_MARKER,
+        quote(_ESCAPED_PASSWORD_MARKER, safe=""),
+        quote_plus(_ESCAPED_PASSWORD_MARKER, safe=""),
+        repr(_ESCAPED_PASSWORD_MARKER)[1:-1],
+        ascii(_ESCAPED_PASSWORD_MARKER)[1:-1],
+    ):
+        assert representation not in output, "an encoded or escaped database password leaked"
+    assert "ValueError: [REDACTED]" in output, "the chained exception should remain useful"

@@ -9,6 +9,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.concurrency import run_in_threadpool
 
 from home_kitchen.basket import BasketReview, ProductSnapshot, SelectedProduct
 from home_kitchen.basket.jobs import BasketMatchJob
@@ -510,7 +511,13 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
                     )
                 )
                 evidence[item.need_id] = matched_need
-            return basket.select_batch(data.start, data.end, selections, evidence)
+            return await run_in_threadpool(
+                basket.select_batch,
+                data.start,
+                data.end,
+                selections,
+                evidence,
+            )
         except KeyError:
             raise HTTPException(404, "Product match job not found") from None
         except ValueError as exc:

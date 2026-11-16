@@ -504,3 +504,101 @@ def test_concurrent_batches_serialize_replacements_and_identical_retries(
     assert event_count == 1 + expected_new_events
     kitchen_a.store.engine.dispose()
     kitchen_b.store.engine.dispose()
+
+
+@pytest.mark.parametrize("legacy_action", ["select", "remove"])
+def test_legacy_basket_writes_serialize_with_batch_replacement(test_database_url, legacy_action):
+    kitchen_a = KitchenService(test_database_url)
+    kitchen_a.add_item(ShoppingItemCreate(name="Yoghurt", quantity=2, unit="item"))
+    basket_a = BasketService(kitchen_a, HistoryRepository(kitchen_a.store.engine))
+    start, end = date(2026, 5, 4), date(2026, 5, 10)
+    need = basket_a.review(start, end).needs[0].need
+
+    def snapshot(product_id):
+        return ProductSnapshot(
+            provider="oda",
+            product_id=product_id,
+            name=product_id,
+            pack_quantity=1,
+            pack_unit="item",
+            observed_at=datetime.now(UTC),
+        )
+
+    original = snapshot("old")
+    basket_a.select(start, end, SelectedProduct(need_id=need.id, product=original, packages=2))
+    kitchen_b = KitchenService(test_database_url)
+    basket_b = BasketService(kitchen_b, HistoryRepository(kitchen_b.store.engine))
+    evidence = NeedMatchResult(
+        need_id=need.id,
+        name=need.name,
+        quantity=need.quantity,
+        unit=need.unit,
+        page=1,
+        has_more=False,
+        candidates=[],
+    )
+    batch_selection = SelectedProduct(
+        need_id=need.id,
+        product=snapshot("batch"),
+        packages=2,
+    )
+    legacy_selection = SelectedProduct(
+        need_id=need.id,
+        product=snapshot("legacy"),
+        packages=2,
+    )
+    first_lock_acquired = Event()
+    allow_legacy_write = Event()
+    first_thread_name = None
+    lock_guard = Lock()
+
+    def after_cursor_execute(_connection, _cursor, statement, _parameters, _context, _many):
+        nonlocal first_thread_name
+        if statement.startswith("SELECT pg_advisory_xact_lock"):
+            with lock_guard:
+                is_first = first_thread_name is None
+                if is_first:
+                    first_thread_name = current_thread().name
+            if is_first:
+                first_lock_acquired.set()
+                allow_legacy_write.wait(timeout=10)
+
+    def before_cursor_execute(_connection, _cursor, statement, _parameters, _context, _many):
+        if (
+            statement.startswith("SELECT pg_advisory_xact_lock")
+            and first_thread_name is not None
+            and current_thread().name != first_thread_name
+        ):
+            allow_legacy_write.set()
+
+    for engine in (kitchen_a.store.engine, kitchen_b.store.engine):
+        event.listen(engine, "before_cursor_execute", before_cursor_execute)
+        event.listen(engine, "after_cursor_execute", after_cursor_execute)
+
+    def legacy_write():
+        if legacy_action == "select":
+            return basket_a.select(start, end, legacy_selection)
+        return basket_a.remove(start, end, need.id, "old")
+
+    try:
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="legacy-batch") as executor:
+            legacy = executor.submit(legacy_write)
+            assert first_lock_acquired.wait(timeout=5)
+            batch = executor.submit(
+                basket_b.select_batch,
+                start,
+                end,
+                [batch_selection],
+                {need.id: evidence},
+            )
+            legacy.result(timeout=10)
+            batch.result(timeout=10)
+    finally:
+        for engine in (kitchen_a.store.engine, kitchen_b.store.engine):
+            event.remove(engine, "before_cursor_execute", before_cursor_execute)
+            event.remove(engine, "after_cursor_execute", after_cursor_execute)
+
+    review = basket_a.review(start, end)
+    assert [item.product.product_id for item in review.needs[0].selections] == ["batch"]
+    kitchen_a.store.engine.dispose()
+    kitchen_b.store.engine.dispose()

@@ -98,24 +98,6 @@ class BasketService:
                 f"{selection.product.pack_unit} cannot satisfy {need.unit}"
             )
 
-        existing_rows = self._load(start, end)
-        valid_ids = set(need_by_id)
-        existing = []
-        for row in existing_rows:
-            saved = _selection_adapter.validate_python(row["payload"])
-            if saved.need_id not in valid_ids:
-                continue
-            saved = _unverified(saved)
-            if not (
-                saved.need_id == selection.need_id
-                and saved.product.provider == selection.product.provider
-                and saved.product.product_id == selection.product.product_id
-            ):
-                existing.append(saved)
-        # Evaluate the candidate in context before any persistent write. Evaluation
-        # retains residual/overbuy quantities as review issues without guessing.
-        evaluate_basket(needs, [*existing, selection])
-
         now = datetime.now(UTC)
         selection_id = _selection_id(start, end, selection)
         payload = selection.model_dump(mode="json")
@@ -139,6 +121,27 @@ class BasketService:
             },
         )
         with self.engine.begin() as connection:
+            connection.execute(
+                text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                {"lock_key": _selection_lock_key(start, end, selection.need_id)},
+            )
+            existing_rows = self._load(start, end)
+            valid_ids = set(need_by_id)
+            existing = []
+            for row in existing_rows:
+                saved = _selection_adapter.validate_python(row["payload"])
+                if saved.need_id not in valid_ids:
+                    continue
+                saved = _unverified(saved)
+                if not (
+                    saved.need_id == selection.need_id
+                    and saved.product.provider == selection.product.provider
+                    and saved.product.product_id == selection.product.product_id
+                ):
+                    existing.append(saved)
+            # Evaluate the candidate in context before any persistent write. Evaluation
+            # retains residual/overbuy quantities as review issues without guessing.
+            evaluate_basket(needs, [*existing, selection])
             connection.execute(
                 text(
                     "INSERT INTO kitchen_basket_selections "
@@ -320,6 +323,10 @@ class BasketService:
             NAMESPACE_URL, f"basket:{start}:{end}:{need_id}:oda:{product_id.strip()}"
         )
         with self.engine.begin() as connection:
+            connection.execute(
+                text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                {"lock_key": _selection_lock_key(start, end, need_id)},
+            )
             row = (
                 connection.execute(
                     text(

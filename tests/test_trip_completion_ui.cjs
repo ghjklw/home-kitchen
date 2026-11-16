@@ -113,7 +113,7 @@ function labeled(ui, label) {
   return node;
 }
 
-test("exact-product fields stay hidden without a valid reviewed product selection", () => {
+test("exact-product controls require evidence but retained choices remain available offline", async () => {
   const line = makeLine("need-yoghurt", "Yoghurt", "g", "meal");
   const disconnected = renderCompletion({
     lines: [line],
@@ -142,6 +142,7 @@ test("exact-product fields stay hidden without a valid reviewed product selectio
     node.textContent === "Ingen valgte Oda-produkter for denne varen. Oppgi faktisk mengde, eller la den stå ukjent.",
   ));
 
+  const calls = [];
   const offlineWithSelection = renderCompletion({
     lines: [{
       ...line,
@@ -157,7 +158,7 @@ test("exact-product fields stay hidden without a valid reviewed product selectio
       }],
     }],
     oda: { connected: false },
-    api: async () => ({}),
+    api: async (endpoint, method, body) => { calls.push({ endpoint, method, body }); return {}; },
   });
   assert.ok(offlineWithSelection.nodes.some((node) => node.attributes?.["aria-label"] === "Kjøp eksakt produkt for Yoghurt"));
   assert.ok(offlineWithSelection.nodes.some((node) => node.attributes?.["aria-label"] === "Velg vist produkt for Yoghurt"));
@@ -165,6 +166,21 @@ test("exact-product fields stay hidden without a valid reviewed product selectio
   assert.ok(offlineWithSelection.nodes.some((node) =>
     node.textContent === "Dette er lagrede produktvalg for varen. Tilgjengeligheten hos Oda er ikke kontrollert nå.",
   ));
+  labeled(offlineWithSelection, "Registrer faktisk kjøp: Yoghurt").checked = true;
+  labeled(offlineWithSelection, "Kjøp eksakt produkt for Yoghurt").checked = true;
+  labeled(offlineWithSelection, "Velg vist produkt for Yoghurt").value = "0";
+  labeled(offlineWithSelection, "Antall pakker kjøpt: Yoghurt").value = "2";
+  const sourceRow = offlineWithSelection.nodes.find((node) =>
+    node.tagName === "label" && node.children.some((child) => child.textContent.includes("Lukk måltidsbehov · 4 g")),
+  );
+  assert.ok(sourceRow);
+  sourceRow.children[0].checked = true;
+  await offlineWithSelection.submit.listeners.click();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].endpoint, "/store-trip/completions");
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[0].body.purchases[0].product)), {
+    provider: "oda", product_id: "yoghurt-1", packages: 2,
+  });
 });
 
 test("unknown actual quantities stay null for g/ml/item purchases and closures stay separate", async () => {

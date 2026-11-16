@@ -27,9 +27,13 @@ const helper = appSource.match(
   /function shouldRefreshShopping\([\s\S]*?\n\}/,
 );
 assert.ok(helper, "the shopping refresh safety guard is present");
+const periodHelper = appSource.match(
+  /function isCurrentShoppingLoad\([\s\S]*?\n\}/,
+);
+assert.ok(periodHelper, "the shopping result period guard is present");
 const context = {};
 vm.runInNewContext(
-  helper[0] + "\nglobalThis.shouldRefreshShopping = shouldRefreshShopping;",
+  helper[0] + "\n" + periodHelper[0] + "\nglobalThis.shouldRefreshShopping = shouldRefreshShopping; globalThis.isCurrentShoppingLoad = isCurrentShoppingLoad;",
   context,
 );
 
@@ -39,6 +43,12 @@ test("refreshes only the visible shopping view when no edit is open", () => {
   assert.equal(context.shouldRefreshShopping("shopping", "hidden", false, false), false);
   assert.equal(context.shouldRefreshShopping("shopping", "visible", true, false), false);
   assert.equal(context.shouldRefreshShopping("shopping", "visible", false, true), false);
+});
+
+test("drops results from an older request or a changed shopping period", () => {
+  assert.equal(context.isCurrentShoppingLoad("shopping", 3, 3, "2026-11-16/2026-11-22", "2026-11-16/2026-11-22"), true);
+  assert.equal(context.isCurrentShoppingLoad("shopping", 4, 3, "2026-11-23/2026-11-29", "2026-11-16/2026-11-22"), false);
+  assert.equal(context.isCurrentShoppingLoad("recipes", 3, 3, "2026-11-16/2026-11-22", "2026-11-16/2026-11-22"), false);
 });
 
 test("uses concise accessible quantities while preserving tiny positive amounts", () => {

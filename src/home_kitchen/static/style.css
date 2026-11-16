@@ -214,6 +214,58 @@ h3 {
 .section-tabs [aria-current="page"] {
   box-shadow: 0 0 0 2px var(--green);
 }
+.shopping-more {
+  margin: 0 0 18px;
+  color: var(--muted);
+}
+.shopping-more summary {
+  cursor: pointer;
+  width: fit-content;
+  font-size: 13px;
+  font-weight: 650;
+}
+.shopping-more .actions {
+  margin-top: 10px;
+}
+.shopping-grouping {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 16px;
+}
+.single-shopping-list li.actionable-shopping-item {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+}
+.single-shopping-list .inline-basket-match {
+  grid-column: 2;
+  min-width: 0;
+  margin: 0;
+  padding: 8px 0 0;
+  border-top: 1px solid var(--line);
+}
+.single-shopping-list .basket-match-need {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.single-shopping-list .basket-match-need h3 {
+  font-size: 13px;
+}
+.shopping-selected-products {
+  margin-top: 10px;
+}
+.shopping-selected-products > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+}
+.single-shopping-list .selected-product {
+  margin-top: 8px;
+}
 .shopping-refresh-controls {
   display: flex;
   align-items: center;
@@ -1577,6 +1629,18 @@ button.link {
     width: 100%;
     justify-content: space-between;
     margin-left: 0;
+  }
+  .shopping-more .actions {
+    display: grid;
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+  .shopping-grouping {
+    gap: 6px;
+  }
+  .single-shopping-list li.actionable-shopping-item {
+    grid-template-columns: 24px minmax(0, 1fr);
+    gap: 8px;
   }
   .product-card {
     grid-template-columns: 90px 1fr;

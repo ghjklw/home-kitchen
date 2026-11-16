@@ -67,6 +67,22 @@
     }, { imported: 0, already: 0, failed: 0 });
   }
 
+  function connectionGuidance(odaStatus, error, odaNeedsReconnect = () => false) {
+    if (error?.status === 401 || error?.status === 403) return null;
+    if (odaStatus?.configured === false) return "setup_required";
+    if (odaStatus?.configured === true && odaStatus.connected === false) return "connect_required";
+    if (odaNeedsReconnect(error?.detail || error?.message || "")) return "reconnect_required";
+    return null;
+  }
+
+  function connectionMessage(guidance) {
+    return ({
+      setup_required: "Oda-tilkoblingen er ikke satt opp. Oppsettet administreres i Innstillinger.",
+      connect_required: "Oda-kontoen er ikke tilkoblet. Koble til kontoen i Innstillinger, og prøv igjen.",
+      reconnect_required: "Oda ber om ny godkjenning av tilkoblingen. Koble til på nytt i Innstillinger, og prøv igjen.",
+    })[guidance] || "Oda-tilkoblingen kunne ikke bekreftes.";
+  }
+
   function importPayload(jobId, selectedIds) {
     const unique = [...new Set(selectedIds)];
     if (!jobId || !unique.length || unique.length !== selectedIds.length)
@@ -74,6 +90,6 @@
     return { path: `/recipe-collections/${encodeURIComponent(jobId)}/import`, body: { selected_ids: unique, reviewed: true } };
   }
 
-  root.KitchenRecipeCollections = { canSelect, completionCounts, entryStatus, importPayload, normalizeJob, progress };
+  root.KitchenRecipeCollections = { canSelect, completionCounts, connectionGuidance, connectionMessage, entryStatus, importPayload, normalizeJob, progress };
   if (typeof module !== "undefined" && module.exports) module.exports = root.KitchenRecipeCollections;
 })(globalThis);

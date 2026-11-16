@@ -15,6 +15,7 @@ from home_kitchen.basket import BasketReview, ProductSnapshot, SelectedProduct
 from home_kitchen.basket.jobs import BasketMatchJob
 from home_kitchen.basket.matching import BasketMatchResult
 from home_kitchen.basket.repository import BasketService
+from home_kitchen.catalogue.identity import MapIngredientInput, UnmappedIngredient
 from home_kitchen.catalogue.models import FoodCatalogueItem
 from home_kitchen.catalogue.sku_models import RetailerProductOption, RetailerProductSnapshot
 from home_kitchen.context import history_context
@@ -22,7 +23,7 @@ from home_kitchen.features import KitchenFeatures
 from home_kitchen.history import HistoryEntry, HistoryEntryCreate, RetrievedEvidence
 from home_kitchen.integrations import IntegrationInfo
 from home_kitchen.inventory import InventoryItem, InventoryItemCreate, PurchasePlan
-from home_kitchen.models import MealCreate
+from home_kitchen.models import MealCreate, Recipe
 from home_kitchen.oda.cart import CartProposalRequest
 from home_kitchen.planning_proposals import ProposalRead
 from home_kitchen.purchasing import StoreTrip
@@ -531,3 +532,21 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
         This does not change an existing retailer cart or cancel any order.
         """
         return basket.remove(start, end, need_id, product_id, channel="mcp")
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
+    def list_unmapped_ingredients(recipe_id: UUID | None = None) -> list[UnmappedIngredient]:
+        """List recipes and ingredients with unmapped product or unit canonical identities."""
+        return features.kitchen.list_unmapped_ingredients(recipe_id=recipe_id)
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
+    def map_unmapped_ingredient(data: MapIngredientInput) -> Recipe:
+        """Link canonical product and/or unit identity to an unmapped recipe ingredient."""
+        return features.kitchen.map_unmapped_ingredient(
+            recipe_id=data.recipe_id,
+            ingredient_index=data.ingredient_index,
+            canonical_product_id=data.canonical_product_id,
+            canonical_unit_id=data.canonical_unit_id,
+            add_alias=data.add_alias,
+            locale=data.locale,
+            context=data.context,
+        )

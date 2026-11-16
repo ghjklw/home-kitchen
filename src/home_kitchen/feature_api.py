@@ -20,8 +20,10 @@ from home_kitchen.catalogue.identity import (
     AliasResolution,
     CanonicalProduct,
     CanonicalUnit,
+    MapIngredientInput,
     ProductIdentityCreate,
     UnitIdentityCreate,
+    UnmappedIngredient,
 )
 from home_kitchen.catalogue.models import FoodCatalogueItem
 from home_kitchen.catalogue.sku_models import RetailerProductOption, RetailerProductSnapshot
@@ -365,6 +367,40 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
             kind, data.locale, data.context, data.alias, identity_id
         )
         return Response(status_code=204)
+
+    @router.get("/catalogue/unmapped-ingredients")
+    @router.get("/catalogue/identities/unmapped")
+    def list_unmapped_ingredients(
+        recipe_id: UUID | None = None,
+    ) -> list[UnmappedIngredient]:
+        try:
+            return features.kitchen.list_unmapped_ingredients(recipe_id=recipe_id)
+        except KeyError:
+            raise HTTPException(404, "Recipe not found") from None
+
+    @router.post("/catalogue/unmapped-ingredients/map")
+    @router.post("/catalogue/identities/unmapped/map")
+    def map_unmapped_ingredient(data: MapIngredientInput) -> Recipe:
+        if data.canonical_product_id is None and data.canonical_unit_id is None:
+            raise HTTPException(
+                422, "Either canonical_product_id or canonical_unit_id must be provided"
+            )
+        try:
+            return features.kitchen.map_unmapped_ingredient(
+                recipe_id=data.recipe_id,
+                ingredient_index=data.ingredient_index,
+                canonical_product_id=data.canonical_product_id,
+                canonical_unit_id=data.canonical_unit_id,
+                add_alias=data.add_alias,
+                locale=data.locale,
+                context=data.context,
+            )
+        except KeyError:
+            raise HTTPException(404, "Recipe not found") from None
+        except IndexError:
+            raise HTTPException(404, "Ingredient index out of range") from None
+        except ValueError as err:
+            raise HTTPException(422, str(err)) from err
 
     @router.post("/catalogue/foods/{food_id}/products", status_code=201)
     def remember_food_product(

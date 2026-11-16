@@ -85,38 +85,29 @@ class KitchenService:
 
             values = preserved[index]
             prior = existing_values[index]
-            prior_model = existing.ingredients[index]
-            prior_has_metadata = bool(
-                prior.get("canonical_product_id")
-                or prior.get("canonical_unit_id")
-                or (
-                    prior.get("source_unit_expression")
-                    and prior.get("source_unit_expression") != prior.get("unit")
-                    and "source_unit_expression" in prior_model.model_fields_set
-                )
+            prior_has_identity = bool(
+                prior.get("canonical_product_id") or prior.get("canonical_unit_id")
             )
-            omitted_fields = {
+            omitted_identity_fields = {
                 field
                 for field in ("canonical_product_id", "canonical_unit_id")
                 if field not in ingredient.model_fields_set
             }
-            if "source_unit_expression" not in ingredient.model_fields_set:
-                omitted_fields.add("source_unit_expression")
-            if not prior_has_metadata or not omitted_fields:
-                continue
-
             current_signature = signature(values)
             unchanged_and_unique = (
                 current_signature == signature(prior)
                 and existing_signatures[current_signature] == 1
                 and incoming_signatures[current_signature] == 1
             )
-            if not unchanged_and_unique:
+            if prior_has_identity and omitted_identity_fields and not unchanged_and_unique:
                 raise ValueError(
                     "Recipe update must include identity metadata for changed or ambiguous ingredients"
                 )
-            for field in omitted_fields:
-                values[field] = prior.get(field)
+            if unchanged_and_unique:
+                for field in omitted_identity_fields:
+                    values[field] = prior.get(field)
+                if "source_unit_expression" not in ingredient.model_fields_set:
+                    values["source_unit_expression"] = prior.get("source_unit_expression")
         return preserved
 
     def _validate_canonical_identities(self, data: RecipeCreate) -> None:

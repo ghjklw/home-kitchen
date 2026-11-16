@@ -1470,6 +1470,213 @@ button.link {
   justify-content: flex-end;
   margin-top: 8px;
 }
+/* Recipe Translations */
+.recipe-translation-panel {
+  background: var(--bg-alt, #f7f6f0);
+  border: 1px solid var(--line, #e2e1d7);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin: 12px 0 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.recipe-translation-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.recipe-language-badge {
+  margin-bottom: 0;
+  font-weight: 500;
+}
+.translation-mode-indicator {
+  font-size: 13px;
+  color: var(--muted, #626a5d);
+}
+.recipe-translation-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.translation-locale-select {
+  padding: 6px 10px;
+  border: 1px solid var(--line, #c8cebf);
+  border-radius: 6px;
+  background: var(--bg, #fffef9);
+  font-size: 13px;
+}
+.recipe-translation-meta {
+  font-size: 12px;
+  color: var(--muted, #626a5d);
+}
+.recipe-translation-meta .translation-details {
+  margin: 0;
+}
+.translation-stale-notice {
+  margin-top: 6px;
+}
+
+/* Product Overview & Preferences */
+.product-overview-view {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.catalogue-toolbar {
+  margin-bottom: 8px;
+}
+.catalogue-search-input {
+  width: 100%;
+  max-width: 500px;
+}
+.product-overview-list {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+}
+.product-overview-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--line, #e2e1d7);
+  border-radius: 14px;
+  background: var(--bg, #fffef9);
+}
+.product-card-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-bottom: 1px solid var(--line, #e2e1d7);
+  padding-bottom: 8px;
+}
+.product-display-name {
+  margin: 0;
+  font-size: 18px;
+  color: var(--fg, #1d2b24);
+}
+.product-canonical-subtitle {
+  margin: 0;
+  font-size: 13px;
+}
+.product-translations-section,
+.product-stock-section,
+.product-frequency-section,
+.product-oda-preferences-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.product-translations-section h4,
+.product-stock-section h4,
+.product-frequency-section h4,
+.product-oda-preferences-section h4 {
+  margin: 0;
+  font-size: 14px;
+  color: var(--fg, #1d2b24);
+}
+.translations-by-locale-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.locale-translation-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.locale-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  margin-bottom: 0;
+  background: #e4e7db;
+}
+.translation-names {
+  font-size: 13px;
+}
+.stock-badge,
+.frequency-badge {
+  margin-bottom: 0;
+  align-self: flex-start;
+}
+.stock-items-list {
+  margin: 4px 0 0;
+  padding-left: 20px;
+  font-size: 13px;
+}
+.provenance-note,
+.provenance-counts,
+.frequency-details {
+  margin: 0;
+  font-size: 13px;
+}
+.preferred-skus-container,
+.excluded-skus-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-alt, #f7f6f0);
+  border: 1px solid var(--line, #e2e1d7);
+  border-radius: 10px;
+  padding: 12px;
+}
+.preferred-skus-container h5,
+.excluded-skus-container h5 {
+  margin: 0;
+  font-size: 13px;
+  color: var(--fg, #1d2b24);
+}
+.preferred-skus-list,
+.excluded-skus-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.preferred-sku-row,
+.excluded-sku-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg, #fffef9);
+  border: 1px solid var(--line, #e2e1d7);
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+.rank-badge {
+  margin-bottom: 0;
+  font-size: 11px;
+  padding: 3px 7px;
+  background: var(--accent, #dce4d5);
+}
+.sku-info {
+  flex: 1;
+  font-size: 13px;
+}
+.sku-actions {
+  display: flex;
+  gap: 4px;
+}
+.add-preferred-sku-form,
+.add-excluded-sku-form {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+.add-preferred-sku-form input,
+.add-excluded-sku-form input {
+  flex: 1;
+  min-width: 140px;
+  font-size: 13px;
+  padding: 6px 10px;
+}
 @media (min-width: 1500px) {
   .week-grid {
     grid-template-columns: repeat(5, minmax(0, 1fr));

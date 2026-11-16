@@ -1586,6 +1586,12 @@ function recipeForm(draft = {}, source = "manual") {
         ),
       ),
     );
+  if (draft.identity_roundtrip_warning)
+    add(root, el(
+      "p",
+      "KI-utkastet kunne ikke knyttes sikkert til alle lagrede produkt- og enhetsreferanser. Kontroller disse ingrediensene før du lagrer.",
+      "callout",
+    ));
   if (draft.photo_source)
     {
       const photoEvidence = add(
@@ -1781,6 +1787,17 @@ function recipeForm(draft = {}, source = "manual") {
       quantity: quantity.input,
       unit: unit.input,
       source_indices: [...(values.source_indices || [])],
+      original_name: values.name == null ? "" : String(values.name),
+      original_unit: values.unit == null ? "" : String(values.unit),
+      ...(Object.prototype.hasOwnProperty.call(values, "canonical_product_id")
+        ? { canonical_product_id: values.canonical_product_id }
+        : {}),
+      ...(Object.prototype.hasOwnProperty.call(values, "canonical_unit_id")
+        ? { canonical_unit_id: values.canonical_unit_id }
+        : {}),
+      ...(Object.prototype.hasOwnProperty.call(values, "source_unit_expression")
+        ? { source_unit_expression: values.source_unit_expression }
+        : {}),
       purchase_estimate: values.purchase_estimate ? { ...values.purchase_estimate } : null,
       category: category.input,
       error: rowError,
@@ -1831,6 +1848,11 @@ function recipeForm(draft = {}, source = "manual") {
         category: row.category.value,
         source_indices: row.source_indices,
         purchase_estimate: row.purchase_estimate,
+        original_name: row.original_name,
+        original_unit: row.original_unit,
+        canonical_product_id: row.canonical_product_id,
+        canonical_unit_id: row.canonical_unit_id,
+        source_unit_expression: row.source_unit_expression,
       });
       const errors = [];
       if (fieldErrors.name) errors.push("Oppgi navnet på ingrediensen.");
@@ -1904,8 +1926,7 @@ function recipeForm(draft = {}, source = "manual") {
       revise.disabled = true;
       revisionError.textContent = "";
       try {
-        const payload = window.KitchenRecipeEditor.buildRevisionRequest(
-          {
+        const revisionValues = {
             title: name.input.value,
             servings: servings.input.value,
             ingredients: rowControllers.map((row) => ({
@@ -1914,6 +1935,11 @@ function recipeForm(draft = {}, source = "manual") {
               unit: row.unit.value,
               category: row.category.value,
               source_indices: row.source_indices,
+              original_name: row.original_name,
+              original_unit: row.original_unit,
+              canonical_product_id: row.canonical_product_id,
+              canonical_unit_id: row.canonical_unit_id,
+              source_unit_expression: row.source_unit_expression,
             })),
             instructions: instructions.input.value,
             source_url: draft.source_url || null,
@@ -1922,7 +1948,9 @@ function recipeForm(draft = {}, source = "manual") {
             provenance: draft.provenance || null,
             photo_source: draft.photo_source || null,
             image_attribution: draft.image_attribution || null,
-          },
+          };
+        const payload = window.KitchenRecipeEditor.buildRevisionRequest(
+          revisionValues,
           { isEditing, source },
           prompt.input.value,
         );
@@ -1932,6 +1960,23 @@ function recipeForm(draft = {}, source = "manual") {
         const revisedDraft = isEditing
           ? { ...response.adapted, id: draft.id }
           : response.adapted;
+        if (isEditing) {
+          const sourceIngredients = revisionValues.ingredients.map((item) =>
+            window.KitchenRecipeEditor.recipeIngredientForSave(item).item,
+          );
+          revisedDraft.ingredients = window.KitchenRecipeEditor.retainIngredientIdentityBySourceIndices(
+            sourceIngredients,
+            response.adapted.ingredients,
+          );
+          const identityMetadataCount = (items) => items.reduce((count, item) => {
+            if (!item.canonical_product_id && !item.canonical_unit_id) return count;
+            return count + ["canonical_product_id", "canonical_unit_id", "source_unit_expression"]
+              .filter((fieldName) => item[fieldName] !== undefined).length;
+          }, 0);
+          const hadIdentityCount = identityMetadataCount(sourceIngredients);
+          const retainedIdentityCount = identityMetadataCount(revisedDraft.ingredients);
+          revisedDraft.identity_roundtrip_warning = retainedIdentityCount < hadIdentityCount;
+        }
         recipeForm(revisedDraft, isEditing ? source : "ai");
       } catch (error) {
         revisionError.textContent = error.message;

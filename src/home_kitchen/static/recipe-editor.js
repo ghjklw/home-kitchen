@@ -125,7 +125,7 @@
     const quantity = value.quantity == null ? "" : String(value.quantity);
     const unit = value.unit == null ? "" : String(value.unit);
     const name = value.name == null ? "" : String(value.name);
-    return {
+    const row = {
       sourceText: "",
       source_indices: Array.isArray(value.source_indices)
         ? [...value.source_indices]
@@ -140,6 +140,9 @@
       parsed: null,
       hasDraftValues: Boolean(name || quantity || unit),
     };
+    for (const field of ["canonical_product_id", "canonical_unit_id", "source_unit_expression"])
+      if (Object.prototype.hasOwnProperty.call(value, field)) row[field] = value[field];
+    return row;
   }
 
   function recipeIngredientForSave(values) {
@@ -159,6 +162,17 @@
         ? { purchase_estimate: { ...values.purchase_estimate } }
         : {}),
     };
+    const normalizedIdentityText = (value) => String(value ?? "").trim().toLocaleLowerCase("nb");
+    const nameChanged = values?.original_name !== undefined &&
+      normalizedIdentityText(name) !== normalizedIdentityText(values.original_name);
+    const unitChanged = values?.original_unit !== undefined &&
+      normalizedIdentityText(unit) !== normalizedIdentityText(values.original_unit);
+    if (Object.prototype.hasOwnProperty.call(values || {}, "canonical_product_id"))
+      item.canonical_product_id = nameChanged ? null : values.canonical_product_id;
+    if (Object.prototype.hasOwnProperty.call(values || {}, "canonical_unit_id"))
+      item.canonical_unit_id = unitChanged ? null : values.canonical_unit_id;
+    if (Object.prototype.hasOwnProperty.call(values || {}, "source_unit_expression"))
+      item.source_unit_expression = unitChanged ? unit : values.source_unit_expression;
     const errors = {
       name: !name,
       quantity: Boolean(rawQuantity && !quantity),
@@ -187,16 +201,13 @@
       const quantity = rawQuantity ? normalizeQuantity(rawQuantity) : null;
       if (rawQuantity && !quantity)
         throw new Error("Rett opp ingrediensmengdene før du ber KI om å endre oppskriften.");
-      return {
+      const { item: saved } = recipeIngredientForSave({
+        ...item,
         name,
         quantity,
         unit: String(item.unit ?? "").trim() || null,
-        category: String(item.category ?? "Other").trim() || "Other",
-        source_indices: Array.isArray(item.source_indices) ? [...item.source_indices] : [],
-        ...(item.purchase_estimate && typeof item.purchase_estimate === "object"
-          ? { purchase_estimate: { ...item.purchase_estimate } }
-          : {}),
-      };
+      });
+      return saved;
     });
     if (!ingredients.length) throw new Error("Legg til minst én ingrediens før du ber om en endring.");
     const imageUrl = String(values.image_url ?? "").trim();
@@ -236,11 +247,52 @@
     };
   }
 
+  function retainIngredientIdentityBySourceIndices(originalIngredients, proposedIngredients) {
+    const keyFor = (item) => {
+      const indices = Array.isArray(item?.source_indices) ? item.source_indices : [];
+      if (!indices.length || indices.some((value) => !Number.isSafeInteger(value) || value < 0)) return null;
+      return [...new Set(indices)].sort((left, right) => left - right).join(",");
+    };
+    const originals = new Map();
+    const proposals = new Map();
+    (Array.isArray(originalIngredients) ? originalIngredients : []).forEach((item) => {
+      const key = keyFor(item);
+      if (key === null) return;
+      originals.set(key, originals.has(key) ? null : item);
+    });
+    (Array.isArray(proposedIngredients) ? proposedIngredients : []).forEach((item, index) => {
+      const key = keyFor(item);
+      if (key === null) return;
+      const indexes = proposals.get(key) || [];
+      indexes.push(index);
+      proposals.set(key, indexes);
+    });
+    return (Array.isArray(proposedIngredients) ? proposedIngredients : []).map((item) => {
+      const key = keyFor(item);
+      const original = key === null ? null : originals.get(key);
+      const proposalIndexes = key === null ? null : proposals.get(key);
+      if (!original || proposalIndexes?.length !== 1) return { ...item };
+      const nameChanged = String(item.name ?? "").trim().toLocaleLowerCase("nb") !==
+        String(original.name ?? "").trim().toLocaleLowerCase("nb");
+      const unitChanged = String(item.unit ?? "").trim().toLocaleLowerCase("nb") !==
+        String(original.unit ?? "").trim().toLocaleLowerCase("nb");
+      const restored = { ...item };
+      if (Object.prototype.hasOwnProperty.call(original, "canonical_product_id"))
+        restored.canonical_product_id = nameChanged ? null : original.canonical_product_id;
+      if (Object.prototype.hasOwnProperty.call(original, "canonical_unit_id"))
+        restored.canonical_unit_id = unitChanged ? null : original.canonical_unit_id;
+      if (Object.prototype.hasOwnProperty.call(original, "source_unit_expression"))
+        restored.source_unit_expression = unitChanged ? (item.unit ?? null) : original.source_unit_expression;
+      return restored;
+    });
+  }
+
   root.KitchenRecipeEditor = {
     buildRevisionRequest,
     isPositiveQuantity,
     normalizeQuantity,
     parseSourceIngredient,
+    retainIngredientIdentityBySourceIndices,
     rowFromDraft,
     recipeIngredientForSave,
   };

@@ -8,7 +8,7 @@ from uuid import UUID
 import pytest
 
 from home_kitchen.basket.jobs import SAFE_ERROR, BasketMatchJobs
-from home_kitchen.basket.matching import BasketMatchResult, NeedMatchResult
+from home_kitchen.basket.matching import BasketCandidate, BasketMatchResult, NeedMatchResult
 from home_kitchen.inventory import PurchasePlan, PurchasePlanLine
 
 START = date(2026, 11, 15)
@@ -295,3 +295,36 @@ async def test_selected_retry_reuses_only_same_current_subset(service):
         "Need 1",
         "Need 2",
     ]
+
+
+async def test_batch_candidate_resolution_is_actor_scope_period_and_snapshot_scoped(service):
+    jobs, _, matching, contexts = service
+    job = await jobs.start("alice", START, END)
+    matching.release.set()
+    final = await settled(jobs, "alice", job.job_id)
+    candidate = BasketCandidate(
+        id="store:sku-1",
+        provider="store",
+        product_id="sku-1",
+        name="Product",
+        description="1 item",
+        pack_quantity=Decimal(1),
+        pack_unit="item",
+        pack_metadata_status="unverified",
+        match_query="Need 1",
+        match_reason="Search result",
+    )
+    owned = jobs._jobs[final.job_id]
+    owned.value.needs[0].candidates = [candidate]
+    reference = [(final.needs[0].need_id, candidate.id)]
+    resolved = await jobs.resolve_batch_candidates("alice", final.job_id, START, END, reference)
+    assert resolved[(final.needs[0].need_id, candidate.id)][1].product_id == "sku-1"
+    with pytest.raises(KeyError):
+        await jobs.resolve_batch_candidates("bob", final.job_id, START, END, reference)
+    with pytest.raises(ValueError, match="different shopping period"):
+        await jobs.resolve_batch_candidates(
+            "alice", final.job_id, date(2026, 11, 22), date(2026, 11, 28), reference
+        )
+    contexts["alice"] = 2
+    with pytest.raises(ValueError, match="provider context changed"):
+        await jobs.resolve_batch_candidates("alice", final.job_id, START, END, reference)

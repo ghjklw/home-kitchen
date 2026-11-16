@@ -1,10 +1,13 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from threading import Event, Lock, current_thread
 from uuid import UUID
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 
+from home_kitchen.basket.matching import NeedMatchResult
 from home_kitchen.basket.models import ProductSnapshot, SelectedProduct
 from home_kitchen.basket.repository import BasketService
 from home_kitchen.history import HistoryRepository
@@ -187,6 +190,38 @@ def test_unknown_need_and_incompatible_unit_leave_storage_unchanged(test_databas
     kitchen.store.engine.dispose()
 
 
+def test_legacy_select_reads_existing_rows_on_its_locked_transaction_connection(
+    test_database_url,
+):
+    kitchen = KitchenService(test_database_url)
+    kitchen.add_item(ShoppingItemCreate(name="Yoghurt", quantity=2, unit="item"))
+    basket = BasketService(kitchen, HistoryRepository(kitchen.store.engine))
+    start, end = date(2026, 5, 4), date(2026, 5, 10)
+    need = basket.review(start, end).needs[0].need
+    picked = ProductSnapshot(
+        provider="oda",
+        product_id="yoghurt",
+        name="Yoghurt",
+        pack_quantity=1,
+        pack_unit="item",
+        observed_at=datetime.now(UTC),
+    )
+    original_load = basket._load
+    connections = []
+
+    def track_load(load_start, load_end, *, connection=None):
+        connections.append(connection)
+        return original_load(load_start, load_end, connection=connection)
+
+    basket._load = track_load
+    basket.select(start, end, SelectedProduct(need_id=need.id, product=picked, packages=2))
+
+    assert connections[0] is not None
+    # The returned review is read after commit and may use a normal checkout.
+    assert connections[-1] is None
+    kitchen.store.engine.dispose()
+
+
 def test_removal_is_persisted_and_logged(test_database_url):
     kitchen = KitchenService(test_database_url)
     kitchen.add_item(ShoppingItemCreate(name="Yoghurt", quantity=8, unit="cup"))
@@ -212,3 +247,390 @@ def test_removal_is_persisted_and_logged(test_database_url):
         )
     assert action_names == ["basket_product_selected", "basket_product_removed"]
     kitchen.store.engine.dispose()
+
+
+def test_batch_rechecks_need_snapshot_and_idempotently_saves_reviewed_candidates(test_database_url):
+    kitchen = KitchenService(test_database_url)
+    kitchen.add_item(ShoppingItemCreate(name="Yoghurt", quantity=16, unit="item"))
+    basket = BasketService(kitchen, HistoryRepository(kitchen.store.engine))
+    start, end = date(2026, 5, 4), date(2026, 5, 10)
+    need = basket.review(start, end).needs[0].need
+    snapshot = NeedMatchResult(
+        need_id=need.id,
+        name=need.name,
+        quantity=need.quantity,
+        unit=need.unit,
+        page=1,
+        has_more=False,
+        candidates=[],
+    )
+    picked = ProductSnapshot(
+        provider="oda",
+        product_id="yoghurt-1",
+        name="Yoghurt",
+        pack_quantity=Decimal(1),
+        pack_unit="item",
+        observed_at=datetime.now(UTC),
+    )
+    selection = SelectedProduct(need_id=need.id, product=picked, packages=16)
+    changed_snapshot = snapshot.model_copy(update={"quantity": Decimal(17)})
+    with pytest.raises(ValueError, match="Shopping needs changed"):
+        basket.select_batch(start, end, [selection], {need.id: changed_snapshot})
+    assert basket.review(start, end).needs[0].selections == []
+
+    first = basket.select_batch(start, end, [selection], {need.id: snapshot})
+    assert len(first.needs[0].selections) == 1
+    with kitchen.store.engine.connect() as connection:
+        before = connection.execute(
+            text(
+                "SELECT count(*) FROM kitchen_history WHERE structured->>'action' = 'basket_product_selected'"
+            )
+        ).scalar_one()
+    repeated = basket.select_batch(start, end, [selection], {need.id: snapshot})
+    with kitchen.store.engine.connect() as connection:
+        after = connection.execute(
+            text(
+                "SELECT count(*) FROM kitchen_history WHERE structured->>'action' = 'basket_product_selected'"
+            )
+        ).scalar_one()
+    assert repeated.needs[0].selections == first.needs[0].selections
+    assert after == before == 1
+    kitchen.store.engine.dispose()
+
+
+def test_batch_failure_rolls_back_all_rows_and_preserves_existing_explicit_choice(
+    test_database_url,
+):
+    kitchen = KitchenService(test_database_url)
+    kitchen.add_item(ShoppingItemCreate(name="Yoghurt", quantity=2, unit="item"))
+    kitchen.add_item(ShoppingItemCreate(name="Milk", quantity=1, unit="item"))
+    history = HistoryRepository(kitchen.store.engine)
+    basket = BasketService(kitchen, history)
+    start, end = date(2026, 5, 4), date(2026, 5, 10)
+    before = basket.review(start, end)
+    old_need, second_need = [item.need for item in before.needs]
+    old = ProductSnapshot(
+        provider="oda",
+        product_id="old-yoghurt",
+        name="Old choice",
+        pack_quantity=1,
+        pack_unit="item",
+        observed_at=datetime.now(UTC),
+    )
+    basket.select(start, end, SelectedProduct(need_id=old_need.id, product=old, packages=2))
+
+    def match(need):
+        return NeedMatchResult(
+            need_id=need.id,
+            name=need.name,
+            quantity=need.quantity,
+            unit=need.unit,
+            page=1,
+            has_more=False,
+            candidates=[],
+        )
+
+    replacement = ProductSnapshot(
+        provider="oda",
+        product_id="new-yoghurt",
+        name="New choice",
+        pack_quantity=1,
+        pack_unit="item",
+        observed_at=datetime.now(UTC),
+    )
+    milk = ProductSnapshot(
+        provider="oda",
+        product_id="milk",
+        name="Milk",
+        pack_quantity=1,
+        pack_unit="item",
+        observed_at=datetime.now(UTC),
+    )
+    selections = [
+        SelectedProduct(need_id=old_need.id, product=replacement, packages=2),
+        SelectedProduct(need_id=second_need.id, product=milk, packages=1),
+    ]
+    evidence = {old_need.id: match(old_need), second_need.id: match(second_need)}
+    original_record = history.record
+    calls = 0
+
+    def fail_second(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("simulated batch write failure")
+        return original_record(*args, **kwargs)
+
+    history.record = fail_second
+    with pytest.raises(RuntimeError, match="simulated batch write failure"):
+        basket.select_batch(start, end, selections, evidence)
+    history.record = original_record
+    review = basket.review(start, end)
+    assert [entry.product.product_id for entry in review.needs[0].selections] == ["old-yoghurt"]
+    assert review.needs[1].selections == []
+    kitchen.store.engine.dispose()
+
+
+def test_batch_replaces_only_submitted_needs_and_preserves_unsubmitted_choices(test_database_url):
+    kitchen = KitchenService(test_database_url)
+    kitchen.add_item(ShoppingItemCreate(name="Yoghurt", quantity=2, unit="item"))
+    kitchen.add_item(ShoppingItemCreate(name="Milk", quantity=1, unit="item"))
+    basket = BasketService(kitchen, HistoryRepository(kitchen.store.engine))
+    start, end = date(2026, 5, 4), date(2026, 5, 10)
+    needs = [item.need for item in basket.review(start, end).needs]
+
+    def product(product_id):
+        return ProductSnapshot(
+            provider="oda",
+            product_id=product_id,
+            name=product_id,
+            pack_quantity=1,
+            pack_unit="item",
+            observed_at=datetime.now(UTC),
+        )
+
+    for need in needs:
+        basket.select(
+            start,
+            end,
+            SelectedProduct(need_id=need.id, product=product(f"old-{need.name}"), packages=1),
+        )
+    submitted = needs[0]
+    evidence = NeedMatchResult(
+        need_id=submitted.id,
+        name=submitted.name,
+        quantity=submitted.quantity,
+        unit=submitted.unit,
+        page=1,
+        has_more=False,
+        candidates=[],
+    )
+    basket.select_batch(
+        start,
+        end,
+        [SelectedProduct(need_id=submitted.id, product=product("new-choice"), packages=1)],
+        {submitted.id: evidence},
+    )
+    review = basket.review(start, end)
+    by_id = {item.need.id: item for item in review.needs}
+    assert [item.product.product_id for item in by_id[submitted.id].selections] == ["new-choice"]
+    untouched = next(need for need in needs if need.id != submitted.id)
+    assert [item.product.product_id for item in by_id[untouched.id].selections] == [
+        f"old-{untouched.name}"
+    ]
+    kitchen.store.engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("first_id", "second_id", "expected_id", "expected_new_events"),
+    [
+        ("choice-a", "choice-b", "choice-b", 2),
+        ("same-choice", "same-choice", "same-choice", 1),
+    ],
+)
+def test_concurrent_batches_serialize_replacements_and_identical_retries(
+    test_database_url, first_id, second_id, expected_id, expected_new_events
+):
+    kitchen_a = KitchenService(test_database_url)
+    kitchen_a.add_item(ShoppingItemCreate(name="Yoghurt", quantity=2, unit="item"))
+    history_a = HistoryRepository(kitchen_a.store.engine)
+    basket_a = BasketService(kitchen_a, history_a)
+    start, end = date(2026, 5, 4), date(2026, 5, 10)
+    need = basket_a.review(start, end).needs[0].need
+
+    def snapshot(product_id):
+        return ProductSnapshot(
+            provider="oda",
+            product_id=product_id,
+            name=product_id,
+            pack_quantity=1,
+            pack_unit="item",
+            observed_at=datetime.now(UTC),
+        )
+
+    initial = snapshot("old")
+    basket_a.select(start, end, SelectedProduct(need_id=need.id, product=initial, packages=2))
+    kitchen_b = KitchenService(test_database_url)
+    basket_b = BasketService(kitchen_b, HistoryRepository(kitchen_b.store.engine))
+    evidence = NeedMatchResult(
+        need_id=need.id,
+        name=need.name,
+        quantity=need.quantity,
+        unit=need.unit,
+        page=1,
+        has_more=False,
+        candidates=[],
+    )
+    first_selection = SelectedProduct(need_id=need.id, product=snapshot(first_id), packages=2)
+    second_selection = (
+        first_selection
+        if first_id == second_id
+        else SelectedProduct(need_id=need.id, product=snapshot(second_id), packages=2)
+    )
+    first_snapshot_ready = Event()
+    allow_first_to_continue = Event()
+    calls_lock = Lock()
+    existing_read_count = 0
+    first_thread_name = None
+    query = "SELECT need_id, provider, product_id, payload FROM kitchen_basket_selections"
+
+    def after_cursor_execute(_connection, _cursor, statement, _parameters, _context, _many):
+        nonlocal existing_read_count, first_thread_name
+        if statement.startswith(query):
+            with calls_lock:
+                existing_read_count += 1
+                current = existing_read_count
+            if current == 1:
+                first_thread_name = current_thread().name
+                first_snapshot_ready.set()
+                allow_first_to_continue.wait(timeout=10)
+            else:
+                allow_first_to_continue.set()
+
+    def before_cursor_execute(_connection, _cursor, statement, _parameters, _context, _many):
+        if (
+            statement.startswith("SELECT pg_advisory_xact_lock")
+            and first_thread_name is not None
+            and current_thread().name != first_thread_name
+        ):
+            allow_first_to_continue.set()
+
+    event.listen(kitchen_a.store.engine, "before_cursor_execute", before_cursor_execute)
+    event.listen(kitchen_b.store.engine, "before_cursor_execute", before_cursor_execute)
+    event.listen(kitchen_a.store.engine, "after_cursor_execute", after_cursor_execute)
+    event.listen(kitchen_b.store.engine, "after_cursor_execute", after_cursor_execute)
+
+    def batch(basket, selection):
+        return basket.select_batch(
+            start,
+            end,
+            [selection],
+            {need.id: evidence},
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="basket-batch") as executor:
+            first = executor.submit(batch, basket_a, first_selection)
+            assert first_snapshot_ready.wait(timeout=5)
+            second = executor.submit(batch, basket_b, second_selection)
+            first.result(timeout=10)
+            second.result(timeout=10)
+    finally:
+        event.remove(kitchen_a.store.engine, "before_cursor_execute", before_cursor_execute)
+        event.remove(kitchen_b.store.engine, "before_cursor_execute", before_cursor_execute)
+        event.remove(kitchen_a.store.engine, "after_cursor_execute", after_cursor_execute)
+        event.remove(kitchen_b.store.engine, "after_cursor_execute", after_cursor_execute)
+
+    final = basket_a.review(start, end)
+    selected_ids = [item.product.product_id for item in final.needs[0].selections]
+    assert selected_ids == [expected_id]
+    with kitchen_a.store.engine.connect() as connection:
+        event_count = connection.execute(
+            text(
+                "SELECT count(*) FROM kitchen_history "
+                "WHERE structured->>'action' = 'basket_product_selected' "
+                "AND structured->>'need_id' = :need_id"
+            ),
+            {"need_id": str(need.id)},
+        ).scalar_one()
+    assert event_count == 1 + expected_new_events
+    kitchen_a.store.engine.dispose()
+    kitchen_b.store.engine.dispose()
+
+
+@pytest.mark.parametrize("legacy_action", ["select", "remove"])
+def test_legacy_basket_writes_serialize_with_batch_replacement(test_database_url, legacy_action):
+    kitchen_a = KitchenService(test_database_url)
+    kitchen_a.add_item(ShoppingItemCreate(name="Yoghurt", quantity=2, unit="item"))
+    basket_a = BasketService(kitchen_a, HistoryRepository(kitchen_a.store.engine))
+    start, end = date(2026, 5, 4), date(2026, 5, 10)
+    need = basket_a.review(start, end).needs[0].need
+
+    def snapshot(product_id):
+        return ProductSnapshot(
+            provider="oda",
+            product_id=product_id,
+            name=product_id,
+            pack_quantity=1,
+            pack_unit="item",
+            observed_at=datetime.now(UTC),
+        )
+
+    original = snapshot("old")
+    basket_a.select(start, end, SelectedProduct(need_id=need.id, product=original, packages=2))
+    kitchen_b = KitchenService(test_database_url)
+    basket_b = BasketService(kitchen_b, HistoryRepository(kitchen_b.store.engine))
+    evidence = NeedMatchResult(
+        need_id=need.id,
+        name=need.name,
+        quantity=need.quantity,
+        unit=need.unit,
+        page=1,
+        has_more=False,
+        candidates=[],
+    )
+    batch_selection = SelectedProduct(
+        need_id=need.id,
+        product=snapshot("batch"),
+        packages=2,
+    )
+    legacy_selection = SelectedProduct(
+        need_id=need.id,
+        product=snapshot("legacy"),
+        packages=2,
+    )
+    first_lock_acquired = Event()
+    allow_legacy_write = Event()
+    first_thread_name = None
+    lock_guard = Lock()
+
+    def after_cursor_execute(_connection, _cursor, statement, _parameters, _context, _many):
+        nonlocal first_thread_name
+        if statement.startswith("SELECT pg_advisory_xact_lock"):
+            with lock_guard:
+                is_first = first_thread_name is None
+                if is_first:
+                    first_thread_name = current_thread().name
+            if is_first:
+                first_lock_acquired.set()
+                allow_legacy_write.wait(timeout=10)
+
+    def before_cursor_execute(_connection, _cursor, statement, _parameters, _context, _many):
+        if (
+            statement.startswith("SELECT pg_advisory_xact_lock")
+            and first_thread_name is not None
+            and current_thread().name != first_thread_name
+        ):
+            allow_legacy_write.set()
+
+    for engine in (kitchen_a.store.engine, kitchen_b.store.engine):
+        event.listen(engine, "before_cursor_execute", before_cursor_execute)
+        event.listen(engine, "after_cursor_execute", after_cursor_execute)
+
+    def legacy_write():
+        if legacy_action == "select":
+            return basket_a.select(start, end, legacy_selection)
+        return basket_a.remove(start, end, need.id, "old")
+
+    try:
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="legacy-batch") as executor:
+            legacy = executor.submit(legacy_write)
+            assert first_lock_acquired.wait(timeout=5)
+            batch = executor.submit(
+                basket_b.select_batch,
+                start,
+                end,
+                [batch_selection],
+                {need.id: evidence},
+            )
+            legacy.result(timeout=10)
+            batch.result(timeout=10)
+    finally:
+        for engine in (kitchen_a.store.engine, kitchen_b.store.engine):
+            event.remove(engine, "before_cursor_execute", before_cursor_execute)
+            event.remove(engine, "after_cursor_execute", after_cursor_execute)
+
+    review = basket_a.review(start, end)
+    assert [item.product.product_id for item in review.needs[0].selections] == ["batch"]
+    kitchen_a.store.engine.dispose()
+    kitchen_b.store.engine.dispose()

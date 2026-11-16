@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from sqlalchemy import (
     JSON,
     Column,
@@ -60,6 +60,10 @@ class CheckpointConflict(RuntimeError):
     """Another sync advanced this provider/account since this page was fetched."""
 
 
+class IncompleteScanError(RuntimeError):
+    """Available source records were saved, but the provider scan was truncated."""
+
+
 class RevisionConflict(ValueError):
     """A revision identity was replayed with different source contents."""
 
@@ -97,6 +101,15 @@ class ProviderPage(BaseModel):
     records: Sequence[ProviderOrderRecord]
     next_cursor: str
     has_more: bool
+    incomplete_reason: str | None = None
+
+    @model_validator(mode="after")
+    def incomplete_scan_must_be_terminal(self) -> "ProviderPage":
+        if self.incomplete_reason is not None and (
+            self.has_more or not self.incomplete_reason.strip()
+        ):
+            raise ValueError("incomplete scans need a terminal cursor and a non-empty reason")
+        return self
 
     @field_validator("next_cursor")
     @classmethod
@@ -245,7 +258,7 @@ def persist_page(
 
 
 def sync_account(engine: Engine, provider: str, account_id: str, adapter: ProviderAdapter) -> int:
-    """Fetch pages; terminal-page cursor is saved for the next incremental poll."""
+    """Fetch pages; terminal-page cursor is saved for the next provider poll."""
     provider, account_id = _identity(provider, account_id)
     cursor = checkpoint(engine, provider, account_id)
     seen: set[str | None] = set()
@@ -255,8 +268,14 @@ def sync_account(engine: Engine, provider: str, account_id: str, adapter: Provid
         page = adapter.fetch_page(account_id, cursor)
         if page.has_more and page.next_cursor == cursor:
             raise ValueError("provider returned a non-advancing continuation cursor")
+        if page.has_more and page.next_cursor in seen:
+            raise ValueError("provider returned a repeated continuation cursor")
         persist_page(engine, provider, account_id, page, expected_cursor=cursor)
         count += len(page.records)
+        if page.incomplete_reason is not None:
+            # Persist first: the terminal cursor allows the next poll to restart,
+            # while the typed failure prevents claiming a completed backfill.
+            raise IncompleteScanError(page.incomplete_reason)
         if not page.has_more:
             return count
         cursor = page.next_cursor

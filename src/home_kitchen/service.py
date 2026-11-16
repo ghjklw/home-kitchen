@@ -65,6 +65,7 @@ class KitchenService:
         """Preserve omitted metadata only for a unique, unchanged ingredient row."""
         preserved = [dict(values) for values in current_values]
         fields = ("name", "quantity", "unit", "category", "source_indices", "purchase_estimate")
+        source_fields = ("name", "unit", "category", "source_indices")
 
         def freeze(value):
             if isinstance(value, dict):
@@ -76,46 +77,52 @@ class KitchenService:
         def signature(values: dict) -> tuple:
             return tuple(freeze(values.get(field)) for field in fields)
 
+        def source_signature(values: dict) -> tuple:
+            return tuple(freeze(values.get(field)) for field in source_fields)
+
         existing_values = [item.model_dump() for item in existing.ingredients]
         existing_signatures = Counter(signature(item) for item in existing_values)
         incoming_signatures = Counter(signature(item) for item in preserved)
+        existing_source_signatures = Counter(source_signature(item) for item in existing_values)
+        incoming_source_signatures = Counter(source_signature(item) for item in preserved)
         for index, ingredient in enumerate(data.ingredients):
             if index >= len(existing.ingredients):
                 continue
 
             values = preserved[index]
             prior = existing_values[index]
-            prior_model = existing.ingredients[index]
-            prior_has_metadata = bool(
-                prior.get("canonical_product_id")
-                or prior.get("canonical_unit_id")
-                or (
-                    prior.get("source_unit_expression")
-                    and "source_unit_expression" in prior_model.model_fields_set
-                )
+            prior_has_identity = bool(
+                prior.get("canonical_product_id") or prior.get("canonical_unit_id")
             )
-            omitted_fields = {
+            omitted_identity_fields = {
                 field
                 for field in ("canonical_product_id", "canonical_unit_id")
                 if field not in ingredient.model_fields_set
             }
-            if "source_unit_expression" not in ingredient.model_fields_set:
-                omitted_fields.add("source_unit_expression")
-            if not prior_has_metadata or not omitted_fields:
-                continue
-
             current_signature = signature(values)
             unchanged_and_unique = (
                 current_signature == signature(prior)
                 and existing_signatures[current_signature] == 1
                 and incoming_signatures[current_signature] == 1
             )
-            if not unchanged_and_unique:
+            if prior_has_identity and omitted_identity_fields and not unchanged_and_unique:
                 raise ValueError(
                     "Recipe update must include identity metadata for changed or ambiguous ingredients"
                 )
-            for field in omitted_fields:
-                values[field] = prior.get(field)
+            if unchanged_and_unique:
+                for field in omitted_identity_fields:
+                    values[field] = prior.get(field)
+            source_key = source_signature(values)
+            source_expression_unchanged = unchanged_and_unique or (
+                source_key == source_signature(prior)
+                and existing_source_signatures[source_key] == 1
+                and incoming_source_signatures[source_key] == 1
+            )
+            if (
+                source_expression_unchanged
+                and "source_unit_expression" not in ingredient.model_fields_set
+            ):
+                values["source_unit_expression"] = prior.get("source_unit_expression")
         return preserved
 
     def _validate_canonical_identities(self, data: RecipeCreate) -> None:

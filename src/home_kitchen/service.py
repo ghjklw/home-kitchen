@@ -1,7 +1,10 @@
 """Household recipes, meal planning, and deliberate shopping suggestions."""
 
+from collections import Counter
 from datetime import date, time
 from uuid import UUID, uuid4
+
+from sqlalchemy import bindparam, text
 
 from .models import (
     Meal,
@@ -29,6 +32,7 @@ class KitchenService:
         self.shopping_builder = shopping_builder or default_shopping_builder()
 
     def create_recipe(self, data: RecipeCreate) -> Recipe:
+        self._validate_canonical_identities(data)
         # Image credit is written only by the authenticated candidate-selection flow.
         recipe = Recipe(id=uuid4(), **self._recipe_values(data, exclude={"image_attribution"}))
         self.store.save("recipe", recipe)
@@ -42,13 +46,107 @@ class KitchenService:
 
     def update_recipe(self, recipe_id: UUID, data: RecipeCreate) -> Recipe:
         existing = self.get_recipe(recipe_id)
+        self._validate_canonical_identities(data)
         values = self._recipe_values(data, exclude={"image_attribution"})
+        values["ingredients"] = self._retain_omitted_ingredient_identity_fields(
+            data, existing, values["ingredients"]
+        )
         values["image_attribution"] = (
             existing.image_attribution if data.image_url == existing.image_url else None
         )
         recipe = Recipe(id=recipe_id, **values)
         self.store.save("recipe", recipe)
         return recipe
+
+    @staticmethod
+    def _retain_omitted_ingredient_identity_fields(
+        data: RecipeCreate, existing: Recipe, current_values: list[dict]
+    ) -> list[dict]:
+        """Preserve omitted metadata only for a unique, unchanged ingredient row."""
+        preserved = [dict(values) for values in current_values]
+        fields = ("name", "quantity", "unit", "category", "source_indices", "purchase_estimate")
+        source_fields = ("name", "unit", "category", "source_indices")
+
+        def freeze(value):
+            if isinstance(value, dict):
+                return tuple((key, freeze(item)) for key, item in sorted(value.items()))
+            if isinstance(value, list):
+                return tuple(freeze(item) for item in value)
+            return value
+
+        def signature(values: dict) -> tuple:
+            return tuple(freeze(values.get(field)) for field in fields)
+
+        def source_signature(values: dict) -> tuple:
+            return tuple(freeze(values.get(field)) for field in source_fields)
+
+        existing_values = [item.model_dump() for item in existing.ingredients]
+        existing_signatures = Counter(signature(item) for item in existing_values)
+        incoming_signatures = Counter(signature(item) for item in preserved)
+        existing_source_signatures = Counter(source_signature(item) for item in existing_values)
+        incoming_source_signatures = Counter(source_signature(item) for item in preserved)
+        for index, ingredient in enumerate(data.ingredients):
+            if index >= len(existing.ingredients):
+                continue
+
+            values = preserved[index]
+            prior = existing_values[index]
+            prior_has_identity = bool(
+                prior.get("canonical_product_id") or prior.get("canonical_unit_id")
+            )
+            omitted_identity_fields = {
+                field
+                for field in ("canonical_product_id", "canonical_unit_id")
+                if field not in ingredient.model_fields_set
+            }
+            current_signature = signature(values)
+            unchanged_and_unique = (
+                current_signature == signature(prior)
+                and existing_signatures[current_signature] == 1
+                and incoming_signatures[current_signature] == 1
+            )
+            if prior_has_identity and omitted_identity_fields and not unchanged_and_unique:
+                raise ValueError(
+                    "Recipe update must include identity metadata for changed or ambiguous ingredients"
+                )
+            if unchanged_and_unique:
+                for field in omitted_identity_fields:
+                    values[field] = prior.get(field)
+            source_key = source_signature(values)
+            source_expression_unchanged = unchanged_and_unique or (
+                source_key == source_signature(prior)
+                and existing_source_signatures[source_key] == 1
+                and incoming_source_signatures[source_key] == 1
+            )
+            if (
+                source_expression_unchanged
+                and "source_unit_expression" not in ingredient.model_fields_set
+            ):
+                values["source_unit_expression"] = prior.get("source_unit_expression")
+        return preserved
+
+    def _validate_canonical_identities(self, data: RecipeCreate) -> None:
+        product_ids = {
+            item.canonical_product_id for item in data.ingredients if item.canonical_product_id
+        }
+        unit_ids = {item.canonical_unit_id for item in data.ingredients if item.canonical_unit_id}
+        with self.store.engine.connect() as connection:
+            for kind, table, identities in (
+                ("product", "kitchen_canonical_products", product_ids),
+                ("unit", "kitchen_canonical_units", unit_ids),
+            ):
+                if not identities:
+                    continue
+                existing = set(
+                    connection.execute(
+                        text(f"SELECT id FROM {table} WHERE id IN :ids").bindparams(
+                            bindparam("ids", expanding=True)
+                        ),
+                        {"ids": list(identities)},
+                    ).scalars()
+                )
+                if existing != identities:
+                    raise ValueError(f"Recipe contains an unknown canonical {kind} identity")
 
     @staticmethod
     def _recipe_values(data: RecipeCreate, *, exclude: set[str]) -> dict:

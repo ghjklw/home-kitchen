@@ -1381,6 +1381,7 @@ function recipeForm(draft = {}, source = "manual") {
     "Bruk en HTTPS-lenke til et bilde. Bildet legges bare til hvis du oppgir en lenke.",
   );
   imageUrl.input.placeholder = "https://…";
+  const imageCredit = recipeImageCredit(draft.image_attribution);
   const ingredientEditor = el("fieldset", null, "ingredient-editor");
   add(ingredientEditor, el("legend", "Ingredienser"));
   add(
@@ -1487,6 +1488,7 @@ function recipeForm(draft = {}, source = "manual") {
     name.wrap,
     servings.wrap,
     imageUrl.wrap,
+    imageCredit,
     ingredientEditor,
     instructions.wrap,
   );
@@ -1626,6 +1628,41 @@ function recipeForm(draft = {}, source = "manual") {
     );
   }
 }
+function recipeImageCredit(attribution) {
+  if (!attribution) return null;
+  const section = el("section", null, "image-credit");
+  add(section, el("h3", "Kreditering av bilde"));
+  if (attribution.title) add(section, el("p", attribution.title));
+  const creator = attribution.artist || attribution.credit || attribution.attribution;
+  if (creator) add(section, el("p", "Fotograf/kreditering: " + creator));
+  const license = window.KitchenRecipeImages.safeUrl(
+    attribution.license_url,
+    new Set(["creativecommons.org", "www.creativecommons.org", "commons.wikimedia.org"]),
+  );
+  const source = window.KitchenRecipeImages.safeUrl(
+    attribution.source_page_url,
+    new Set(["commons.wikimedia.org"]),
+  );
+  const links = el("div", null, "actions");
+  if (license) {
+    const link = el("a", attribution.license_name || "Bildekreditering og lisens");
+    link.href = license;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    add(links, link);
+  }
+  if (source) {
+    const link = el("a", "Kilde hos Wikimedia Commons");
+    link.href = source;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    add(links, link);
+  }
+  if (attribution.obligations?.length)
+    add(section, add(el("ul"), ...attribution.obligations.map((item) => el("li", item))));
+  if (links.childElementCount) add(section, links);
+  return section;
+}
 function viewRecipe(recipe) {
   const root = openDialog(recipe.title);
   const body = el("div", null, "recipe-body");
@@ -1648,6 +1685,7 @@ function viewRecipe(recipe) {
       button("Vis originalbildet", () => viewRecipePhoto(recipe.photo_source), "quiet"),
     );
   }
+  if (recipe.image_attribution) add(body, recipeImageCredit(recipe.image_attribution));
   const ingredients = el("ul");
   recipe.ingredients.forEach((item) => {
     const row = el("li");
@@ -1677,7 +1715,13 @@ function viewRecipe(recipe) {
       el("div", null, "actions"),
       button("Planlegg et måltid", () => mealForm(undefined, recipe.id), "primary"),
       button("Rediger oppskrift", () => recipeForm(recipe, recipe.source || "manual"), "quiet"),
+      recipe.source === "manual"
+        ? button("Finn et bilde", () => recipeImageSearchForm(recipe), "quiet")
+        : null,
       button("Vurder oppskriften", () => feedbackForm(recipe), "quiet"),
+      recipe.image_url
+        ? button("Fjern bilde", () => removeRecipeImage(recipe), "quiet")
+        : null,
       button(
         "Slett oppskrift",
         () => {
@@ -1717,6 +1761,205 @@ function viewRecipe(recipe) {
     ),
   );
   add(root, body);
+}
+function removeRecipeImage(recipe) {
+  const root = openDialog("Fjerne oppskriftsbildet?");
+  add(
+    root,
+    el("p", "Dette fjerner bildet og bildekrediteringen. Oppskriftens kilde, ingredienser og fremgangsmåte beholdes.", "muted"),
+    button("Behold bildet", () => viewRecipe(recipe)),
+    button("Fjern bilde", async () => {
+      try {
+        const updated = await api("/recipes/" + encodeURIComponent(recipe.id), "PUT", {
+          title: recipe.title,
+          servings: recipe.servings,
+          ingredients: recipe.ingredients,
+          instructions: recipe.instructions,
+          source_url: recipe.source_url || null,
+          image_url: null,
+          source: recipe.source,
+          source_ingredients: recipe.source_ingredients || [],
+          provenance: recipe.provenance || null,
+          photo_source: recipe.photo_source || null,
+          image_attribution: null,
+        });
+        state.recipes = state.recipes.map((item) => item.id === recipe.id ? updated : item);
+        viewRecipe(updated);
+        notify("Oppskriftsbildet og krediteringen er fjernet.");
+      } catch (error) {
+        notify(error.message, true);
+        viewRecipe(recipe);
+      }
+    }, "danger"),
+  );
+}
+function recipeImageSearchForm(recipe) {
+  const root = openDialog("Finn et bilde til oppskriften");
+  add(
+    root,
+    el("p", "Søk etter bilder på Wikimedia Commons. Velg selv etter at du har sett bildet, fotografen, lisensen og krediteringskravene.", "muted"),
+    el("p", "Dette endrer bare oppskriftsbildet og bildekrediteringen. Oppskriftens kilde og innhold forblir uendret.", "callout"),
+  );
+  const form = el("form");
+  const query = field("Søk etter bilde", "search", recipe.title);
+  query.input.maxLength = 200;
+  query.input.required = true;
+  const status = el("p", "Søket har ikke startet.", "muted");
+  status.setAttribute("role", "status");
+  const errors = el("p", "", "form-error");
+  errors.setAttribute("role", "alert");
+  const results = el("div", null, "recipe-image-results");
+  const searchButton = button("Søk etter bilder", () => runSearch(false), "primary");
+  const moreButton = button("Vis flere bilder", () => runSearch(true), "quiet");
+  moreButton.hidden = true;
+  let currentQuery = "";
+  let continuation = null;
+  let candidates = [];
+  let requestSequence = 0;
+  let busy = false;
+
+  function drawCandidates() {
+    results.replaceChildren();
+    if (!candidates.length) return;
+    add(results, el("h3", `Treff for «${currentQuery}»`));
+    const grid = el("div", null, "grid recipe-image-results-grid");
+    candidates.forEach(({ candidate, searchId }) => {
+      const card = el("article", null, "card recipe-image-candidate");
+      const image = el("img", null, "recipe-image-candidate-preview");
+      image.src = candidate.thumbnail_url;
+      image.alt = candidate.title;
+      image.loading = "lazy";
+      image.decoding = "async";
+      image.referrerPolicy = "no-referrer";
+      image.addEventListener("error", () => image.replaceWith(el("p", "Forhåndsvisningen er ikke tilgjengelig.", "muted")));
+      add(card, image, el("h3", candidate.title));
+      if (candidate.artist || candidate.credit || candidate.attribution)
+        add(card, el("p", candidate.artist || candidate.credit || candidate.attribution, "muted"));
+      if (candidate.credit && candidate.artist) add(card, el("p", candidate.credit, "muted"));
+      const license = el("a", candidate.license_name);
+      license.href = candidate.license_url;
+      license.target = "_blank";
+      license.rel = "noopener noreferrer";
+      const source = el("a", "Åpne kilde og bildeinformasjon");
+      source.href = candidate.source_page_url;
+      source.target = "_blank";
+      source.rel = "noopener noreferrer";
+      add(card, el("p", "Lisens: "), license, source);
+      if (candidate.obligations?.length)
+        add(card, add(el("ul", null, "image-license-obligations"), ...candidate.obligations.map((item) => el("li", item))));
+      if (candidate.attribution_required && candidate.attribution)
+        add(card, el("p", "Kreditering: " + candidate.attribution, "image-credit-required"));
+      const review = el("label", null, "image-license-review");
+      const reviewed = el("input");
+      reviewed.type = "checkbox";
+      add(review, reviewed, el("span", "Jeg har gjennomgått lisensen og krediteringen."));
+      const candidateError = el("p", "", "form-error");
+      candidateError.setAttribute("role", "alert");
+      const choose = button("Bruk dette bildet", async () => {
+        choose.disabled = true;
+        candidateError.textContent = "";
+        status.textContent = "Lagrer valgt bilde og kreditering …";
+        try {
+          if (!reviewed.checked) throw new Error("Bekreft at du har sett gjennom lisens og kreditering.");
+          const updated = await api("/recipes/" + encodeURIComponent(recipe.id) + "/image", "POST", {
+            search_id: searchId,
+            provider_id: candidate.provider_id,
+            reviewed: true,
+          });
+          state.recipes = state.recipes.map((item) => item.id === recipe.id ? updated : item);
+          viewRecipe(updated);
+          notify("Oppskriftsbildet og krediteringen er lagret.");
+        } catch (error) {
+          candidateError.textContent = error.message;
+          status.textContent = "Oppskriften er uendret. Du kan gjennomgå bildet på nytt eller søke videre.";
+          choose.disabled = !reviewed.checked;
+        }
+      }, "primary");
+      choose.disabled = true;
+      reviewed.addEventListener("change", () => { choose.disabled = !reviewed.checked || busy; });
+      add(card, review, candidateError, choose);
+      grid.append(card);
+    });
+    add(results, grid);
+  }
+
+  async function runSearch(loadMore) {
+    if (busy) return;
+    const term = query.input.value.trim();
+    if (!term) {
+      errors.textContent = "Skriv inn hva du vil finne bilde av.";
+      return;
+    }
+    if (loadMore && (!continuation || term !== currentQuery)) return;
+    const sequence = ++requestSequence;
+    const priorQuery = currentQuery;
+    busy = true;
+    searchButton.disabled = true;
+    moreButton.disabled = true;
+    results.querySelectorAll("button, input").forEach((control) => { control.disabled = true; });
+    if (!loadMore) moreButton.hidden = true;
+    errors.textContent = "";
+    status.textContent = loadMore ? "Henter flere bilder …" : "Søker etter bilder …";
+    try {
+      const response = await api("/recipe-images/search", "POST", {
+        query: term,
+        limit: 10,
+        ...(loadMore ? { continuation } : {}),
+      });
+      if (sequence !== requestSequence) return;
+      const session = window.KitchenRecipeImages.normalizeSession(response);
+      if (session.status !== "ok") {
+        if (session.status === "no_usable_results" && !loadMore) {
+          candidates = [];
+          currentQuery = term;
+          continuation = null;
+          drawCandidates();
+        }
+        if (session.status === "invalid_continuation") continuation = null;
+        status.textContent = window.KitchenRecipeImages.statusLabel(session.status) +
+          (candidates.length && term !== currentQuery ? ` Viser fortsatt treff for «${currentQuery}».` : "");
+        moreButton.hidden = !continuation;
+        return;
+      }
+      if (!loadMore) {
+        candidates = [];
+        currentQuery = term;
+      }
+      const known = new Set(candidates.map(({ candidate }) => candidate.provider_id));
+      session.results.forEach((candidate) => {
+        if (!known.has(candidate.provider_id)) {
+          candidates.push({ candidate, searchId: session.search_id });
+          known.add(candidate.provider_id);
+        }
+      });
+      continuation = session.continuation;
+      status.textContent = session.results.length
+        ? window.KitchenRecipeImages.statusLabel("ok")
+        : "Fant ikke flere brukbare bilder.";
+      drawCandidates();
+      moreButton.hidden = !continuation;
+      if (term !== currentQuery) moreButton.hidden = true;
+    } catch (error) {
+      if (sequence !== requestSequence) return;
+      status.textContent = candidates.length
+        ? `Søket kunne ikke fullføres. Viser fortsatt treff for «${priorQuery || currentQuery}».`
+        : "Søket kunne ikke fullføres. Prøv igjen.";
+      errors.textContent = error.message;
+      moreButton.hidden = !continuation || term !== currentQuery;
+    } finally {
+      if (sequence === requestSequence) {
+        busy = false;
+        searchButton.disabled = false;
+        moreButton.disabled = false;
+        drawCandidates();
+      }
+    }
+  }
+  add(form, query.wrap, el("div", null, "actions"));
+  const actions = form.lastElementChild;
+  add(actions, searchButton, moreButton);
+  form.addEventListener("submit", (event) => { event.preventDefault(); runSearch(false); });
+  add(root, form, status, errors, results);
 }
 async function viewRecipePhoto(photoSource) {
   const root = openDialog("Privat bilde av oppskriftssiden");

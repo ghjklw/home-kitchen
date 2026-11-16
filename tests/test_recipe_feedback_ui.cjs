@@ -27,6 +27,7 @@ class Node {
   replaceChildren(...children) { this.ownText = ""; this.children = children; }
   setAttribute(name, value) { this.attributes[name] = value; }
   addEventListener(name, action) { this.listeners[name] = action; }
+  focus() { this.focused = true; }
   async click() { if (!this.disabled) await this.listeners.click?.(); }
   async submit() { await this.listeners.submit({ preventDefault() {} }); }
 }
@@ -247,4 +248,26 @@ test("meal-plan review displays recent context independently from AI output", as
   assert.match(ui.root().textContent, /Mindre sterk mat/);
   assert.match(ui.root().textContent, /Fikk ingen måltidsforslag/);
   assert.deepEqual(ui.calls.map((call) => call.endpoint), ["/interactions?limit=100", "/ai/plan"]);
+});
+
+
+test("discovery adds an explicitly selected preference to the editable query without searching", async () => {
+  const ui = harness(() => [entry("preference", "Foretrekker bønner"), entry("feedback", "God suppe")]);
+  ui.app.discoveryForm();
+  await flush();
+  const root = ui.root();
+  const query = controls(root).inputs.find((node) => node.type === "search");
+  const actions = walk(root).filter((node) => node.tagName === "BUTTON" && node.textContent === "Legg matpreferansen til i søket");
+  assert.equal(actions.length, 1);
+  query.value = "rask middag";
+  await actions[0].click();
+  assert.equal(query.value, "rask middag Foretrekker bønner");
+  assert.ok(query.focused);
+  assert.match(controls(root).status.textContent, /Se over søket/);
+  assert.deepEqual(ui.calls.map((call) => call.endpoint), ["/interactions?limit=100"]);
+  query.value = "x".repeat(200);
+  await actions[0].click();
+  assert.match(controls(root).status.textContent, /Kort ned søket til høyst 200 tegn/);
+  assert.ok(query.value.endsWith("Foretrekker bønner"), "preserve the original preference wording without silent truncation");
+  assert.equal(ui.calls.length, 1);
 });

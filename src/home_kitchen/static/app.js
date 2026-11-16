@@ -2547,7 +2547,6 @@ function importForm() {
 }
 function discoveryForm() {
   const root = openDialog("Finn oppskrifter fra kilder");
-  add(root, recentFeedbackPanel().node);
   add(
     root,
     el(
@@ -2574,6 +2573,13 @@ function discoveryForm() {
   );
   query.input.required = true;
   query.input.maxLength = 200;
+  add(root, recentFeedbackPanel((preference) => {
+    query.input.value = [query.input.value.trim(), preference].filter(Boolean).join(" ");
+    query.input.focus();
+    return query.input.value.length > 200
+      ? "Matpreferansen er lagt til. Kort ned søket til høyst 200 tegn før du søker i kildene."
+      : "Matpreferansen er lagt til. Se over søket og velg «Søk i kildene» når du er klar.";
+  }).node);
   const sources = el("fieldset", null, "discovery-source-picker");
   add(sources, el("legend", "Søkekilder"));
   const selected = new Set(
@@ -4986,7 +4992,7 @@ function renderBasket(main) {
     add(main, cartPanel);
   }
 }
-function recentFeedbackPanel() {
+function recentFeedbackPanel(onPreference = null) {
   const node = el("section", null, "callout");
   const status = el("p", "", "muted");
   status.setAttribute("role", "status");
@@ -5031,6 +5037,11 @@ function recentFeedbackPanel() {
           if (data.notes) add(row, el("p", data.notes));
         } else {
           add(row, el("p", entry.message));
+        }
+        if (entry.kind === "preference" && onPreference) {
+          add(row, button("Legg matpreferansen til i søket", () => {
+            status.textContent = onPreference(entry.message);
+          }, "quiet small"));
         }
         const recorded = new Date(entry.occurred_at);
         const channel = { app: "appen", api: "API", mcp: "MCP" }[entry.channel] || "ukjent kanal";

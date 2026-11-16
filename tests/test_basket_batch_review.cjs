@@ -21,9 +21,16 @@ class Node {
     this.attributes = {};
     this.disabled = false;
     this.dataset = {};
+    this.ownerDocument = null;
   }
   append(child) { this.children.push(child); }
   setAttribute(key, value) { this.attributes[key] = value; }
+  focus() { this.focused = true; if (this.ownerDocument) this.ownerDocument.activeElement = this; }
+  contains(node) { return allNodes(this).includes(node); }
+  querySelectorAll(selector) {
+    assert.equal(selector, "[data-focus-key]");
+    return allNodes(this).filter((node) => node.dataset?.focusKey);
+  }
   get text() { return this.textContent + " " + this.children.map((child) => child.text || "").join(" "); }
   find(predicate) {
     if (predicate(this)) return this;
@@ -79,6 +86,7 @@ function fixture({ api } = {}) {
   };
   const requests = [];
   const notifications = [];
+  const document = { activeElement: null };
   const modal = {
     open: false,
     dataset: {},
@@ -107,14 +115,25 @@ function fixture({ api } = {}) {
       modal.open = true;
       modal.dataset = {};
       modal.root = new Node("dialog-content");
+      modal.root.ownerDocument = document;
       return modal.root;
     },
-    $(selector) { assert.equal(selector, "#modal"); return modal; },
-    el: (tag, text = "", className = "") => new Node(tag, text, className),
+    $(selector) {
+      if (selector === "#modal") return modal;
+      if (selector === "#modal-content") return modal.root;
+      throw new Error(`Unexpected selector ${selector}`);
+    },
+    document,
+    el: (tag, text = "", className = "") => {
+      const node = new Node(tag, text, className);
+      node.ownerDocument = document;
+      return node;
+    },
     add: (parent, ...children) => { children.filter(Boolean).forEach((child) => parent.append(child)); return parent; },
     button: (text, action, className = "") => {
       const node = new Node("button", text, className);
       node.action = action;
+      node.ownerDocument = document;
       return node;
     },
     basketProduct: (product, packages) => new Node("article", `${product.name} ${packages || ""}`),
@@ -148,7 +167,7 @@ function fixture({ api } = {}) {
     "saveBasketBatchChoices",
   ].map(functionSource).join("\n");
   vm.runInNewContext(functions, context);
-  return { context, state, modal, requests, notifications, safeNeed, unclearNeed, safeCandidate };
+  return { context, state, modal, requests, notifications, document, safeNeed, unclearNeed, safeCandidate };
 }
 
 test("opening and closing review makes no write, shows retained choices and unresolved reason", () => {
@@ -217,6 +236,52 @@ test("an unverified product requires explicit identity confirmation before batch
     packages: 2,
     confirm_identity: true,
   }]);
+});
+
+test("identity confirmation keeps focus on the updated candidate control", () => {
+  const value = fixture();
+  value.state.basketMatchPages[value.safeNeed.id][1].candidates = [{
+    ...value.safeCandidate,
+    id: "oda:focus-check",
+    identity_status: "unverified",
+  }];
+  value.context.openBasketBatchReview();
+  const confirm = value.modal.root.find((node) =>
+    node.tagName === "button" && node.textContent === "Dette er riktig produkt",
+  );
+  confirm.focus();
+  confirm.action();
+
+  const updated = value.modal.root.find((node) =>
+    node.tagName === "button" && node.textContent === "Bekreftelsen er valgt",
+  );
+  assert.ok(updated);
+  assert.equal(value.document.activeElement, updated);
+  assert.equal(updated.attributes["aria-pressed"], "true");
+  assert.equal(updated.focused, true);
+});
+
+test("identity confirmation does not restore focus when the active element is outside its modal", () => {
+  const value = fixture();
+  const candidate = {
+    ...value.safeCandidate,
+    id: "oda:external-focus-check",
+    identity_status: "unverified",
+  };
+  value.state.basketMatchPages[value.safeNeed.id][1].candidates = [candidate];
+  value.context.openBasketBatchReview();
+  const outside = new Node("button", "Other context");
+  outside.ownerDocument = value.document;
+  outside.focus();
+
+  value.context.toggleBasketBatchChoice(candidate, value.safeNeed, "job-current", true);
+
+  const updated = value.modal.root.find((node) =>
+    node.tagName === "button" && node.textContent === "Bekreftelsen er valgt",
+  );
+  assert.ok(updated);
+  assert.equal(value.document.activeElement, outside);
+  assert.notEqual(updated.focused, true);
 });
 
 test("identity confirmation cannot make a candidate with unknown package facts selectable", () => {

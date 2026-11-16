@@ -38,6 +38,13 @@ test("completion UI uses reviewed endpoints and does not default planned need in
   assert.match(source, /crypto\.randomUUID\(\)/);
 });
 
+test("trip closure reason control exposes its accessible name", () => {
+  const ui = renderCompletion({ lines: [makeLine("need-salt", "Salt", "g", "meal")], api: async () => ({}) });
+  const reason = ui.nodes.find((node) => node.tagName === "select");
+  assert.ok(reason);
+  assert.equal(reason.attributes["aria-label"], "Lukk uten å registrere kjøp");
+});
+
 const renderer = source.match(/function renderTripCompletion\(main\) \{[\s\S]*?\n\}(?=\nfunction inventoryForm\()/u);
 assert.ok(renderer, "the actual trip-completion renderer exists");
 

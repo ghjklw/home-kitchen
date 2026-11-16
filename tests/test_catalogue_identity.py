@@ -1,12 +1,20 @@
 """Canonical identity reuse and conservative alias resolution."""
 
 import os
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from fastmcp import Client, FastMCP
 
 from home_kitchen.catalogue.identity import CanonicalProduct, CanonicalUnit
 from home_kitchen.catalogue.identity_service import CanonicalIdentityService
+from home_kitchen.feature_api import feature_router
+from home_kitchen.feature_mcp import install_feature_tools
+from home_kitchen.models import Ingredient, Recipe, RecipeCreate
+from home_kitchen.service import KitchenService
 
 
 class MemoryIdentityRepository:
@@ -48,6 +56,45 @@ class MemoryIdentityRepository:
             list(self.products.values()) if kind == "product" else list(self.units.values())
         )
         return [identity for identity in identities if identity.id in ids]
+
+    def validate_identities(self, kind: str, ids: set[UUID]) -> None:
+        if not ids:
+            return
+        if kind == "product":
+            existing = {p.id for p in self.products.values()}
+        elif kind == "unit":
+            existing = {u.id for u in self.units.values()}
+        else:
+            raise ValueError("kind must be product or unit")
+        if not ids <= existing:
+            raise ValueError(f"Recipe contains an unknown canonical {kind} identity")
+
+
+class MemoryStore:
+    def __init__(self):
+        self.recipes: dict[UUID, Recipe] = {}
+        self.settings: dict[str, str] = {}
+        self.photo_household_id = None
+        self.engine = None
+
+    def get_setting(self, key: str) -> str | None:
+        return self.settings.get(key)
+
+    def save(self, kind: str, entity: Any) -> None:
+        if kind == "recipe":
+            self.recipes[entity.id] = entity
+
+    def get(self, kind: str, entity_id: UUID, model: type) -> Any:
+        if kind == "recipe":
+            if entity_id not in self.recipes:
+                raise KeyError(str(entity_id))
+            return self.recipes[entity_id]
+        raise KeyError(str(entity_id))
+
+    def list(self, kind: str, model: type) -> list[Any]:
+        if kind == "recipe":
+            return list(self.recipes.values())
+        return []
 
 
 def test_product_identities_reuse_exact_canonical_variant_and_keep_variants_distinct():
@@ -340,6 +387,283 @@ def test_old_client_update_rejects_changed_reordered_or_ambiguous_rows(incoming_
         )
 
 
+def test_automatic_alias_resolution_at_recipe_creation():
+    repo = MemoryIdentityRepository()
+    identities = CanonicalIdentityService(repo)
+    tomato = identities.create_product("Tomato", "fresh")
+    gram = identities.create_unit("Gram")
+    identities.add_alias("product", "nb", "recipe", "tomat", tomato.id)
+    identities.add_alias("unit", "nb", "recipe", "grams", gram.id)
+
+    store = MemoryStore()
+    service = KitchenService(store=store, identity_service=identities)
+
+    recipe = service.create_recipe(
+        RecipeCreate(
+            title="Pasta Sauce",
+            servings=4,
+            ingredients=[
+                Ingredient(name="tomat", quantity="500", unit="Grams"),
+                Ingredient(name="mysterious herb", quantity="1", unit="pinch"),
+            ],
+            instructions=["Boil", "Simmer"],
+        )
+    )
+
+    # First ingredient matched known aliases:
+    mapped = recipe.ingredients[0]
+    assert mapped.canonical_product_id == tomato.id
+    assert mapped.canonical_unit_id == gram.id
+    assert mapped.name == "tomat"
+    assert mapped.unit == "grams"
+    assert mapped.source_unit_expression == "Grams"
+
+    # Second ingredient has no known aliases; leaves identities safely None:
+    unmapped = recipe.ingredients[1]
+    assert unmapped.canonical_product_id is None
+    assert unmapped.canonical_unit_id is None
+    assert unmapped.name == "mysterious herb"
+    assert unmapped.unit == "pinch"
+
+
+def test_ambiguous_alias_and_predefined_identity_preservation():
+    repo = MemoryIdentityRepository()
+    identities = CanonicalIdentityService(repo)
+    fresh_tomato = identities.create_product("Tomato", "fresh")
+    canned_tomato = identities.create_product("Tomato", "canned")
+    identities.add_alias("product", "nb", "recipe", "tomat", fresh_tomato.id)
+    identities.add_alias("product", "nb", "recipe", "tomat", canned_tomato.id)
+
+    store = MemoryStore()
+    service = KitchenService(store=store, identity_service=identities)
+
+    recipe = service.create_recipe(
+        RecipeCreate(
+            title="Soup",
+            servings=2,
+            ingredients=[
+                Ingredient(name="tomat", quantity="2", unit="item"),
+                Ingredient(
+                    name="tomat",
+                    quantity="1",
+                    unit="item",
+                    canonical_product_id=canned_tomato.id,
+                ),
+            ],
+            instructions=["Cook"],
+        )
+    )
+
+    # Ambiguous alias is not guessed:
+    assert recipe.ingredients[0].canonical_product_id is None
+    # Pre-existing canonical ID is preserved untouched:
+    assert recipe.ingredients[1].canonical_product_id == canned_tomato.id
+
+
+def test_recipe_update_auto_resolution_and_explicit_clear_preservation():
+    repo = MemoryIdentityRepository()
+    identities = CanonicalIdentityService(repo)
+    tomato = identities.create_product("Tomato")
+    onion = identities.create_product("Onion")
+    gram = identities.create_unit("Gram")
+    identities.add_alias("product", "nb", "recipe", "tomat", tomato.id)
+    identities.add_alias("product", "nb", "recipe", "løk", onion.id)
+    identities.add_alias("unit", "nb", "recipe", "g", gram.id)
+
+    store = MemoryStore()
+    service = KitchenService(store=store, identity_service=identities)
+
+    recipe = service.create_recipe(
+        RecipeCreate(
+            title="Sauce",
+            servings=2,
+            ingredients=[
+                Ingredient(name="tomat", quantity="200", unit="g"),
+            ],
+            instructions=["Cook"],
+        )
+    )
+    assert recipe.ingredients[0].canonical_product_id == tomato.id
+    assert recipe.ingredients[0].canonical_unit_id == gram.id
+
+    # 1. User explicitly clears product identity without renaming the ingredient:
+    cleared_update = RecipeCreate(
+        title="Sauce edited",
+        servings=2,
+        ingredients=[
+            Ingredient(
+                name="tomat",
+                quantity="200",
+                unit="g",
+                canonical_product_id=None,
+                canonical_unit_id=gram.id,
+            ),
+        ],
+        instructions=["Cook"],
+    )
+    updated = service.update_recipe(recipe.id, cleared_update)
+    assert updated.ingredients[0].canonical_product_id is None
+    assert updated.ingredients[0].canonical_unit_id == gram.id
+
+    # 2. Renaming the ingredient to "løk" auto-resolves to onion:
+    renamed_update = RecipeCreate(
+        title="Sauce with onion",
+        servings=2,
+        ingredients=[
+            Ingredient(
+                name="løk",
+                quantity="100",
+                unit="g",
+                canonical_product_id=None,
+                canonical_unit_id=gram.id,
+            ),
+        ],
+        instructions=["Cook"],
+    )
+    updated_renamed = service.update_recipe(recipe.id, renamed_update)
+    assert updated_renamed.ingredients[0].canonical_product_id == onion.id
+    assert updated_renamed.ingredients[0].name == "løk"
+
+
+def test_list_and_map_unmapped_ingredients():
+    repo = MemoryIdentityRepository()
+    identities = CanonicalIdentityService(repo)
+    garlic = identities.create_product("Garlic")
+    clove = identities.create_unit("Clove")
+
+    store = MemoryStore()
+    service = KitchenService(store=store, identity_service=identities)
+
+    recipe = service.create_recipe(
+        RecipeCreate(
+            title="Garlic Bread",
+            servings=2,
+            ingredients=[
+                Ingredient(name="hvitløk", quantity="3", unit="fedd"),
+            ],
+            instructions=["Bake"],
+        )
+    )
+
+    unmapped = service.list_unmapped_ingredients()
+    assert len(unmapped) == 1
+    assert unmapped[0].recipe_id == recipe.id
+    assert unmapped[0].name == "hvitløk"
+    assert unmapped[0].unit == "fedd"
+    assert unmapped[0].canonical_product_id is None
+    assert unmapped[0].canonical_unit_id is None
+
+    # Filter by recipe_id
+    assert len(service.list_unmapped_ingredients(recipe_id=recipe.id)) == 1
+    with pytest.raises(KeyError):
+        service.list_unmapped_ingredients(recipe_id=uuid4())
+
+    # Map the ingredient using map_unmapped_ingredient:
+    mapped_recipe = service.map_unmapped_ingredient(
+        recipe_id=recipe.id,
+        ingredient_index=0,
+        canonical_product_id=garlic.id,
+        canonical_unit_id=clove.id,
+        add_alias=True,
+    )
+    assert mapped_recipe.ingredients[0].canonical_product_id == garlic.id
+    assert mapped_recipe.ingredients[0].canonical_unit_id == clove.id
+
+    # Subsequent recipe creation with "hvitløk" auto-resolves because add_alias=True:
+    subsequent = service.create_recipe(
+        RecipeCreate(
+            title="Other Recipe",
+            servings=1,
+            ingredients=[Ingredient(name="hvitløk", quantity="1", unit="fedd")],
+            instructions=["Eat"],
+        )
+    )
+    assert subsequent.ingredients[0].canonical_product_id == garlic.id
+    assert subsequent.ingredients[0].canonical_unit_id == clove.id
+
+    # All unmapped ingredients are resolved:
+    assert len(service.list_unmapped_ingredients()) == 0
+
+
+@pytest.mark.asyncio
+async def test_unmapped_ingredients_routes_and_mcp_tools():
+    repo = MemoryIdentityRepository()
+    identities = CanonicalIdentityService(repo)
+    butter = identities.create_product("Butter")
+
+    store = MemoryStore()
+    service = KitchenService(store=store, identity_service=identities)
+
+    recipe = service.create_recipe(
+        RecipeCreate(
+            title="Toast",
+            servings=1,
+            ingredients=[Ingredient(name="smør", quantity="10", unit="g")],
+            instructions=["Spread"],
+        )
+    )
+
+    class DummyFeatures:
+        def __init__(self, kitchen, ids):
+            self.kitchen = kitchen
+            self.catalogue_identities = ids
+
+    dummy_features = DummyFeatures(service, identities)
+    router = feature_router(dummy_features, None)
+    app = FastAPI()
+    app.include_router(router)
+
+    with TestClient(app) as client:
+        # GET /api/catalogue/unmapped-ingredients
+        res = client.get("/api/catalogue/unmapped-ingredients")
+        assert res.status_code == 200
+        assert len(res.json()) == 1
+        assert res.json()[0]["name"] == "smør"
+        assert res.json()[0]["canonical_product_id"] is None
+
+        # GET /api/catalogue/identities/unmapped (alias path)
+        res_alias = client.get("/api/catalogue/identities/unmapped")
+        assert res_alias.status_code == 200
+        assert len(res_alias.json()) == 1
+
+        # Error on nonexistent recipe
+        bad_get = client.get(
+            "/api/catalogue/unmapped-ingredients",
+            params={"recipe_id": "00000000-0000-0000-0000-000000000001"},
+        )
+        assert bad_get.status_code == 404
+
+        # POST /api/catalogue/unmapped-ingredients/map with missing IDs -> 422
+        bad_map = client.post(
+            "/api/catalogue/unmapped-ingredients/map",
+            json={"recipe_id": str(recipe.id), "ingredient_index": 0},
+        )
+        assert bad_map.status_code == 422
+
+        # POST /api/catalogue/unmapped-ingredients/map
+        map_res = client.post(
+            "/api/catalogue/unmapped-ingredients/map",
+            json={
+                "recipe_id": str(recipe.id),
+                "ingredient_index": 0,
+                "canonical_product_id": str(butter.id),
+                "add_alias": True,
+            },
+        )
+        assert map_res.status_code == 200
+        assert map_res.json()["ingredients"][0]["canonical_product_id"] == str(butter.id)
+
+    # MCP tool test:
+    mcp = FastMCP("test")
+    install_feature_tools(mcp, dummy_features, None)
+    async with Client(mcp) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+    assert "list_unmapped_ingredients" in tools
+    assert "map_unmapped_ingredient" in tools
+    assert tools["list_unmapped_ingredients"].annotations.readOnlyHint is True
+    assert tools["map_unmapped_ingredient"].annotations.readOnlyHint is False
+
+
 @pytest.mark.skipif(
     not os.environ.get("KITCHEN_TEST_DATABASE_URL"),
     reason="requires the explicitly configured disposable PostgreSQL test database",
@@ -547,3 +871,46 @@ def test_identity_api_reuses_products_resolves_aliases_and_preserves_recipe_payl
             },
         )
         assert invalid_update.status_code == 422
+
+        auto_recipe = client.post(
+            "/api/recipes",
+            json={
+                "title": "Auto resolved",
+                "servings": 1,
+                "ingredients": [
+                    {
+                        "name": "tomat",
+                        "quantity": "2",
+                        "unit": "g",
+                    }
+                ],
+                "instructions": ["Cook"],
+            },
+        )
+        assert auto_recipe.status_code == 201
+        auto_ing = auto_recipe.json()["ingredients"][0]
+        assert auto_ing["canonical_product_id"] == first.json()["id"]
+        assert auto_ing["canonical_unit_id"] == unit.json()["id"]
+        assert auto_ing["name"] == "tomat"
+        assert auto_ing["unit"] == "g"
+
+        unmapped_res = client.get("/api/catalogue/unmapped-ingredients")
+        assert unmapped_res.status_code == 200
+        assert any(item["recipe_id"] == recipe.json()["id"] for item in unmapped_res.json())
+
+        unmapped_alias_res = client.get("/api/catalogue/identities/unmapped")
+        assert unmapped_alias_res.status_code == 200
+
+        map_res = client.post(
+            "/api/catalogue/unmapped-ingredients/map",
+            json={
+                "recipe_id": recipe.json()["id"],
+                "ingredient_index": 0,
+                "canonical_product_id": first.json()["id"],
+                "canonical_unit_id": unit.json()["id"],
+                "add_alias": False,
+            },
+        )
+        assert map_res.status_code == 200
+        assert map_res.json()["ingredients"][0]["canonical_product_id"] == first.json()["id"]
+        assert map_res.json()["ingredients"][0]["canonical_unit_id"] == unit.json()["id"]

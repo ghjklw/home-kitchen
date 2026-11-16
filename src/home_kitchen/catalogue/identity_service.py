@@ -23,6 +23,7 @@ class IdentityRepository(Protocol):
     def resolve(
         self, kind: str, locale: str, context: str, alias: str
     ) -> list[CanonicalProduct | CanonicalUnit]: ...
+    def validate_identities(self, kind: str, ids: set[UUID]) -> None: ...
 
 
 class CanonicalIdentityService:
@@ -67,3 +68,6 @@ class CanonicalIdentityService:
             "unmapped" if not candidates else "resolved" if len(candidates) == 1 else "ambiguous"
         )
         return AliasResolution(status=status, candidates=candidates)
+
+    def validate_identities(self, kind: str, ids: set[UUID]) -> None:
+        self.repository.validate_identities(kind, ids)

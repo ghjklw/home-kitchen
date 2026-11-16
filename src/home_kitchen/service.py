@@ -2,9 +2,12 @@
 
 from collections import Counter
 from datetime import date, time
+from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import bindparam, text
+from home_kitchen.catalogue.identity import UnmappedIngredient, normalize_identity_text
+from home_kitchen.catalogue.identity_repository import PostgresIdentityRepository
+from home_kitchen.catalogue.identity_service import CanonicalIdentityService
 
 from .models import (
     Meal,
@@ -27,14 +30,29 @@ _PURCHASABLE_SOURCE_UNITS = frozenset({"g", "kg", "mg", "ml", "cl", "dl", "l", "
 
 
 class KitchenService:
-    def __init__(self, database_url: str, shopping_builder: ShoppingBuilder | None = None):
-        self.store = Store(database_url)
+    def __init__(
+        self,
+        database_url: str = "",
+        shopping_builder: ShoppingBuilder | None = None,
+        identity_service: CanonicalIdentityService | None = None,
+        store: Store | None = None,
+    ):
+        if store is not None:
+            self.store = store
+        else:
+            self.store = Store(database_url)
         self.shopping_builder = shopping_builder or default_shopping_builder()
+        self.identities = identity_service or CanonicalIdentityService(
+            PostgresIdentityRepository(self.store.engine)
+        )
 
     def create_recipe(self, data: RecipeCreate) -> Recipe:
-        self._validate_canonical_identities(data)
+        resolved_data = self._resolve_recipe_identities_on_create(data)
+        self._validate_canonical_identities(resolved_data)
         # Image credit is written only by the authenticated candidate-selection flow.
-        recipe = Recipe(id=uuid4(), **self._recipe_values(data, exclude={"image_attribution"}))
+        recipe = Recipe(
+            id=uuid4(), **self._recipe_values(resolved_data, exclude={"image_attribution"})
+        )
         self.store.save("recipe", recipe)
         return recipe
 
@@ -51,6 +69,10 @@ class KitchenService:
         values["ingredients"] = self._retain_omitted_ingredient_identity_fields(
             data, existing, values["ingredients"]
         )
+        values["ingredients"] = self._resolve_ingredient_identities_on_update(
+            data, existing, values["ingredients"]
+        )
+        self._validate_ingredient_dict_identities(values["ingredients"])
         values["image_attribution"] = (
             existing.image_attribution if data.image_url == existing.image_url else None
         )
@@ -125,28 +147,104 @@ class KitchenService:
                 values["source_unit_expression"] = prior.get("source_unit_expression")
         return preserved
 
+    def _household_locale(self) -> str:
+        try:
+            value = self.store.get_setting("household")
+            if value:
+                from home_kitchen.settings import Household
+
+                return Household.model_validate_json(value).language
+        except Exception:
+            pass
+        return "nb"
+
+    def _resolve_recipe_identities_on_create(self, data: RecipeCreate) -> RecipeCreate:
+        locale = self._household_locale()
+        new_ingredients = []
+        changed = False
+        for ingredient in data.ingredients:
+            updates: dict[str, Any] = {}
+            if ingredient.canonical_product_id is None and ingredient.name:
+                res = self.identities.resolve("product", locale, "recipe", ingredient.name)
+                if res.status == "resolved" and len(res.candidates) == 1:
+                    updates["canonical_product_id"] = res.candidates[0].id
+            if ingredient.canonical_unit_id is None and ingredient.unit:
+                res = self.identities.resolve("unit", locale, "recipe", ingredient.unit)
+                if res.status == "resolved" and len(res.candidates) == 1:
+                    updates["canonical_unit_id"] = res.candidates[0].id
+            if updates:
+                changed = True
+                new_ingredients.append(ingredient.model_copy(update=updates))
+            else:
+                new_ingredients.append(ingredient)
+        if changed:
+            return data.model_copy(update={"ingredients": new_ingredients})
+        return data
+
+    def _resolve_ingredient_identities_on_update(
+        self, data: RecipeCreate, existing: Recipe, current_values: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        locale = self._household_locale()
+        resolved = [dict(v) for v in current_values]
+        for index, item in enumerate(resolved):
+            incoming = data.ingredients[index] if index < len(data.ingredients) else None
+            prior = existing.ingredients[index] if index < len(existing.ingredients) else None
+
+            product_cleared = False
+            if incoming is not None and prior is not None:
+                if (
+                    prior.canonical_product_id is not None
+                    and incoming.canonical_product_id is None
+                    and "canonical_product_id" in incoming.model_fields_set
+                    and normalize_identity_text(incoming.name)
+                    == normalize_identity_text(prior.name)
+                ):
+                    product_cleared = True
+
+            unit_cleared = False
+            if incoming is not None and prior is not None:
+                if (
+                    prior.canonical_unit_id is not None
+                    and incoming.canonical_unit_id is None
+                    and "canonical_unit_id" in incoming.model_fields_set
+                    and normalize_identity_text(incoming.unit or "")
+                    == normalize_identity_text(prior.unit or "")
+                ):
+                    unit_cleared = True
+
+            if (
+                item.get("canonical_product_id") is None
+                and not product_cleared
+                and item.get("name")
+            ):
+                res = self.identities.resolve("product", locale, "recipe", item["name"])
+                if res.status == "resolved" and len(res.candidates) == 1:
+                    item["canonical_product_id"] = res.candidates[0].id
+
+            if item.get("canonical_unit_id") is None and not unit_cleared and item.get("unit"):
+                res = self.identities.resolve("unit", locale, "recipe", item["unit"])
+                if res.status == "resolved" and len(res.candidates) == 1:
+                    item["canonical_unit_id"] = res.candidates[0].id
+
+        return resolved
+
     def _validate_canonical_identities(self, data: RecipeCreate) -> None:
         product_ids = {
             item.canonical_product_id for item in data.ingredients if item.canonical_product_id
         }
         unit_ids = {item.canonical_unit_id for item in data.ingredients if item.canonical_unit_id}
-        with self.store.engine.connect() as connection:
-            for kind, table, identities in (
-                ("product", "kitchen_canonical_products", product_ids),
-                ("unit", "kitchen_canonical_units", unit_ids),
-            ):
-                if not identities:
-                    continue
-                existing = set(
-                    connection.execute(
-                        text(f"SELECT id FROM {table} WHERE id IN :ids").bindparams(
-                            bindparam("ids", expanding=True)
-                        ),
-                        {"ids": list(identities)},
-                    ).scalars()
-                )
-                if existing != identities:
-                    raise ValueError(f"Recipe contains an unknown canonical {kind} identity")
+        self.identities.validate_identities("product", product_ids)
+        self.identities.validate_identities("unit", unit_ids)
+
+    def _validate_ingredient_dict_identities(self, ingredients: list[dict[str, Any]]) -> None:
+        product_ids = {
+            item["canonical_product_id"] for item in ingredients if item.get("canonical_product_id")
+        }
+        unit_ids = {
+            item["canonical_unit_id"] for item in ingredients if item.get("canonical_unit_id")
+        }
+        self.identities.validate_identities("product", product_ids)
+        self.identities.validate_identities("unit", unit_ids)
 
     @staticmethod
     def _recipe_values(data: RecipeCreate, *, exclude: set[str]) -> dict:
@@ -334,3 +432,73 @@ class KitchenService:
     def _validate_range(start: date, end: date) -> None:
         if end < start:
             raise ValueError("end must be on or after start")
+
+    def list_unmapped_ingredients(self, recipe_id: UUID | None = None) -> list[UnmappedIngredient]:
+        recipes = [self.get_recipe(recipe_id)] if recipe_id else self.list_recipes()
+        unmapped = []
+        for recipe in recipes:
+            for index, ingredient in enumerate(recipe.ingredients):
+                needs_product = ingredient.canonical_product_id is None
+                needs_unit = bool(ingredient.unit) and ingredient.canonical_unit_id is None
+                if needs_product or needs_unit:
+                    unmapped.append(
+                        UnmappedIngredient(
+                            recipe_id=recipe.id,
+                            recipe_title=recipe.title,
+                            ingredient_index=index,
+                            name=ingredient.name,
+                            quantity=ingredient.quantity,
+                            unit=ingredient.unit,
+                            source_unit_expression=ingredient.source_unit_expression,
+                            canonical_product_id=ingredient.canonical_product_id,
+                            canonical_unit_id=ingredient.canonical_unit_id,
+                        )
+                    )
+        return unmapped
+
+    def map_unmapped_ingredient(
+        self,
+        recipe_id: UUID,
+        ingredient_index: int,
+        canonical_product_id: UUID | None = None,
+        canonical_unit_id: UUID | None = None,
+        *,
+        add_alias: bool = False,
+        locale: str = "nb",
+        context: str = "recipe",
+    ) -> Recipe:
+        recipe = self.get_recipe(recipe_id)
+        if ingredient_index < 0 or ingredient_index >= len(recipe.ingredients):
+            raise IndexError("Ingredient index out of range")
+        if canonical_product_id is None and canonical_unit_id is None:
+            raise ValueError("Must specify canonical_product_id or canonical_unit_id to map")
+
+        target = recipe.ingredients[ingredient_index]
+        if canonical_product_id is not None:
+            self.identities.validate_identities("product", {canonical_product_id})
+            if add_alias:
+                self.identities.add_alias(
+                    "product", locale, context, target.name, canonical_product_id
+                )
+        if canonical_unit_id is not None:
+            self.identities.validate_identities("unit", {canonical_unit_id})
+            if add_alias and target.unit:
+                self.identities.add_alias("unit", locale, context, target.unit, canonical_unit_id)
+
+        updated_ingredients = []
+        for idx, ing in enumerate(recipe.ingredients):
+            if idx == ingredient_index:
+                updates: dict[str, Any] = {}
+                if canonical_product_id is not None:
+                    updates["canonical_product_id"] = canonical_product_id
+                if canonical_unit_id is not None:
+                    updates["canonical_unit_id"] = canonical_unit_id
+                updated_ingredients.append(ing.model_copy(update=updates))
+            else:
+                updated_ingredients.append(ing)
+
+        recipe_create = RecipeCreate(
+            **recipe.model_dump(exclude={"id", "ingredients"}),
+            ingredients=updated_ingredients,
+        )
+        return self.update_recipe(recipe_id, recipe_create)

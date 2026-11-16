@@ -2,7 +2,7 @@
 
 from uuid import UUID, uuid4
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.engine import Engine
 
 from home_kitchen.catalogue.identity import CanonicalProduct, CanonicalUnit, normalize_identity_text
@@ -131,6 +131,25 @@ class PostgresIdentityRepository:
             )
         model = CanonicalProduct if kind == "product" else CanonicalUnit
         return [model.model_validate(dict(row)) for row in rows]
+
+    def validate_identities(self, kind: str, ids: set[UUID]) -> None:
+        if not ids:
+            return
+        self._table(kind)
+        identity_table = (
+            "kitchen_canonical_products" if kind == "product" else "kitchen_canonical_units"
+        )
+        with self.engine.connect() as connection:
+            existing = set(
+                connection.execute(
+                    text(f"SELECT id FROM {identity_table} WHERE id IN :ids").bindparams(
+                        bindparam("ids", expanding=True)
+                    ),
+                    {"ids": list(ids)},
+                ).scalars()
+            )
+        if existing != ids:
+            raise ValueError(f"Recipe contains an unknown canonical {kind} identity")
 
     @staticmethod
     def _table(kind: str) -> tuple[str, str]:

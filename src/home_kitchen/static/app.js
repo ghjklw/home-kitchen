@@ -226,8 +226,8 @@ function formatServings(value) {
 function formatUiQuantity(value) {
   return window.KitchenShoppingView.formatQuantityForDisplay(String(value ?? ""));
 }
-function formatUiExactQuantity(value) {
-  return window.KitchenShoppingView.formatExactQuantityForAccessibility(String(value ?? ""));
+function formatUiAccessibleQuantity(value) {
+  return window.KitchenShoppingView.formatQuantityForAccessibility(String(value ?? ""));
 }
 function ingredientQuantityText(item) {
   const quantity = formatUiQuantity(item.quantity);
@@ -2199,9 +2199,9 @@ function renderInStore(main) {
       );
       quantity.setAttribute(
         "aria-label",
-        "Nøyaktig mengde: " + formatUiExactQuantity(exactQuantity) + (unit ? " " + unit : "") + " å plukke",
+        "Mengde: " + formatUiAccessibleQuantity(exactQuantity) + (unit ? " " + unit : "") + " å plukke",
       );
-      quantity.title = "Nøyaktig mengde: " + formatUiExactQuantity(exactQuantity) + (unit ? " " + unit : "");
+      quantity.title = "Mengde: " + formatUiAccessibleQuantity(exactQuantity) + (unit ? " " + unit : "");
       add(
         detail,
         quantity,
@@ -2397,15 +2397,17 @@ function renderShopping(main) {
       );
       summary.setAttribute(
         "aria-label",
-        (item.approximate === true ? "Omtrentlige mengder: ca. " : "Nøyaktige mengder: ") +
-          formatUiExactQuantity(required) +
-          (unit ? " " + unit : "") +
+        window.KitchenBasketMatchView.formatNeedQuantity(
+          { quantity: required, unit, approximate: item.approximate === true },
+          formatNeed,
+        ) +
           " nødvendig" +
-          (available != null ? "; " + formatUiExactQuantity(available) + " " + unit + " hjemme" : "") +
+          (available != null ? "; " + formatUiAccessibleQuantity(available) + " " + unit + " hjemme" : "") +
           "; " +
-          formatUiExactQuantity(toBuy) +
-          " " +
-          unit +
+          window.KitchenBasketMatchView.formatNeedQuantity(
+            { quantity: toBuy, unit, approximate: item.approximate === true },
+            formatNeed,
+          ) +
           " å kjøpe",
       );
       const detail = add(el("div", null, "detail"), el("strong", item.name), summary);

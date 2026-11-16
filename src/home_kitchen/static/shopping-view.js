@@ -96,12 +96,8 @@
     return String(wholePart) + (decimalPart ? "," + decimalPart : "");
   }
 
-  function formatExactQuantityForAccessibility(value) {
-    const exact = normalizeDecimalText(value);
-    if (exact == null) return String(value ?? "");
-    const [whole, fraction = ""] = exact.split(".");
-    const preciseFraction = fraction.replace(/0+$/u, "");
-    return whole + (preciseFraction ? "," + preciseFraction : "");
+  function formatQuantityForAccessibility(value) {
+    return formatQuantityForDisplay(value);
   }
 
   function isPositiveDecimal(value) {
@@ -145,7 +141,7 @@
   root.KitchenShoppingView = {
     basketPriceSummary,
     formatQuantityForDisplay,
-    formatExactQuantityForAccessibility,
+    formatQuantityForAccessibility,
     formatQuantityMentions,
     groupedByCategory,
     hasSelectedProducts,

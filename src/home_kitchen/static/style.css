@@ -534,6 +534,25 @@ h3 {
 .basket-match-summary p {
   margin-bottom: 10px;
 }
+.basket-batch-review {
+  margin-top: 14px;
+}
+.basket-batch-review h2 {
+  margin-bottom: 7px;
+}
+.basket-batch-review > p {
+  margin-bottom: 10px;
+}
+.basket-batch-choice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.basket-batch-choice > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .basket-match-need {
   margin: 18px 0;
   padding-top: 14px;

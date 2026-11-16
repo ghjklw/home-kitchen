@@ -242,8 +242,24 @@ def _metadata_value(metadata: Mapping[str, object], key: str) -> object:
 
 def _license(metadata: Mapping[str, object]) -> tuple[str, str, list[str]] | None:
     name = _plain_text(_metadata_value(metadata, "LicenseShortName"), max_length=100)
+    raw_url = _metadata_value(metadata, "LicenseUrl")
+    # Commons still publishes canonical Creative Commons links over HTTP.
+    # Upgrade only exact Creative Commons hosts; all other metadata must pass
+    # the existing HTTPS host and license-family validation below.
+    if isinstance(raw_url, str):
+        try:
+            parsed = urlsplit(raw_url)
+        except ValueError:
+            parsed = None
+        if parsed and (
+            parsed.scheme == "http"
+            and parsed.netloc.casefold() in {"creativecommons.org", "www.creativecommons.org"}
+            and not parsed.query
+            and not parsed.fragment
+        ):
+            raw_url = parsed._replace(scheme="https").geturl()
     url = _safe_url(
-        _metadata_value(metadata, "LicenseUrl"),
+        raw_url,
         {"creativecommons.org", "www.creativecommons.org", "commons.wikimedia.org"},
     )
     if not name or not url:
@@ -427,6 +443,10 @@ class WikimediaCommonsImageProvider:
         if not _json_is_bounded(payload) or not isinstance(payload, dict):
             return RecipeImageSearch(
                 status="unavailable", detail="Commons returned invalid or oversized metadata."
+            )
+        if "error" in payload:
+            return RecipeImageSearch(
+                status="unavailable", detail="Commons could not complete image search."
             )
         query_data = payload.get("query")
         pages = query_data.get("pages", []) if isinstance(query_data, Mapping) else []

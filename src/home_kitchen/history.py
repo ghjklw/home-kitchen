@@ -127,7 +127,8 @@ class HistoryRepository:
             params["query"] = query
             statement = text(
                 "SELECT id, kind, message, structured, occurred_at, "
-                "ts_rank_cd(search_document, websearch_to_tsquery('simple', :query)) AS score "
+                "(ts_rank_cd(search_document, websearch_to_tsquery('simple', :query)) + "
+                "ts_rank_cd(search_document, phraseto_tsquery('simple', :query))) AS score "
                 "FROM kitchen_history "
                 "WHERE search_document @@ websearch_to_tsquery('simple', :query)"
                 + kind_clause

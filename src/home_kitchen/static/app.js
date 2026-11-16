@@ -3344,7 +3344,7 @@ function renderInStore(main) {
   window.KitchenShoppingView.groupedByCategory(trip.lines, categoryOrder).forEach((lines, category) => {
     const section = add(
       el("section", null, "panel category-section"),
-      el("h2", category),
+      el("h2", categoryLabel(category)),
     );
     const list = el("ul", null, "list");
     lines.forEach((line) => {
@@ -3378,18 +3378,20 @@ function renderInStore(main) {
       const detail = add(el("div", null, "detail"), el("strong", line.name));
       const exactQuantity = String(line.to_buy_quantity ?? "0");
       const unit = line.unit || "";
+      const displayUnitText = unit ? window.KitchenShoppingView.displayUnit(unit, false, exactQuantity) : "";
+      const accessibleUnitText = unit ? window.KitchenShoppingView.displayUnit(unit, true, exactQuantity) : "";
       const quantity = el(
         "small",
         window.KitchenShoppingView.formatQuantityForDisplay(exactQuantity) +
-          (unit ? " " + unit : "") +
+          (displayUnitText ? " " + displayUnitText : "") +
           " å plukke" +
           (line.origins?.length ? " · " + shoppingOrigins(line.origins) : ""),
       );
       quantity.setAttribute(
         "aria-label",
-        "Mengde: " + formatUiAccessibleQuantity(exactQuantity) + (unit ? " " + unit : "") + " å plukke",
+        "Mengde: " + formatUiAccessibleQuantity(exactQuantity) + (accessibleUnitText ? " " + accessibleUnitText : "") + " å plukke",
       );
-      quantity.title = "Mengde: " + formatUiAccessibleQuantity(exactQuantity) + (unit ? " " + unit : "");
+      quantity.title = "Mengde: " + formatUiAccessibleQuantity(exactQuantity) + (accessibleUnitText ? " " + accessibleUnitText : "");
       add(
         detail,
         quantity,
@@ -3438,7 +3440,8 @@ function renderTripCompletion(main) {
       : [];
     const line = { ...reviewLine, selected_products: selectedProducts };
     const section = add(el("section", null, "panel trip-completion-line"), el("h3", line.name));
-    add(section, el("p", `Planlagt behov: ${formatUiQuantity(line.to_buy_quantity)} ${line.unit} · kontekst, ikke faktisk kjøp.`, "muted"));
+    const plannedUnit = line.unit ? window.KitchenShoppingView.displayUnit(line.unit, false, line.to_buy_quantity) : "";
+    add(section, el("p", `Planlagt behov: ${formatUiQuantity(line.to_buy_quantity)}${plannedUnit ? " " + plannedUnit : ""} · kontekst, ikke faktisk kjøp.`, "muted"));
     const bought = el("input"); bought.type = "checkbox"; bought.setAttribute("aria-label", `Registrer faktisk kjøp: ${line.name}`);
     add(section, add(el("label"), bought, el("span", "Jeg kjøpte denne varen")));
     const quantity = el("input"); quantity.type = "number"; quantity.min = "0.0000001"; quantity.step = "any"; quantity.placeholder = "Ukjent"; quantity.setAttribute("aria-label", `Faktisk mengde kjøpt: ${line.name}`);
@@ -3497,7 +3500,8 @@ function renderTripCompletion(main) {
         } else {
           context = "Fast vare";
         }
-        const detailLabel = `${kindLabel} · ${context} · ${formatUiQuantity(source.quantity)} ${source.unit}`;
+        const sourceUnit = source.unit ? window.KitchenShoppingView.displayUnit(source.unit, false, source.quantity) : "";
+        const detailLabel = `${kindLabel} · ${context} · ${formatUiQuantity(source.quantity)}${sourceUnit ? " " + sourceUnit : ""}`;
         add(sourceDetails, add(el("label"), input, el("span", detailLabel)));
         let regularPurchase = null;
         if (source.kind === "capture") {
@@ -4427,7 +4431,11 @@ function renderShopping(main) {
       add(
         el("div", null, "detail"),
         el("strong", item.name),
-        el("small", formatUiQuantity(item.quantity) + " " + item.unit),
+        el(
+          "small",
+          formatUiQuantity(item.quantity) +
+            (item.unit ? " " + window.KitchenShoppingView.displayUnit(item.unit, false, item.quantity) : ""),
+        ),
       ),
       button(
         "Fjern",
@@ -4466,7 +4474,12 @@ function renderShopping(main) {
           add(
             el("div", null, "detail"),
             el("strong", item.name),
-            el("small", formatUiQuantity(item.quantity) + " " + item.unit + " · Forslag"),
+            el(
+              "small",
+              formatUiQuantity(item.quantity) +
+                (item.unit ? " " + window.KitchenShoppingView.displayUnit(item.unit, false, item.quantity) : "") +
+                " · Forslag",
+            ),
           ),
           button(
             "Legg til",
@@ -4681,16 +4694,17 @@ function chooseOdaProduct(product, need) {
     return;
   }
   const root = openDialog("Bekreft produkt og pakningsstørrelse");
+  const unitText = need.unit ? window.KitchenShoppingView.displayUnit(need.unit, false) : "";
   add(
     root,
     el(
       "p",
       "Oppgi hvor mange " +
-        need.unit +
+        (unitText || need.unit) +
         " det er i én pakke. Kjøkkenet utleder ikke pakningsstørrelsen fra Oda-oppføringen.",
       "callout",
     ),
-    el("h3", product.name || "Oda product"),
+    el("h3", product.name || "Oda-produkt"),
     product.brand ? el("p", product.brand, "muted") : null,
   );
   const form = el("form");
@@ -4700,7 +4714,7 @@ function chooseOdaProduct(product, need) {
   packages.input.step = "1";
   packages.input.required = true;
   const packQuantity = field(
-    "Mengde " + need.unit + " per pakke",
+    "Mengde " + (unitText || need.unit) + " per pakke",
     "number",
     "",
   );
@@ -5254,7 +5268,7 @@ function renderOdaProposal(proposal, request) {
       root,
       el(
         "p",
-        "Confirming adds only the package counts listed above. No order or payment is made.",
+        "Bekreftelse legger bare til pakkeantallene ovenfor. Ingen bestilling eller betaling blir gjennomført.",
         "muted",
       ),
     );
@@ -5538,8 +5552,11 @@ function renderBasketMatchCandidate(candidate, need) {
       ),
     );
   } else {
+    const packUnit = candidate.pack_unit
+      ? window.KitchenShoppingView.displayUnit(candidate.pack_unit, false, candidate.pack_quantity)
+      : "";
     const pack = candidate.pack_quantity != null && candidate.pack_unit
-      ? "Pakke " + formatUiQuantity(candidate.pack_quantity) + " " + candidate.pack_unit + " · antall er ikke beregnet"
+      ? "Pakke " + formatUiQuantity(candidate.pack_quantity) + (packUnit ? " " + packUnit : "") + " · antall er ikke beregnet"
       : "Pakningsstørrelsen er uklar · kontroller før du velger";
     add(details, el("small", pack, "muted"));
   }
@@ -5753,7 +5770,7 @@ function renderBasket(main) {
       (() => {
         const exact =
           typeof issue === "string" ? issue : issue.message || JSON.stringify(issue);
-        const item = el("li", window.KitchenShoppingView.formatQuantityMentions(exact));
+        const item = el("li", window.KitchenShoppingView.formatBasketIssue(exact));
         item.title = exact;
         return add(list, item);
       })(),
@@ -5816,30 +5833,36 @@ function renderBasket(main) {
       const remaining = String(entry.remaining_quantity ?? "unknown");
       const overbuy = String(entry.overbuy_quantity ?? "unknown");
       const unit = need.unit || "";
+      const allocatedDisplayUnit = unit ? window.KitchenShoppingView.displayUnit(unit, false, allocated) : "";
+      const remainingDisplayUnit = unit ? window.KitchenShoppingView.displayUnit(unit, false, remaining) : "";
+      const overbuyDisplayUnit = unit ? window.KitchenShoppingView.displayUnit(unit, false, overbuy) : "";
+      const allocatedA11yUnit = unit ? window.KitchenShoppingView.displayUnit(unit, true, allocated) : "";
+      const remainingA11yUnit = unit ? window.KitchenShoppingView.displayUnit(unit, true, remaining) : "";
+      const overbuyA11yUnit = unit ? window.KitchenShoppingView.displayUnit(unit, true, overbuy) : "";
       const allocation = el(
         "p",
         "Dekket av valgte pakker: " +
           window.KitchenShoppingView.formatQuantityForDisplay(allocated) +
-          (unit ? " " + unit : "") +
+          (allocatedDisplayUnit ? " " + allocatedDisplayUnit : "") +
           " · Gjenstår: " +
           window.KitchenShoppingView.formatQuantityForDisplay(remaining) +
-          (unit ? " " + unit : "") +
+          (remainingDisplayUnit ? " " + remainingDisplayUnit : "") +
           " · Til overs fra valgte pakker: " +
           window.KitchenShoppingView.formatQuantityForDisplay(overbuy) +
-          (unit ? " " + unit : ""),
+          (overbuyDisplayUnit ? " " + overbuyDisplayUnit : ""),
         "muted",
       );
       allocation.setAttribute(
         "aria-label",
         "Nøyaktige mengder: dekket av valgte pakker " +
-          allocated +
-          (unit ? " " + unit : "") +
+          window.KitchenShoppingView.formatQuantityForAccessibility(allocated) +
+          (allocatedA11yUnit ? " " + allocatedA11yUnit : "") +
           "; gjenstår " +
-          remaining +
-          (unit ? " " + unit : "") +
+          window.KitchenShoppingView.formatQuantityForAccessibility(remaining) +
+          (remainingA11yUnit ? " " + remainingA11yUnit : "") +
           "; til overs fra valgte pakker " +
-          overbuy +
-          (unit ? " " + unit : ""),
+          window.KitchenShoppingView.formatQuantityForAccessibility(overbuy) +
+          (overbuyA11yUnit ? " " + overbuyA11yUnit : ""),
       );
       add(section, allocation);
     }

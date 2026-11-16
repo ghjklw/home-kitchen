@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const {
+  formatBasketIssue,
   formatDuration,
   formatNeedQuantity,
   mergeNeedPages,
@@ -71,4 +72,18 @@ test("marks estimated need quantities as approximate and accepts only safe sourc
   assert.equal(sourceUrl("https://matvaretabellen.no/food"), "https://matvaretabellen.no/food");
   assert.equal(sourceUrl("http://matvaretabellen.no/food"), null);
   assert.equal(sourceUrl("https://user:secret@example.test/food"), null);
+});
+
+test("KitchenBasketMatchView delegates basket issue formatting", () => {
+  assert.equal(typeof formatBasketIssue, "function");
+  const shoppingView = require("../src/home_kitchen/static/shopping-view.js");
+  globalThis.KitchenShoppingView = shoppingView;
+  assert.equal(
+    formatBasketIssue("Tine yoghurt: product evidence is unverified"),
+    "Tine yoghurt: produktgrunnlaget er ubekreftet",
+  );
+  assert.equal(
+    formatBasketIssue("Eggs: 1 item still needed"),
+    "Eggs: 1 stk. gjenstår",
+  );
 });

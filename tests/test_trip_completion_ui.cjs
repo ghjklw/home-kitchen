@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const test = require("node:test");
+const shoppingView = require("../src/home_kitchen/static/shopping-view.js");
 
 const source = fs.readFileSync("src/home_kitchen/static/app.js", "utf8");
 const helperStart = source.indexOf("window.KitchenTripCompletion = {");
@@ -32,7 +33,7 @@ test("exact product purchase requires a product from this reviewed line and expl
 test("completion UI uses reviewed endpoints and does not default planned need into actual purchase", () => {
   assert.match(source, /\/store-trip\/completion-review/);
   assert.match(source, /\/store-trip\/completions/);
-  assert.match(source, /Planlagt behov: \$\{formatUiQuantity\(line\.to_buy_quantity\)\} \$\{line\.unit\} · kontekst, ikke faktisk kjøp/);
+  assert.match(source, /Planlagt behov: \$\{formatUiQuantity\(line\.to_buy_quantity\)\}\$\{plannedUnit \? " " \+ plannedUnit : ""\} · kontekst, ikke faktisk kjøp/);
   assert.match(source, /quantity\.placeholder = "Ukjent"/);
   assert.match(source, /reviewed: true/);
   assert.match(source, /crypto\.randomUUID\(\)/);
@@ -88,7 +89,7 @@ function renderCompletion({ lines, meals = [], recipes = [], retry = null, oda =
   const main = new DomNode("main");
   const context = {
     state,
-    window: { KitchenTripCompletion: completion },
+    window: { KitchenTripCompletion: completion, KitchenShoppingView: shoppingView },
     crypto: { randomUUID: () => `idempotency-${++idempotencyCounter}` },
     Option: class { constructor(label, value) { this.textContent = label; this.value = value; } },
     el: (tag, text, className) => new DomNode(tag, text, className),
@@ -199,7 +200,8 @@ test("unknown actual quantities stay null for g/ml/item purchases and closures s
   for (const line of lines.slice(0, 3)) {
     labeled(ui, `Registrer faktisk kjøp: ${line.name}`).checked = true;
     const sourceLabel = line.source_quantities[0].kind === "meal" ? "måltidsbehov" : line.source_quantities[0].kind === "capture" ? "hurtigtillegg" : "fast vare";
-    const sourceRow = ui.nodes.find((node) => node.tagName === "label" && node.children.some((child) => child.textContent.includes(`Lukk ${sourceLabel}`) && child.textContent.includes(`4 ${line.unit}`)));
+    const displayUnit = shoppingView.displayUnit(line.unit, false, "4");
+    const sourceRow = ui.nodes.find((node) => node.tagName === "label" && node.children.some((child) => child.textContent.includes(`Lukk ${sourceLabel}`) && child.textContent.includes(`4 ${displayUnit}`)));
     assert.ok(sourceRow);
     sourceRow.children[0].checked = true;
   }

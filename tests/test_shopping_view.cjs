@@ -10,6 +10,7 @@ const {
   formatNeedQuantity,
   categoryLabel,
   formatQuantityMentions,
+  formatBasketIssue,
   groupedByCategory,
   hasSelectedProducts,
   isPositiveDecimal,
@@ -177,6 +178,58 @@ test("formats decimal quantities inside basket issue text", () => {
   assert.equal(
     formatQuantityMentions("Milk: 233.3333333333333333333333334 g still needed; 1E+3 ml overbuy"),
     "Milk: 233,33 g still needed; 1000 ml overbuy",
+  );
+});
+
+test("localizes known backend basket evaluation issues to Bokmål with formatted quantities and units", () => {
+  assert.equal(
+    formatBasketIssue("Tine yoghurt: product evidence is unverified"),
+    "Tine yoghurt: produktgrunnlaget er ubekreftet",
+  );
+  assert.equal(
+    formatBasketIssue("Tine yoghurt: product information is stale or future-dated"),
+    "Tine yoghurt: produktinformasjonen er foreldet eller fremtidsdatert",
+  );
+  assert.equal(
+    formatBasketIssue("Tine yoghurt: availability is not confirmed"),
+    "Tine yoghurt: tilgjengeligheten er ikke bekreftet",
+  );
+  assert.equal(
+    formatBasketIssue("Milk: 233.3333333333333333333333334 g still needed"),
+    "Milk: 233,33 g gjenstår",
+  );
+  assert.equal(
+    formatBasketIssue("Eggs: 1 item still needed"),
+    "Eggs: 1 stk. gjenstår",
+  );
+  assert.equal(
+    formatBasketIssue("Eggs: overbuy of 2 item"),
+    "Eggs: 2 stk. til overs",
+  );
+  assert.equal(
+    formatBasketIssue("Flour: overbuy of 0.5 kg"),
+    "Flour: 0,5 kg til overs",
+  );
+  assert.equal(
+    formatBasketIssue("one or more selected product prices are unknown"),
+    "Én eller flere valgte produktpriser er ukjente",
+  );
+  assert.equal(
+    formatBasketIssue("Quantity requires review: Salt"),
+    "Mengde må kontrolleres: Salt",
+  );
+  assert.equal(
+    formatBasketIssue("1 saved product selection(s) no longer match current shopping needs"),
+    "1 lagret produktvalg passer ikke lenger med nåværende handlebehov",
+  );
+  assert.equal(
+    formatBasketIssue("3 saved product selection(s) no longer match current shopping needs"),
+    "3 lagrede produktvalg passer ikke lenger med nåværende handlebehov",
+  );
+  // Fallback preserves unknown issues while formatting decimal numbers
+  assert.equal(
+    formatBasketIssue("Custom warning with 12.500 kg amount"),
+    "Custom warning with 12,5 kg amount",
   );
 });
 

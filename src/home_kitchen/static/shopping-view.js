@@ -176,6 +176,58 @@
     );
   }
 
+  function formatBasketIssue(issue) {
+    const text = typeof issue === "string" ? issue : issue?.message || String(issue ?? "");
+    const trimmed = text.trim();
+    if (!trimmed) return "";
+
+    let match = /^(.+):\s*product evidence is unverified$/u.exec(trimmed);
+    if (match) return `${match[1]}: produktgrunnlaget er ubekreftet`;
+
+    match = /^(.+):\s*product information is stale or future-dated$/u.exec(trimmed);
+    if (match) return `${match[1]}: produktinformasjonen er foreldet eller fremtidsdatert`;
+
+    match = /^(.+):\s*availability is not confirmed$/u.exec(trimmed);
+    if (match) return `${match[1]}: tilgjengeligheten er ikke bekreftet`;
+
+    match = /^(.+):\s*([0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)\s+(\S+)\s+still needed$/u.exec(trimmed);
+    if (match) {
+      const name = match[1];
+      const quantity = match[2];
+      const unit = match[3];
+      const amount = formatQuantityForDisplay(quantity);
+      const u = displayUnit(unit, false, quantity);
+      return `${name}: ${amount}${u ? " " + u : ""} gjenstår`;
+    }
+
+    match = /^(.+):\s*overbuy of\s+([0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)\s+(\S+)$/u.exec(trimmed);
+    if (match) {
+      const name = match[1];
+      const quantity = match[2];
+      const unit = match[3];
+      const amount = formatQuantityForDisplay(quantity);
+      const u = displayUnit(unit, false, quantity);
+      return `${name}: ${amount}${u ? " " + u : ""} til overs`;
+    }
+
+    if (/^one or more selected product prices are unknown$/u.test(trimmed)) {
+      return "Én eller flere valgte produktpriser er ukjente";
+    }
+
+    match = /^Quantity requires review:\s*(.+)$/u.exec(trimmed);
+    if (match) return `Mengde må kontrolleres: ${match[1]}`;
+
+    match = /^(\d+)\s+saved product selection\(s\) no longer match current shopping needs$/u.exec(trimmed);
+    if (match) {
+      const count = Number(match[1]);
+      return count === 1
+        ? "1 lagret produktvalg passer ikke lenger med nåværende handlebehov"
+        : `${count} lagrede produktvalg passer ikke lenger med nåværende handlebehov`;
+    }
+
+    return formatQuantityMentions(text);
+  }
+
   function groupedByCategory(lines, categoryOrder = []) {
     const rank = new Map(
       (Array.isArray(categoryOrder) ? categoryOrder : []).map((category, index) => [
@@ -262,6 +314,7 @@
     formatNeedQuantity,
     categoryLabel,
     formatQuantityMentions,
+    formatBasketIssue,
     groupedByCategory,
     hasSelectedProducts,
     isPositiveDecimal,

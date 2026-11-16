@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
+const shoppingView = require("../src/home_kitchen/static/shopping-view.js");
 
 const source = fs.readFileSync(path.join(__dirname, "../src/home_kitchen/static/app.js"), "utf8");
 function functionSource(name) {
@@ -106,7 +107,7 @@ function fixture({ api } = {}) {
       KitchenShoppingView: {
         formatQuantityForDisplay: (value) => String(value),
         formatQuantityForAccessibility: (value) => String(value),
-        displayUnit: (unit) => unit,
+        displayUnit: (...args) => shoppingView.displayUnit(...args),
       },
     },
     formatUiNeedQuantity: (need) => `${need.quantity} ${need.unit}`,
@@ -509,4 +510,18 @@ test("provider pagination detail renders in Bokmål without mutating provider ev
   assert.doesNotMatch(root.text, /More provider results/u);
   assert.equal(result.detail, "More provider results are available on the next page.");
   assert.equal(value.requests.length, 0);
+});
+
+test("candidate package size without recommendation displays localized unit", () => {
+  const value = fixture();
+  const candidate = {
+    id: "oda:201",
+    name: "Yoghurt Beger",
+    pack_quantity: "1",
+    pack_unit: "item",
+    recommended_packages: null,
+    recommended_fulfillment_quantity: null,
+  };
+  const rendered = value.context.renderBasketMatchCandidate(candidate, value.safeNeed);
+  assert.match(rendered.text, /Pakke 1 stk\. · antall er ikke beregnet/u);
 });

@@ -108,6 +108,7 @@
   }
 
   root.KitchenBasketMatchView = {
+    formatBasketIssue: (issue) => root.KitchenShoppingView?.formatBasketIssue?.(issue) ?? issue,
     formatDuration,
     formatNeedQuantity,
     identityStatus,

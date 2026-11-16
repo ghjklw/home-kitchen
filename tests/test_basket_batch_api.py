@@ -95,7 +95,7 @@ def test_batch_api_resolves_only_job_candidates_and_rejects_unknown_packages(tes
             pack_metadata_status="unverified",
             match_query="Pasta",
             match_reason="Search result",
-            identity_status="compatible",
+            identity_status="unverified",
         )
         job_id = seed(safe)
         old_selection = client.put(

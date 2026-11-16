@@ -11,6 +11,7 @@ import asyncio
 import re
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Hashable
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_CEILING, Decimal, localcontext
 from typing import Literal, Protocol
@@ -43,10 +44,22 @@ SEARCH_CACHE_TTL = timedelta(minutes=5)
 SEARCH_EMPTY_CACHE_TTL = timedelta(seconds=20)
 SEARCH_CACHE_MAX_ENTRIES = 512
 ODA_QUERY_BATCH_SIZE = 5
-# Imported recipes commonly keep English ingredient names, while Oda's search
-# is strongest with Bokmål. Keep the source query intact and add one localized
-# query so the provider request and the whole-plan cache remain bounded.
-_BOKMAL_INGREDIENTS = {
+# Search-only expansions for legacy aliases not yet covered by the reviewed
+# identity table. These never establish product compatibility.
+_LEGACY_SEARCH_EXPANSIONS = {
+    "all-purpose flour": "hvetemel",
+    "all purpose flour": "hvetemel",
+    "plain flour": "hvetemel",
+    "large eggs": "egg L",
+    "large egg": "egg L",
+    "unsalted butter": "usaltet smør",
+    "whole milk": "helmelk",
+    "granulated sugar": "sukker",
+    "caster sugar": "sukker",
+    "vanilla extract": "vaniljeekstrakt",
+    "vanilla essence": "vaniljeessens",
+    "cocoa powder": "kakaopulver",
+    "hot water": "varmt vann",
     "chicken breast": "kyllingfilet",
     "chicken breasts": "kyllingfilet",
     "chicken thigh": "kyllinglår",
@@ -96,6 +109,21 @@ _BOKMAL_INGREDIENTS = {
     "salmon": "laks",
     "rice": "ris",
     "pasta": "pasta",
+    "wheat flour": "hvetemel",
+    "egg yolks": "eggeplomme",
+    "egg whites": "eggehvite",
+    "powdered sugar": "melis",
+    "icing sugar": "melis",
+    # Recognize canonical Bokmål terms as identity queries too. Mapping them
+    # to themselves leaves search expansion unchanged.
+    "hvetemel": "hvetemel",
+    "usaltet smør": "usaltet smør",
+    "helmelk": "helmelk",
+    "lettmelk": "lettmelk",
+    "sukker": "sukker",
+    "ris": "ris",
+    "basmatiris": "basmatiris",
+    "olivenolje": "olivenolje",
 }
 _BOKMAL_QUALIFIERS = {
     "fresh": "ferske",
@@ -111,7 +139,7 @@ _BOKMAL_QUALIFIERS = {
 }
 _INGREDIENT_PHRASES = re.compile(
     r"(?<!\w)("
-    + "|".join(re.escape(key) for key in sorted(_BOKMAL_INGREDIENTS, key=len, reverse=True))
+    + "|".join(re.escape(key) for key in sorted(_LEGACY_SEARCH_EXPANSIONS, key=len, reverse=True))
     + r")(?!\w)",
     re.I,
 )
@@ -120,17 +148,455 @@ _QUALIFIER_WORDS = re.compile(
     re.I,
 )
 _TRAILING_FORM_QUALIFIER = re.compile(
-    r"^(.*?)(?:,\s*|\s+)(hakket|finhakket|terninger|malt|hel|fryst|hermetisk|tørket|røkt)$",
+    r"^(.*?)(?:,\s*|\s+)(hakket|finhakket|terninger|malt|hel|fryst|hermetisk|tørket|røkt|"
+    r"for dusting|plus extra for greasing|separated|to taste|as needed)$",
+    re.I,
+)
+_RECIPE_INSTRUCTION_SUFFIX = re.compile(
+    r"(?:,\s*|\s+)(?:plus\s+extra\s+for\s+greasing|for\s+greasing|for\s+dusting|"
+    r"separated|to\s+taste|as\s+needed)\s*$",
     re.I,
 )
 
 
+@dataclass(frozen=True)
+class _IdentityFamily:
+    name: str
+    # alias, requested variant, localized query
+    queries: tuple[tuple[str, str | None, str | None], ...]
+    # variant and product identity expression
+    products: tuple[tuple[str, str], ...]
+    generic_variants: tuple[str, ...] = ()
+    priority: int = 0
+
+
+# English and Bokmål aliases, expansions, supported product compounds and
+# variant compatibility are defined together. Product-only families identify
+# known adjacent classes that must not be treated as ingredients.
+_IDENTITY_FAMILIES = (
+    _IdentityFamily(
+        "flour",
+        (
+            ("all-purpose flour", "wheat", "hvetemel"),
+            ("all purpose flour", "wheat", "hvetemel"),
+            ("plain flour", "wheat", "hvetemel"),
+            ("wheat flour", "wheat", "hvetemel"),
+            ("hvetemel", "wheat", None),
+            ("flour", None, "hvetemel"),
+        ),
+        (
+            ("almond", r"\b(?:almond flour|mandelmel)\b"),
+            ("oat", r"\b(?:oat flour|havremel)\b"),
+            ("wheat", r"\b(?:hvetemel|wheat flour|all[- ]purpose flour|plain flour)\b"),
+            ("unspecified", r"\bflour\b"),
+        ),
+        ("wheat", "almond", "oat", "unspecified"),
+        20,
+    ),
+    _IdentityFamily(
+        "eggs",
+        (
+            ("large eggs", "large", "egg L"),
+            ("large egg", "large", "egg L"),
+            ("eggs", None, "egg"),
+            ("egg", None, "egg"),
+        ),
+        (
+            (
+                "large",
+                r"\b(?:egg|eggs)\b.*\b(?:large|store|size L|xl|m/l)\b|\b(?:large|store|xl|m/l)\b.*\b(?:egg|eggs)\b",
+            ),
+            ("medium", r"\b(?:egg|eggs)\b.*\b(?:medium|size M)\b"),
+            ("unspecified", r"\b(?:egg|eggs)\b"),
+        ),
+        ("large", "medium", "unspecified"),
+        20,
+    ),
+    _IdentityFamily(
+        "butter",
+        (
+            ("unsalted butter", "unsalted", "usaltet smør"),
+            ("usaltet smør", "unsalted", None),
+            ("butter", None, "smør"),
+            ("smør", None, None),
+        ),
+        (
+            ("unsalted", r"(?=.*\b(?:usaltet|unsalted)\b)(?=.*\b(?:meierismør|smør|butter)\b)"),
+            ("salted", r"(?=.*\b(?:saltet|salted)\b)(?=.*\b(?:meierismør|smør|butter)\b)"),
+            ("unspecified", r"\b(?:meierismør|smør|butter)\b"),
+        ),
+        ("unsalted", "salted", "unspecified"),
+        20,
+    ),
+    _IdentityFamily(
+        "milk",
+        (
+            ("whole milk", "whole", "helmelk"),
+            ("helmelk", "whole", None),
+            ("low-fat milk", "low-fat", "lettmelk"),
+            ("lettmelk", "low-fat", None),
+            ("milk", None, "melk"),
+            ("melk", None, None),
+        ),
+        (
+            ("whole", r"\b(?:helmelk|whole\s+milk|wholemilk)\b"),
+            (
+                "low-fat",
+                r"\b(?:lettmelk|skummetmelk|low[- ]fat milk|skimmed milk|semi[- ]skimmed milk)\b",
+            ),
+            ("unspecified", r"\b(?:milk|melk)\b"),
+        ),
+        ("whole", "low-fat", "unspecified"),
+        20,
+    ),
+    _IdentityFamily(
+        "sugar",
+        (
+            ("granulated sugar", "granulated", "sukker"),
+            ("caster sugar", "caster", "sukker"),
+            ("powdered sugar", "powdered", "melis"),
+            ("icing sugar", "powdered", "melis"),
+            ("sugar", None, "sukker"),
+            ("sukker", None, None),
+            ("melis", "powdered", None),
+        ),
+        (
+            ("caster", r"\bcaster sugar\b"),
+            ("powdered", r"\b(?:powdered sugar|icing sugar|melis)\b"),
+            ("granulated", r"\b(?:granulated sugar|white sugar|sukker|sugar)\b"),
+        ),
+        ("granulated", "caster", "powdered"),
+        20,
+    ),
+    _IdentityFamily(
+        "cooking-oil",
+        (
+            ("olive oil", "olive", "olivenolje"),
+            ("olivenolje", "olive", None),
+            ("rapeseed oil", "rapeseed", "rapsolje"),
+            ("rapsolje", "rapeseed", None),
+            ("sunflower oil", "sunflower", "solsikkeolje"),
+            ("solsikkeolje", "sunflower", None),
+            ("vegetable oil", None, "matolje"),
+            ("cooking oil", None, "matolje"),
+            ("matolje", None, None),
+        ),
+        (
+            ("olive", r"\b(?:olive oil|olivenolje)\b"),
+            ("rapeseed", r"\b(?:rapeseed oil|rapsolje)\b"),
+            ("sunflower", r"\b(?:sunflower oil|solsikkeolje)\b"),
+            ("unspecified", r"\b(?:vegetable oil|cooking oil|matolje|planteolje|maisolje)\b"),
+        ),
+        ("olive", "rapeseed", "sunflower", "unspecified"),
+        20,
+    ),
+    _IdentityFamily(
+        "rice",
+        (
+            ("basmati rice", "basmati", "basmatiris"),
+            ("basmatiris", "basmati", None),
+            ("jasmine rice", "jasmine", "jasminris"),
+            ("jasminris", "jasmine", None),
+            ("rice", None, "ris"),
+            ("ris", None, None),
+        ),
+        (
+            ("basmati", r"\b(?:basmati rice|basmatiris)\b"),
+            ("jasmine", r"\b(?:jasmine rice|jasminris)\b"),
+            ("unspecified", r"\b(?:rice|ris)\b"),
+        ),
+        ("basmati", "jasmine", "unspecified"),
+        20,
+    ),
+    _IdentityFamily(
+        "tomato",
+        (
+            ("tomato paste", "processed", "tomatpuré"),
+            ("tomato puree", "processed", "tomatpuré"),
+            ("tomatpuré", "processed", None),
+            ("cherry tomatoes", "fresh", "cherrytomater"),
+            ("tomatoes", "fresh", "tomater"),
+            ("tomato", "fresh", "tomat"),
+            ("tomater", "fresh", None),
+            ("tomat", "fresh", None),
+        ),
+        (
+            ("processed", r"\b(?:tomato paste|tomato puree|tomatpur[eé]|tomatkonsentrat)\b"),
+            ("fresh", r"\b(?:tomatoes|tomato|tomater|tomat|cherrytomater)\b"),
+        ),
+        ("fresh",),
+        20,
+    ),
+    _IdentityFamily(
+        "coffee",
+        (
+            ("coffee beans", "beans", "kaffebønner"),
+            ("coffee", None, "kaffe"),
+            ("kaffe", None, None),
+        ),
+        (
+            ("beans", r"\b(?:coffee beans|kaffebønner)\b"),
+            ("ground", r"\b(?:ground coffee|filter coffee|filterkaffe|malt kaffe)\b"),
+            ("unspecified", r"\b(?:coffee|kaffe)\b"),
+        ),
+        ("beans", "ground", "unspecified"),
+        20,
+    ),
+    _IdentityFamily(
+        "vanilla-extract",
+        (
+            ("vanilla extract", "extract", "vaniljeekstrakt"),
+            ("vanilla essence", "extract", "vaniljeessens"),
+            ("vaniljeekstrakt", "extract", None),
+            ("vaniljeessens", "extract", None),
+        ),
+        (
+            (
+                "extract",
+                r"\b(?:vanilla extract|vanilla essence|vaniljeekstrakt|vaniljeessens|vaniljearoma)\b",
+            ),
+        ),
+        ("extract",),
+        20,
+    ),
+    _IdentityFamily(
+        "cocoa-powder",
+        (
+            ("cocoa powder", "powder", "kakaopulver"),
+            ("cacao powder", "powder", "kakaopulver"),
+            ("kakaopulver", "powder", None),
+        ),
+        (("powder", r"\b(?:cocoa powder|cacao powder|kakaopulver)\b"),),
+        ("powder",),
+        20,
+    ),
+    _IdentityFamily(
+        "hot-water",
+        (
+            ("hot water", "hot", "varmt vann"),
+            ("varmt vann", "hot", None),
+        ),
+        (("hot", r"\b(?:hot water|varmt vann)\b"),),
+        ("hot",),
+        20,
+    ),
+    _IdentityFamily(
+        "chicken",
+        (
+            ("chicken breast", "breast", "kyllingfilet"),
+            ("chicken breasts", "breast", "kyllingfilet"),
+            ("chicken thigh", "thigh", "kyllinglår"),
+            ("chicken thighs", "thigh", "kyllinglår"),
+            ("kyllingfilet", "breast", None),
+            ("kyllinglår", "thigh", None),
+        ),
+        (
+            ("breast", r"\b(?:chicken breast|chicken breasts|kyllingfilet)\b"),
+            ("thigh", r"\b(?:chicken thigh|chicken thighs|kyllinglår)\b"),
+        ),
+        ("breast", "thigh"),
+        20,
+    ),
+    _IdentityFamily(
+        "creme-fraiche",
+        (
+            ("crème fraîche", None, "crème fraîche"),
+            ("creme fraiche", None, "crème fraîche"),
+        ),
+        (("unspecified", r"\bcr[eè]me\s+fra[iî]che\b"),),
+        ("unspecified",),
+        20,
+    ),
+    _IdentityFamily("chocolate", (), (("unspecified", r"\b(?:chocolate|sjokolade)\b"),), (), 100),
+    _IdentityFamily(
+        "personal-care",
+        (),
+        (
+            (
+                "unspecified",
+                r"\b(?:shower\s+(?:gel|oil)|dusjgel[eé]|body\s+wash|shampoo|såpe|soap|lotion)\b",
+            ),
+        ),
+        (),
+        100,
+    ),
+    _IdentityFamily(
+        "sugar-decoration",
+        (),
+        (
+            (
+                "unspecified",
+                r"\b(?:sugar\s+(?:decoration|decorations|faces)|sukkerpynt|dekorstrøssel|sprinkles)\b",
+            ),
+        ),
+        (),
+        100,
+    ),
+    _IdentityFamily("tortilla", (), (("unspecified", r"\b(?:tortillas?|wraps?)\b"),), (), 100),
+    _IdentityFamily("diaper", (), (("unspecified", r"\b(?:diapers?|nappies|bleier)\b"),), (), 100),
+    _IdentityFamily("nicotine", (), (("unspecified", r"\b(?:nicotine|tobacco|snus)\b"),), (), 100),
+    _IdentityFamily(
+        "produce-box", (), (("unspecified", r"\b(?:fruit\s+(?:box|basket)|fruktkasse)\b"),), (), 100
+    ),
+    _IdentityFamily("tonic", (), (("unspecified", r"\b(?:tonic|tonic water)\b"),), (), 100),
+    _IdentityFamily(
+        "licorice", (), (("unspecified", r"\b(?:lakris|licorice|liquorice)\b"),), (), 100
+    ),
+    _IdentityFamily(
+        "peanut-butter", (), (("unspecified", r"\b(?:peanut butter|peanøttsmør)\b"),), (), 100
+    ),
+    _IdentityFamily(
+        "vanilla-ice-cream",
+        (),
+        (("unspecified", r"\b(?:vanilla ice\s?cream|vaniljeis|gelato|softis)\b"),),
+        (),
+        100,
+    ),
+    _IdentityFamily(
+        "coffee-creamer",
+        (),
+        (("unspecified", r"\b(?:coffee mate|kaffefløte|kaffekrem|kaffemelk)\b"),),
+        (),
+        100,
+    ),
+    _IdentityFamily(
+        "rice-drink",
+        (),
+        (("unspecified", r"\b(?:rice\s+milk|rice\s+drink|rismelk|risdrikk)\b"),),
+        (),
+        100,
+    ),
+    _IdentityFamily("pasta", (), (("unspecified", r"\b(?:pasta|spaghetti|linguine)\b"),), (), 80),
+    _IdentityFamily(
+        "flour-mix",
+        (),
+        (("unspecified", r"\b(?:pancake mix|cake mix|pannekakeblanding|kakemiks|baking mix)\b"),),
+        (),
+        100,
+    ),
+)
+_QUERY_IDENTITIES = {
+    alias: (family, variant, localized)
+    for family in _IDENTITY_FAMILIES
+    for alias, variant, localized in family.queries
+}
+_QUERY_IDENTITY_PATTERN = re.compile(
+    r"(?<!\w)("
+    + "|".join(re.escape(alias) for alias in sorted(_QUERY_IDENTITIES, key=len, reverse=True))
+    + r")(?!\w)",
+    re.I,
+)
+_PRODUCT_IDENTITIES = tuple(
+    (family, variant, re.compile(pattern, re.I))
+    for family in sorted(_IDENTITY_FAMILIES, key=lambda item: item.priority, reverse=True)
+    for variant, pattern in family.products
+)
+_EXPLICIT_MANUAL_INTENT = re.compile(
+    r"\b(?:shower\s+(?:gel|oil)|dusjgel[eé]|body\s+wash|dish\s+soap|coffee\s+mate|peanut\s+butter|peanøttsmør)\b",
+    re.I,
+)
+_ALLOWED_QUERY_QUALIFIERS = frozenset(
+    {
+        *_BOKMAL_QUALIFIERS,
+        *_BOKMAL_QUALIFIERS.values(),
+        "for",
+        "dusting",
+        "plus",
+        "extra",
+        "greasing",
+        "separated",
+        "to",
+        "taste",
+        "as",
+        "needed",
+    }
+)
+
+
+def _clean_ingredient_query(query: str) -> str:
+    cleaned = " ".join(query.split())
+    previous = None
+    while cleaned != previous:
+        previous = cleaned
+        cleaned = _RECIPE_INSTRUCTION_SUFFIX.sub("", cleaned).strip(" ,")
+    return cleaned
+
+
+def _query_identity(
+    query: str,
+) -> tuple[_IdentityFamily, str | None, str | None] | None:
+    cleaned = _clean_ingredient_query(query)
+    if _EXPLICIT_MANUAL_INTENT.search(cleaned):
+        return None
+    match = _QUERY_IDENTITY_PATTERN.search(cleaned)
+    if match is None:
+        return None
+    residue = cleaned[: match.start()] + " " + cleaned[match.end() :]
+    residue_words = re.sub(r"[,;]+", " ", residue).split()
+    if any(word.casefold() not in _ALLOWED_QUERY_QUALIFIERS for word in residue_words):
+        return None
+    return _QUERY_IDENTITIES[match.group(0).casefold()]
+
+
+def _product_identity(product: ProviderProduct) -> tuple[_IdentityFamily, str] | None:
+    text = " ".join((product.name, product.brand or "")).casefold()
+    for family, variant, pattern in _PRODUCT_IDENTITIES:
+        if pattern.search(text):
+            return family, variant
+    return None
+
+
+def _identity_status(
+    query: str, product: ProviderProduct
+) -> Literal["compatible", "unverified"] | None:
+    query_identity = _query_identity(query)
+    if query_identity is None:
+        return "unverified"
+    query_family, requested_variant, _ = query_identity
+    found = _product_identity(product)
+    if found is None:
+        return "unverified"
+    product_family, product_variant = found
+    if product_family.name != query_family.name:
+        return None
+    if requested_variant is None:
+        return "compatible" if product_variant in query_family.generic_variants else "unverified"
+    if product_variant == requested_variant:
+        return "compatible"
+    if product_variant == "unspecified":
+        return "unverified"
+    return None
+
+
+def _product_matches_ingredient(query: str, product: ProviderProduct) -> bool:
+    return _identity_status(query, product) == "compatible"
+
+
 def _bokmal_ingredient_query(query: str) -> str | None:
     """Translate known food terms and common form qualifiers for Oda search."""
-    if re.search(r"\bcoffee[\s-]*mate\b", query, re.I):
+    if _EXPLICIT_MANUAL_INTENT.search(query) or re.search(r"\bcoffee[\s-]*mate\b", query, re.I):
         return None
+    cleaned = _clean_ingredient_query(query)
+    identity_match = _QUERY_IDENTITY_PATTERN.search(cleaned)
+    identity = _query_identity(cleaned)
+    if identity_match is not None and identity is None:
+        return None
+    if identity_match is not None and identity is not None:
+        localized = identity[2]
+        if localized:
+            translated = (
+                cleaned[: identity_match.start()] + localized + cleaned[identity_match.end() :]
+            )
+            translated = _QUALIFIER_WORDS.sub(
+                lambda match: _BOKMAL_QUALIFIERS[match.group(0).casefold()], translated
+            )
+            translated = " ".join(translated.split())
+            trailing_qualifier = _TRAILING_FORM_QUALIFIER.fullmatch(translated)
+            if trailing_qualifier:
+                translated = f"{trailing_qualifier.group(2)} {trailing_qualifier.group(1)}"
+            return translated
     translated, count = _INGREDIENT_PHRASES.subn(
-        lambda match: _BOKMAL_INGREDIENTS[match.group(0).casefold()], query
+        lambda match: _LEGACY_SEARCH_EXPANSIONS[match.group(0).casefold()], cleaned
     )
     if not count:
         return None
@@ -175,6 +641,7 @@ class BasketCandidate(BaseModel):
     pack_metadata_status: Literal["unknown", "unverified"] = "unknown"
     match_query: str
     match_reason: str
+    identity_status: Literal["compatible", "unverified"] = "unverified"
     recommended_packages: int | None = Field(default=None, gt=0)
     recommended_fulfillment_quantity: Decimal | None = Field(
         default=None, ge=0, allow_inf_nan=False
@@ -194,6 +661,7 @@ class ProviderProduct(BaseModel):
     unit_price: str | None = None
     unit_name: str | None = None
     available: bool | None = None
+    identity_status: Literal["compatible", "unverified"] = "unverified"
 
 
 class ProviderSearchGroup(BaseModel):
@@ -279,35 +747,6 @@ class OdaSearchAdapter:
                 ],
             )
 
-        def product_is_mismatch(query: str, product: ProviderProduct) -> bool:
-            normalized = " ".join(query.casefold().split())
-            text = " ".join((product.name, product.description, product.brand or "")).casefold()
-            coffee_need = (
-                re.search(r"\b(?:coffee|kaffe)\b", normalized) is not None
-                and re.search(r"\bcoffee[\s-]*mate\b", normalized) is None
-            )
-            tomato_need = re.search(r"\b(?:tomato(?:es)?|tomat(?:er)?)\b", normalized) is not None
-            tomato_paste_need = re.search(r"\b(?:paste|pur[eé]e|pur[eé])\b", normalized) is not None
-            if coffee_need:
-                return (
-                    re.search(
-                        r"\bcoffee[\s-]*mate\b|\bkaffe(?:\w*)fløte\b|\bkaffemelk\b|\bkaffekrem\b",
-                        text,
-                    )
-                    is not None
-                    or re.search(r"coffee|kaffe\w*", text) is None
-                )
-            if tomato_need and not tomato_paste_need:
-                return (
-                    re.search(
-                        r"\b(?:tomato\s+(?:paste|pur[eé]e)|tomatpur[eé]|tomatkonsentrat)\b",
-                        text,
-                    )
-                    is not None
-                    or re.search(r"(?:tomato|tomat)\w*", text) is None
-                )
-            return False
-
         result = []
         for query in queries:
             product_map = OrderedDict()
@@ -319,8 +758,12 @@ class OdaSearchAdapter:
                 group_has_more, group_products = group
                 has_more = has_more or group_has_more
                 for product in group_products:
-                    if not product_is_mismatch(query, product):
-                        product_map.setdefault((product.provider, product.product_id), product)
+                    identity_status = _identity_status(query, product)
+                    if identity_status is not None:
+                        product_map.setdefault(
+                            (product.provider, product.product_id),
+                            product.model_copy(update={"identity_status": identity_status}),
+                        )
             result.append(
                 ProviderSearchGroup(
                     query=query,
@@ -700,9 +1143,11 @@ class BasketMatchingService:
                         available=product.available,
                         match_query=group.query,
                         match_reason=(
-                            f"Returned by {product.provider} product search for the need name "
+                            f"{'Identity compatible' if product.identity_status == 'compatible' else 'Identity unverified; explicit confirmation required'}; "
+                            f"returned by {product.provider} product search for the need name "
                             f"'{group.query}'."
                         ),
+                        identity_status=product.identity_status,
                     )
                     for product in group.products[:size]
                 ]

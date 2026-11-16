@@ -44,6 +44,7 @@ class BasketBatchSelectionInput(BaseModel):
     need_id: UUID
     candidate_id: str = Field(min_length=1, max_length=200)
     packages: int = Field(gt=0, le=99)
+    confirm_identity: bool = False
 
 
 class BasketBatchSelectionInputEnvelope(BaseModel):
@@ -426,9 +427,21 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
             raise ValueError("Select at most one product for each purchase need")
         if len(set(references)) != len(references):
             raise ValueError("Do not select a product more than once for a need")
-        resolved = await features.basket_jobs.resolve_batch_candidates(
-            actor_id, data.job_id, data.start, data.end, references
-        )
+        identity_confirmations = {
+            (item.need_id, item.candidate_id) for item in data.selections if item.confirm_identity
+        }
+        resolve = features.basket_jobs.resolve_batch_candidates
+        if identity_confirmations:
+            resolved = await resolve(
+                actor_id,
+                data.job_id,
+                data.start,
+                data.end,
+                references,
+                identity_confirmations=identity_confirmations,
+            )
+        else:
+            resolved = await resolve(actor_id, data.job_id, data.start, data.end, references)
         selections = []
         evidence = {}
         for item in data.selections:

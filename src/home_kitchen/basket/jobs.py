@@ -226,8 +226,12 @@ class BasketMatchJobs:
         start: date,
         end: date,
         references: list[tuple[UUID, str]],
+        identity_confirmations: set[tuple[UUID, str]] | frozenset[tuple[UUID, str]] = frozenset(),
     ) -> dict[tuple[UUID, str], tuple[NeedMatchResult, BasketCandidate, datetime]]:
         """Resolve only current, actor-owned candidates from a completed search snapshot."""
+        reference_set = set(references)
+        if not set(identity_confirmations) <= reference_set:
+            raise ValueError("Identity confirmation must name a selected candidate for its need.")
         self._actor(actor)
         job = self._jobs.get(job_id)
         if job is None or job.actor != actor:
@@ -260,6 +264,13 @@ class BasketMatchJobs:
             if need is None or candidate is None or need.status != "matched":
                 raise ValueError(
                     "A selected product match is stale or unavailable. Refresh matches."
+                )
+            if (
+                candidate.identity_status != "compatible"
+                and (need_id, candidate_id) not in identity_confirmations
+            ):
+                raise ValueError(
+                    "Product identity is unverified. Confirm this exact candidate for this need."
                 )
             resolved[(need_id, candidate_id)] = (
                 need.model_copy(deep=True),

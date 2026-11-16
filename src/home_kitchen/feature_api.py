@@ -15,6 +15,14 @@ from home_kitchen.basket import BasketReview, ProductSnapshot, SelectedProduct
 from home_kitchen.basket.jobs import BasketMatchJob
 from home_kitchen.basket.matching import BasketMatchResult
 from home_kitchen.basket.repository import BasketService
+from home_kitchen.catalogue.identity import (
+    AliasInput,
+    AliasResolution,
+    CanonicalProduct,
+    CanonicalUnit,
+    ProductIdentityCreate,
+    UnitIdentityCreate,
+)
 from home_kitchen.catalogue.models import FoodCatalogueItem
 from home_kitchen.catalogue.sku_models import RetailerProductOption, RetailerProductSnapshot
 from home_kitchen.features import KitchenFeatures
@@ -85,6 +93,7 @@ class BasketBatchSelection(BaseModel):
     need_id: UUID
     candidate_id: str = Field(min_length=1, max_length=200)
     packages: int = Field(gt=0, le=99)
+    confirm_identity: bool = False
 
 
 class BasketBatchSelectionRequest(BaseModel):
@@ -320,6 +329,43 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
         response.headers["Cache-Control"] = "no-store"
         return features.catalogue_skus.list_options(features.household_id, food_id)
 
+    @router.post("/catalogue/identities/products", status_code=201)
+    def create_canonical_product(data: ProductIdentityCreate) -> CanonicalProduct:
+        return features.catalogue_identities.create_product(data.canonical_name, data.variant)
+
+    @router.post("/catalogue/identities/units", status_code=201)
+    def create_canonical_unit(data: UnitIdentityCreate) -> CanonicalUnit:
+        return features.catalogue_identities.create_unit(data.canonical_name)
+
+    @router.get("/catalogue/aliases/{kind}")
+    def resolve_canonical_alias(
+        kind: str,
+        alias: str = Query(min_length=1, max_length=200),
+        locale: str = Query(min_length=2, max_length=20),
+        context: str = Query(default="", max_length=100),
+    ) -> AliasResolution:
+        if kind not in {"product", "unit"}:
+            raise HTTPException(404, "Unknown identity kind")
+        return features.catalogue_identities.resolve(kind, locale, context, alias)
+
+    @router.post("/catalogue/aliases/{kind}/{identity_id}", status_code=201)
+    def add_canonical_alias(kind: str, identity_id: UUID, data: AliasInput) -> Response:
+        if kind not in {"product", "unit"}:
+            raise HTTPException(404, "Unknown identity kind")
+        features.catalogue_identities.add_alias(
+            kind, data.locale, data.context, data.alias, identity_id
+        )
+        return Response(status_code=201)
+
+    @router.put("/catalogue/aliases/{kind}/{identity_id}/review")
+    def correct_canonical_alias(kind: str, identity_id: UUID, data: AliasInput) -> Response:
+        if kind not in {"product", "unit"}:
+            raise HTTPException(404, "Unknown identity kind")
+        features.catalogue_identities.correct_alias(
+            kind, data.locale, data.context, data.alias, identity_id
+        )
+        return Response(status_code=204)
+
     @router.post("/catalogue/foods/{food_id}/products", status_code=201)
     def remember_food_product(
         food_id: UUID, data: RetailerProductSnapshot, request: Request
@@ -471,9 +517,23 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
         if len(set(references)) != len(references):
             raise HTTPException(422, "Do not select a product more than once for a need")
         try:
-            resolved = await features.basket_jobs.resolve_batch_candidates(
-                actor, data.job_id, data.start, data.end, references
-            )
+            identity_confirmations = {
+                (item.need_id, item.candidate_id)
+                for item in data.selections
+                if item.confirm_identity
+            }
+            resolve = features.basket_jobs.resolve_batch_candidates
+            if identity_confirmations:
+                resolved = await resolve(
+                    actor,
+                    data.job_id,
+                    data.start,
+                    data.end,
+                    references,
+                    identity_confirmations=identity_confirmations,
+                )
+            else:
+                resolved = await resolve(actor, data.job_id, data.start, data.end, references)
             selections = []
             evidence = {}
             for item in data.selections:

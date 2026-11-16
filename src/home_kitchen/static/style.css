@@ -797,6 +797,54 @@ h3 {
 .connection-actions {
   margin-top: 8px;
 }
+.connector-guided-flow {
+  display: grid;
+  gap: 14px;
+  margin: 10px 0;
+}
+.connector-step {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px;
+  background: var(--card);
+}
+.connector-step h3 {
+  margin: 0 0 6px;
+  font-size: 15px;
+  font-weight: 650;
+}
+.connector-step p {
+  margin: 4px 0 10px;
+  line-height: 1.45;
+}
+.connector-security-note {
+  font-size: 13px;
+  line-height: 1.5;
+  background: #f4f6f3;
+  border-left: 4px solid var(--green, #2b593f);
+  padding: 10px 14px;
+  border-radius: 6px;
+  margin: 8px 0 14px;
+}
+.connector-manual-details {
+  margin-top: 16px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+.connector-manual-details > summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--muted, #626a5d);
+  padding: 4px 0;
+  user-select: none;
+}
+.connector-manual-details > summary:hover {
+  color: var(--text, #1e261f);
+}
+.connector-manual-details[open] > summary {
+  margin-bottom: 12px;
+}
 .category-order-settings {
   margin-top: 24px;
   padding-top: 18px;

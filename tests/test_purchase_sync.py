@@ -167,6 +167,27 @@ def test_stale_page_cannot_regress_newer_checkpoint(engine):
     assert count_sources(engine) == 0
 
 
+def test_repeated_prior_continuation_cursor_does_not_persist_page(engine):
+    adapter = PagedAdapter(
+        {
+            None: page([record("o1", "r1")], "page-2", True),
+            "page-2": page([record("o2", "r1")], "page-3", True),
+            "page-3": page([record("o3", "r1")], "page-2", True),
+        }
+    )
+
+    with pytest.raises(ValueError, match="repeated continuation cursor"):
+        sync_account(engine, "provider-a", "account-a", adapter)
+
+    assert adapter.calls == [
+        ("account-a", None),
+        ("account-a", "page-2"),
+        ("account-a", "page-3"),
+    ]
+    assert checkpoint(engine, "provider-a", "account-a") == "page-3"
+    assert count_sources(engine) == 2
+
+
 @pytest.mark.parametrize("external_id", ["", "   "])
 def test_rejects_malformed_external_identity(external_id):
     with pytest.raises(ValidationError):
@@ -193,3 +214,14 @@ def test_rejects_malformed_provider_account_identity(engine, provider, account_i
             page([], "cursor", False),
             expected_cursor=None,
         )
+
+
+def test_provider_without_source_timestamp_can_replay_but_cannot_invent_one(engine):
+    observed = ProviderOrderRecord(external_id="o1", revision_id="r1", payload={"source": "raw"})
+    persist_page(engine, "oda", "alice", page([observed], "c1", False), expected_cursor=None)
+    persist_page(engine, "oda", "alice", page([observed], "c2", False), expected_cursor="c1")
+    assert count_sources(engine) == 1
+    invented = observed.model_copy(update={"source_updated_at": datetime(2026, 1, 1, tzinfo=UTC)})
+    with pytest.raises(RevisionConflict):
+        persist_page(engine, "oda", "alice", page([invented], "c3", False), expected_cursor="c2")
+    assert checkpoint(engine, "oda", "alice") == "c2"

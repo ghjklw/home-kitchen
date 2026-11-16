@@ -65,7 +65,10 @@ window.KitchenTripCompletion = {
   purchaseSourceField(kind) {
     return kind === "meal" ? "close_meal_ids" : kind === "capture" ? "close_capture_ids" : kind === "regular" ? "regular_ids" : null;
   },
-  exactProductPurchase(line, selectionIndex, packageCount) {
+  exactProductPurchase(line, selectionValue, packageCount) {
+    if (selectionValue === "" || selectionValue === null || selectionValue === undefined) return null;
+    const selectionIndex = Number(selectionValue);
+    if (!Number.isInteger(selectionIndex) || selectionIndex < 0) return null;
     const selection = line?.selected_products?.[selectionIndex];
     const packages = Number(packageCount);
     if (!selection || !Number.isInteger(packages) || packages < 1 || packages > 99) return null;
@@ -3284,7 +3287,7 @@ function renderTripCompletion(main) {
       if (bought.checked) {
         const purchase = { need_id: line.id };
         if (exact.checked) {
-          const product = window.KitchenTripCompletion.exactProductPurchase(line, Number(productSelect.value), packCount.value);
+          const product = window.KitchenTripCompletion.exactProductPurchase(line, productSelect.value, packCount.value);
           if (!product) { notify(`Velg et vist produkt og skriv inn antall pakker for ${line.name}.`, true); return; }
           purchase.product = product;
         } else if (quantity.value.trim() || unit.value.trim() !== (line.unit || "")) {

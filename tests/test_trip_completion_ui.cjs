@@ -22,6 +22,7 @@ test("exact product purchase requires a product from this reviewed line and expl
   assert.deepEqual({ ...completion.exactProductPurchase(line, 0, "3") }, {
     provider: "oda", product_id: "p-1", packages: 3,
   });
+  assert.equal(completion.exactProductPurchase(line, "", "3"), null);
   assert.equal(completion.exactProductPurchase(line, 1, "3"), null);
   assert.equal(completion.exactProductPurchase(line, 0, ""), null);
   assert.equal(completion.exactProductPurchase(line, 0, "1.5"), null);

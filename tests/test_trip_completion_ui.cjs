@@ -69,11 +69,13 @@ function makeLine(id, name, unit, kind) {
     source_quantities: [{ kind, source_id: `source-${id}`, quantity: "4", unit }],
   };
 }
-function renderCompletion({ lines, retry = null, oda = null, api, refreshView = async () => {}, notices = [] }) {
+function renderCompletion({ lines, meals = [], recipes = [], retry = null, oda = null, api, refreshView = async () => {}, notices = [] }) {
   let idempotencyCounter = 0;
   const state = {
     tripCompletionReview: { review_token: "review-1", start: "2026-11-16", end: "2026-11-22", lines },
     tripCompletionRetry: retry,
+    meals,
+    recipes,
     oda,
   };
   const main = new DomNode("main");
@@ -171,7 +173,7 @@ test("exact-product controls require evidence but retained choices remain availa
   labeled(offlineWithSelection, "Velg vist produkt for Yoghurt").value = "0";
   labeled(offlineWithSelection, "Antall pakker kjøpt: Yoghurt").value = "2";
   const sourceRow = offlineWithSelection.nodes.find((node) =>
-    node.tagName === "label" && node.children.some((child) => child.textContent.includes("Lukk måltidsbehov · 4 g")),
+    node.tagName === "label" && node.children.some((child) => child.textContent.includes("Lukk måltidsbehov") && child.textContent.includes("4 g")),
   );
   assert.ok(sourceRow);
   sourceRow.children[0].checked = true;
@@ -190,11 +192,11 @@ test("unknown actual quantities stay null for g/ml/item purchases and closures s
   for (const line of lines.slice(0, 3)) {
     labeled(ui, `Registrer faktisk kjøp: ${line.name}`).checked = true;
     const sourceLabel = line.source_quantities[0].kind === "meal" ? "måltidsbehov" : line.source_quantities[0].kind === "capture" ? "hurtigtillegg" : "fast vare";
-    const sourceRow = ui.nodes.find((node) => node.tagName === "label" && node.children.some((child) => child.textContent.includes(`Lukk ${sourceLabel} · 4 ${line.unit}`)));
+    const sourceRow = ui.nodes.find((node) => node.tagName === "label" && node.children.some((child) => child.textContent.includes(`Lukk ${sourceLabel}`) && child.textContent.includes(`4 ${line.unit}`)));
     assert.ok(sourceRow);
     sourceRow.children[0].checked = true;
   }
-  const closeInput = ui.nodes.filter((node) => node.tagName === "label" && node.children.some((child) => child.textContent.includes("Lukk måltidsbehov · 4 g"))).at(-1)?.children[0];
+  const closeInput = ui.nodes.filter((node) => node.tagName === "label" && node.children.some((child) => child.textContent.includes("Lukk måltidsbehov") && child.textContent.includes("4 g"))).at(-1)?.children[0];
   assert.ok(closeInput);
   closeInput.checked = true;
   const reason = ui.nodes.filter((node) => node.tagName === "select" && node.children.some((child) => child.value === "unavailable")).at(-1);
@@ -214,6 +216,33 @@ test("unknown actual quantities stay null for g/ml/item purchases and closures s
     assert.equal(Object.hasOwn(purchase, "quantity"), false);
     assert.equal(Object.hasOwn(purchase, "unit"), false);
   }
+});
+
+test("source closure choices are collapsed and identify meal date and recipe", () => {
+  const line = {
+    ...makeLine("need-g", "Mel", "g", "meal"),
+    source_quantities: [
+      { kind: "meal", source_id: "meal-a", quantity: "4", unit: "g" },
+      { kind: "meal", source_id: "meal-b", quantity: "4", unit: "g" },
+    ],
+  };
+  const ui = renderCompletion({
+    lines: [line],
+    meals: [
+      { id: "meal-a", recipe_id: "recipe-a", date: "2026-11-17" },
+      { id: "meal-b", recipe_id: "recipe-b", date: "2026-11-18" },
+    ],
+    recipes: [
+      { id: "recipe-a", title: "Tomatsuppe" },
+      { id: "recipe-b", title: "Pastagrateng" },
+    ],
+    api: async () => ({}),
+  });
+  assert.ok(ui.nodes.some((node) => node.tagName === "summary" && node.textContent === "Behovskilder (2)"));
+  assert.ok(ui.nodes.some((node) => node.tagName === "span" && node.textContent.includes("Tomatsuppe · 2026-11-17 · 4 g")));
+  assert.ok(ui.nodes.some((node) => node.tagName === "span" && node.textContent.includes("Pastagrateng · 2026-11-18 · 4 g")));
+  assert.equal(ui.nodes.filter((node) => node.tagName === "input" && node.type === "checkbox").length, 3);
+  assert.ok(ui.nodes.filter((node) => node.tagName === "input" && node.type === "checkbox").every((node) => !node.checked));
 });
 
 test("a definitive 422 clears the invalid retry payload but preserves editable input", async () => {

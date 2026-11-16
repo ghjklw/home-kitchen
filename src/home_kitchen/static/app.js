@@ -295,9 +295,34 @@ function formatUiQuantity(value) {
 function formatUiAccessibleQuantity(value) {
   return window.KitchenShoppingView.formatQuantityForAccessibility(String(value ?? ""));
 }
+function formatUiNeedQuantity(need, accessible = false) {
+  return window.KitchenShoppingView.formatNeedQuantity(
+    need?.quantity,
+    need?.unit,
+    accessible,
+    need?.approximate === true,
+  );
+}
+function formatUiTime(value) {
+  if (typeof value !== "string") return "";
+  const match = /^(\d{2}:\d{2})(?::00)?$/u.exec(value);
+  return match ? match[1] : value;
+}
+function recipeOriginLabel(value) {
+  return ({
+    imported: "en importert oppskrift",
+    manual: "en manuelt oppgitt oppskrift",
+    ai: "en KI-oppskrift",
+    oda: "en Oda-oppskrift",
+  })[value] || value;
+}
 function ingredientQuantityText(item) {
-  const quantity = formatUiQuantity(item.quantity);
-  return [quantity, item.unit, item.name].filter(Boolean).join(" ");
+  const quantity = window.KitchenShoppingView.formatNeedQuantity(
+    item.quantity,
+    item.unit,
+    false,
+  );
+  return [quantity, item.name].filter(Boolean).join(" ");
 }
 function purchaseEstimateText(estimate) {
   if (
@@ -331,7 +356,7 @@ function mealSlotLabel(slot) {
 function mealAgendaMetadata(meal) {
   return [
     meal.label || mealSlotLabel(meal.slot),
-    meal.scheduled_time,
+    formatUiTime(meal.scheduled_time),
     formatServings(meal.servings),
   ]
     .filter(Boolean)
@@ -2958,7 +2983,7 @@ function plannedMealView(view) {
   });
   const provenance = recipe.provenance;
   if (provenance?.original_source)
-    add(body, el("p", "Tilpasset fra " + provenance.original_source + ".", "muted"));
+    add(body, el("p", "Tilpasset fra " + recipeOriginLabel(provenance.original_source) + ".", "muted"));
   if (recipe.source_url) {
     const url = window.KitchenRecipeDiscovery.safeHttpsUrl(recipe.source_url);
     if (url) {
@@ -3032,7 +3057,7 @@ function shoppingOrigins(origins = []) {
   return [...labels].join(", ");
 }
 function categoryLabel(category) {
-  return category === "Other" || !category ? "Annet" : category;
+  return window.KitchenShoppingView.categoryLabel(category);
 }
 function shoppingSections() {
   const nav = el("div", null, "section-tabs");
@@ -3358,20 +3383,39 @@ function renderTripCompletion(main) {
       add(section, el("p", explanation, "muted"));
     }
     const sourceChecks = [];
-    (line.source_quantities || []).forEach((source) => {
-      const input = el("input"); input.type = "checkbox";
-      const label = source.kind === "meal" ? "Lukk måltidsbehov" : source.kind === "capture" ? "Lukk hurtigtillegg" : "Lukk fast vare";
-      add(section, add(el("label"), input, el("span", `${label} · ${formatUiQuantity(source.quantity)} ${source.unit}`)));
-      let regularPurchase = null;
-      if (source.kind === "capture") {
-        const capture = (line.captures || []).find((item) => item.id === source.source_id);
-        if (capture?.regular_id) {
-          regularPurchase = el("input"); regularPurchase.type = "checkbox";
-          add(section, add(el("label"), regularPurchase, el("span", "Oppdater sist kjøpt for den tilknyttede hverdagsvaren")));
+    const sources = line.source_quantities || [];
+    if (sources.length) {
+      const sourceDetails = el("details", null, "trip-source-details");
+      add(sourceDetails, el("summary", `Behovskilder (${sources.length})`));
+      sources.forEach((source) => {
+        const input = el("input"); input.type = "checkbox";
+        const kindLabel = source.kind === "meal" ? "Lukk måltidsbehov" : source.kind === "capture" ? "Lukk hurtigtillegg" : "Lukk fast vare";
+        let context = "";
+        if (source.kind === "meal") {
+          const meal = (state.meals || []).find((item) => item.id === source.source_id);
+          const recipe = meal && (state.recipes || []).find((item) => item.id === meal.recipe_id);
+          const mealLabel = meal?.label || recipe?.title;
+          context = meal ? [mealLabel, meal.date].filter(Boolean).join(" · ") : `Måltid ${String(source.source_id || "").slice(0, 8)}`;
+        } else if (source.kind === "capture") {
+          const capture = (line.captures || []).find((item) => item.id === source.source_id);
+          context = capture?.label || "Hurtigtillegg";
+        } else {
+          context = "Fast vare";
         }
-      }
-      sourceChecks.push({ source, input, regularPurchase });
-    });
+        const detailLabel = `${kindLabel} · ${context} · ${formatUiQuantity(source.quantity)} ${source.unit}`;
+        add(sourceDetails, add(el("label"), input, el("span", detailLabel)));
+        let regularPurchase = null;
+        if (source.kind === "capture") {
+          const capture = (line.captures || []).find((item) => item.id === source.source_id);
+          if (capture?.regular_id) {
+            regularPurchase = el("input"); regularPurchase.type = "checkbox";
+            add(sourceDetails, add(el("label"), regularPurchase, el("span", "Oppdater sist kjøpt for den tilknyttede hverdagsvaren")));
+          }
+        }
+        sourceChecks.push({ source, input, regularPurchase });
+      });
+      add(section, sourceDetails);
+    }
     const reason = el("select");
     [["", "Velg hvorfor dette behovet lukkes"], ["already_have", "Hadde den allerede"], ["not_needed", "Trengte den ikke"], ["unavailable", "Var utilgjengelig"], ["other", "Annet"]].forEach(([value, label]) => reason.append(new Option(label, value)));
     add(section, el("label", "Lukk uten å registrere kjøp"), reason);
@@ -3659,14 +3703,7 @@ function openBasketBatchReview() {
     const section = add(
       el("section", null, "basket-batch-need"),
       el("h3", need.name),
-      el(
-        "p",
-        window.KitchenBasketMatchView.formatNeedQuantity(
-          need,
-          (quantity) => window.KitchenShoppingView.formatQuantityForDisplay(quantity),
-        ) + " å dekke",
-        "muted",
-      ),
+      el("p", formatUiNeedQuantity(need) + " å dekke", "muted"),
     );
     if (saved.length) {
       const current = el("details", null, "basket-batch-existing");
@@ -3693,15 +3730,16 @@ function openBasketBatchReview() {
     const candidates = !state.basketBatchNeedsRefresh && result?.match_job_id === state.basketBatchReviewJobId
       ? result.candidates || []
       : [];
-    candidates.forEach((candidate) => {
+    const eligible = reason ? [] : candidates.filter((candidate) =>
+      candidate.available !== false && basketBatchRecommendation(candidate, need.unit),
+    );
+    const primary = eligible.find((candidate) =>
+      staged?.candidate_id === candidate.id && staged?.match_job_id === state.basketBatchReviewJobId,
+    ) || eligible[0];
+    const renderOption = (candidate) => {
       const card = el("article", null, "basket-batch-option");
       add(card, renderBasketMatchCandidate(candidate, need));
-      const recommendation = basketBatchRecommendation(candidate, need.unit);
-      if (!recommendation || candidate.available === false) {
-        add(card, el("p", candidate.available === false
-          ? "Kan ikke velges samlet: Oda oppgir at varen ikke er tilgjengelig."
-          : "Kan ikke velges samlet fordi pakningsforslaget mangler eller er uklart. Oppdater søket eller hopp over varen uten å angi en mengde her.", "muted"));
-      } else {
+      if (eligible.includes(candidate)) {
         const selected = staged?.candidate_id === candidate.id &&
           staged?.match_job_id === state.basketBatchReviewJobId;
         const select = button(
@@ -3713,8 +3751,24 @@ function openBasketBatchReview() {
         select.disabled = state.basketBatchSaving || state.basketBatchNeedsRefresh;
         add(card, select);
       }
-      add(section, card);
-    });
+      return card;
+    };
+    if (primary) add(section, renderOption(primary));
+    const alternatives = candidates.filter((candidate) => candidate !== primary);
+    if (alternatives.length) {
+      const disclosure = el("details", null, "basket-batch-alternatives");
+      add(
+        disclosure,
+        el(
+          "summary",
+          (primary ? "Flere treff (" : "Vis uavklarte treff (") +
+            formatUiCount(alternatives.length) +
+            ")",
+        ),
+      );
+      alternatives.forEach((candidate) => add(disclosure, renderOption(candidate)));
+      add(section, disclosure);
+    }
     if (staged) {
       const remove = button("Fjern dette forslaget", () => {
         delete state.basketBatchChoices[String(need.id)];
@@ -3762,19 +3816,21 @@ function openBasketBatchReview() {
 function renderBasketBatchReview(main) {
   if (!state.oda?.connected || !state.basketBatchReviewJobId) return;
   const eligibility = state.basketBatchNeedsRefresh
-    ? { safe: 0, skipped: currentBasketMatchNeeds().length }
+    ? { safe: 0, alternatives: 0, skipped: currentBasketMatchNeeds().length }
     : currentBasketMatchNeeds().reduce((summary, need) => {
       const result = state.basketMatchPages[String(need.id)]?.[1];
-      const safe = result?.match_job_id === state.basketBatchReviewJobId
+      const eligible = result?.match_job_id === state.basketBatchReviewJobId && !basketBatchSkipReason(need, result)
         ? (result.candidates || []).filter((candidate) =>
             candidate.available !== false &&
             basketBatchRecommendation(candidate, need.unit),
-          ).length
-        : 0;
-      summary.safe += safe;
-      if (!safe) summary.skipped += 1;
+          )
+        : [];
+      if (eligible.length) {
+        summary.safe += 1;
+        summary.alternatives += eligible.length - 1;
+      } else summary.skipped += 1;
       return summary;
-    }, { safe: 0, skipped: 0 });
+    }, { safe: 0, alternatives: 0, skipped: 0 });
   const panel = add(
     el("section", null, "panel basket-batch-review"),
     el("h2", "Samlet Oda-gjennomgang"),
@@ -3784,7 +3840,9 @@ function renderBasketBatchReview(main) {
       "muted",
     ),
   );
-  add(panel, el("p", formatUiCount(eligibility.safe) + " forslag kan velges samlet · " + formatUiCount(eligibility.skipped) + " varer må stå over eller avklares.", "muted"));
+  add(panel, el("p", formatUiCount(eligibility.safe) + " varer har forslag som kan velges samlet · " + formatUiCount(eligibility.skipped) + " varer må stå over eller avklares.", "muted"));
+  if (eligibility.alternatives)
+    add(panel, el("p", formatUiCount(eligibility.alternatives) + " ekstra valgbare alternativer finnes under «Flere treff».", "muted"));
   if (state.basketBatchSaveError) {
     const error = el("p", state.basketBatchSaveError, "form-error");
     error.setAttribute("role", "alert");
@@ -3805,7 +3863,7 @@ function renderBasketBatchReview(main) {
     ));
   }
   if (!eligibility.safe) {
-    add(panel, el("p", "Ingen forslag kan godkjennes automatisk ennå. Oppdater produkttreffene eller hopp over uavklarte varer.", "muted"));
+    add(panel, el("p", "Ingen varer har forslag som kan velges samlet ennå. Oppdater produkttreffene eller hopp over uavklarte varer.", "muted"));
     if (!state.basketBatchNeedsRefresh)
       add(panel, button(
         state.basketMatchGlobalRefreshing ? "Oppdaterer produkttreff …" : "Oppdater produkttreff",
@@ -3954,7 +4012,7 @@ function renderSingleShoppingList(main) {
     state.recipes,
   );
   for (const [groupName, entries] of groups) {
-    const section = add(el("section", null, "panel category-section actionable-shopping-group"), el("h2", groupName));
+    const section = add(el("section", null, "panel category-section actionable-shopping-group"), el("h2", categoryLabel(groupName)));
     const list = el("ul", null, "list single-shopping-list");
     entries.forEach(({ line, match }) => {
       const row = el("li", null, line.checked ? "completed actionable-shopping-item" : "actionable-shopping-item");
@@ -3978,12 +4036,18 @@ function renderSingleShoppingList(main) {
         }
       });
       const detail = add(el("div", null, "detail"), el("strong", line.name));
-      const amount = window.KitchenBasketMatchView.formatNeedQuantity(
-        { quantity: String(line.to_buy_quantity ?? "0"), unit: line.unit, approximate: line.approximate === true },
-        (quantity) => window.KitchenShoppingView.formatQuantityForDisplay(quantity),
-      );
+      const amount = formatUiNeedQuantity({
+        quantity: line.to_buy_quantity,
+        unit: line.unit,
+        approximate: line.approximate === true,
+      });
       const summary = el("small", amount + " å kjøpe" + (line.category ? " · " + categoryLabel(line.category) : ""));
-      summary.setAttribute("aria-label", (line.approximate ? "Omtrentlig mengde: ca. " : "Nøyaktig mengde: ") + String(line.to_buy_quantity ?? "0") + (line.unit ? " " + line.unit : "") + " å kjøpe");
+      summary.setAttribute(
+        "aria-label",
+        (line.approximate ? "Omtrentlig mengde: " : "Nøyaktig mengde: ") +
+          formatUiNeedQuantity({ quantity: line.to_buy_quantity, unit: line.unit, approximate: line.approximate }, true) +
+          " å kjøpe",
+      );
       add(detail, summary);
       const mealOrigins = window.KitchenShoppingView.mealOriginNames(line.origins, state.meals, state.recipes);
       const extraOrigins = (line.origins || []).filter((origin) => typeof origin === "string" && !origin.startsWith("meal:"));
@@ -4104,22 +4168,15 @@ function renderShopping(main) {
       const required = String(item.required_quantity ?? item.quantity ?? "");
       const available = item.available_quantity == null ? null : String(item.available_quantity);
       const toBuy = String(item.to_buy_quantity ?? item.quantity ?? "0");
-      const formatNeed = (quantity) => window.KitchenShoppingView.formatQuantityForDisplay(quantity);
       const summary = el(
         "small",
-        window.KitchenBasketMatchView.formatNeedQuantity(
-          { quantity: required, unit, approximate: item.approximate === true },
-          formatNeed,
-        ) +
+        formatUiNeedQuantity({ quantity: required, unit, approximate: item.approximate === true }) +
           (available != null
-            ? " · " + window.KitchenShoppingView.formatQuantityForDisplay(available) + " hjemme"
+            ? " · " + formatUiQuantity(available) + " " + window.KitchenShoppingView.displayUnit(unit, false, available) + " hjemme"
             : "") +
           " · " +
           (window.KitchenShoppingView.isPositiveDecimal(toBuy)
-            ? window.KitchenBasketMatchView.formatNeedQuantity(
-                { quantity: toBuy, unit, approximate: item.approximate === true },
-                formatNeed,
-              ) + " å kjøpe"
+            ? formatUiNeedQuantity({ quantity: toBuy, unit, approximate: item.approximate === true }) + " å kjøpe"
             : "dekket hjemme") +
           " · " +
           categoryLabel(item.category) +
@@ -4127,17 +4184,11 @@ function renderShopping(main) {
       );
       summary.setAttribute(
         "aria-label",
-        window.KitchenBasketMatchView.formatNeedQuantity(
-          { quantity: required, unit, approximate: item.approximate === true },
-          formatNeed,
-        ) +
+        formatUiNeedQuantity({ quantity: required, unit, approximate: item.approximate === true }, true) +
           " nødvendig" +
-          (available != null ? "; " + formatUiAccessibleQuantity(available) + " " + unit + " hjemme" : "") +
+          (available != null ? "; " + formatUiAccessibleQuantity(available) + " " + window.KitchenShoppingView.displayUnit(unit, true, available) + " hjemme" : "") +
           "; " +
-          window.KitchenBasketMatchView.formatNeedQuantity(
-            { quantity: toBuy, unit, approximate: item.approximate === true },
-            formatNeed,
-          ) +
+          formatUiNeedQuantity({ quantity: toBuy, unit, approximate: item.approximate === true }, true) +
           " å kjøpe",
       );
       const detail = add(el("div", null, "detail"), el("strong", item.name), summary);
@@ -5221,7 +5272,17 @@ function renderBasketMatchNeed(need) {
     add(panel, errorText);
   } else if (result) {
     add(panel, el("p", window.KitchenBasketMatchView.statusLabel(result.status), "muted"));
-    if (result.detail) add(panel, el("p", result.detail, "muted"));
+    if (result.detail)
+      add(
+        panel,
+        el(
+          "p",
+          result.detail === "More provider results are available on the next page."
+            ? "Flere treff fra leverandøren er tilgjengelige på neste side."
+            : result.detail,
+          "muted",
+        ),
+      );
   } else {
     add(panel, el("p", "Venter på automatisk produktsøk …", "muted"));
   }
@@ -5286,7 +5347,7 @@ function renderBasketMatchCandidate(candidate, need) {
         "small",
         "Foreslått " + formatUiCount(candidate.recommended_packages) + " pakker · " +
           window.KitchenShoppingView.formatQuantityForDisplay(String(candidate.recommended_fulfillment_quantity)) +
-          " " + need.unit + " totalt",
+          " " + window.KitchenShoppingView.displayUnit(need.unit, false, candidate.recommended_fulfillment_quantity) + " totalt",
         "muted",
       ),
     );
@@ -5541,19 +5602,11 @@ function renderBasket(main) {
     const need = entry.need || {};
     const section = el("section", null, "panel need-card");
     const heading = el("div", null, "need-heading");
-    const needQuantity = el(
-      "p",
-      window.KitchenBasketMatchView.formatNeedQuantity(
-        need,
-        (quantity) => window.KitchenShoppingView.formatQuantityForDisplay(String(quantity ?? "")),
-      ),
-      "need-quantity",
-    );
+    const needQuantity = el("p", formatUiNeedQuantity(need), "need-quantity");
     needQuantity.setAttribute(
       "aria-label",
-      (need.approximate === true ? "Omtrentlig mengde: ca. " : "Nøyaktig mengde: ") +
-        String(need.quantity ?? "") +
-        (need.unit ? " " + need.unit : ""),
+      (need.approximate === true ? "Omtrentlig mengde: " : "Nøyaktig mengde: ") +
+        formatUiNeedQuantity(need, true),
     );
     add(
       heading,
@@ -6085,8 +6138,8 @@ function renderSettings(main) {
   preferences.input.rows = 3;
   let nextCategoryKey = 0;
   let categoryRows = (household.shopping_category_order || []).map((value) => ({
+    ...window.KitchenSettingsView.createShoppingCategoryRow(value, categoryLabel),
     key: String(nextCategoryKey++),
-    value,
   }));
   const categoryEditor = add(
     el("section", null, "category-order-settings"),
@@ -6107,29 +6160,34 @@ function renderSettings(main) {
       const input = el("input");
       input.type = "text";
       input.maxLength = 100;
-      input.value = row.value;
+      input.value = row.displayValue;
       input.setAttribute("aria-label", "Kategori på plass " + formatUiCount(index + 1));
       input.dataset.focusKey = "shopping-category-" + row.key;
-      input.addEventListener("input", () => { row.value = input.value; });
+      input.addEventListener("input", () => {
+        Object.assign(
+          row,
+          window.KitchenSettingsView.editShoppingCategoryRow(row, input.value, categoryLabel),
+        );
+      });
       const moveUp = button("Flytt opp", () => {
         categoryRows = window.KitchenSettingsView.moveShoppingCategory(categoryRows, index, index - 1);
         renderCategoryRows("shopping-category-" + row.key);
       }, "quiet category-order-move");
       moveUp.disabled = index === 0;
-      moveUp.setAttribute("aria-label", "Flytt " + row.value + " opp");
+      moveUp.setAttribute("aria-label", "Flytt " + row.displayValue + " opp");
       const moveDown = button("Flytt ned", () => {
         categoryRows = window.KitchenSettingsView.moveShoppingCategory(categoryRows, index, index + 1);
         renderCategoryRows("shopping-category-" + row.key);
       }, "quiet category-order-move");
       moveDown.disabled = index === categoryRows.length - 1;
-      moveDown.setAttribute("aria-label", "Flytt " + row.value + " ned");
+      moveDown.setAttribute("aria-label", "Flytt " + row.displayValue + " ned");
       const remove = button("Fjern", () => {
         categoryRows = categoryRows.filter((category) => category.key !== row.key);
         const next = categoryRows[Math.min(index, categoryRows.length - 1)];
         renderCategoryRows(next ? "shopping-category-" + next.key : null);
         if (!next) categoryEntry.input.focus();
       }, "quiet category-order-remove");
-      remove.setAttribute("aria-label", "Fjern " + row.value);
+      remove.setAttribute("aria-label", "Fjern " + row.displayValue);
       add(item, input, moveUp, moveDown, remove);
       categoryList.append(item);
     });
@@ -6137,7 +6195,7 @@ function renderSettings(main) {
       categoryList.querySelector('[data-focus-key="' + focusKey + '"]')?.focus({ preventScroll: true });
   };
   renderCategoryRows();
-  const categoryEntry = field("Legg til en kategori", "text", "", "For eksempel: Bakery eller Household.");
+  const categoryEntry = field("Legg til en kategori", "text", "", "For eksempel: Bakeri eller Husholdning.");
   categoryEntry.input.maxLength = 100;
   categoryEntry.input.dataset.focusKey = "new-shopping-category";
   const categoryError = el("p", "", "form-error");
@@ -6161,12 +6219,19 @@ function renderSettings(main) {
       categoryError.textContent = "Du kan legge til opptil 64 kategorier.";
       return;
     }
-    if (normalized.error === "duplicate" || normalized.value?.some((category) => category.toLowerCase() === value.toLowerCase())) {
+    if (
+      normalized.error === "duplicate" ||
+      categoryRows.some((row) => row.displayValue.toLowerCase() === value.toLowerCase()) ||
+      normalized.value?.some((category) => category.toLowerCase() === value.toLowerCase())
+    ) {
       categoryError.textContent = "Hver kategori må ha et unikt navn.";
       categoryEntry.input.focus();
       return;
     }
-    categoryRows.push({ key: String(nextCategoryKey++), value });
+    categoryRows.push({
+      ...window.KitchenSettingsView.createShoppingCategoryRow(value, (entry) => entry),
+      key: String(nextCategoryKey++),
+    });
     categoryEntry.input.value = "";
     categoryError.textContent = "";
     renderCategoryRows();
@@ -6180,8 +6245,8 @@ function renderSettings(main) {
   });
   const restoreDefaults = button("Gjenopprett anbefalt rekkefølge", () => {
     categoryRows = window.KitchenSettingsView.DEFAULT_SHOPPING_CATEGORY_ORDER.map((value) => ({
+      ...window.KitchenSettingsView.createShoppingCategoryRow(value, categoryLabel),
       key: String(nextCategoryKey++),
-      value,
     }));
     categoryError.textContent = "";
     renderCategoryRows();

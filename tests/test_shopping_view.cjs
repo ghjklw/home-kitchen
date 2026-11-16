@@ -6,6 +6,9 @@ const {
   actionableGroups,
   formatQuantityForDisplay,
   formatQuantityForAccessibility,
+  displayUnit,
+  formatNeedQuantity,
+  categoryLabel,
   formatQuantityMentions,
   groupedByCategory,
   hasSelectedProducts,
@@ -143,6 +146,24 @@ test("formats accessible quantities compactly without hiding small positive amou
   assert.equal(formatQuantityForAccessibility("1E+3"), "1000");
   assert.equal(formatQuantityForAccessibility("0.0001"), "<0,01");
   assert.equal(formatQuantityForAccessibility("not-a-number"), "not-a-number");
+});
+
+test("formats shopping amounts and units for Bokmål without changing source values", () => {
+  assert.equal(formatNeedQuantity("249.999999999999999999", "ml"), "250 ml");
+  assert.equal(formatNeedQuantity("2", "tsp"), "2 ts");
+  assert.equal(formatNeedQuantity("1", "tbsp", true), "1 spiseskje");
+  assert.equal(formatNeedQuantity("2", "item", true), "2 stykk");
+  assert.equal(formatNeedQuantity("3", "stk"), "3 stk.");
+  assert.equal(formatNeedQuantity(null, "g"), "g");
+  assert.equal(displayUnit("unmapped-source-unit"), "unmapped-source-unit");
+});
+
+test("localizes canonical category headings while retaining custom labels", () => {
+  assert.equal(categoryLabel("Produce"), "Frukt og grønt");
+  assert.equal(categoryLabel("Dairy"), "Meieri");
+  assert.equal(categoryLabel("Dairy & Eggs"), "Meieri og egg");
+  assert.equal(categoryLabel("Baking"), "Bakevarer");
+  assert.equal(categoryLabel("Kjøkkenfavoritter"), "Kjøkkenfavoritter");
 });
 
 test("detects positive decimal text without floating-point coercion", () => {

@@ -66,6 +66,9 @@ function renderFixture(overrides = {}) {
     add: (parent, ...children) => { children.filter(Boolean).forEach((child) => parent.append(child)); return parent; },
     button: (text, action, className = "") => { const node = new Node("button", text, className); node.action = action; return node; },
     formatUiCount: String,
+    formatUiNeedQuantity: (need, accessible = false) => shoppingView.formatNeedQuantity(
+      need?.quantity, need?.unit, accessible, need?.approximate === true,
+    ),
     dateLabel: () => "16. nov.",
     day: () => new Date("2026-11-16T00:00:00"),
     notify: () => {},

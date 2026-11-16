@@ -100,6 +100,70 @@
     return formatQuantityForDisplay(value);
   }
 
+  function unitIsOne(quantity) {
+    return /^1(?:\.0+)?$/u.test(normalizeDecimalText(String(quantity ?? "")) || "");
+  }
+
+  function displayUnit(unit, accessible = false, quantity = "") {
+    const value = String(unit ?? "").trim();
+    const key = value.toLowerCase();
+    const singular = unitIsOne(quantity);
+    const display = {
+      item: ["stk.", "stykk"],
+      items: ["stk.", "stykk"],
+      pc: ["stk.", "stykk"],
+      pcs: ["stk.", "stykk"],
+      stk: ["stk.", "stykk"],
+      "stk.": ["stk.", "stykk"],
+      tsp: ["ts", singular ? "teskje" : "teskjeer"],
+      teaspoon: ["ts", singular ? "teskje" : "teskjeer"],
+      teaspoons: ["ts", "teskjeer"],
+      tbsp: ["ss", singular ? "spiseskje" : "spiseskjeer"],
+      tablespoon: ["ss", singular ? "spiseskje" : "spiseskjeer"],
+      tablespoons: ["ss", "spiseskjeer"],
+      pack: [singular ? "pakke" : "pakker", singular ? "pakke" : "pakker"],
+      packs: ["pakker", "pakker"],
+      g: ["g", "gram"],
+      kg: ["kg", "kilogram"],
+      mg: ["mg", "milligram"],
+      ml: ["ml", "milliliter"],
+      cl: ["cl", "centiliter"],
+      dl: ["dl", "desiliter"],
+      l: ["l", "liter"],
+    }[key];
+    return display ? display[accessible ? 1 : 0] : value;
+  }
+
+  function formatNeedQuantity(quantity, unit, accessible = false, approximate = false) {
+    const formatter = accessible ? formatQuantityForAccessibility : formatQuantityForDisplay;
+    const amount = quantity == null || quantity === "" ? "" : formatter(String(quantity));
+    const prefix = approximate ? "ca. " : "";
+    return [amount ? prefix + amount : "", displayUnit(unit, accessible, quantity)]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  function categoryLabel(category) {
+    const value = String(category ?? "").trim();
+    return ({
+      Produce: "Frukt og grønt",
+      Bakery: "Bakeri",
+      Meat: "Kjøtt",
+      Seafood: "Sjømat",
+      Fish: "Fisk",
+      Dairy: "Meieri",
+      "Dairy & Eggs": "Meieri og egg",
+      Chilled: "Kjølevarer",
+      Pantry: "Tørrvarer",
+      Baking: "Bakevarer",
+      Spices: "Krydder",
+      Drinks: "Drikke",
+      Household: "Husholdning",
+      Frozen: "Frysevarer",
+      Other: "Annet",
+    })[value] || value || "Annet";
+  }
+
   function isPositiveDecimal(value) {
     const text = normalizeDecimalText(value);
     return text != null && /[1-9]/u.test(text.replace(".", ""));
@@ -194,6 +258,9 @@
     basketPriceSummary,
     formatQuantityForDisplay,
     formatQuantityForAccessibility,
+    displayUnit,
+    formatNeedQuantity,
+    categoryLabel,
     formatQuantityMentions,
     groupedByCategory,
     hasSelectedProducts,

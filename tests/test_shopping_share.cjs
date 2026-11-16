@@ -19,7 +19,7 @@ test("formats a date-titled remaining list with category headings and exact deci
 
   assert.equal(
     text,
-      "Kitchen shopping list · Nov 16–22, 2026\n\nProduce:\n  - Carrots — 0,13 kg",
+      "Kitchen shopping list · Nov 16–22, 2026\n\nFrukt og grønt:\n  - Carrots — 0,13 kg",
   );
 });
 
@@ -38,7 +38,7 @@ test("accepts canonical exponential decimals from the backend for remaining line
   const text = formatRemainingShoppingText("Week", [
     { name: "Milk", category: "Dairy", to_buy_quantity: "1E+3", unit: "ml" },
   ]);
-  assert.equal(text, "Week\n\nDairy:\n  - Milk — 1000 ml");
+  assert.equal(text, "Week\n\nMeieri:\n  - Milk — 1000 ml");
 });
 
 test("uses a configured category order and readable decimal amounts", () => {
@@ -50,7 +50,7 @@ test("uses a configured category order and readable decimal amounts", () => {
 
   assert.equal(
     text,
-    "Week\n\nProduce:\n  - Apples — 10,25 item\n  - zucchini — 1,5 kg\n\nPantry:\n  - Oats — 2 bag",
+    "Week\n\nFrukt og grønt:\n  - Apples — 10,25 stk.\n  - zucchini — 1,5 kg\n\nTørrvarer:\n  - Oats — 2 bag",
   );
 });
 

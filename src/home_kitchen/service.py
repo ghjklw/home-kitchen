@@ -113,7 +113,7 @@ class KitchenService:
                 for field in omitted_identity_fields:
                     values[field] = prior.get(field)
             source_key = source_signature(values)
-            source_expression_unchanged = (
+            source_expression_unchanged = unchanged_and_unique or (
                 source_key == source_signature(prior)
                 and existing_source_signatures[source_key] == 1
                 and incoming_source_signatures[source_key] == 1

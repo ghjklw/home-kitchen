@@ -238,6 +238,52 @@ def test_unmapped_quantity_edit_keeps_distinct_source_unit_wording_without_block
     assert measure_result[0]["source_unit_expression"] == "ml"
 
 
+def test_title_only_update_preserves_source_wording_for_distinct_exact_rows():
+    from home_kitchen.models import Recipe, RecipeCreate
+    from home_kitchen.service import KitchenService
+
+    existing = Recipe.model_validate(
+        {
+            "id": uuid4(),
+            "title": "Soup",
+            "servings": 2,
+            "ingredients": [
+                {
+                    "name": "pepper",
+                    "quantity": "1",
+                    "unit": "tbsp",
+                    "source_unit_expression": "Tablespoons",
+                },
+                {
+                    "name": "pepper",
+                    "quantity": "2",
+                    "unit": "tbsp",
+                    "source_unit_expression": "spiseskjeer",
+                },
+            ],
+            "instructions": ["Cook"],
+        }
+    )
+    title_only = RecipeCreate.model_validate(
+        {
+            "title": "New soup title",
+            "servings": 2,
+            "ingredients": [
+                {"name": "pepper", "quantity": "1", "unit": "tbsp"},
+                {"name": "pepper", "quantity": "2", "unit": "tbsp"},
+            ],
+            "instructions": ["Cook"],
+        }
+    )
+    updated = KitchenService._retain_omitted_ingredient_identity_fields(
+        title_only, existing, [item.model_dump() for item in title_only.ingredients]
+    )
+    assert [item["source_unit_expression"] for item in updated] == [
+        "Tablespoons",
+        "spiseskjeer",
+    ]
+
+
 @pytest.mark.parametrize(
     "incoming_ingredients",
     [

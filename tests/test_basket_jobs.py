@@ -1,7 +1,7 @@
 """Background matching stays bounded, isolated and useful while work is pending."""
 
 import asyncio
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -328,3 +328,73 @@ async def test_batch_candidate_resolution_is_actor_scope_period_and_snapshot_sco
     contexts["alice"] = 2
     with pytest.raises(ValueError, match="provider context changed"):
         await jobs.resolve_batch_candidates("alice", final.job_id, START, END, reference)
+
+
+async def test_observation_time_is_exposed_only_after_successful_completion(service):
+    jobs, _, matching, _ = service
+    initial = await jobs.start("alice", START, END)
+    assert initial.observed_at is None
+    await matching.partial.wait()
+    assert (await jobs.get("alice", initial.job_id)).observed_at is None
+    old = datetime(2000, 1, 1, tzinfo=UTC)
+    jobs._jobs[initial.job_id].observed_at = old
+    before = datetime.now(UTC)
+    matching.release.set()
+    final = await settled(jobs, "alice", initial.job_id)
+    assert final.observed_at is not None
+    assert before <= final.observed_at <= datetime.now(UTC)
+    assert final.observed_at != old
+    assert final.observed_at == jobs._jobs[initial.job_id].observed_at
+    assert final.model_dump(mode="json")["observed_at"].endswith("Z")
+    reused = await jobs.start("alice", START, END)
+    assert reused.job_id == final.job_id
+    assert reused.observed_at == final.observed_at
+    refreshed = await jobs.start("alice", START, END, force_refresh=True)
+    assert refreshed.observed_at is None
+    next_final = await settled(jobs, "alice", refreshed.job_id)
+    assert next_final.observed_at >= final.observed_at
+
+
+async def test_failed_job_does_not_publish_a_successful_observation_time(service):
+    jobs, _, matching, _ = service
+    matching.fail = True
+    job = await jobs.start("alice", START, END)
+    await matching.partial.wait()
+    matching.release.set()
+    final = await settled(jobs, "alice", job.job_id)
+    assert final.status == "failed"
+    assert final.needs[0].status == "matched"  # Partial success is not a completed job.
+    assert final.observed_at is None
+    assert final.model_dump(mode="json")["observed_at"] is None
+
+
+async def test_job_api_serializes_observation_time_without_database_or_provider(service):
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI, Request
+    from httpx import ASGITransport, AsyncClient
+
+    from home_kitchen.feature_api import feature_router
+
+    jobs, _, matching, _ = service
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def actor(request: Request, call_next):
+        request.state.actor_id = "alice"
+        return await call_next(request)
+
+    app.include_router(feature_router(SimpleNamespace(basket_jobs=jobs), None))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/basket/match-jobs", json={"start": str(START), "end": str(END)}
+        )
+        assert response.status_code == 202
+        assert response.json()["observed_at"] is None
+        job_id = response.json()["job_id"]
+        matching.release.set()
+        final = await settled(jobs, "alice", job_id)
+        response = await client.get(f"/api/basket/match-jobs/{job_id}")
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
+        assert response.json()["observed_at"] == final.model_dump(mode="json")["observed_at"]

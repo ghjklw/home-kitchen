@@ -1,9 +1,11 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from threading import Event, Lock, current_thread
 from uuid import UUID
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 from home_kitchen.basket.matching import NeedMatchResult
 from home_kitchen.basket.models import ProductSnapshot, SelectedProduct
@@ -385,3 +387,120 @@ def test_batch_replaces_only_submitted_needs_and_preserves_unsubmitted_choices(t
         f"old-{untouched.name}"
     ]
     kitchen.store.engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("first_id", "second_id", "expected_id", "expected_new_events"),
+    [
+        ("choice-a", "choice-b", "choice-b", 2),
+        ("same-choice", "same-choice", "same-choice", 1),
+    ],
+)
+def test_concurrent_batches_serialize_replacements_and_identical_retries(
+    test_database_url, first_id, second_id, expected_id, expected_new_events
+):
+    kitchen_a = KitchenService(test_database_url)
+    kitchen_a.add_item(ShoppingItemCreate(name="Yoghurt", quantity=2, unit="item"))
+    history_a = HistoryRepository(kitchen_a.store.engine)
+    basket_a = BasketService(kitchen_a, history_a)
+    start, end = date(2026, 5, 4), date(2026, 5, 10)
+    need = basket_a.review(start, end).needs[0].need
+
+    def snapshot(product_id):
+        return ProductSnapshot(
+            provider="oda",
+            product_id=product_id,
+            name=product_id,
+            pack_quantity=1,
+            pack_unit="item",
+            observed_at=datetime.now(UTC),
+        )
+
+    initial = snapshot("old")
+    basket_a.select(start, end, SelectedProduct(need_id=need.id, product=initial, packages=2))
+    kitchen_b = KitchenService(test_database_url)
+    basket_b = BasketService(kitchen_b, HistoryRepository(kitchen_b.store.engine))
+    evidence = NeedMatchResult(
+        need_id=need.id,
+        name=need.name,
+        quantity=need.quantity,
+        unit=need.unit,
+        page=1,
+        has_more=False,
+        candidates=[],
+    )
+    first_selection = SelectedProduct(need_id=need.id, product=snapshot(first_id), packages=2)
+    second_selection = (
+        first_selection
+        if first_id == second_id
+        else SelectedProduct(need_id=need.id, product=snapshot(second_id), packages=2)
+    )
+    first_snapshot_ready = Event()
+    allow_first_to_continue = Event()
+    calls_lock = Lock()
+    existing_read_count = 0
+    first_thread_name = None
+    query = "SELECT need_id, provider, product_id, payload FROM kitchen_basket_selections"
+
+    def after_cursor_execute(_connection, _cursor, statement, _parameters, _context, _many):
+        nonlocal existing_read_count, first_thread_name
+        if statement.startswith(query):
+            with calls_lock:
+                existing_read_count += 1
+                current = existing_read_count
+            if current == 1:
+                first_thread_name = current_thread().name
+                first_snapshot_ready.set()
+                allow_first_to_continue.wait(timeout=10)
+            else:
+                allow_first_to_continue.set()
+
+    def before_cursor_execute(_connection, _cursor, statement, _parameters, _context, _many):
+        if (
+            statement.startswith("SELECT pg_advisory_xact_lock")
+            and first_thread_name is not None
+            and current_thread().name != first_thread_name
+        ):
+            allow_first_to_continue.set()
+
+    event.listen(kitchen_a.store.engine, "before_cursor_execute", before_cursor_execute)
+    event.listen(kitchen_b.store.engine, "before_cursor_execute", before_cursor_execute)
+    event.listen(kitchen_a.store.engine, "after_cursor_execute", after_cursor_execute)
+    event.listen(kitchen_b.store.engine, "after_cursor_execute", after_cursor_execute)
+
+    def batch(basket, selection):
+        return basket.select_batch(
+            start,
+            end,
+            [selection],
+            {need.id: evidence},
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="basket-batch") as executor:
+            first = executor.submit(batch, basket_a, first_selection)
+            assert first_snapshot_ready.wait(timeout=5)
+            second = executor.submit(batch, basket_b, second_selection)
+            first.result(timeout=10)
+            second.result(timeout=10)
+    finally:
+        event.remove(kitchen_a.store.engine, "before_cursor_execute", before_cursor_execute)
+        event.remove(kitchen_b.store.engine, "before_cursor_execute", before_cursor_execute)
+        event.remove(kitchen_a.store.engine, "after_cursor_execute", after_cursor_execute)
+        event.remove(kitchen_b.store.engine, "after_cursor_execute", after_cursor_execute)
+
+    final = basket_a.review(start, end)
+    selected_ids = [item.product.product_id for item in final.needs[0].selections]
+    assert selected_ids == [expected_id]
+    with kitchen_a.store.engine.connect() as connection:
+        event_count = connection.execute(
+            text(
+                "SELECT count(*) FROM kitchen_history "
+                "WHERE structured->>'action' = 'basket_product_selected' "
+                "AND structured->>'need_id' = :need_id"
+            ),
+            {"need_id": str(need.id)},
+        ).scalar_one()
+    assert event_count == 1 + expected_new_events
+    kitchen_a.store.engine.dispose()
+    kitchen_b.store.engine.dispose()

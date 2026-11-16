@@ -29,6 +29,11 @@ def _selection_id(start: date, end: date, selection: SelectedProduct) -> UUID:
     )
 
 
+def _selection_lock_key(start: date, end: date, need_id: UUID) -> int:
+    lock_id = uuid5(NAMESPACE_URL, f"basket-selection-lock:{start}:{end}:{need_id}").int >> 64
+    return lock_id - (1 << 64) if lock_id >= (1 << 63) else lock_id
+
+
 def _unverified(selection: SelectedProduct) -> SelectedProduct:
     payload = selection.model_dump(mode="python")
     payload["product"]["evidence_status"] = "unverified"
@@ -206,6 +211,11 @@ class BasketService:
 
         now = datetime.now(UTC)
         with self.engine.begin() as connection:
+            for need_id in sorted(submitted_need_ids, key=str):
+                connection.execute(
+                    text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                    {"lock_key": _selection_lock_key(start, end, need_id)},
+                )
             existing_payloads = {
                 (row["need_id"], row["provider"], row["product_id"]): row["payload"]
                 for row in connection.execute(

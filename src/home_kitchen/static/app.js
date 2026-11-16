@@ -1962,16 +1962,23 @@ function recipeImageSearchForm(recipe) {
   add(root, form, status, errors, results);
 }
 async function viewRecipePhoto(photoSource) {
-  const root = openDialog("Privat bilde av oppskriftssiden");
+  const modal = $("#private-photo-modal");
+  const root = $("#private-photo-content");
+  if (modal.open) modal.close();
+  root.replaceChildren();
+  const heading = el("h2", "Privat bilde av oppskriftssiden");
+  heading.id = "private-photo-title";
   const status = el("p", "Henter originalbildet …", "muted");
-  add(root, status);
+  const close = button("Lukk", () => modal.close(), "quiet");
+  close.ariaLabel = "Lukk originalbildet";
+  add(root, add(el("div", null, "dialog-header"), heading, close), status);
   let objectUrl = null;
-  const modal = $("#modal");
   const release = () => {
     if (objectUrl) URL.revokeObjectURL(objectUrl);
     modal.removeEventListener("close", release);
   };
   modal.addEventListener("close", release);
+  modal.showModal();
   try {
     const response = await fetch("/api/recipe-photos/" + encodeURIComponent(photoSource.id), {
       credentials: "same-origin",
@@ -1989,7 +1996,7 @@ async function viewRecipePhoto(photoSource) {
     image.alt = "Originalt bilde av oppskriftssiden";
     status.replaceWith(image);
   } catch (error) {
-    status.textContent = error.message;
+    if (modal.open && status.isConnected) status.textContent = error.message;
   }
 }
 function addRecipeForm() {
@@ -2030,6 +2037,8 @@ function recipePhotoForm() {
       ),
     );
   const form = el("form");
+  const formModal = $("#modal");
+  const isCurrentDialog = () => form.isConnected && formModal.open;
   const image = field("Bilde av oppskriftssiden", "file", "", "JPEG, PNG eller WebP · maks 8 MiB");
   image.input.accept = "image/jpeg,image/png,image/webp";
   image.input.capture = "environment";
@@ -2045,8 +2054,11 @@ function recipePhotoForm() {
     retry.disabled = true;
     status.textContent = "Prøver å lese siden på nytt …";
     try {
-      const result = await api("/recipe-photos/" + encodeURIComponent(photoSource.id) + "/redraft", "POST", {});
-      showPhotoDraft(result);
+      await window.KitchenRecipePhoto.applyIfActive(
+        api("/recipe-photos/" + encodeURIComponent(photoSource.id) + "/redraft", "POST", {}),
+        isCurrentDialog,
+        showPhotoDraft,
+      );
     } catch (error) {
       status.textContent = error.message;
     } finally {
@@ -2073,8 +2085,12 @@ function recipePhotoForm() {
       book_title: book.input.value,
       page: page.input.value,
     });
-    const result = await api("/recipe-photos", "POST", payload);
-    showPhotoDraft(result);
+    if (!isCurrentDialog()) return;
+    await window.KitchenRecipePhoto.applyIfActive(
+      api("/recipe-photos", "POST", payload),
+      isCurrentDialog,
+      showPhotoDraft,
+    );
   });
   add(form, image.wrap, book.wrap, page.wrap, status, retry);
   add(root, form);

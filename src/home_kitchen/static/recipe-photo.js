@@ -25,6 +25,13 @@
     };
   }
 
-  root.KitchenRecipePhoto = { buildUpload, MAX_PHOTO_BYTES };
+  async function applyIfActive(promise, isActive, apply) {
+    const result = await promise;
+    if (!isActive()) return false;
+    apply(result);
+    return true;
+  }
+
+  root.KitchenRecipePhoto = { applyIfActive, buildUpload, MAX_PHOTO_BYTES };
   if (typeof module !== "undefined" && module.exports) module.exports = root.KitchenRecipePhoto;
 })(globalThis);

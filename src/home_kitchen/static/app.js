@@ -3051,13 +3051,16 @@ function shoppingSections() {
     }, "quiet small")));
     add(more, actions);
     nav.append(more);
+    nav.append(button("Registrer handletur", async () => {
+      state.shoppingPanel = "complete_trip";
+      await refreshView();
+    }, "primary"));
   } else {
     [
       ["single", "Handleliste"],
       ["needs", "Behov og forslag"],
       ["oda", "Oda-handlekurv"],
       ["in_store", "Del og plukk"],
-      ["complete_trip", "Registrer handletur"],
       ["pantry", "Hjemme"],
     ].forEach(([key, label]) => {
       const tab = button(
@@ -3292,7 +3295,28 @@ function renderTripCompletion(main) {
   date.max = iso(new Date()); date.setAttribute("aria-label", "Kjøpsdato");
   const controls = add(el("section", null, "panel"), el("h2", "Faktiske kjøp"), el("label", "Kjøpsdato"), date);
   const lineForms = [];
-  (review.lines || []).forEach((line) => {
+  (review.lines || []).forEach((reviewLine) => {
+    const selectedProducts = Array.isArray(reviewLine.selected_products)
+      ? reviewLine.selected_products.filter((selection) => {
+          const product = selection?.product;
+          return (
+            product &&
+            typeof product.provider === "string" &&
+            product.provider.trim() &&
+            typeof product.product_id === "string" &&
+            product.product_id.trim() &&
+            typeof product.name === "string" &&
+            product.name.trim() &&
+            Number.isFinite(Number(product.pack_quantity)) &&
+            Number(product.pack_quantity) > 0 &&
+            typeof product.pack_unit === "string" &&
+            product.pack_unit.trim() &&
+            Number.isInteger(selection.packages) &&
+            selection.packages > 0
+          );
+        })
+      : [];
+    const line = { ...reviewLine, selected_products: selectedProducts };
     const section = add(el("section", null, "panel trip-completion-line"), el("h3", line.name));
     add(section, el("p", `Planlagt behov: ${formatUiQuantity(line.to_buy_quantity)} ${line.unit} · kontekst, ikke faktisk kjøp.`, "muted"));
     const bought = el("input"); bought.type = "checkbox"; bought.setAttribute("aria-label", `Registrer faktisk kjøp: ${line.name}`);
@@ -3301,8 +3325,8 @@ function renderTripCompletion(main) {
     const unit = el("input"); unit.placeholder = line.unit || "Enhet"; unit.setAttribute("aria-label", `Enhet for faktisk kjøp: ${line.name}`);
     add(section, el("label", "Faktisk mengde (valgfritt)"), quantity, el("label", "Enhet (valgfritt)"), unit);
     const exact = el("input"); exact.type = "checkbox"; exact.setAttribute("aria-label", `Kjøp eksakt produkt for ${line.name}`);
-    add(section, add(el("label"), exact, el("span", "Jeg kjøpte et av de viste produktene")));
     const productSelect = el("select");
+    productSelect.setAttribute("aria-label", `Velg vist produkt for ${line.name}`);
     productSelect.append(new Option("Velg vist produkt", ""));
     (line.selected_products || []).forEach((entry, index) => {
       const p = entry.product;
@@ -3320,7 +3344,19 @@ function renderTripCompletion(main) {
       add(productDetails, el("p", `${p.name} · ${p.provider} / ${p.product_id} · ${p.pack_quantity} ${p.pack_unit} per pakke`));
       if (p.url) { const link = el("a", "Åpne produktreferanse"); link.href = p.url; link.rel = "noopener noreferrer"; link.target = "_blank"; productDetails.append(link); }
     });
-    add(section, productSelect, packCount, productDetails);
+    const hasExactProduct = selectedProducts.length > 0;
+    if (hasExactProduct) {
+      add(section, el("p", "Dette er lagrede produktvalg for varen. Tilgjengeligheten hos Oda er ikke kontrollert nå.", "muted"));
+      add(section, add(el("label"), exact, el("span", "Jeg kjøpte et av de valgte produktene")));
+      add(section, productSelect, packCount, productDetails);
+    } else {
+      const explanation = !state.oda
+        ? "Oda-status er ikke tilgjengelig. Oppgi faktisk mengde, eller la den stå ukjent."
+        : !state.oda.connected
+          ? "Oda er ikke tilkoblet. Oppgi faktisk mengde, eller la den stå ukjent."
+          : "Ingen valgte Oda-produkter for denne varen. Oppgi faktisk mengde, eller la den stå ukjent.";
+      add(section, el("p", explanation, "muted"));
+    }
     const sourceChecks = [];
     (line.source_quantities || []).forEach((source) => {
       const input = el("input"); input.type = "checkbox";

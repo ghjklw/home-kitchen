@@ -69,11 +69,12 @@ function makeLine(id, name, unit, kind) {
     source_quantities: [{ kind, source_id: `source-${id}`, quantity: "4", unit }],
   };
 }
-function renderCompletion({ lines, retry = null, api, refreshView = async () => {}, notices = [] }) {
+function renderCompletion({ lines, retry = null, oda = null, api, refreshView = async () => {}, notices = [] }) {
   let idempotencyCounter = 0;
   const state = {
     tripCompletionReview: { review_token: "review-1", start: "2026-11-16", end: "2026-11-22", lines },
     tripCompletionRetry: retry,
+    oda,
   };
   const main = new DomNode("main");
   const context = {
@@ -111,6 +112,76 @@ function labeled(ui, label) {
   assert.ok(node, `input ${label} exists`);
   return node;
 }
+
+test("exact-product controls require evidence but retained choices remain available offline", async () => {
+  const line = makeLine("need-yoghurt", "Yoghurt", "g", "meal");
+  const disconnected = renderCompletion({
+    lines: [line],
+    oda: { connected: false },
+    api: async () => ({}),
+  });
+  const productControls = (ui) => ui.nodes.filter((node) =>
+    [
+      "Kjøp eksakt produkt for Yoghurt",
+      "Velg vist produkt for Yoghurt",
+      "Antall pakker kjøpt: Yoghurt",
+    ].includes(node.attributes?.["aria-label"]),
+  );
+  assert.equal(productControls(disconnected).length, 0);
+  assert.ok(disconnected.nodes.some((node) =>
+    node.textContent === "Oda er ikke tilkoblet. Oppgi faktisk mengde, eller la den stå ukjent.",
+  ));
+
+  const noProductMatches = renderCompletion({
+    lines: [line],
+    oda: { connected: true },
+    api: async () => ({}),
+  });
+  assert.equal(productControls(noProductMatches).length, 0);
+  assert.ok(noProductMatches.nodes.some((node) =>
+    node.textContent === "Ingen valgte Oda-produkter for denne varen. Oppgi faktisk mengde, eller la den stå ukjent.",
+  ));
+
+  const calls = [];
+  const offlineWithSelection = renderCompletion({
+    lines: [{
+      ...line,
+      selected_products: [{
+        packages: 1,
+        product: {
+          name: "Test yoghurt",
+          provider: "oda",
+          product_id: "yoghurt-1",
+          pack_quantity: "500",
+          pack_unit: "g",
+        },
+      }],
+    }],
+    oda: { connected: false },
+    api: async (endpoint, method, body) => { calls.push({ endpoint, method, body }); return {}; },
+  });
+  assert.ok(offlineWithSelection.nodes.some((node) => node.attributes?.["aria-label"] === "Kjøp eksakt produkt for Yoghurt"));
+  assert.ok(offlineWithSelection.nodes.some((node) => node.attributes?.["aria-label"] === "Velg vist produkt for Yoghurt"));
+  assert.ok(offlineWithSelection.nodes.some((node) => node.attributes?.["aria-label"] === "Antall pakker kjøpt: Yoghurt"));
+  assert.ok(offlineWithSelection.nodes.some((node) =>
+    node.textContent === "Dette er lagrede produktvalg for varen. Tilgjengeligheten hos Oda er ikke kontrollert nå.",
+  ));
+  labeled(offlineWithSelection, "Registrer faktisk kjøp: Yoghurt").checked = true;
+  labeled(offlineWithSelection, "Kjøp eksakt produkt for Yoghurt").checked = true;
+  labeled(offlineWithSelection, "Velg vist produkt for Yoghurt").value = "0";
+  labeled(offlineWithSelection, "Antall pakker kjøpt: Yoghurt").value = "2";
+  const sourceRow = offlineWithSelection.nodes.find((node) =>
+    node.tagName === "label" && node.children.some((child) => child.textContent.includes("Lukk måltidsbehov · 4 g")),
+  );
+  assert.ok(sourceRow);
+  sourceRow.children[0].checked = true;
+  await offlineWithSelection.submit.listeners.click();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].endpoint, "/store-trip/completions");
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[0].body.purchases[0].product)), {
+    provider: "oda", product_id: "yoghurt-1", packages: 2,
+  });
+});
 
 test("unknown actual quantities stay null for g/ml/item purchases and closures stay separate", async () => {
   const lines = [makeLine("need-g", "Mel", "g", "meal"), makeLine("need-ml", "Melk", "ml", "capture"), makeLine("need-item", "Egg", "item", "regular"), makeLine("need-close", "Salt", "g", "meal")];

@@ -51,6 +51,7 @@ _PROCESSING = threading.Lock()
 _LOG = logging.getLogger(__name__)
 PHOTO_DRAFT_TTL = timedelta(hours=24)
 PHOTO_CLEANUP_INTERVAL = 60 * 60
+PHOTO_CLEANUP_BATCH_SIZE = 100
 
 
 class StoredPhoto(ValidatedPhoto):
@@ -209,7 +210,7 @@ class PhotoRecipeService:
                     ),
                 )
                 .order_by(recipe_photos.c.id)
-                .limit(100)
+                .limit(PHOTO_CLEANUP_BATCH_SIZE)
                 .with_for_update(skip_locked=True)
             ).all()
             return sum(self._delete_unreferenced(connection, photo_id) for photo_id in ids)
@@ -219,7 +220,8 @@ class PhotoRecipeService:
         # multiple workers safe; failures leave rows for the next scheduled run.
         while True:
             try:
-                await self._offload(self.cleanup)
+                while await self._offload(self.cleanup) == PHOTO_CLEANUP_BATCH_SIZE:
+                    pass
             except Exception:
                 _LOG.warning("Recipe photo cleanup failed; will retry on the next run")
             await asyncio.sleep(interval)

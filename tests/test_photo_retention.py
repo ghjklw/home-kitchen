@@ -9,11 +9,15 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
-from test_photo_storage import image_bytes, service
+from test_photo_storage import draft, image_bytes, service
 
 from home_kitchen.history import HistoryRepository
-from home_kitchen.models import Recipe
-from home_kitchen.recipes.photo_storage import PHOTO_DRAFT_TTL, recipe_photos
+from home_kitchen.models import PhotoSource, Recipe
+from home_kitchen.recipes.photo_storage import (
+    PHOTO_CLEANUP_BATCH_SIZE,
+    PHOTO_DRAFT_TTL,
+    recipe_photos,
+)
 from home_kitchen.store import recipes
 
 
@@ -42,6 +46,91 @@ async def test_expiry_boundary_and_household_isolation(test_database_url):
     assert photos.cleanup(at + PHOTO_DRAFT_TTL) == 0
     with pytest.raises(KeyError):
         await photos.get(result.photo_source.id)
+
+
+async def test_cleanup_forever_drains_backlog_and_preserves_protected_photos(test_database_url):
+    photos, store = service(test_database_url)
+    other, _ = service(test_database_url)
+    expired_at = datetime.now(UTC) - PHOTO_DRAFT_TTL - timedelta(minutes=1)
+    expired_ids = [uuid4() for _ in range(PHOTO_CLEANUP_BATCH_SIZE * 2 + 5)]
+    retained_id = uuid4()
+    referenced_id = uuid4()
+    other_ids = [uuid4(), uuid4()]
+    rows = [
+        {
+            "id": photo_id,
+            "household_id": photos.household_id,
+            "data": b"image",
+            "mime_type": "image/png",
+            "width": 1,
+            "height": 1,
+            "sha256": "0" * 64,
+            "created_by": "actor",
+            "created_at": expired_at,
+            "last_draft_activity_at": expired_at,
+            "retained_at": None,
+        }
+        for photo_id in expired_ids
+    ]
+    rows.extend(
+        [
+            {**rows[0], "id": retained_id, "retained_at": expired_at},
+            {**rows[0], "id": referenced_id},
+            *(
+                {**rows[0], "id": photo_id, "household_id": other.household_id}
+                for photo_id in other_ids
+            ),
+        ]
+    )
+    with store.connection() as connection:
+        connection.execute(recipe_photos.insert(), rows)
+    store.photo_household_id = photos.household_id
+    store.save(
+        "recipe",
+        Recipe(
+            id=uuid4(),
+            **draft().model_dump(exclude={"photo_source"}),
+            photo_source=PhotoSource(id=referenced_id),
+        ),
+    )
+
+    batches = []
+    drained = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    cleanup = photos.cleanup
+
+    def tracked_cleanup():
+        deleted = cleanup()
+        batches.append(deleted)
+        if deleted < PHOTO_CLEANUP_BATCH_SIZE:
+            loop.call_soon_threadsafe(drained.set)
+        return deleted
+
+    photos.cleanup = tracked_cleanup
+    task = asyncio.create_task(photos.cleanup_forever(interval=3600))
+    try:
+        await asyncio.wait_for(drained.wait(), timeout=5)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert batches == [PHOTO_CLEANUP_BATCH_SIZE, PHOTO_CLEANUP_BATCH_SIZE, 5]
+    with store.connection() as connection:
+        remaining = set(
+            connection.scalars(
+                select(recipe_photos.c.id).where(
+                    recipe_photos.c.household_id == photos.household_id
+                )
+            ).all()
+        )
+        other_remaining = set(
+            connection.scalars(
+                select(recipe_photos.c.id).where(recipe_photos.c.household_id == other.household_id)
+            ).all()
+        )
+    assert remaining == {retained_id, referenced_id}
+    assert other_remaining == set(other_ids)
 
 
 async def test_redraft_refreshes_even_when_transcription_fails(test_database_url):

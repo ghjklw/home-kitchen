@@ -502,7 +502,7 @@ async def test_postgres_recipe_stats_and_quick_feedback_end_to_end(test_database
                 text(
                     "INSERT INTO kitchen_history "
                     "(id, occurred_at, channel, kind, message, structured, recipe_id) "
-                    "VALUES (:id, now(), 'app', 'cooked', 'Cooked meal', '{}'::jsonb, :recipe_id)"
+                    "VALUES (:id, now(), 'app', 'domain_event', 'Cooked meal', '{\"event\": \"meal_cooked\"}'::jsonb, :recipe_id)"
                 ),
                 {"id": uuid4(), "recipe_id": recipe_id},
             )

@@ -18,7 +18,7 @@ from home_kitchen.feature_mcp import install_feature_tools
 from home_kitchen.features import KitchenFeatures
 from home_kitchen.history import HistoryEntry, HistoryEntryCreate
 from home_kitchen.mcp_server import build_mcp
-from home_kitchen.models import Ingredient, MealCreate, Recipe, RecipeActivityStats, RecipeCreate
+from home_kitchen.models import Ingredient, MealCreate, Recipe, RecipeActivityStats
 from home_kitchen.service import KitchenService
 from home_kitchen.settings import Household, Settings
 from home_kitchen.store import Store, entity_values
@@ -374,7 +374,9 @@ def test_rest_stats_endpoints_and_quick_feedback_loop():
         # 1-click rating + 1-click thumbs down
         r_star = client.post(f"/api/recipes/{recipe.id}/feedback", json={"rating": 4})
         assert r_star.status_code == 201
-        r_thumb = client.post(f"/api/recipes/{recipe.id}/feedback", json={"would_make_again": False})
+        r_thumb = client.post(
+            f"/api/recipes/{recipe.id}/feedback", json={"would_make_again": False}
+        )
         assert r_thumb.status_code == 201
 
         single = client.get(f"/api/recipes/{recipe.id}/stats")

@@ -63,6 +63,7 @@ class RecipeSource(StrEnum):
     MANUAL = "manual"
     IMPORTED = "imported"
     AI = "ai"
+    COOKIDOO = "cookidoo"
 
 
 class RecipeType(StrEnum):

@@ -103,11 +103,16 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
         return {"deleted": await features.recipe_photos.discard(photo_id, actor())}
 
     @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
-    async def preview_recipe_collections(kinds: list[CollectionKind]) -> dict:
-        """Preview liked or purchased Oda recipes. Preview reads metadata only."""
-        return (await features.recipe_collections.start_preview(actor(), kinds)).model_dump(
-            mode="json"
-        )
+    async def preview_recipe_collections(
+        kinds: list[CollectionKind] | None = None,
+        provider: Literal["oda", "cookidoo"] = "oda",
+    ) -> dict:
+        """Preview Oda or Cookidoo recipe collections. Preview reads metadata only."""
+        return (
+            await features.recipe_collections.start_preview(
+                actor(), kinds or [], provider_id=provider
+            )
+        ).model_dump(mode="json")
 
     @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
     async def get_recipe_collection_preview(job_id: UUID) -> dict:

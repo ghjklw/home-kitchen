@@ -5,7 +5,7 @@ import binascii
 import json
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
@@ -81,7 +81,8 @@ class PhotoUpload(BaseModel):
 
 
 class CollectionPreviewRequest(BaseModel):
-    kinds: list[CollectionKind] = Field(min_length=1, max_length=2)
+    provider: Literal["oda", "cookidoo"] = "oda"
+    kinds: list[CollectionKind] = Field(default_factory=list, max_length=3)
 
 
 class CollectionImportRequest(BaseModel):
@@ -312,7 +313,7 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
     ) -> CollectionJob:
         response.headers["Cache-Control"] = "no-store"
         return await features.recipe_collections.start_preview(
-            authenticated_actor(request), data.kinds
+            authenticated_actor(request), data.kinds, provider_id=data.provider
         )
 
     @router.get("/recipe-collections/{job_id}")

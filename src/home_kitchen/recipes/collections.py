@@ -14,7 +14,9 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 from sqlalchemy import Column, DateTime, ForeignKey, Table, Text, Uuid, select, text
-from sqlalchemy.dialects.postgresql import JSONB, insert
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from home_kitchen.history import HistoryEntryCreate, HistoryRepository
 from home_kitchen.imports import ImportedDraft, import_recipe, validate_url
@@ -24,8 +26,18 @@ from home_kitchen.service import KitchenService
 from home_kitchen.store import entity_values, metadata, recipes
 
 _LOG = logging.getLogger(__name__)
-CollectionKind = Literal["liked", "purchased"]
-LABELS = {"liked": "Liked on Oda", "purchased": "Ingredients bought on Oda"}
+CollectionKind = str
+LABELS: dict[str, str] = {
+    "liked": "Liked on Oda",
+    "purchased": "Ingredients bought on Oda",
+    "saved": "Lagret i Cookidoo",
+    "created": "Opprettet i Cookidoo",
+    "bookmarks": "Bokmerker i Cookidoo",
+}
+PROVIDER_KINDS: dict[str, set[str]] = {
+    "oda": {"liked", "purchased"},
+    "cookidoo": {"saved", "created", "bookmarks"},
+}
 source_links = Table(
     "recipe_source_links",
     metadata,
@@ -51,6 +63,9 @@ class CollectionEntry(BaseModel):
     ] = "pending"
     recipe_id: UUID | None = None
     error: str | None = None
+    servings: int | None = None
+    ingredients: list[str] = Field(default_factory=list)
+    instructions: list[str] = Field(default_factory=list)
 
 
 class CollectionPage(BaseModel):
@@ -137,6 +152,7 @@ class OdaCollectionProvider:
 
 class CollectionJob(BaseModel):
     job_id: UUID
+    provider: str = "oda"
     status: Literal["previewing", "ready", "importing", "completed", "cancelled", "failed"]
     kinds: list[CollectionKind]
     entries: list[CollectionEntry] = Field(default_factory=list)
@@ -149,10 +165,11 @@ class CollectionJob(BaseModel):
 
 
 class _Job:
-    def __init__(self, actor, generation, view):
+    def __init__(self, actor, generation, view, provider: CollectionProvider):
         self.actor = actor
         self.generation = generation
         self.view = view
+        self.provider = provider
         self.created = time.monotonic()
         self.task: asyncio.Task | None = None
         self.cancelled = False
@@ -185,19 +202,41 @@ class CollectionService:
         self,
         kitchen: KitchenService,
         history: HistoryRepository,
-        provider: CollectionProvider,
+        provider: CollectionProvider | None = None,
         extractor: Callable[[str], Awaitable[ImportedDraft]] = import_recipe,
+        *,
+        providers: dict[str, CollectionProvider] | None = None,
     ):
-        self.kitchen, self.history, self.provider, self.extractor = (
-            kitchen,
-            history,
-            provider,
-            extractor,
-        )
+        self.kitchen = kitchen
+        self.history = history
+        self.extractor = extractor
         self._jobs: dict[UUID, _Job] = {}
         self._job_reservations = 0
         self._semaphore = asyncio.Semaphore(2)
         self._closed = False
+
+        if providers is not None:
+            self.providers = dict(providers)
+        elif provider is not None:
+            if isinstance(provider, dict):
+                self.providers = dict(provider)
+            else:
+                self.providers = {provider.id: provider}
+        else:
+            self.providers = {}
+
+    @property
+    def provider(self) -> CollectionProvider:
+        return self.providers.get("oda") or next(iter(self.providers.values()))
+
+    @provider.setter
+    def provider(self, value: CollectionProvider) -> None:
+        self.providers[value.id] = value
+
+    def _provider_for(self, provider_id: str) -> CollectionProvider:
+        if provider_id not in self.providers:
+            raise ValueError(f"Ukjent leverandør: {provider_id}")
+        return self.providers[provider_id]
 
     def _prune(self):
         now = time.monotonic()
@@ -225,23 +264,39 @@ class CollectionService:
             raise asyncio.CancelledError
         if time.monotonic() - job.created >= self.TTL_SECONDS:
             raise ValueError("Collection preview expired; preview again")
-        if self.provider.generation(job.actor) != job.generation:
-            raise ValueError("Oda connection changed; preview the collections again")
+        prov = getattr(job, "provider", None) or self.provider
+        if prov.generation(job.actor) != job.generation:
+            label = "Cookidoo" if prov.id == "cookidoo" else "Oda"
+            raise ValueError(f"{label} connection changed; preview the collections again")
 
-    async def start_preview(self, actor_id: str, kinds: list[CollectionKind]) -> CollectionJob:
+    async def start_preview(
+        self,
+        actor_id: str,
+        kinds: list[CollectionKind],
+        provider_id: str = "oda",
+    ) -> CollectionJob:
         self._prune()
         if self._closed:
             raise ValueError("Collection service is closed")
-        if not kinds or any(kind not in LABELS for kind in kinds):
-            raise ValueError("Select liked and/or purchased collections")
+        provider = self._provider_for(provider_id)
+        if not kinds:
+            kinds = ["saved"] if provider.id == "cookidoo" else ["liked"]
+        supported_kinds = PROVIDER_KINDS.get(provider.id, set(LABELS))
+        if any(kind not in supported_kinds for kind in kinds):
+            raise ValueError("Select supported collection kinds")
         if len(self._jobs) + self._job_reservations >= self.MAX_JOBS:
             raise ValueError(
                 "Too many collection jobs; cancel or wait for an existing job to expire"
             )
-        view = CollectionJob(job_id=uuid4(), status="previewing", kinds=list(dict.fromkeys(kinds)))
+        view = CollectionJob(
+            job_id=uuid4(),
+            provider=provider.id,
+            status="previewing",
+            kinds=list(dict.fromkeys(kinds)),
+        )
         self._job_reservations += 1
         try:
-            generation = await asyncio.to_thread(self.provider.generation, actor_id)
+            generation = await asyncio.to_thread(provider.generation, actor_id)
         finally:
             self._job_reservations -= 1
         self._prune()
@@ -251,7 +306,7 @@ class CollectionService:
             raise ValueError(
                 "Too many collection jobs; cancel or wait for an existing job to expire"
             )
-        job = _Job(actor_id, generation, view)
+        job = _Job(actor_id, generation, view, provider)
         self._jobs[view.job_id] = job
         job.task = asyncio.create_task(self._preview(job))
         return view.model_copy(deep=True)
@@ -265,16 +320,17 @@ class CollectionService:
     async def _preview(self, job):
         try:
             async with self._semaphore:
+                prov = getattr(job, "provider", None) or self.provider
                 seen = {}
                 for kind in job.view.kinds:
                     try:
                         for number in range(1, self.MAX_PAGES + 1):
                             await asyncio.to_thread(self._fence, job)
-                            page = await self.provider.page(job.actor, kind, number, self.PAGE_SIZE)
+                            page = await prov.page(job.actor, kind, number, self.PAGE_SIZE)
                             await asyncio.to_thread(self._fence, job)
                             job.view.pages_read += 1
                             for entry in page.entries[: self.PAGE_SIZE]:
-                                if entry.provider != self.provider.id:
+                                if entry.provider != prov.id:
                                     raise ValueError("Collection provider identity changed")
                                 if entry.id in seen:
                                     existing = seen[entry.id]
@@ -284,10 +340,10 @@ class CollectionService:
                                     existing.metadata.update(entry.metadata)
                                     if not existing.source_url and entry.source_url:
                                         existing.source_url = entry.source_url
-                                        await asyncio.to_thread(self._inspect_entry, existing)
+                                        await asyncio.to_thread(self._inspect_entry, existing, prov)
                                     continue
                                 seen[entry.id] = entry
-                                await asyncio.to_thread(self._inspect_entry, entry)
+                                await asyncio.to_thread(self._inspect_entry, entry, prov)
                                 job.view.entries.append(entry)
                             if not page.has_more:
                                 break
@@ -297,18 +353,22 @@ class CollectionService:
                     except Exception as error:
                         _LOG.warning("Could not finish collection %s: %s", kind, error)
                         await asyncio.to_thread(self._fence, job)
+                        detail = getattr(error, "detail", str(error))
+                        detail_lower = str(detail).lower()
                         if (
-                            getattr(error, "status_code", None) == 409
-                            or "expired" in str(error).lower()
-                            or "connect" in str(error).lower()
+                            getattr(error, "status_code", None) in (401, 409, 502, 503)
+                            or "expired" in detail_lower
+                            or "connect" in detail_lower
+                            or "utløpt" in detail_lower
+                            or "logg inn" in detail_lower
                         ):
                             job.view.errors.append(
-                                getattr(error, "detail", str(error))
-                                or f"Could not finish {LABELS[kind]}; preview again to retry."
+                                str(detail)
+                                or f"Could not finish {LABELS.get(kind, kind)}; preview again to retry."
                             )
                             break
                         job.view.errors.append(
-                            f"Could not finish {LABELS[kind]}; preview again to retry."
+                            f"Could not finish {LABELS.get(kind, kind)}; preview again to retry."
                         )
                 job.view.total = len(job.view.entries)
                 job.view.status = "ready" if job.view.entries or not job.view.errors else "failed"
@@ -320,7 +380,8 @@ class CollectionService:
                 "Collection connection changed or became unavailable; preview again."
             )
 
-    def _inspect_entry(self, entry):
+    def _inspect_entry(self, entry, provider=None):
+        prov = provider or self._provider_for(entry.provider)
         entry.recipe_id = self._existing(entry)
         if entry.recipe_id:
             entry.status = "already_imported"
@@ -328,7 +389,7 @@ class CollectionService:
             entry.status = "missing_url"
         else:
             try:
-                self.provider.validate_source(entry)
+                prov.validate_source(entry)
                 entry.status, entry.error = "pending", None
             except ValueError as error:
                 entry.status, entry.error = "failed", str(error)
@@ -376,9 +437,11 @@ class CollectionService:
 
     def _save(self, job, entry, draft):
         self._fence(job)
+        prov = getattr(job, "provider", None) or self._provider_for(entry.provider)
         # The public URL is the exact reviewed provider URL, even if an extractor redirects.
         if draft is not None and str(draft.source_url) != entry.source_url:
             raise ValueError("Extracted source URL changed; preview the source again")
+        source = RecipeSource.COOKIDOO if entry.provider == "cookidoo" else RecipeSource.IMPORTED
         recipe = (
             None
             if draft is None
@@ -390,7 +453,7 @@ class CollectionService:
                     source_ingredient(raw, index) for index, raw in enumerate(draft.ingredients)
                 ],
                 instructions=draft.instructions,
-                source=RecipeSource.IMPORTED,
+                source=source,
                 source_url=entry.source_url,
                 image_url=draft.image_url,
                 source_ingredients=[
@@ -400,21 +463,29 @@ class CollectionService:
             )
         )
         with self.kitchen.store.engine.begin() as connection:
-            connection.execute(
-                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-                {"key": f"recipe-source:{entry.provider}:{entry.id}"},
-            )
+            if connection.dialect.name == "postgresql":
+                connection.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                    {"key": f"recipe-source:{entry.provider}:{entry.id}"},
+                )
             self._fence(job)
-            self.provider.lock_generation(connection, job.actor, job.generation)
+            prov.lock_generation(connection, job.actor, job.generation)
             existing = self._existing(entry, connection)
             if existing is None:
                 if recipe is None:
                     raise ValueError("Previously saved recipe was removed; preview again")
-                connection.execute(insert(recipes).values(**entity_values(recipe)))
+                from sqlalchemy import insert as core_insert
+
+                connection.execute(core_insert(recipes).values(**entity_values(recipe)))
+                history_msg = (
+                    "Importerte Cookidoo-oppskrift"
+                    if entry.provider == "cookidoo"
+                    else "Imported source recipe"
+                )
                 self.history.record(
                     HistoryEntryCreate(
                         kind="domain_event",
-                        message="Imported source recipe",
+                        message=history_msg,
                         recipe_id=recipe.id,
                         structured={
                             "provider": entry.provider,
@@ -431,17 +502,20 @@ class CollectionService:
             else:
                 assert recipe is not None
                 recipe_id = recipe.id
+            link_insert = (
+                pg_insert(source_links)
+                if connection.dialect.name == "postgresql"
+                else sqlite_insert(source_links)
+            )
             connection.execute(
-                insert(source_links)
-                .values(
+                link_insert.values(
                     provider=entry.provider,
                     external_recipe_id=entry.id,
                     recipe_id=recipe_id,
                     source_url=entry.source_url,
                     metadata={"badges": entry.badges, **entry.metadata},
                     created_at=datetime.now(UTC),
-                )
-                .on_conflict_do_nothing(
+                ).on_conflict_do_nothing(
                     index_elements=[source_links.c.provider, source_links.c.external_recipe_id]
                 )
             )
@@ -458,6 +532,7 @@ class CollectionService:
     async def _import(self, job, selected):
         try:
             async with self._semaphore:
+                prov = getattr(job, "provider", None) or self._provider_for(job.view.provider)
                 for entry in selected:
                     await asyncio.to_thread(self._fence, job)
                     if entry.status == "imported" or not entry.source_url:
@@ -465,13 +540,29 @@ class CollectionService:
                         continue
                     entry.status, entry.error = "importing", None
                     try:
-                        self.provider.validate_source(entry)
+                        prov.validate_source(entry)
                         existing = await asyncio.to_thread(self._existing, entry)
                         if existing:
                             entry.recipe_id, _ = await self._save_async(job, entry, None)
                             entry.status = "already_imported"
                         else:
-                            draft = await self.extractor(entry.source_url)
+                            ingredients = entry.ingredients or entry.metadata.get("ingredients")
+                            instructions = entry.instructions or entry.metadata.get("instructions")
+                            if ingredients and instructions:
+                                draft = ImportedDraft(
+                                    title=entry.title,
+                                    servings=entry.servings or entry.metadata.get("servings", 4),
+                                    ingredients=ingredients,
+                                    instructions=instructions,
+                                    source_url=entry.source_url,
+                                    image_url=entry.image_url,
+                                )
+                            else:
+                                extract_entry = getattr(prov, "extract_entry", None)
+                                if extract_entry is not None and self.extractor is import_recipe:
+                                    draft = await extract_entry(entry)
+                                else:
+                                    draft = await self.extractor(entry.source_url)
                             await asyncio.to_thread(self._fence, job)
                             entry.recipe_id, existed = await self._save_async(job, entry, draft)
                             entry.status = "already_imported" if existed else "imported"

@@ -129,7 +129,7 @@ def test_connector_integrations_unconnected_report_not_configured():
     trumf = TrumfIntegration().describe("actor-1")
     assert trumf.id == "trumf"
     assert trumf.status == "not_configured"
-    assert trumf.supported_auth_modes == ["oauth_pkce", "interactive_otp", "session_cookie"]
+    assert trumf.supported_auth_modes == ["session_cookie", "interactive_otp"]
 
 
 def test_connector_integrations_connected_and_expired_states():

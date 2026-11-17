@@ -372,7 +372,8 @@ def test_normalize_cookidoo_recipe_handles_variants_and_sanitizes_images():
     assert official.instructions == ["Râper le fromage 10 sec/vitesse 7."]
     assert official.metadata["total_time"] == 1800
     assert (
-        official.image_url == "https://assets.tmecosys.com/image/upload/t_web400x328/gougeres.jpg"
+        official.image_url
+        == "https://assets.tmecosys.com/image/upload/t_web_rdp_recipe_584x480_1_5x/gougeres.jpg"
     )
 
     # Created recipe item shape (/created-recipes/en)
@@ -394,7 +395,8 @@ def test_normalize_cookidoo_recipe_handles_variants_and_sanitizes_images():
     assert created.title == "Compote pomme/prune"
     assert created.servings == 6
     assert (
-        created.image_url == "https://ugc.assets.tmecosys.com/image/upload/t_web400x328/compote.jpg"
+        created.image_url
+        == "https://ugc.assets.tmecosys.com/image/upload/t_web_rdp_recipe_584x480_1_5x/compote.jpg"
     )
     assert created.ingredients == ["500 g pommes", "200 g prunes"]
     assert created.instructions == ["Cuire 15 min/100°C."]
@@ -567,7 +569,7 @@ async def test_cookidoo_provider_page_mock_transport_fallbacks_and_errors(connec
     assert saved_page.entries[1].title == "Favoritter (r-missing)"
     assert (
         saved_page.entries[1].image_url
-        == "https://assets.tmecosys.com/image/upload/t_web400x328/thumb.jpg"
+        == "https://assets.tmecosys.com/image/upload/t_web_rdp_recipe_584x480_1_5x/thumb.jpg"
     )
 
     created_page = await provider.page("malo", "created", 1, 20)
@@ -579,7 +581,7 @@ async def test_cookidoo_provider_page_mock_transport_fallbacks_and_errors(connec
     )
     assert (
         created_page.entries[0].image_url
-        == "https://ugc.assets.tmecosys.com/image/upload/t_web400x328/vaffel.jpg"
+        == "https://ugc.assets.tmecosys.com/image/upload/t_web_rdp_recipe_584x480_1_5x/vaffel.jpg"
     )
     assert created_page.entries[0].ingredients == ["3 dl hvetemel", "2 egg"]
 
@@ -887,7 +889,7 @@ def test_rest_api_cookidoo_preview_import_and_provider_isolation(sqlite_engine, 
         assert job["entries"][0]["badges"] == ["Lagret i Cookidoo", "Mine oppskrifter"]
         assert (
             job["entries"][2]["image_url"]
-            == "https://ugc.assets.tmecosys.com/image/upload/t_web400x328/compote.jpg"
+            == "https://ugc.assets.tmecosys.com/image/upload/t_web_rdp_recipe_584x480_1_5x/compote.jpg"
         )
 
         # Import requires reviewed=True
@@ -1085,3 +1087,143 @@ async def test_cookidoo_domain_resolution_uses_international_for_norway(connecto
 
     draft = await provider.extract_entry(page.entries[0])
     assert str(draft.source_url) == "https://cookidoo.international/recipes/recipe/en/r42"
+
+
+@pytest.mark.asyncio
+async def test_cookidoo_custom_list_supports_chapters_and_hydrates_missing_images(connector_store):
+    hid = uuid4()
+    _save_cookidoo_connection(connector_store, hid, country="no")
+    paths_seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths_seen.append(request.url.path)
+        if request.url.path == "/organize/en/api/custom-list":
+            return httpx.Response(
+                200,
+                json={
+                    "customlists": [
+                        {
+                            "id": "cl-chapters",
+                            "title": "Ukemeny",
+                            "chapters": [
+                                {
+                                    "title": "Forretter",
+                                    "recipes": [
+                                        # Inline summary without image_url / descriptiveAssets -> MUST hydrate
+                                        {"id": "r-no-img", "title": "Tomatsuppe"},
+                                    ],
+                                    "recipeIds": ["r-chap-id"],
+                                }
+                            ],
+                        }
+                    ]
+                },
+            )
+        if request.url.path == "/recipes/recipe/en/r-no-img":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "r-no-img",
+                    "title": "Tomatsuppe",
+                    "servingSize": {"quantity": {"value": 4}},
+                    "times": [{"type": "totalTime", "quantity": {"value": 1500}}],
+                    "descriptiveAssets": [
+                        {
+                            "square": "https://assets.tmecosys.com/image/upload/{transformation}/tomatsuppe.jpg"
+                        }
+                    ],
+                    "recipeIngredientGroups": [{"recipeIngredients": ["500 g tomater"]}],
+                    "recipeStepGroups": [{"recipeSteps": [{"formattedText": "Kok opp"}]}],
+                },
+            )
+        if request.url.path == "/recipes/recipe/en/r-chap-id":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "r-chap-id",
+                    "title": "Sjokolademousse",
+                    "servingSize": {"quantity": {"value": 4}},
+                    "times": [{"type": "totalTime", "quantity": {"value": 900}}],
+                    "categories": [{"title": "Desserts"}],
+                    "descriptiveAssets": [
+                        {
+                            "landscape": "https://assets.tmecosys.com/image/upload/{transformation}/mousse.jpg"
+                        }
+                    ],
+                    "recipeIngredientGroups": [{"recipeIngredients": ["200 g sjokolade"]}],
+                    "recipeStepGroups": [{"recipeSteps": [{"formattedText": "Pisk sammen"}]}],
+                },
+            )
+        return httpx.Response(404)
+
+    provider = CookidooCollectionProvider(
+        connector_store, hid, transport=httpx.MockTransport(handler)
+    )
+    page = await provider.page("malo", "saved", 1, 20)
+    assert [e.id for e in page.entries] == ["r-no-img", "r-chap-id"]
+    assert "/recipes/recipe/en/r-no-img" in paths_seen
+    assert (
+        page.entries[0].image_url
+        == "https://assets.tmecosys.com/image/upload/t_web_rdp_recipe_584x480_1_5x/tomatsuppe.jpg"
+    )
+    assert page.entries[0].recipe_type == "lunsj"
+    assert page.entries[0].prep_time_minutes == 25
+    assert page.entries[0].prep_category == "rask"
+
+    assert (
+        page.entries[1].image_url
+        == "https://assets.tmecosys.com/image/upload/t_web_rdp_recipe_584x480_1_5x/mousse.jpg"
+    )
+    assert page.entries[1].recipe_type == "dessert"
+    assert page.entries[1].prep_time_minutes == 15
+    assert page.entries[1].prep_category == "rask"
+
+    # extract_entry preserves image_url and auto-tags on ImportedDraft
+    draft = await provider.extract_entry(page.entries[0])
+    assert (
+        str(draft.image_url)
+        == "https://assets.tmecosys.com/image/upload/t_web_rdp_recipe_584x480_1_5x/tomatsuppe.jpg"
+    )
+    assert draft.recipe_type == "lunsj"
+    assert draft.prep_time_minutes == 25
+    assert draft.prep_category == "rask"
+
+
+def test_cookidoo_auto_tags_and_import_atomic_persists_metadata(connector_store, sqlite_engine):
+    hid = uuid4()
+    _save_cookidoo_connection(connector_store, hid)
+    kitchen = SimpleNamespace(store=SimpleNamespace(engine=sqlite_engine))
+    history = FakeHistory()
+    service = CookidooRecipeService(kitchen, history, connector_store, hid)
+
+    entry = normalize_cookidoo_recipe(
+        {
+            "id": "r-tags-1",
+            "title": "Brioche maison",
+            "servingSize": {"quantity": {"value": 8}},
+            "times": [{"type": "totalTime", "quantity": {"value": 5400}}],
+            "categories": [{"title": "Baking"}],
+            "tags": ["brød", "helg"],
+            "descriptiveAssets": [
+                {"square": "https://assets.tmecosys.com/image/upload/{transformation}/brioche.jpg"}
+            ],
+            "recipeIngredientGroups": [{"recipeIngredients": ["500 g hvetemel"]}],
+            "recipeStepGroups": [{"recipeSteps": [{"formattedText": "Elt og stek"}]}],
+        },
+        country="no",
+    )
+    assert entry.recipe_type == "bakst"
+    assert entry.prep_time_minutes == 90
+    assert entry.prep_category == "batch_cooking"
+
+    recipe_id, existed = service.import_recipe_atomic("malo", entry, reviewed=True)
+    assert existed is False
+    with sqlite_engine.connect() as conn:
+        row = conn.execute(select(recipes).where(recipes.c.id == recipe_id)).one()
+        assert (
+            row.image_url
+            == "https://assets.tmecosys.com/image/upload/t_web_rdp_recipe_584x480_1_5x/brioche.jpg"
+        )
+        assert row.recipe_type == "bakst"
+        assert row.prep_time_minutes == 90
+        assert row.prep_category == "batch_cooking"

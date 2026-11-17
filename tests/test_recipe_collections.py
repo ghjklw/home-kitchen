@@ -11,7 +11,7 @@ from sqlalchemy import select
 from home_kitchen.history import HistoryRepository
 from home_kitchen.imports import ImportedDraft
 from home_kitchen.inventory import InventoryService
-from home_kitchen.models import MealCreate, RecipeCreate
+from home_kitchen.models import MealCreate, PrepCategory, RecipeCreate, RecipeType
 from home_kitchen.recipes.collections import (
     CollectionEntry,
     CollectionPage,
@@ -481,5 +481,92 @@ async def test_oda_collection_estimate_is_separate_and_used_by_planned_shopping(
         assert purchase.approximate is True
         assert "1 dl sukker" in purchase.provenance
         assert str(purchase.source_url).startswith("https://www.matprat.no/")
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_preview_backfills_image_url_across_kinds_and_import_assigns_metadata(kitchen):
+    img_url = "https://images.oda.com/oppskrifter/tomatsuppe.jpg"
+    first_kind_entry = CollectionEntry(
+        id="731",
+        provider="oda",
+        title="Kremet tomatsuppe",
+        source_url=URL,
+        image_url=None,
+        badges=["Liked on Oda"],
+    )
+    second_kind_entry = CollectionEntry(
+        id="731",
+        provider="oda",
+        title="Kremet tomatsuppe",
+        source_url=URL,
+        image_url=img_url,
+        badges=["Ingredients bought on Oda"],
+    )
+    provider = Provider(
+        {
+            ("liked", 1): CollectionPage(entries=[first_kind_entry], has_more=False),
+            ("purchased", 1): CollectionPage(entries=[second_kind_entry], has_more=False),
+        }
+    )
+
+    async def extract(url):
+        return ImportedDraft(
+            title="Kremet tomatsuppe",
+            servings=4,
+            ingredients=["500 g tomater", "1 dl fløte"],
+            instructions=["Kok opp", "Kjør glatt"],
+            source_url=url,
+            image_url=None,
+            recipe_type=RecipeType.LUNSJ,
+            prep_time_minutes=25,
+            prep_category=PrepCategory.RASK,
+        )
+
+    service = make_service(kitchen, provider, extract)
+    try:
+        job = await service.start_preview("alice", ["liked", "purchased"])
+        preview = await settle(service, "alice", job.job_id)
+        assert len(preview.entries) == 1
+        assert preview.entries[0].image_url == img_url
+        assert preview.entries[0].badges == ["Liked on Oda", "Ingredients bought on Oda"]
+
+        await service.start_import("alice", job.job_id, ["731"], True)
+        done = await settle(service, "alice", job.job_id)
+        assert done.entries[0].status == "imported"
+
+        saved = kitchen.list_recipes()[0]
+        assert str(saved.image_url) == img_url
+        assert saved.recipe_type == RecipeType.LUNSJ
+        assert saved.prep_time_minutes == 25
+        assert saved.prep_category == PrepCategory.RASK
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_oda_collection_import_backfills_metadata_when_draft_omits_tags(kitchen):
+    provider = Provider({("liked", 1): CollectionPage(entries=[entry()], has_more=False)})
+
+    async def extract(url):
+        return ImportedDraft(
+            title="Hjemmelaget lasagne",
+            servings=4,
+            ingredients=["400 g kjøttdeig", "9 lasagneplater"],
+            instructions=["Lag saus", "Stek i ovn"],
+            source_url=url,
+        )
+
+    service = make_service(kitchen, provider, extract)
+    try:
+        job = await service.start_preview("alice", ["liked"])
+        await settle(service, "alice", job.job_id)
+        await service.start_import("alice", job.job_id, ["731"], True)
+        await settle(service, "alice", job.job_id)
+
+        saved = kitchen.list_recipes()[0]
+        assert saved.recipe_type == RecipeType.MIDDAG
+        assert saved.prep_category == PrepCategory.BATCH_COOKING
     finally:
         await service.close()

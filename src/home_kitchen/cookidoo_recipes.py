@@ -30,6 +30,7 @@ from home_kitchen.models import (
     Recipe,
     RecipeSource,
     SourceIngredient,
+    infer_recipe_metadata,
 )
 from home_kitchen.recipes.collections import (
     CollectionEntry,
@@ -72,7 +73,44 @@ class CookidooError(HTTPException):
         super().__init__(status_code=status_code, detail=detail)
 
 
-_COOKIDOO_IMAGE_TRANSFORMATION = "t_web400x328"
+_COOKIDOO_IMAGE_TRANSFORMATION = "t_web_rdp_recipe_584x480_1_5x"
+
+
+def _seconds_to_minutes(raw_val: Any) -> int | None:
+    if isinstance(raw_val, bool) or raw_val is None:
+        return None
+    if isinstance(raw_val, (int, float)):
+        return max(1, round(raw_val / 60)) if raw_val > 0 else None
+    if isinstance(raw_val, str):
+        stripped = raw_val.strip()
+        try:
+            sec = float(stripped)
+        except ValueError:
+            return None
+        return max(1, round(sec / 60)) if sec > 0 else None
+    return None
+
+
+def _extract_cookidoo_labels(raw_val: Any) -> list[str]:
+    if isinstance(raw_val, str):
+        return [part.strip() for part in raw_val.split(",") if part.strip()]
+    if not isinstance(raw_val, list):
+        return []
+    labels: list[str] = []
+    for item in raw_val:
+        if isinstance(item, str) and item.strip():
+            labels.append(item.strip())
+        elif isinstance(item, dict):
+            val = (
+                item.get("title")
+                or item.get("name")
+                or item.get("label")
+                or item.get("category")
+                or item.get("value")
+            )
+            if isinstance(val, str) and val.strip():
+                labels.append(val.strip())
+    return labels
 
 
 def _strip_html(text: str) -> str:
@@ -316,6 +354,25 @@ def normalize_cookidoo_recipe(
     if raw.get("tools"):
         metadata["tools"] = raw["tools"]
 
+    raw_seconds = (
+        metadata.get("total_time")
+        if metadata.get("total_time") is not None
+        else metadata.get("prep_time")
+    )
+    prep_minutes = _seconds_to_minutes(raw_seconds)
+    if prep_minutes is None and metadata.get("prep_time") is not None:
+        prep_minutes = _seconds_to_minutes(metadata.get("prep_time"))
+    categories = _extract_cookidoo_labels(raw.get("categories") or raw.get("recipeCategory"))
+    tags = _extract_cookidoo_labels(raw.get("tags") or raw.get("keywords"))
+    recipe_type, prep_time_minutes, prep_category = infer_recipe_metadata(
+        title=title,
+        ingredients=ingredients,
+        categories=categories,
+        tags=tags,
+        prep_time_minutes=prep_minutes,
+        servings=servings,
+    )
+
     return CollectionEntry(
         id=recipe_id,
         provider=provider,
@@ -327,6 +384,9 @@ def normalize_cookidoo_recipe(
         servings=servings,
         ingredients=ingredients,
         instructions=instructions,
+        recipe_type=recipe_type,
+        prep_time_minutes=prep_time_minutes,
+        prep_category=prep_category,
     )
 
 
@@ -634,17 +694,17 @@ class CookidooCollectionProvider:
             badges = list(dict.fromkeys(item.get("badges") or ["Lagret i Cookidoo"]))
             fallback_thumb = _sanitize_cookidoo_image_url(item.get("thumbnail"), domain)
             raw_inline = item.get("raw")
+            inline_entry: CollectionEntry | None = None
             if isinstance(raw_inline, dict) and (
                 raw_inline.get("title") or raw_inline.get("recipeName") or raw_inline.get("name")
             ):
                 merged_raw = dict(raw_inline)
                 merged_raw["badges"] = badges
-                entry = normalize_cookidoo_recipe(
+                inline_entry = normalize_cookidoo_recipe(
                     merged_raw, provider=self.id, country=country, locale="en"
                 )
-                if not entry.image_url and fallback_thumb:
-                    entry.image_url = fallback_thumb
-                return entry
+                if inline_entry.image_url is not None:
+                    return inline_entry
 
             async with sem:
                 recipe_data: dict[str, Any] | list[Any] | None = None
@@ -668,7 +728,8 @@ class CookidooCollectionProvider:
                     else recipe_data
                 )
                 if isinstance(raw_recipe, dict):
-                    merged_raw = dict(raw_recipe)
+                    merged_raw = dict(raw_inline) if isinstance(raw_inline, dict) else {}
+                    merged_raw.update(raw_recipe)
                     merged_raw.setdefault("id", recipe_id)
                     merged_raw["badges"] = badges
                     entry = normalize_cookidoo_recipe(
@@ -677,6 +738,11 @@ class CookidooCollectionProvider:
                     if not entry.image_url and fallback_thumb:
                         entry.image_url = fallback_thumb
                     return entry
+
+            if inline_entry is not None:
+                if not inline_entry.image_url and fallback_thumb:
+                    inline_entry.image_url = fallback_thumb
+                return inline_entry
 
             primary_badge = badges[0] if badges else "Cookidoo"
             return CollectionEntry(
@@ -699,13 +765,26 @@ class CookidooCollectionProvider:
         inline_ingredients = entry.ingredients or entry.metadata.get("ingredients") or []
         inline_instructions = entry.instructions or entry.metadata.get("instructions") or []
         if inline_ingredients and inline_instructions:
+            servings = entry.servings or entry.metadata.get("servings") or 4
+            recipe_type, prep_time_minutes, prep_category = infer_recipe_metadata(
+                title=entry.title,
+                ingredients=inline_ingredients,
+                categories=entry.badges,
+                prep_time_minutes=entry.prep_time_minutes,
+                servings=servings,
+                recipe_type=entry.recipe_type,
+                prep_category=entry.prep_category,
+            )
             return ImportedDraft(
                 title=entry.title,
-                servings=entry.servings or entry.metadata.get("servings") or 4,
+                servings=servings,
                 ingredients=list(inline_ingredients),
                 instructions=list(inline_instructions),
                 source_url=entry.source_url,
                 image_url=entry.image_url,
+                recipe_type=recipe_type,
+                prep_time_minutes=prep_time_minutes,
+                prep_category=prep_category,
             )
 
         headers, base_url, country, locale = self._build_request_context()
@@ -741,6 +820,13 @@ class CookidooCollectionProvider:
                             instructions=detail.instructions,
                             source_url=entry.source_url,
                             image_url=detail.image_url or entry.image_url,
+                            recipe_type=detail.recipe_type or entry.recipe_type,
+                            prep_time_minutes=(
+                                detail.prep_time_minutes
+                                if detail.prep_time_minutes is not None
+                                else entry.prep_time_minutes
+                            ),
+                            prep_category=detail.prep_category or entry.prep_category,
                         )
             raise ValueError("Fant ikke den egne Cookidoo-oppskriften for import")
 
@@ -773,6 +859,13 @@ class CookidooCollectionProvider:
             instructions=detail.instructions,
             source_url=entry.source_url,
             image_url=detail.image_url or entry.image_url,
+            recipe_type=detail.recipe_type or entry.recipe_type,
+            prep_time_minutes=(
+                detail.prep_time_minutes
+                if detail.prep_time_minutes is not None
+                else entry.prep_time_minutes
+            ),
+            prep_category=detail.prep_category or entry.prep_category,
         )
 
     @staticmethod
@@ -850,46 +943,7 @@ class CookidooCollectionProvider:
                             cl.get("title") or cl.get("name") or "Lagret i Cookidoo"
                         ).strip()
                         list_thumb = cl.get("listThumbnail") or cl.get("thumbnail")
-                        for rid in cl.get("recipeIds") or []:
-                            if not isinstance(rid, str) or not rid.strip():
-                                continue
-                            clean_id = rid.strip()
-                            slot = by_id.get(clean_id)
-                            if slot is None:
-                                by_id[clean_id] = {
-                                    "id": clean_id,
-                                    "badges": [list_title],
-                                    "thumbnail": list_thumb,
-                                    "raw": None,
-                                }
-                            else:
-                                if list_title not in slot["badges"]:
-                                    slot["badges"].append(list_title)
-                                if not slot.get("thumbnail") and list_thumb:
-                                    slot["thumbnail"] = list_thumb
-                        for rec in cl.get("recipes") or []:
-                            if isinstance(rec, dict):
-                                clean_id = str(
-                                    rec.get("id")
-                                    or rec.get("recipeId")
-                                    or rec.get("recipe_id")
-                                    or ""
-                                ).strip()
-                                if not clean_id:
-                                    continue
-                                slot = by_id.get(clean_id)
-                                if slot is None:
-                                    by_id[clean_id] = {
-                                        "id": clean_id,
-                                        "badges": [list_title],
-                                        "thumbnail": list_thumb,
-                                        "raw": rec,
-                                    }
-                                else:
-                                    if list_title not in slot["badges"]:
-                                        slot["badges"].append(list_title)
-                                    if not slot.get("raw"):
-                                        slot["raw"] = rec
+                        self._collect_managed_list_items(cl, list_title, list_thumb, by_id)
                 all_items = list(by_id.values())
                 page_items = all_items[start:end]
                 entries = await self._hydrate_recipe_summaries(
@@ -1100,6 +1154,25 @@ class CookidooRecipeService:
             safe_instructions = (
                 instructions if instructions else ["Følg veiledning i Cookidoo / TM6"]
             )
+            raw_seconds = (
+                entry.metadata.get("total_time")
+                if entry.metadata.get("total_time") is not None
+                else entry.metadata.get("prep_time")
+            )
+            raw_minutes = (
+                entry.prep_time_minutes
+                if entry.prep_time_minutes is not None
+                else _seconds_to_minutes(raw_seconds)
+            )
+            inferred_type, inferred_minutes, inferred_prep_category = infer_recipe_metadata(
+                title=entry.title,
+                ingredients=safe_ingredients,
+                categories=entry.badges,
+                prep_time_minutes=raw_minutes,
+                servings=servings,
+                recipe_type=entry.recipe_type,
+                prep_category=entry.prep_category,
+            )
 
             new_recipe = Recipe(
                 id=recipe_id,
@@ -1117,6 +1190,9 @@ class CookidooRecipeService:
                     for idx, raw in enumerate(safe_ingredients)
                 ],
                 source_language="nob",
+                recipe_type=inferred_type,
+                prep_time_minutes=inferred_minutes,
+                prep_category=inferred_prep_category,
             )
 
             connection.execute(insert(recipes).values(**entity_values(new_recipe)))

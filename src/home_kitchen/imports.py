@@ -11,6 +11,8 @@ from pydantic import BaseModel, HttpUrl
 from recipe_scrapers import scrape_html
 from starlette.concurrency import run_in_threadpool
 
+from home_kitchen.models import PrepCategory, RecipeType, infer_recipe_metadata
+
 ODA_HOSTS = {"oda.com", "www.oda.com"}
 ALLOWED_HOSTS = {"matprat.no", "www.matprat.no", "marmiton.org", "www.marmiton.org", *ODA_HOSTS}
 MAX_BYTES = 2_000_000
@@ -18,6 +20,10 @@ MAX_JSONLD_NODES = 5_000
 MAX_JSONLD_DEPTH = 32
 USER_AGENT = "HomeKitchenBot/0.1 (+https://github.com/ghjklw/home-kitchen)"
 _ODA_RECIPE_PATH = re.compile(r"^/no/recipes/[1-9][0-9]*-[a-z0-9]+(?:-[a-z0-9]+)*/?$")
+_ISO_DURATION_RE = re.compile(
+    r"^P(?:(?P<days>\d+)D)?(?:T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+)S)?)?$",
+    re.IGNORECASE,
+)
 
 
 class ImportedDraft(BaseModel):
@@ -27,6 +33,9 @@ class ImportedDraft(BaseModel):
     instructions: list[str]
     source_url: HttpUrl
     image_url: HttpUrl | None = None
+    recipe_type: RecipeType | None = None
+    prep_time_minutes: int | None = None
+    prep_category: PrepCategory | None = None
 
 
 def validate_url(url: str) -> None:
@@ -149,6 +158,43 @@ def _oda_servings(value) -> int:
     return int(match.group(1)) if match else 0
 
 
+def _parse_schema_duration_minutes(value) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        num = int(round(value))
+        return num if num > 0 else None
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    if stripped.isdigit():
+        num = int(stripped)
+        return num if num > 0 else None
+    match = _ISO_DURATION_RE.fullmatch(stripped)
+    if not match:
+        return None
+    days = int(match.group("days") or 0)
+    hours = int(match.group("hours") or 0)
+    minutes = int(match.group("minutes") or 0)
+    seconds = int(match.group("seconds") or 0)
+    total = days * 1440 + hours * 60 + minutes + (1 if seconds >= 30 else 0)
+    return total if total > 0 else None
+
+
+def _extract_schema_labels(value) -> list[str]:
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    if isinstance(value, list):
+        out: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                out.extend(part.strip() for part in item.split(",") if part.strip())
+        return out
+    return []
+
+
 def _parse_oda_recipe(html_text: str, url: str) -> ImportedDraft:
     parser = _JsonLdParser()
     parser.feed(html_text)
@@ -198,6 +244,17 @@ def _parse_oda_recipe(html_text: str, url: str) -> ImportedDraft:
                 image = candidate
         except (ValueError, TypeError):
             pass
+    raw_minutes = _parse_schema_duration_minutes(recipe.get("totalTime"))
+    if raw_minutes is None:
+        raw_minutes = _parse_schema_duration_minutes(recipe.get("prepTime"))
+    recipe_type, prep_time_minutes, prep_category = infer_recipe_metadata(
+        title=title.strip(),
+        ingredients=ingredients,
+        categories=_extract_schema_labels(recipe.get("recipeCategory")),
+        tags=_extract_schema_labels(recipe.get("keywords")),
+        prep_time_minutes=raw_minutes,
+        servings=servings,
+    )
     return ImportedDraft(
         title=title.strip(),
         servings=servings,
@@ -205,7 +262,17 @@ def _parse_oda_recipe(html_text: str, url: str) -> ImportedDraft:
         instructions=instructions,
         source_url=HttpUrl(url),
         image_url=image,
+        recipe_type=recipe_type,
+        prep_time_minutes=prep_time_minutes,
+        prep_category=prep_category,
     )
+
+
+def _scraper_optional(fn) -> object:
+    try:
+        return fn()
+    except Exception:
+        return None
 
 
 def parse_recipe(html: str, url: str) -> ImportedDraft:
@@ -214,23 +281,42 @@ def parse_recipe(html: str, url: str) -> ImportedDraft:
         return _parse_oda_recipe(html, url)
     scraper = scrape_html(html, org_url=url)
     # Keep source ingredient text for human review: quantities are not guessed.
-    import re
-
+    title = scraper.title()
+    ingredients = scraper.ingredients() or scraper.schema.ingredients()
     yield_text = scraper.yields()
     match = re.search(r"\d+", yield_text)
+    servings = max(1, int(match.group()) if match else 1)
     try:
         image = HttpUrl(scraper.image())
         if image.scheme != "https" or image.username or image.password:
             image = None
     except (ValueError, TypeError, AttributeError):
         image = None
+    raw_total_time = _scraper_optional(scraper.total_time)
+    if raw_total_time is None and hasattr(scraper, "prep_time"):
+        raw_total_time = _scraper_optional(scraper.prep_time)
+    categories: list[str] = []
+    for getter_name in ("category", "cuisine"):
+        getter = getattr(scraper, getter_name, None)
+        if callable(getter):
+            categories.extend(_extract_schema_labels(_scraper_optional(getter)))
+    recipe_type, prep_time_minutes, prep_category = infer_recipe_metadata(
+        title=title,
+        ingredients=ingredients,
+        categories=categories,
+        prep_time_minutes=raw_total_time if isinstance(raw_total_time, (int, float)) else None,
+        servings=servings,
+    )
     return ImportedDraft(
-        title=scraper.title(),
-        servings=max(1, int(match.group()) if match else 1),
-        ingredients=scraper.ingredients() or scraper.schema.ingredients(),
+        title=title,
+        servings=servings,
+        ingredients=ingredients,
         instructions=[step.strip() for step in scraper.instructions().splitlines() if step.strip()],
         source_url=HttpUrl(url),
         image_url=image,
+        recipe_type=recipe_type,
+        prep_time_minutes=prep_time_minutes,
+        prep_category=prep_category,
     )
 
 

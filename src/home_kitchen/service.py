@@ -6,7 +6,11 @@ from datetime import UTC, date, datetime, time
 from typing import Any
 from uuid import UUID, uuid4
 
-from home_kitchen.catalogue.identity import UnmappedIngredient, normalize_identity_text
+from home_kitchen.catalogue.identity import (
+    UnmappedIngredient,
+    candidate_identity_names,
+    normalize_identity_text,
+)
 from home_kitchen.catalogue.identity_repository import PostgresIdentityRepository
 from home_kitchen.catalogue.identity_service import CanonicalIdentityService
 
@@ -289,14 +293,33 @@ class KitchenService:
                 locales.append(normalized)
         return locales
 
-    def _resolve_identity_across_locales(
+    def _resolve_exact_identity_across_locales(
         self, kind: str, alias: str, locales: list[str]
-    ) -> UUID | None:
+    ) -> tuple[UUID | None, bool]:
         for locale in locales:
             res = self.identities.resolve(kind, locale, "recipe", alias)
             if res.status == "resolved" and len(res.candidates) == 1:
-                return res.candidates[0].id
+                return res.candidates[0].id, False
             if res.status == "ambiguous":
+                return None, True
+        return None, False
+
+    def _resolve_identity_across_locales(
+        self, kind: str, alias: str, locales: list[str]
+    ) -> UUID | None:
+        exact_id, ambiguous = self._resolve_exact_identity_across_locales(kind, alias, locales)
+        if exact_id is not None or ambiguous or kind != "product":
+            return exact_id
+        norm_alias = normalize_identity_text(alias)
+        for candidate in candidate_identity_names(alias):
+            if candidate == norm_alias:
+                continue
+            matched_id, cand_ambiguous = self._resolve_exact_identity_across_locales(
+                kind, candidate, locales
+            )
+            if matched_id is not None:
+                return matched_id
+            if cand_ambiguous:
                 return None
         return None
 

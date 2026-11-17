@@ -1238,29 +1238,4 @@ class CookidooRecipeService:
                 )
             )
 
-        has_unmapped = any(
-            ing.canonical_product_id is None
-            or (bool(ing.unit and ing.unit.strip()) and ing.canonical_unit_id is None)
-            for ing in new_recipe.ingredients
-        )
-        kitchen_settings = getattr(self.kitchen, "settings", None)
-        if has_unmapped and kitchen_settings is not None and kitchen_settings.ai_configured:
-            try:
-                from home_kitchen.catalogue.ai_mapper import auto_map_unmapped_ingredients
-
-                auto_map_unmapped_ingredients(
-                    self.kitchen.store,
-                    kitchen_settings,
-                    household_id=self.household_id,
-                    actor_id=actor_id,
-                    recipe_id=recipe_id,
-                    identity_service=getattr(self.kitchen, "identities", None),
-                )
-            except Exception:
-                _LOG.warning(
-                    "Auto-mapping unmapped ingredients failed after Cookidoo import for %s",
-                    recipe_id,
-                    exc_info=True,
-                )
-
         return recipe_id, False

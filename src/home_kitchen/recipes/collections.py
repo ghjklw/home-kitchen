@@ -575,31 +575,6 @@ class CollectionService:
                     index_elements=[source_links.c.provider, source_links.c.external_recipe_id]
                 )
             )
-        if existing is None and recipe is not None:
-            has_unmapped = any(
-                ing.canonical_product_id is None
-                or (bool(ing.unit and ing.unit.strip()) and ing.canonical_unit_id is None)
-                for ing in recipe.ingredients
-            )
-            kitchen_settings = getattr(self.kitchen, "settings", None)
-            if has_unmapped and kitchen_settings is not None and kitchen_settings.ai_configured:
-                try:
-                    from home_kitchen.catalogue.ai_mapper import auto_map_unmapped_ingredients
-
-                    auto_map_unmapped_ingredients(
-                        self.kitchen.store,
-                        kitchen_settings,
-                        household_id=getattr(self.kitchen, "household_id", None),
-                        actor_id=job.actor,
-                        recipe_id=recipe_id,
-                        identity_service=getattr(self.kitchen, "identities", None),
-                    )
-                except Exception:
-                    _LOG.warning(
-                        "Auto-mapping unmapped ingredients failed after collection save for %s",
-                        recipe_id,
-                        exc_info=True,
-                    )
         return recipe_id, existing is not None
 
     async def _save_async(self, job, entry, draft):
@@ -610,7 +585,34 @@ class CollectionService:
             await task
             raise
 
+    async def _auto_map_imported_recipes(self, job, recipe_ids: list[UUID]) -> None:
+        kitchen_settings = getattr(self.kitchen, "settings", None)
+        if kitchen_settings is None or not kitchen_settings.ai_configured:
+            return
+        try:
+            from home_kitchen.catalogue.ai_mapper import auto_map_unmapped_ingredients_async
+
+            await auto_map_unmapped_ingredients_async(
+                self.kitchen.store,
+                kitchen_settings,
+                household_id=getattr(self.kitchen, "household_id", None),
+                actor_id=job.actor,
+                recipe_ids=recipe_ids,
+                batch_size=40,
+                max_batches=10,
+                identity_service=getattr(self.kitchen, "identities", None),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _LOG.warning(
+                "Auto-mapping unmapped ingredients failed after collection import for %d recipes",
+                len(recipe_ids),
+                exc_info=True,
+            )
+
     async def _import(self, job, selected):
+        imported_recipe_ids: list[UUID] = []
         try:
             async with self._semaphore:
                 prov = getattr(job, "provider", None) or self._provider_for(job.view.provider)
@@ -652,6 +654,8 @@ class CollectionService:
                             await asyncio.to_thread(self._fence, job)
                             entry.recipe_id, existed = await self._save_async(job, entry, draft)
                             entry.status = "already_imported" if existed else "imported"
+                            if not existed and entry.recipe_id is not None:
+                                imported_recipe_ids.append(entry.recipe_id)
                     except asyncio.CancelledError:
                         entry.status = "pending"
                         raise
@@ -669,6 +673,8 @@ class CollectionService:
                             "Could not import this source. Review the source URL and explicitly retry.",
                         )
                     job.view.processed += 1
+                if imported_recipe_ids and not job.cancelled:
+                    await self._auto_map_imported_recipes(job, imported_recipe_ids)
                 job.view.status = "completed"
         except asyncio.CancelledError:
             job.view.status = "cancelled"

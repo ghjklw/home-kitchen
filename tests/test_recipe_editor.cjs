@@ -10,7 +10,9 @@ const {
   PREP_CATEGORIES,
   RECIPE_TYPE_LABELS,
   PREP_CATEGORY_LABELS,
+  RECIPE_SOURCE_LABELS,
   formatRecipeBadge,
+  formatRecipeSourceBadge,
   isPositiveQuantity,
   buildRevisionRequest,
   normalizeQuantity,
@@ -877,4 +879,155 @@ test("DOM: importForm pre-populates recipe_type, prep_time_minutes, and prep_cat
   assert.equal(metaRow.findAll((n) => n.name === "recipe_type")[0].value, "lunsj");
   assert.equal(metaRow.findAll((n) => n.name === "prep_time_minutes")[0].value, "25");
   assert.equal(metaRow.findAll((n) => n.name === "prep_category")[0].value, "rask");
+});
+
+test("formatRecipeSourceBadge formats recipe source labels cleanly", () => {
+  assert.equal(RECIPE_SOURCE_LABELS.cookidoo, "Cookidoo");
+  assert.equal(RECIPE_SOURCE_LABELS.oda, "Oda");
+  assert.equal(RECIPE_SOURCE_LABELS.ai, "KI-idé");
+  assert.equal(RECIPE_SOURCE_LABELS.manual, "Fra ditt kjøkken");
+
+  assert.equal(formatRecipeSourceBadge({ source: "cookidoo" }), "Cookidoo");
+  assert.equal(formatRecipeSourceBadge({ source: "ai" }), "KI-idé");
+  assert.equal(
+    formatRecipeSourceBadge({ source: "imported", provenance: { provider: "oda" } }),
+    "Oda",
+  );
+  assert.equal(
+    formatRecipeSourceBadge({
+      source: "imported",
+      source_url: "https://oda.com/no/recipes/731-tomato-soup/",
+    }),
+    "Oda",
+  );
+  assert.equal(
+    formatRecipeSourceBadge({ source: "imported", provenance: { kind: "photo" } }),
+    "Fra bilde",
+  );
+  assert.equal(
+    formatRecipeSourceBadge({ source: "imported", photo_source: { kind: "photo_book" } }),
+    "Fra bilde",
+  );
+  assert.equal(
+    formatRecipeSourceBadge({
+      source: "imported",
+      source_url: "https://www.matprat.no/oppskrifter/tomatsuppe/",
+    }),
+    "Fra en oppskriftslenke",
+  );
+  assert.equal(formatRecipeSourceBadge({ source: "manual" }), "Fra ditt kjøkken");
+  assert.equal(formatRecipeSourceBadge({}), "Fra ditt kjøkken");
+  assert.equal(formatRecipeSourceBadge(null), "");
+});
+
+test("DOM: renderRecipes and viewRecipe render source badges and source filter chips filter cards", () => {
+  const recipes = [
+    {
+      id: "s1",
+      title: "Cookidoo Risotto",
+      servings: 4,
+      source: "cookidoo",
+      source_url: "https://cookidoo.no/recipes/recipe/nb-NO/r1",
+      recipe_type: "middag",
+      prep_time_minutes: 30,
+      prep_category: "rask",
+      ingredients: [{ name: "ris", quantity: "300", unit: "g" }],
+      instructions: ["Kok"],
+    },
+    {
+      id: "s2",
+      title: "Oda Fiskesuppe",
+      servings: 4,
+      source: "imported",
+      source_url: "https://oda.com/no/recipes/42-fiskesuppe/",
+      recipe_type: "middag",
+      prep_time_minutes: 25,
+      prep_category: "rask",
+      ingredients: [{ name: "laks", quantity: "400", unit: "g" }],
+      instructions: ["Trekk"],
+    },
+    {
+      id: "s3",
+      title: "Matprat Pannekaker",
+      servings: 2,
+      source: "imported",
+      source_url: "https://www.matprat.no/oppskrifter/pannekaker/",
+      recipe_type: "frokost",
+      prep_time_minutes: 20,
+      prep_category: "rask",
+      ingredients: [{ name: "mel", quantity: "200", unit: "g" }],
+      instructions: ["Stek"],
+    },
+    {
+      id: "s4",
+      title: "KI Kyllingbolle",
+      servings: 2,
+      source: "ai",
+      recipe_type: "lunsj",
+      ingredients: [{ name: "kylling", quantity: "200", unit: "g" }],
+      instructions: ["Bland"],
+    },
+    {
+      id: "s5",
+      title: "Mormors Brød",
+      servings: 1,
+      source: "manual",
+      ingredients: [{ name: "mel", quantity: "500", unit: "g" }],
+      instructions: ["Bak"],
+    },
+  ];
+
+  const harness = buildRecipeUiHarness({ recipes });
+  harness.context.renderRecipes(harness.main);
+
+  const cards = harness.main.querySelectorAll(".recipe-card");
+  assert.equal(cards.length, 5);
+  assert.deepEqual(
+    cards.map((c) => c.querySelector(".recipe-badge-source").textContent),
+    ["Cookidoo", "Oda", "Fra en oppskriftslenke", "KI-idé", "Fra ditt kjøkken"],
+  );
+
+  // Source filter chips exist and filter accurately
+  const sourceChipButtons = harness.main.querySelector(".source-chips").querySelectorAll(".filter-chip");
+  assert.deepEqual(
+    sourceChipButtons.map((btn) => btn.textContent),
+    ["Alle kilder", "Cookidoo", "Oda", "Lenke", "KI-idé", "Egen"],
+  );
+
+  const clickSource = (val) => {
+    const chip = sourceChipButtons.find((btn) => btn.dataset.sourceFilter === val);
+    assert.ok(chip, `Source chip ${val} exists`);
+    chip.click();
+    return harness.main.querySelectorAll(".recipe-card").map((c) => c.querySelector("h3").textContent);
+  };
+
+  assert.deepEqual(clickSource("cookidoo"), ["Cookidoo Risotto"]);
+  assert.deepEqual(clickSource("oda"), ["Oda Fiskesuppe"]);
+  assert.deepEqual(clickSource("imported"), ["Matprat Pannekaker"]);
+  assert.deepEqual(clickSource("ai"), ["KI Kyllingbolle"]);
+  assert.deepEqual(clickSource("manual"), ["Mormors Brød"]);
+  assert.deepEqual(clickSource(""), [
+    "Cookidoo Risotto",
+    "Oda Fiskesuppe",
+    "Matprat Pannekaker",
+    "KI Kyllingbolle",
+    "Mormors Brød",
+  ]);
+
+  // Combined filter: type "middag" + source "oda" -> "Oda Fiskesuppe"
+  harness.main.findAll((n) => n.dataset?.typeFilter === "middag")[0].click();
+  assert.deepEqual(clickSource("oda"), ["Oda Fiskesuppe"]);
+
+  // viewRecipe renders .recipe-badge-source alongside .recipe-badge-meta
+  harness.context.viewRecipe(recipes[0]);
+  assert.equal(harness.dialogRoot.querySelector(".recipe-badge-source").textContent, "Cookidoo");
+  assert.equal(harness.dialogRoot.querySelector(".recipe-badge-meta").textContent, "Middag · Rask (30 min)");
+
+  harness.context.viewRecipe(recipes[1]);
+  assert.equal(harness.dialogRoot.querySelector(".recipe-badge-source").textContent, "Oda");
+  assert.equal(harness.dialogRoot.querySelector(".recipe-badge-meta").textContent, "Middag · Rask (25 min)");
+
+  harness.context.viewRecipe(recipes[4]);
+  assert.equal(harness.dialogRoot.querySelector(".recipe-badge-source").textContent, "Fra ditt kjøkken");
+  assert.equal(harness.dialogRoot.querySelector(".recipe-badge-meta"), null);
 });

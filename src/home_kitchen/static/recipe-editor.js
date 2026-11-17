@@ -344,6 +344,36 @@
     batch_cooking: "Batch-cooking",
   });
 
+  const RECIPE_SOURCE_LABELS = Object.freeze({
+    cookidoo: "Cookidoo",
+    oda: "Oda",
+    photo: "Fra bilde",
+    imported: "Fra en oppskriftslenke",
+    ai: "KI-idé",
+    manual: "Fra ditt kjøkken",
+  });
+
+  function formatRecipeSourceBadge(recipe) {
+    if (!recipe || typeof recipe !== "object") return "";
+    if (recipe.source === "cookidoo") return RECIPE_SOURCE_LABELS.cookidoo;
+    if (recipe.source === "ai") return RECIPE_SOURCE_LABELS.ai;
+    if (recipe.source === "imported") {
+      const sourceUrl = String(recipe.source_url || "").toLowerCase();
+      if (recipe.provenance?.provider === "oda" || sourceUrl.includes("oda.com")) {
+        return RECIPE_SOURCE_LABELS.oda;
+      }
+      if (
+        recipe.provenance?.kind === "photo" ||
+        recipe.photo_source?.kind === "photo_book" ||
+        Boolean(recipe.photo_source?.id)
+      ) {
+        return RECIPE_SOURCE_LABELS.photo;
+      }
+      return RECIPE_SOURCE_LABELS.imported;
+    }
+    return RECIPE_SOURCE_LABELS.manual;
+  }
+
   function formatRecipeBadge(recipe) {
     if (!recipe || typeof recipe !== "object") return "";
     const typeText = RECIPE_TYPE_LABELS[recipe.recipe_type] || "";
@@ -393,7 +423,9 @@
     PREP_CATEGORIES,
     RECIPE_TYPE_LABELS,
     PREP_CATEGORY_LABELS,
+    RECIPE_SOURCE_LABELS,
     formatRecipeBadge,
+    formatRecipeSourceBadge,
     buildRevisionRequest,
     applyRevisionIfActive,
     isPositiveQuantity,

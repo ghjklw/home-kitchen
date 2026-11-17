@@ -200,15 +200,31 @@ def create_app(
         recipe_type: str | None = None,
         prep_category: str | None = None,
         max_prep_minutes: int | None = Query(default=None, ge=1, le=2880),
+        source: str | None = None,
         include_stats: Annotated[bool, Query()] = False,
         stats: Annotated[bool, Query()] = False,
     ) -> list[Recipe]:
         if include_stats or stats:
+            if source is not None:
+                return service.list_recipes(
+                    recipe_type=recipe_type,
+                    prep_category=prep_category,
+                    max_prep_minutes=max_prep_minutes,
+                    include_stats=True,
+                    source=source,
+                )
             return service.list_recipes(
                 recipe_type=recipe_type,
                 prep_category=prep_category,
                 max_prep_minutes=max_prep_minutes,
                 include_stats=True,
+            )
+        if source is not None:
+            return service.list_recipes(
+                recipe_type=recipe_type,
+                prep_category=prep_category,
+                max_prep_minutes=max_prep_minutes,
+                source=source,
             )
         return service.list_recipes(
             recipe_type=recipe_type,

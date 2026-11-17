@@ -297,11 +297,19 @@ function formatRecipeBadge(recipe) {
   else if (timeText) prepText = timeText;
   return [typeText, prepText].filter(Boolean).join(" · ");
 }
+function isOdaSourceUrl(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== "string") return false;
+  try {
+    const host = new URL(rawUrl).hostname.toLowerCase();
+    return host === "oda.com" || host.endsWith(".oda.com");
+  } catch {
+    return false;
+  }
+}
 function isOdaRecipe(recipe) {
   return (
     recipe?.source === "imported" &&
-    (recipe?.provenance?.provider === "oda" ||
-      String(recipe?.source_url || "").toLowerCase().includes("oda.com"))
+    (recipe?.provenance?.provider === "oda" || isOdaSourceUrl(recipe?.source_url))
   );
 }
 function formatRecipeSourceBadge(recipe) {

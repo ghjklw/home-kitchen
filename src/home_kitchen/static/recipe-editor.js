@@ -358,8 +358,16 @@
     if (recipe.source === "cookidoo") return RECIPE_SOURCE_LABELS.cookidoo;
     if (recipe.source === "ai") return RECIPE_SOURCE_LABELS.ai;
     if (recipe.source === "imported") {
-      const sourceUrl = String(recipe.source_url || "").toLowerCase();
-      if (recipe.provenance?.provider === "oda" || sourceUrl.includes("oda.com")) {
+      let isOdaUrl = false;
+      if (typeof recipe.source_url === "string" && recipe.source_url) {
+        try {
+          const host = new URL(recipe.source_url).hostname.toLowerCase();
+          isOdaUrl = host === "oda.com" || host.endsWith(".oda.com");
+        } catch {
+          isOdaUrl = false;
+        }
+      }
+      if (recipe.provenance?.provider === "oda" || isOdaUrl) {
         return RECIPE_SOURCE_LABELS.oda;
       }
       if (

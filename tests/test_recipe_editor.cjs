@@ -1,7 +1,16 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
+const vm = require("node:vm");
 
+const KitchenRecipeEditor = require("../src/home_kitchen/static/recipe-editor.js");
 const {
+  RECIPE_TYPES,
+  PREP_CATEGORIES,
+  RECIPE_TYPE_LABELS,
+  PREP_CATEGORY_LABELS,
+  formatRecipeBadge,
   isPositiveQuantity,
   buildRevisionRequest,
   normalizeQuantity,
@@ -11,7 +20,7 @@ const {
   prepareAIRevisionForEditor,
   applyRevisionIfActive,
   recipeRevisionSnapshot,
-} = require("../src/home_kitchen/static/recipe-editor.js");
+} = KitchenRecipeEditor;
 
 test("saves unknown source quantities without inventing an amount", () => {
   assert.deepEqual(recipeIngredientForSave({
@@ -473,4 +482,365 @@ test("AI revision preserves recipe metadata fields when supplied", () => {
   assert.equal(payload.recipe.recipe_type, "middag");
   assert.equal(payload.recipe.prep_time_minutes, 25);
   assert.equal(payload.recipe.prep_category, "rask");
+});
+
+test("formatRecipeBadge formats recipe type, prep category, and prep time minutes", () => {
+  assert.deepEqual(RECIPE_TYPES, ["middag", "dessert", "frokost", "lunsj", "tilbehør", "bakst", "annet"]);
+  assert.deepEqual(PREP_CATEGORIES, ["rask", "normal", "langtid", "batch_cooking"]);
+  assert.equal(RECIPE_TYPE_LABELS.tilbehør, "Tilbehør");
+  assert.equal(PREP_CATEGORY_LABELS.batch_cooking, "Batch-cooking");
+
+  assert.equal(
+    formatRecipeBadge({ recipe_type: "middag", prep_category: "rask", prep_time_minutes: 25 }),
+    "Middag · Rask (25 min)",
+  );
+  assert.equal(
+    formatRecipeBadge({ recipe_type: "bakst", prep_category: "langtid", prep_time_minutes: null }),
+    "Bakst · Langtid",
+  );
+  assert.equal(
+    formatRecipeBadge({ recipe_type: null, prep_category: null, prep_time_minutes: 45 }),
+    "45 min",
+  );
+  assert.equal(formatRecipeBadge({ recipe_type: "unknown", prep_time_minutes: 0 }), "");
+  assert.equal(formatRecipeBadge(null), "");
+});
+
+test("recipeRevisionSnapshot detects metadata changes and buildRevisionRequest preserves metadata when provided", () => {
+  const base = {
+    title: "Suppe",
+    servings: "2",
+    prompt: "",
+    recipe_type: "middag",
+    prep_time_minutes: "20",
+    prep_category: "rask",
+    ingredients: [{ name: "gulrot", quantity: "2", unit: "stk" }],
+    instructions: "Kok",
+  };
+  assert.notEqual(
+    recipeRevisionSnapshot(base),
+    recipeRevisionSnapshot({ ...base, recipe_type: "lunsj" }),
+  );
+  assert.notEqual(
+    recipeRevisionSnapshot(base),
+    recipeRevisionSnapshot({ ...base, prep_time_minutes: "35" }),
+  );
+  assert.notEqual(
+    recipeRevisionSnapshot(base),
+    recipeRevisionSnapshot({ ...base, prep_category: "normal" }),
+  );
+
+  const req = buildRevisionRequest(base, { isEditing: true, source: "manual" }, "gjør den raskere");
+  assert.equal(req.recipe.recipe_type, "middag");
+  assert.equal(req.recipe.prep_time_minutes, 20);
+  assert.equal(req.recipe.prep_category, "rask");
+});
+
+class DomNode {
+  constructor(tag, text = "", className = "") {
+    this.tagName = tag.toUpperCase();
+    this.textContent = text == null ? "" : String(text);
+    this.className = className || "";
+    this.children = [];
+    this.attributes = {};
+    this.dataset = {};
+    this.listeners = {};
+    this.value = "";
+    this.type = "";
+    this.name = "";
+    this.hidden = false;
+    this.disabled = false;
+    this.parentNode = null;
+    this.classList = {
+      contains: (cls) => this.className.split(/\s+/).filter(Boolean).includes(cls),
+      toggle: (cls, force) => {
+        const set = new Set(this.className.split(/\s+/).filter(Boolean));
+        const shouldAdd = force !== undefined ? Boolean(force) : !set.has(cls);
+        if (shouldAdd) set.add(cls);
+        else set.delete(cls);
+        this.className = [...set].join(" ");
+      },
+    };
+  }
+  append(...children) {
+    children.forEach((child) => {
+      if (!child) return;
+      child.parentNode = this;
+      this.children.push(child);
+    });
+  }
+  replaceChildren(...children) {
+    this.children.forEach((child) => { child.parentNode = null; });
+    this.children = [];
+    this.append(...children);
+  }
+  remove() {
+    if (!this.parentNode) return;
+    this.parentNode.children = this.parentNode.children.filter((c) => c !== this);
+    this.parentNode = null;
+  }
+  setAttribute(key, value) { this.attributes[key] = String(value); }
+  getAttribute(key) { return this.attributes[key] ?? null; }
+  removeAttribute(key) { delete this.attributes[key]; }
+  addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
+  click() { (this.listeners.click || []).forEach((fn) => fn({ target: this, currentTarget: this })); }
+  dispatchEvent(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this, currentTarget: this })); }
+  focus() { this.focused = true; }
+  get isConnected() {
+    if (this.parentNode) return this.parentNode.isConnected;
+    return this.connected === true;
+  }
+  findAll(predicate, acc = []) {
+    if (predicate(this)) acc.push(this);
+    this.children.forEach((child) => child.findAll?.(predicate, acc));
+    return acc;
+  }
+  querySelectorAll(selector) {
+    const classNames = selector.startsWith(".") ? selector.slice(1).split(".") : null;
+    return this.findAll((n) => {
+      if (classNames) return classNames.every((cls) => n.classList.contains(cls));
+      return n.tagName.toLowerCase() === selector.toLowerCase();
+    });
+  }
+  querySelector(selector) {
+    return this.querySelectorAll(selector)[0] || null;
+  }
+}
+
+function buildRecipeUiHarness({ recipes = [] } = {}) {
+  const appSource = fs.readFileSync(path.join(__dirname, "../src/home_kitchen/static/app.js"), "utf8");
+  const extractRange = (startMarker, endMarker) => {
+    const start = appSource.indexOf(startMarker);
+    const end = appSource.indexOf(endMarker, start);
+    assert.ok(start >= 0 && end > start, `Located ${startMarker}`);
+    return appSource.slice(start, end);
+  };
+  const renderRecipesSource = extractRange("function renderRecipes(", "\nfunction recipeForm(");
+  const recipeFormSource = extractRange("function recipeForm(", "\nfunction recipeImageCredit(");
+  const viewStart = appSource.indexOf("function viewRecipe(");
+  const viewEnd = appSource.indexOf("\nfunction removeRecipeImage(", viewStart);
+  assert.ok(viewStart >= 0 && viewEnd > viewStart, "Located viewRecipe");
+  const viewRecipeSlice = appSource.slice(viewStart, viewEnd);
+  const badgeStart = appSource.indexOf("function formatRecipeBadge(");
+  const badgeEnd = appSource.indexOf("\nfunction day(", badgeStart);
+  const badgeSource = appSource.slice(badgeStart, badgeEnd);
+
+  const modal = { open: false, dataset: {}, showModal() { this.open = true; }, close() { this.open = false; } };
+  const main = new DomNode("main");
+  main.connected = true;
+  const dialogRoot = new DomNode("div");
+  dialogRoot.connected = true;
+  const apiCalls = [];
+  const state = {
+    view: "recipes",
+    household: { default_servings: 2, language: "nb" },
+    recipes,
+    recipeCollectionJob: null,
+    recipeCollectionStatusNode: null,
+  };
+  const fields = [];
+  let submitAction = null;
+  const context = {
+    state,
+    window: { KitchenRecipeEditor },
+    URL,
+    $: (sel) => (sel === "#modal" ? modal : sel === "#main" ? main : dialogRoot),
+    openDialog: (headingText) => {
+      modal.showModal();
+      dialogRoot.replaceChildren(new DomNode("h2", headingText));
+      return dialogRoot;
+    },
+    el: (tag, text = "", className = "") => new DomNode(tag, text, className),
+    add: (parent, ...children) => {
+      children.filter(Boolean).forEach((child) => parent.append(child));
+      return parent;
+    },
+    button: (text, action, className = "") => {
+      const node = new DomNode("button", text, className);
+      node.type = "button";
+      node.addEventListener("click", action);
+      return node;
+    },
+    field: (label, type = "text", value = "", help = "") => {
+      const wrap = new DomNode("label", label, "field");
+      const input = new DomNode(type === "textarea" ? "textarea" : type === "select" ? "select" : "input");
+      input.value = value == null ? "" : String(value);
+      input.fieldLabel = label;
+      wrap.append(input);
+      if (help) wrap.append(new DomNode("small", help));
+      fields.push(input);
+      return { wrap, input };
+    },
+    formSubmit: (form, label, action) => {
+      const error = new DomNode("p", "", "form-error");
+      form.append(error);
+      submitAction = async () => {
+        try {
+          await action();
+        } catch (err) {
+          error.textContent = err.message;
+          throw err;
+        }
+      };
+      return error;
+    },
+    title: (heading, eyebrow, subtitle, actions = []) => {
+      const header = new DomNode("header", "", "page-title");
+      header.append(new DomNode("h1", heading), ...actions);
+      return header;
+    },
+    empty: (heading, desc, action) => {
+      const box = new DomNode("div", "", "empty");
+      box.append(new DomNode("h2", heading), new DomNode("p", desc), action);
+      return box;
+    },
+    recipeAssistantConfigured: () => false,
+    connectionSettingsButton: () => new DomNode("button", "Innstillinger"),
+    updateRecipeCollectionStatus: () => {},
+    unmappedIngredientsDialog: () => {},
+    addRecipeForm: () => {},
+    mealForm: () => {},
+    recipeImage: () => null,
+    recipeImageCredit: () => null,
+    purchaseEstimateText: () => "",
+    ingredientQuantityText: (item) => item.name,
+    formatUiCount: String,
+    formatServings: (v) => `${v} porsjoner`,
+    httpsUrl: () => true,
+    notify: () => {},
+    navigate: () => {},
+    render: () => {},
+    api: async (reqPath, method = "GET", body) => {
+      apiCalls.push({ path: reqPath, method, body });
+      if (reqPath === "/recipes" && method === "GET") return state.recipes;
+      return { id: "saved-1", ...(body || {}) };
+    },
+  };
+  vm.runInNewContext([badgeSource, renderRecipesSource, recipeFormSource, viewRecipeSlice].join("\n"), context);
+  return {
+    main,
+    dialogRoot,
+    state,
+    context,
+    fields,
+    apiCalls,
+    submitForm: () => submitAction(),
+  };
+}
+
+test("DOM: recipeForm renders recipe metadata fields, pre-populates edits, and submits metadata in payload", async () => {
+  const harness = buildRecipeUiHarness();
+  harness.context.recipeForm({
+    id: "rec-1",
+    title: "Kjøttkaker",
+    servings: 4,
+    recipe_type: "middag",
+    prep_time_minutes: 45,
+    prep_category: "normal",
+    ingredients: [{ name: "kjøttdeig", quantity: "400", unit: "g" }],
+    instructions: ["Stek"],
+  }, "manual");
+
+  const metaRow = harness.dialogRoot.querySelector(".recipe-metadata-row");
+  assert.ok(metaRow, "recipe-metadata-row should be rendered");
+  const typeSelect = metaRow.findAll((n) => n.name === "recipe_type")[0];
+  const minutesInput = metaRow.findAll((n) => n.name === "prep_time_minutes")[0];
+  const categorySelect = metaRow.findAll((n) => n.name === "prep_category")[0];
+  assert.equal(typeSelect.value, "middag");
+  assert.equal(minutesInput.value, "45");
+  assert.equal(categorySelect.value, "normal");
+
+  // Update metadata values and submit
+  typeSelect.value = "lunsj";
+  minutesInput.value = "20";
+  categorySelect.value = "rask";
+  await harness.submitForm();
+
+  const putCall = harness.apiCalls.find((c) => c.path === "/recipes/rec-1" && c.method === "PUT");
+  assert.ok(putCall);
+  assert.equal(putCall.body.recipe_type, "lunsj");
+  assert.equal(putCall.body.prep_time_minutes, 20);
+  assert.equal(putCall.body.prep_category, "rask");
+
+  // Invalid negative prep_time_minutes throws validation error
+  minutesInput.value = "-5";
+  await assert.rejects(() => harness.submitForm(), /Tilberedningstid må være et positivt heltall/);
+});
+
+test("DOM: renderRecipes and viewRecipe display recipe metadata badges and filter chips filter cards", () => {
+  const recipes = [
+    {
+      id: "r1",
+      title: "Rask suppe",
+      servings: 2,
+      source: "manual",
+      recipe_type: "middag",
+      prep_time_minutes: 15,
+      prep_category: "rask",
+      ingredients: [{ name: "tomat", quantity: "2", unit: "stk" }],
+      instructions: ["Kok"],
+    },
+    {
+      id: "r2",
+      title: "Langtidssurret gryte",
+      servings: 4,
+      source: "manual",
+      recipe_type: "middag",
+      prep_time_minutes: 120,
+      prep_category: "langtid",
+      ingredients: [{ name: "bønner", quantity: "200", unit: "g" }],
+      instructions: ["Kok lenge"],
+    },
+    {
+      id: "r3",
+      title: "Eplekake",
+      servings: 6,
+      source: "manual",
+      recipe_type: "dessert",
+      prep_time_minutes: 50,
+      prep_category: "normal",
+      ingredients: [{ name: "eple", quantity: "3", unit: "stk" }],
+      instructions: ["Stek"],
+    },
+    {
+      id: "r4",
+      title: "Enkel salat",
+      servings: 1,
+      source: "manual",
+      ingredients: [{ name: "salat", quantity: "1", unit: "stk" }],
+      instructions: ["Bland"],
+    },
+  ];
+  const harness = buildRecipeUiHarness({ recipes });
+  harness.context.renderRecipes(harness.main);
+
+  const cards = harness.main.querySelectorAll(".recipe-card");
+  assert.equal(cards.length, 4);
+  assert.equal(cards[0].querySelector(".recipe-badge-meta").textContent, "Middag · Rask (15 min)");
+  assert.equal(cards[1].querySelector(".recipe-badge-meta").textContent, "Middag · Langtid (120 min)");
+  assert.equal(cards[2].querySelector(".recipe-badge-meta").textContent, "Dessert · Normal (50 min)");
+  assert.equal(cards[3].querySelector(".recipe-badge-meta"), null);
+
+  // Filter by recipe type "middag" -> 2 cards
+  const middagChip = harness.main.findAll((n) => n.dataset?.typeFilter === "middag")[0];
+  middagChip.click();
+  assert.equal(middagChip.classList.contains("active"), true);
+  assert.deepEqual(
+    harness.main.querySelectorAll(".recipe-card").map((c) => c.querySelector("h3").textContent),
+    ["Rask suppe", "Langtidssurret gryte"],
+  );
+
+  // Also filter by prep category "rask" -> 1 card
+  const raskChip = harness.main.findAll((n) => n.dataset?.prepFilter === "rask")[0];
+  raskChip.click();
+  assert.deepEqual(
+    harness.main.querySelectorAll(".recipe-card").map((c) => c.querySelector("h3").textContent),
+    ["Rask suppe"],
+  );
+
+  // viewRecipe shows badge when metadata present and omits when absent
+  harness.context.viewRecipe(recipes[0]);
+  assert.equal(harness.dialogRoot.querySelector(".recipe-badge-meta").textContent, "Middag · Rask (15 min)");
+  harness.context.viewRecipe(recipes[3]);
+  assert.equal(harness.dialogRoot.querySelector(".recipe-badge-meta"), null);
 });

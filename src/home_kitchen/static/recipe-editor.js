@@ -219,6 +219,13 @@
       if (!parsed || parsed.protocol !== "https:" || parsed.username || parsed.password)
         throw new Error("Lenken til oppskriftsbildet må være en offentlig HTTPS-lenke før du ber om en endring.");
     }
+    const rawPrepMinutes = values.prep_time_minutes;
+    const prepMinutes =
+      rawPrepMinutes != null && String(rawPrepMinutes).trim() !== ""
+        ? Number(rawPrepMinutes)
+        : null;
+    if (prepMinutes !== null && (!Number.isInteger(prepMinutes) || prepMinutes < 1))
+      throw new Error("Tilberedningstid må være et positivt heltall i minutter.");
     const current = {
       title,
       servings,
@@ -230,11 +237,11 @@
         ? values.source_ingredients.map((item) => ({ ...item }))
         : [],
       provenance: values.provenance || null,
+      ...(values.recipe_type ? { recipe_type: String(values.recipe_type) } : {}),
+      ...(prepMinutes !== null ? { prep_time_minutes: prepMinutes } : {}),
+      ...(values.prep_category ? { prep_category: String(values.prep_category) } : {}),
       ...(values.photo_source ? { photo_source: { ...values.photo_source } } : {}),
       ...(values.image_attribution ? { image_attribution: { ...values.image_attribution } } : {}),
-      ...(values.recipe_type ? { recipe_type: values.recipe_type } : {}),
-      ...(values.prep_time_minutes != null ? { prep_time_minutes: values.prep_time_minutes } : {}),
-      ...(values.prep_category ? { prep_category: values.prep_category } : {}),
     };
     const isAdaptedDraft = !mode.isEditing && mode.source === "ai";
     if (isAdaptedDraft)
@@ -303,11 +310,68 @@
     return true;
   }
 
+  const RECIPE_TYPES = Object.freeze([
+    "middag",
+    "dessert",
+    "frokost",
+    "lunsj",
+    "tilbehør",
+    "bakst",
+    "annet",
+  ]);
+
+  const PREP_CATEGORIES = Object.freeze([
+    "rask",
+    "normal",
+    "langtid",
+    "batch_cooking",
+  ]);
+
+  const RECIPE_TYPE_LABELS = Object.freeze({
+    middag: "Middag",
+    dessert: "Dessert",
+    frokost: "Frokost",
+    lunsj: "Lunsj",
+    tilbehør: "Tilbehør",
+    bakst: "Bakst",
+    annet: "Annet",
+  });
+
+  const PREP_CATEGORY_LABELS = Object.freeze({
+    rask: "Rask",
+    normal: "Normal",
+    langtid: "Langtid",
+    batch_cooking: "Batch-cooking",
+  });
+
+  function formatRecipeBadge(recipe) {
+    if (!recipe || typeof recipe !== "object") return "";
+    const typeText = RECIPE_TYPE_LABELS[recipe.recipe_type] || "";
+    const prepCatText = PREP_CATEGORY_LABELS[recipe.prep_category] || "";
+    const rawMinutes = recipe.prep_time_minutes;
+    const minutes = rawMinutes != null && rawMinutes !== "" ? Number(rawMinutes) : null;
+    const timeText = minutes != null && Number.isFinite(minutes) && minutes > 0 ? `${minutes} min` : "";
+
+    let prepText = "";
+    if (prepCatText && timeText) {
+      prepText = `${prepCatText} (${timeText})`;
+    } else if (prepCatText) {
+      prepText = prepCatText;
+    } else if (timeText) {
+      prepText = timeText;
+    }
+
+    return [typeText, prepText].filter(Boolean).join(" · ");
+  }
+
   function recipeRevisionSnapshot(values) {
     return JSON.stringify({
       title: String(values?.title ?? ""),
       servings: String(values?.servings ?? ""),
       prompt: String(values?.prompt ?? ""),
+      recipe_type: String(values?.recipe_type ?? ""),
+      prep_time_minutes: String(values?.prep_time_minutes ?? ""),
+      prep_category: String(values?.prep_category ?? ""),
       image_url: String(values?.image_url ?? ""),
       ingredients: (Array.isArray(values?.ingredients) ? values.ingredients : []).map((item) => ({
         name: String(item?.name ?? ""),
@@ -325,6 +389,11 @@
   }
 
   root.KitchenRecipeEditor = {
+    RECIPE_TYPES,
+    PREP_CATEGORIES,
+    RECIPE_TYPE_LABELS,
+    PREP_CATEGORY_LABELS,
+    formatRecipeBadge,
     buildRevisionRequest,
     applyRevisionIfActive,
     isPositiveQuantity,

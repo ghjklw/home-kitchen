@@ -107,6 +107,15 @@ def normalize_prep_category_value(value: Any) -> Any:
     return value
 
 
+def normalize_recipe_source_value(value: Any) -> Any:
+    """Normalize recipe source strings (case and whitespace)."""
+    if isinstance(value, str):
+        value = value.strip().casefold()
+        if not value:
+            return None
+    return value
+
+
 def derive_prep_category(
     prep_time_minutes: int | None, prep_category: PrepCategory | None
 ) -> PrepCategory | None:

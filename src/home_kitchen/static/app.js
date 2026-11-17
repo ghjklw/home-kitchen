@@ -297,6 +297,48 @@ function formatRecipeBadge(recipe) {
   else if (timeText) prepText = timeText;
   return [typeText, prepText].filter(Boolean).join(" · ");
 }
+function isOdaSourceUrl(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== "string") return false;
+  try {
+    const host = new URL(rawUrl).hostname.toLowerCase();
+    return host === "oda.com" || host.endsWith(".oda.com");
+  } catch {
+    return false;
+  }
+}
+function isOdaRecipe(recipe) {
+  return (
+    recipe?.source === "imported" &&
+    (recipe?.provenance?.provider === "oda" || isOdaSourceUrl(recipe?.source_url))
+  );
+}
+function formatRecipeSourceBadge(recipe) {
+  if (window.KitchenRecipeEditor?.formatRecipeSourceBadge) {
+    return window.KitchenRecipeEditor.formatRecipeSourceBadge(recipe);
+  }
+  if (!recipe || typeof recipe !== "object") return "";
+  if (recipe.source === "cookidoo") return "Cookidoo";
+  if (recipe.source === "ai") return "KI-idé";
+  if (recipe.source === "imported") {
+    if (isOdaRecipe(recipe)) return "Oda";
+    if (
+      recipe.provenance?.kind === "photo" ||
+      recipe.photo_source?.kind === "photo_book" ||
+      Boolean(recipe.photo_source?.id)
+    ) {
+      return "Fra bilde";
+    }
+    return "Fra en oppskriftslenke";
+  }
+  return "Fra ditt kjøkken";
+}
+function matchesRecipeSourceFilter(recipe, filterValue) {
+  if (!filterValue) return true;
+  const source = recipe?.source || "manual";
+  if (filterValue === "oda") return isOdaRecipe(recipe);
+  if (filterValue === "imported") return source === "imported" && !isOdaRecipe(recipe);
+  return source === filterValue;
+}
 function renderRecipeStatsBadges(recipe) {
   const formatter = window.KitchenRecipeQuickFeedback?.formatRecipeStatsBadges;
   if (typeof formatter !== "function") return null;
@@ -1541,9 +1583,11 @@ function renderRecipes(main) {
 
   let selectedTypeFilter = null;
   let selectedPrepFilter = null;
+  let selectedSourceFilter = null;
   const filterSection = el("div", null, "recipe-filters");
   const typeChips = el("div", null, "filter-chips type-chips");
   const prepChips = el("div", null, "filter-chips prep-chips");
+  const sourceChips = el("div", null, "filter-chips source-chips");
 
   const typeOptions = [
     ["", "Alle typer"],
@@ -1582,6 +1626,24 @@ function renderRecipes(main) {
     add(prepChips, chip);
   });
 
+  const sourceOptions = [
+    ["", "Alle kilder"],
+    ["cookidoo", "Cookidoo"],
+    ["oda", "Oda"],
+    ["imported", "Lenke"],
+    ["ai", "KI-idé"],
+    ["manual", "Egen"],
+  ];
+  sourceOptions.forEach(([val, label]) => {
+    const chip = button(label, () => {
+      selectedSourceFilter = (selectedSourceFilter === val || !val) ? null : val;
+      updateFilterChipActive();
+      draw();
+    }, "filter-chip" + (!selectedSourceFilter && !val ? " active" : ""));
+    chip.dataset.sourceFilter = val;
+    add(sourceChips, chip);
+  });
+
   function updateFilterChipActive() {
     typeChips.querySelectorAll(".filter-chip").forEach((btn) => {
       const val = btn.dataset.typeFilter;
@@ -1591,9 +1653,13 @@ function renderRecipes(main) {
       const val = btn.dataset.prepFilter;
       btn.classList.toggle("active", (!selectedPrepFilter && !val) || selectedPrepFilter === val);
     });
+    sourceChips.querySelectorAll(".filter-chip").forEach((btn) => {
+      const val = btn.dataset.sourceFilter;
+      btn.classList.toggle("active", (!selectedSourceFilter && !val) || selectedSourceFilter === val);
+    });
   }
 
-  add(filterSection, typeChips, prepChips);
+  add(filterSection, typeChips, prepChips, sourceChips);
   add(main, filterSection);
 
   const results = el("div");
@@ -1604,6 +1670,7 @@ function renderRecipes(main) {
       if (query && !recipe.title.toLowerCase().includes(query)) return false;
       if (selectedTypeFilter && recipe.recipe_type !== selectedTypeFilter) return false;
       if (selectedPrepFilter && recipe.prep_category !== selectedPrepFilter) return false;
+      if (selectedSourceFilter && !matchesRecipeSourceFilter(recipe, selectedSourceFilter)) return false;
       return true;
     });
     if (!state.recipes.length)
@@ -1621,21 +1688,20 @@ function renderRecipes(main) {
       const grid = el("div", null, "grid");
       matches.forEach((recipe) => {
         const metaBadge = formatRecipeBadge(recipe);
+        const sourceBadge = formatRecipeSourceBadge(recipe);
+        const badges = (sourceBadge || metaBadge)
+          ? add(
+              el("div", null, "recipe-badges"),
+              sourceBadge ? el("span", sourceBadge, "badge recipe-badge-source") : null,
+              metaBadge ? el("span", metaBadge, "badge recipe-badge-meta") : null,
+            )
+          : null;
         add(
           grid,
           add(
             el("article", null, "card recipe-card"),
             recipeImage(recipe),
-            el(
-              "span",
-              recipe.source === "ai"
-                ? "KI-idé"
-                : recipe.source === "imported"
-                  ? "Fra en oppskriftslenke"
-                  : "Fra ditt kjøkken",
-              "badge",
-            ),
-            metaBadge ? el("span", metaBadge, "badge recipe-badge-meta") : null,
+            badges,
             el("h3", recipe.title),
             el(
               "p",
@@ -2259,6 +2325,14 @@ function viewRecipe(recipe) {
   const root = openDialog(recipe.title);
   const body = el("div", null, "recipe-body");
   const metaBadge = formatRecipeBadge(recipe);
+  const sourceBadge = formatRecipeSourceBadge(recipe);
+  const badges = (sourceBadge || metaBadge)
+    ? add(
+        el("div", null, "recipe-badges"),
+        sourceBadge ? el("span", sourceBadge, "badge recipe-badge-source") : null,
+        metaBadge ? el("span", metaBadge, "badge recipe-badge-meta") : null,
+      )
+    : null;
   const statsContainer = el("div", null, "recipe-stats-host");
   function updateStatsDisplay(currentRecipe) {
     statsContainer.replaceChildren();
@@ -2269,7 +2343,7 @@ function viewRecipe(recipe) {
   add(
     body,
     recipeImage(recipe),
-    metaBadge ? el("span", metaBadge, "badge recipe-badge-meta") : null,
+    badges,
     el("p", formatUiCount(recipe.servings) + " porsjoner", "muted"),
     statsContainer,
   );

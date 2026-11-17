@@ -53,8 +53,16 @@ def build_mcp(
         recipe_type: str | None = None,
         prep_category: str | None = None,
         max_prep_minutes: Annotated[int | None, Field(ge=1, le=2880)] = None,
+        source: str | None = None,
     ) -> list[Recipe]:
-        """List saved household recipes, optionally filtered by type, prep category, or max prep time."""
+        """List saved household recipes, optionally filtered by type, prep category, max prep time, or source."""
+        if source is not None:
+            return service.list_recipes(
+                recipe_type=recipe_type,
+                prep_category=prep_category,
+                max_prep_minutes=max_prep_minutes,
+                source=source,
+            )
         return service.list_recipes(
             recipe_type=recipe_type,
             prep_category=prep_category,

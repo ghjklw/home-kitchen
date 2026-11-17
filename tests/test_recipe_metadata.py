@@ -17,9 +17,11 @@ from home_kitchen.ai import draft_recipe, recipe_agent
 from home_kitchen.app import create_app
 from home_kitchen.mcp_server import build_mcp
 from home_kitchen.models import (
+    PhotoSource,
     PrepCategory,
     Recipe,
     RecipeCreate,
+    RecipeSource,
     RecipeType,
     infer_recipe_metadata,
 )
@@ -348,6 +350,51 @@ def test_service_list_recipes_filtering():
     assert len(service.list_recipes(recipe_type="   ", prep_category="")) == 7
 
 
+def test_service_list_recipes_source_filtering_and_preservation():
+    r_manual = make_recipe(title="Homemade Pasta", source=RecipeSource.MANUAL, recipe_type="middag")
+    r_cookidoo = make_recipe(
+        title="TM6 Risotto",
+        source=RecipeSource.COOKIDOO,
+        source_url="https://cookidoo.no/recipes/recipe/nb-NO/r123",
+        recipe_type="middag",
+    )
+    r_oda = make_recipe(
+        title="Oda Laksepasta",
+        source=RecipeSource.IMPORTED,
+        source_url="https://oda.com/no/recipes/731-laksepasta/",
+        recipe_type="middag",
+    )
+    r_ai = make_recipe(title="AI Chili", source=RecipeSource.AI, recipe_type="lunsj")
+
+    mock_store = MagicMock()
+    mock_store.list.return_value = [r_manual, r_cookidoo, r_oda, r_ai]
+    service = KitchenService(store=mock_store)
+
+    assert {r.title for r in service.list_recipes(source="cookidoo")} == {"TM6 Risotto"}
+    assert {r.title for r in service.list_recipes(source=RecipeSource.COOKIDOO)} == {"TM6 Risotto"}
+    assert {r.title for r in service.list_recipes(source="  IMPORTED  ")} == {"Oda Laksepasta"}
+    assert {r.title for r in service.list_recipes(source="ai")} == {"AI Chili"}
+    assert {r.title for r in service.list_recipes(source="manual")} == {"Homemade Pasta"}
+    assert len(service.list_recipes(source="   ")) == 4
+    assert {r.title for r in service.list_recipes(recipe_type="middag", source="cookidoo")} == {
+        "TM6 Risotto"
+    }
+
+    # Verify update preserves source, source_url, provenance, and photo_source when omitted
+    photo_id = uuid4()
+    r_cookidoo_with_photo = r_cookidoo.model_copy(
+        update={"photo_source": PhotoSource(id=photo_id, book_title="Bok", page="12")}
+    )
+    mock_store.get.return_value = r_cookidoo_with_photo
+    updated = service.update_recipe(
+        r_cookidoo_with_photo.id,
+        RecipeCreate.model_validate(sample_recipe_data(title="TM6 Risotto Oppdatert")),
+    )
+    assert updated.source == RecipeSource.COOKIDOO
+    assert str(updated.source_url) == "https://cookidoo.no/recipes/recipe/nb-NO/r123"
+    assert updated.photo_source == PhotoSource(id=photo_id, book_title="Bok", page="12")
+
+
 # ==============================================================================
 # 3. FastMCP and API Filtering Tests
 # ==============================================================================
@@ -431,6 +478,66 @@ def test_app_api_recipes_filtering_query_params():
     assert client.get("/api/recipes", params={"max_prep_minutes": 2881}).status_code == 422
 
 
+@pytest.mark.asyncio
+async def test_mcp_list_recipes_with_source_filter():
+    r1 = make_recipe(title="TM6 Risotto", source=RecipeSource.COOKIDOO, recipe_type="middag")
+    mock_service = MagicMock()
+    mock_service.list_recipes.return_value = [r1]
+
+    mcp = build_mcp(mock_service, get_household=lambda: Household())
+    async with Client(mcp) as client:
+        res = await client.call_tool("list_recipes", {"source": "cookidoo"})
+        content = res.structured_content
+        data = content.get("result", content)
+        assert len(data) == 1
+        assert data[0]["title"] == "TM6 Risotto"
+        assert data[0]["source"] == "cookidoo"
+        mock_service.list_recipes.assert_called_once_with(
+            recipe_type=None, prep_category=None, max_prep_minutes=None, source="cookidoo"
+        )
+
+
+def test_app_api_recipes_source_query_param():
+    class MemoryTestStore:
+        def __init__(self, items):
+            self.settings = {}
+            self.photo_household_id = None
+            self.engine = None
+            self.items = items
+
+        def get_setting(self, key: str) -> str | None:
+            return self.settings.get(key)
+
+        def set_setting(self, key: str, value: str) -> None:
+            self.settings[key] = value
+
+        def ensure_setting(self, key: str, value: str) -> str:
+            if key not in self.settings:
+                self.settings[key] = value
+            return self.settings[key]
+
+        def list(self, kind: str, model: type) -> list:
+            return list(self.items) if kind == "recipe" else []
+
+    r_cookidoo = make_recipe(title="TM6 Risotto", source=RecipeSource.COOKIDOO)
+    r_oda = make_recipe(
+        title="Oda Suppe",
+        source=RecipeSource.IMPORTED,
+        source_url="https://oda.com/no/recipes/12-suppe/",
+    )
+    kitchen = KitchenService(store=MemoryTestStore([r_cookidoo, r_oda]))
+    app = create_app(Settings(local_dev=True, entra_allowed_group=uuid4()), service=kitchen)
+    client = TestClient(app, client=("127.0.0.1", 5000))
+
+    res_cookidoo = client.get("/api/recipes", params={"source": "cookidoo"})
+    assert res_cookidoo.status_code == 200
+    assert [item["title"] for item in res_cookidoo.json()] == ["TM6 Risotto"]
+
+    res_imported = client.get("/api/recipes", params={"source": "imported"})
+    assert res_imported.status_code == 200
+    assert [item["title"] for item in res_imported.json()] == ["Oda Suppe"]
+
+
 # ==============================================================================
 # 4. AI Meal Planning Context & Prompt Tests
 # ==============================================================================
@@ -480,7 +587,8 @@ async def test_recommend_plan_includes_metadata_in_recipe_catalog():
     assert len(draft.meals) == 1
     assert captured_prompt is not None
 
-    # Check that recipe_type, prep_time_minutes, prep_category appear in the prompt context
+    # Check that source, recipe_type, prep_time_minutes, prep_category appear in the prompt context
+    assert "'source': 'manual'" in captured_prompt
     assert "'recipe_type': 'middag'" in captured_prompt
     assert "'prep_time_minutes': 20" in captured_prompt
     assert "'prep_category': 'rask'" in captured_prompt

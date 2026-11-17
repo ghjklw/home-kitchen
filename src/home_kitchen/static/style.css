@@ -1144,6 +1144,20 @@ h3 {
   gap: 12px;
   margin-bottom: 14px;
 }
+.recipe-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.recipe-badges .badge {
+  margin-bottom: 0;
+}
+.badge.recipe-badge-source {
+  background: var(--accent);
+  color: #273d33;
+  border: 1px solid #d5decb;
+}
 .badge.recipe-badge-meta {
   background: #eef3ef;
   color: #2b5c46;

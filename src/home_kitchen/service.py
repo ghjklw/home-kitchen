@@ -18,6 +18,7 @@ from .models import (
     Recipe,
     RecipeActivityStats,
     RecipeCreate,
+    RecipeSource,
     RecipeTranslation,
     RecipeType,
     RegularItem,
@@ -25,6 +26,7 @@ from .models import (
     ShoppingItemCreate,
     WeekShopping,
     normalize_prep_category_value,
+    normalize_recipe_source_value,
     normalize_recipe_type_value,
 )
 from .recipes.language import detect_recipe_language
@@ -80,6 +82,7 @@ class KitchenService:
         prep_category: PrepCategory | str | None = None,
         max_prep_minutes: int | None = None,
         include_stats: bool = False,
+        source: RecipeSource | str | None = None,
     ) -> list[Recipe]:
         recipes = self.store.list("recipe", Recipe)
         normalized_type = normalize_recipe_type_value(recipe_type)
@@ -105,6 +108,14 @@ class KitchenService:
                 r
                 for r in recipes
                 if r.prep_time_minutes is not None and r.prep_time_minutes <= max_prep_minutes
+            ]
+        normalized_source = normalize_recipe_source_value(source)
+        if normalized_source is not None:
+            target_source = str(normalized_source).strip().casefold()
+            recipes = [
+                r
+                for r in recipes
+                if r.source is not None and str(r.source).strip().casefold() == target_source
             ]
         if include_stats:
             stats_map = self.store.get_recipes_activity_stats([r.id for r in recipes])
@@ -142,6 +153,19 @@ class KitchenService:
             else:
                 source_language = existing.source_language
         values = self._recipe_values(data, exclude={"image_attribution", "source_language"})
+        if "source" not in data.model_fields_set:
+            values["source"] = existing.source
+        if "source_url" not in data.model_fields_set and "provenance" not in data.model_fields_set:
+            values["source_url"] = existing.source_url
+            values["provenance"] = (
+                existing.provenance.model_dump() if existing.provenance is not None else None
+            )
+        elif "source_url" not in data.model_fields_set and data.provenance is None:
+            values["source_url"] = existing.source_url
+        if "photo_source" not in data.model_fields_set:
+            values["photo_source"] = (
+                existing.photo_source.model_dump() if existing.photo_source is not None else None
+            )
         values["ingredients"] = self._retain_omitted_ingredient_identity_fields(
             data, existing, values["ingredients"]
         )

@@ -129,7 +129,7 @@ def test_connector_integrations_unconnected_report_not_configured():
     trumf = TrumfIntegration().describe("actor-1")
     assert trumf.id == "trumf"
     assert trumf.status == "not_configured"
-    assert trumf.supported_auth_modes == ["session_cookie", "interactive_otp"]
+    assert trumf.supported_auth_modes == ["session_cookie"]
 
 
 def test_connector_integrations_connected_and_expired_states():
@@ -213,4 +213,5 @@ def test_trumf_oauth_pkce_reports_refresh_available_when_refresh_token_present()
     assert trumf.status == "connected"
     assert trumf.auth_mode == "oauth_pkce"
     assert trumf.auth_type == "oauth_pkce"
+    assert trumf.refresh_available is True
     assert [a.refresh_available for a in trumf.accounts] == [True, False, True]

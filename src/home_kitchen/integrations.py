@@ -71,6 +71,7 @@ class IntegrationInfo(BaseModel):
     ) = None
     last_error: str | None = None
     expiry_prompt: str | None = None
+    refresh_available: bool = False
     account_count: int = 0
     accounts: list[IntegrationAccountInfo] = Field(default_factory=list)
 
@@ -354,6 +355,7 @@ class StoredConnectorIntegration:
             token_status=token_status,
             last_error=last_error,
             expiry_prompt=expiry_prompt,
+            refresh_available=any(a.refresh_available for a in accounts),
             account_count=len(accounts),
             accounts=accounts,
         )
@@ -404,7 +406,7 @@ class TrumfIntegration(StoredConnectorIntegration):
         super().__init__(
             provider_id="trumf",
             name="Trumf",
-            supported_auth_modes=["session_cookie", "interactive_otp"],
+            supported_auth_modes=["session_cookie"],
             capabilities=["purchase_history", "receipt_sync"],
             detail="Koble til Trumf med sesjonsinformasjonskapsel for automatisk kvitterings- og kjøpshistorikk.",
             store=store,

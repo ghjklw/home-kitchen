@@ -10,8 +10,10 @@ Plaintext secrets and passwords are never returned in responses or persisted in 
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
+import logging
 import re
 import secrets
 import threading
@@ -28,6 +30,12 @@ if TYPE_CHECKING:
     from home_kitchen.connector_store import ConnectorStore
     from home_kitchen.integrations import IntegrationInfo, IntegrationRegistry
     from home_kitchen.settings import Settings
+
+_LOG = logging.getLogger(__name__)
+
+REFRESHABLE_PROVIDERS = ("rema1000", "coop", "cookidoo")
+OAUTH_REFRESH_MODES = ("oauth_pkce", "oauth_password")
+DEFAULT_REFRESH_INTERVAL_SECONDS = 300.0
 
 DEFAULT_REMA1000_AUTHORIZE_URL = "https://id.rema.no/authorization"
 DEFAULT_REMA1000_TOKEN_URL = "https://id.rema.no/token"
@@ -117,6 +125,15 @@ class TrumfOTPSession(BaseModel):
     phone: str
     household_id: UUID
     created_at: datetime
+
+
+def _parse_expires_at(expires_in: Any) -> datetime | None:
+    if expires_in is None:
+        return None
+    try:
+        return datetime.now(UTC) + timedelta(seconds=int(expires_in))
+    except (ValueError, TypeError):
+        return None
 
 
 def generate_pkce_pair() -> tuple[str, str]:
@@ -210,11 +227,38 @@ class ConnectorAuthService:
         self.trumf_base_url = trumf_base_url
         self.settings = settings
         self._lock = threading.Lock()
+        self._refresh_locks: dict[tuple[UUID, str], threading.RLock] = {}
         self._pkce_transactions: dict[str, PKCETransaction] = {}
         self._trumf_sessions: dict[str, TrumfOTPSession] = {}
 
     def _get_http_client(self) -> httpx.Client:
         return httpx.Client(transport=self.transport, timeout=30.0)
+
+    def _connection_lock(self, household_id: UUID, provider_id: str) -> threading.RLock:
+        key = (household_id, provider_id)
+        with self._lock:
+            lock = self._refresh_locks.get(key)
+            if lock is None:
+                lock = threading.RLock()
+                self._refresh_locks[key] = lock
+            return lock
+
+    def _refresh_config(self, provider_id: str) -> tuple[str, str]:
+        if provider_id == "rema1000":
+            return self.rema1000_token_url, self.rema1000_client_id
+        if provider_id == "coop":
+            return self.coop_token_url, self.coop_client_id
+        if provider_id == "cookidoo":
+            return (
+                f"{self.cookidoo_base_url.rstrip('/')}/token-srv/token",
+                self.cookidoo_client_id,
+            )
+        if provider_id in ("trumf", "oda", "anthropic"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Tokenfornyelse støttes ikke for '{provider_id}'.",
+            )
+        raise HTTPException(status_code=404, detail=f"Ukjent leverandør: {provider_id}")
 
     def start_pkce(
         self,
@@ -362,13 +406,7 @@ class ConnectorAuthService:
             )
 
         refresh_token = token_data.get("refresh_token")
-        expires_in = token_data.get("expires_in")
-        expires_at: datetime | None = None
-        if expires_in is not None:
-            try:
-                expires_at = datetime.now(UTC) + timedelta(seconds=int(expires_in))
-            except (ValueError, TypeError):
-                expires_at = None
+        expires_at = _parse_expires_at(token_data.get("expires_in"))
 
         self.store.save_connection(
             household_id=household_id,
@@ -616,13 +654,7 @@ class ConnectorAuthService:
             )
 
         refresh_token = token_data.get("refresh_token")
-        expires_in = token_data.get("expires_in")
-        expires_at: datetime | None = None
-        if expires_in is not None:
-            try:
-                expires_at = datetime.now(UTC) + timedelta(seconds=int(expires_in))
-            except (ValueError, TypeError):
-                expires_at = None
+        expires_at = _parse_expires_at(token_data.get("expires_in"))
 
         # Invariant: ONLY store resulting encrypted OAuth tokens, NEVER raw password
         self.store.save_connection(
@@ -785,3 +817,195 @@ class ConnectorAuthService:
         )
 
         return self.integrations.describe_one("trumf", actor_id)
+
+    def refresh_connection(
+        self,
+        household_id: UUID,
+        actor_id: str | None,
+        provider_id: str,
+    ) -> IntegrationInfo:
+        """Exchange a stored refresh_token for fresh OAuth tokens."""
+        token_endpoint, client_id = self._refresh_config(provider_id)
+
+        with self._connection_lock(household_id, provider_id):
+            meta = self.store.get_connection_metadata(household_id, provider_id)
+            creds = self.store.get_credentials(household_id, provider_id)
+            if meta is None or creds is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Ingen lagret tilkobling funnet for '{provider_id}'.",
+                )
+
+            refresh_token = creds.get("refresh_token")
+            if not isinstance(refresh_token, str) or not refresh_token.strip():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Tilkoblingen for '{provider_id}' mangler refresh_token og må kobles til på nytt.",
+                )
+
+            clean_refresh_token = refresh_token.strip()
+            headers = {"Accept": "application/json"}
+            if provider_id == "cookidoo":
+                headers = {**headers, **COOKIDOO_LOGIN_HEADERS}
+
+            with self._get_http_client() as client:
+                try:
+                    response = client.post(
+                        token_endpoint,
+                        data={
+                            "grant_type": "refresh_token",
+                            "client_id": client_id,
+                            "refresh_token": clean_refresh_token,
+                        },
+                        headers=headers,
+                    )
+                except httpx.HTTPError as exc:
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"Nettverksfeil mot token-endepunktet til {provider_id}: {exc}",
+                    ) from None
+
+            if response.status_code == 401:
+                raise HTTPException(
+                    status_code=401,
+                    detail=f"Tokenfornyelse avvist av {provider_id}. Koble til på nytt.",
+                )
+            if response.status_code != 200:
+                safe_body = response.text.replace(clean_refresh_token, "[REDACTED]")
+                status_code = 400 if response.status_code in (400, 403) else 502
+                raise HTTPException(
+                    status_code=status_code,
+                    detail=f"Tokenfornyelse feilet hos {provider_id}: {safe_body}",
+                )
+
+            try:
+                token_data = response.json()
+            except Exception:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Ugyldig JSON-respons fra token-endepunktet til {provider_id}.",
+                ) from None
+
+            if not isinstance(token_data, dict):
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Ugyldig JSON-respons fra token-endepunktet til {provider_id}.",
+                )
+
+            access_token = token_data.get("access_token") or (
+                token_data.get("token") if provider_id == "cookidoo" else None
+            )
+            if not isinstance(access_token, str) or not access_token.strip():
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Mottok ingen access_token fra {provider_id}.",
+                )
+
+            rotated_refresh = token_data.get("refresh_token")
+            new_refresh_token = (
+                rotated_refresh.strip()
+                if isinstance(rotated_refresh, str) and rotated_refresh.strip()
+                else clean_refresh_token
+            )
+            expires_at = _parse_expires_at(token_data.get("expires_in"))
+
+            updated_credentials: dict[str, Any] = {
+                **creds,
+                "access_token": access_token,
+                "refresh_token": new_refresh_token,
+                "token_type": token_data.get("token_type") or creds.get("token_type", "Bearer"),
+            }
+            if token_data.get("scope") is not None:
+                updated_credentials["scope"] = token_data["scope"]
+
+            effective_actor = actor_id if actor_id is not None else meta.actor_id
+            self.store.save_connection(
+                household_id=household_id,
+                provider_id=provider_id,
+                auth_mode=meta.auth_mode,
+                credentials=updated_credentials,
+                expires_at=expires_at,
+                actor_id=effective_actor,
+                metadata=meta.metadata,
+            )
+
+            return self.integrations.describe_one(provider_id, effective_actor)
+
+    def ensure_fresh_credentials(
+        self,
+        household_id: UUID,
+        actor_id: str | None,
+        provider_id: str,
+        margin_seconds: int = 300,
+    ) -> dict[str, Any]:
+        """Return stored credentials, proactively refreshing if nearing or past expiry."""
+        with self._connection_lock(household_id, provider_id):
+            meta = self.store.get_connection_metadata(household_id, provider_id)
+            creds = self.store.get_credentials(household_id, provider_id)
+            if meta is None or creds is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Ingen lagret tilkobling funnet for '{provider_id}'.",
+                )
+
+            if (
+                meta.expires_at is not None
+                and meta.expires_at <= datetime.now(UTC) + timedelta(seconds=margin_seconds)
+                and provider_id in REFRESHABLE_PROVIDERS
+                and meta.auth_mode in OAUTH_REFRESH_MODES
+                and isinstance(creds.get("refresh_token"), str)
+                and creds["refresh_token"].strip()
+            ):
+                self.refresh_connection(household_id, actor_id, provider_id)
+                refreshed = self.store.get_credentials(household_id, provider_id)
+                if refreshed is not None:
+                    return refreshed
+
+            return creds
+
+    def refresh_expiring_connections(self, margin_seconds: int = 900) -> list[str]:
+        """Scan ConnectorStore for OAuth connections nearing expiry and renew them proactively."""
+        refreshed: list[str] = []
+        deadline = datetime.now(UTC) + timedelta(seconds=margin_seconds)
+        connections = self.store.list_connections(self.household_id)
+
+        for provider_id, status in connections.items():
+            if provider_id not in REFRESHABLE_PROVIDERS:
+                continue
+            if status.auth_mode not in OAUTH_REFRESH_MODES:
+                continue
+            if status.expires_at is None or status.expires_at > deadline:
+                continue
+            try:
+                creds = self.store.get_credentials(self.household_id, provider_id)
+                if (
+                    not creds
+                    or not isinstance(creds.get("refresh_token"), str)
+                    or not creds["refresh_token"].strip()
+                ):
+                    continue
+                self.refresh_connection(self.household_id, status.actor_id, provider_id)
+                refreshed.append(provider_id)
+            except Exception:
+                _LOG.warning("Proactive token refresh failed for provider %s", provider_id)
+
+        return refreshed
+
+    async def refresh_forever(self, interval: float = DEFAULT_REFRESH_INTERVAL_SECONDS) -> None:
+        """Periodically renew expiring OAuth connections in the background."""
+        while True:
+            try:
+                task = asyncio.create_task(asyncio.to_thread(self.refresh_expiring_connections))
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    try:
+                        await task
+                    except Exception:
+                        pass
+                    raise
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _LOG.warning("Background connector token refresh failed; will retry on next run")
+            await asyncio.sleep(interval)

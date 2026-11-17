@@ -8,6 +8,7 @@ Covers:
 Uses httpx.MockTransport for 100% offline testing with zero live credentials or networks.
 """
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -856,3 +857,376 @@ def test_get_integrations_redacts_all_secrets_after_interactive_logins(sqlite_en
     assert "secret-refresh-token" not in raw_json
     assert "secret-password-xyz" not in raw_json
     assert "secret-trumf-cookie" not in raw_json
+
+
+# =============================================================================
+# 6. OAuth Token Refresh, Rotation, Proactive Renewal & Background Loop
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    ("provider_id", "auth_mode", "expected_url", "extra_creds"),
+    [
+        ("rema1000", "oauth_pkce", "https://id.rema.no/token", {}),
+        ("coop", "oauth_pkce", "https://login.coop.no/oauth/token", {}),
+        (
+            "cookidoo",
+            "oauth_password",
+            "https://ciam.prod.cookidoo.vorwerk-digital.com/token-srv/token",
+            {"country": "no"},
+        ),
+    ],
+)
+def test_refresh_endpoint_exchanges_token_and_redacts_secrets(
+    sqlite_engine,
+    cipher,
+    provider_id: str,
+    auth_mode: str,
+    expected_url: str,
+    extra_creds: dict[str, str],
+):
+    captured_requests: list[httpx.Request] = []
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        captured_requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "access_token": f"new-access-{provider_id}-999",
+                "refresh_token": f"rotated-refresh-{provider_id}-888",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+            },
+        )
+
+    mock_transport = httpx.MockTransport(mock_handler)
+    app, _, store, household_id = create_test_app(
+        sqlite_engine, cipher, mock_transport=mock_transport
+    )
+    store.save_connection(
+        household_id=household_id,
+        provider_id=provider_id,
+        auth_mode=auth_mode,
+        credentials={
+            "access_token": f"old-access-{provider_id}-111",
+            "refresh_token": f"old-refresh-{provider_id}-222",
+            "token_type": "Bearer",
+            **extra_creds,
+        },
+        expires_at=datetime.now(UTC) - timedelta(minutes=5),
+        actor_id="malo",
+    )
+
+    client = TestClient(app)
+    resp = client.post(f"/api/integrations/{provider_id}/refresh")
+    assert resp.status_code == 200
+    assert resp.headers.get("cache-control") == "no-store"
+
+    info = resp.json()
+    assert info["id"] == provider_id
+    assert info["status"] == "connected"
+    assert info["auth_mode"] == auth_mode
+
+    serialized = json.dumps(info)
+    assert f"new-access-{provider_id}-999" not in serialized
+    assert f"rotated-refresh-{provider_id}-888" not in serialized
+    assert f"old-access-{provider_id}-111" not in serialized
+    assert f"old-refresh-{provider_id}-222" not in serialized
+
+    assert len(captured_requests) == 1
+    req = captured_requests[0]
+    assert req.method == "POST"
+    assert str(req.url) == expected_url
+    form = urllib.parse.parse_qs(req.read().decode())
+    assert form["grant_type"] == ["refresh_token"]
+    assert form["refresh_token"] == [f"old-refresh-{provider_id}-222"]
+    assert "client_id" in form
+
+    updated_creds = store.get_credentials(household_id, provider_id)
+    assert updated_creds is not None
+    assert updated_creds["access_token"] == f"new-access-{provider_id}-999"
+    assert updated_creds["refresh_token"] == f"rotated-refresh-{provider_id}-888"
+    for k, v in extra_creds.items():
+        assert updated_creds[k] == v
+
+    meta = store.get_connection_metadata(household_id, provider_id)
+    assert meta is not None
+    assert meta.expires_at is not None
+    assert meta.expires_at > datetime.now(UTC) + timedelta(minutes=50)
+
+
+def test_refresh_preserves_old_refresh_token_when_omitted(sqlite_engine, cipher):
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "access_token": "fresh-access-without-rotation",
+                "expires_in": 1800,
+            },
+        )
+
+    app, auth_service, store, household_id = create_test_app(
+        sqlite_engine, cipher, mock_transport=httpx.MockTransport(mock_handler)
+    )
+    store.save_connection(
+        household_id=household_id,
+        provider_id="rema1000",
+        auth_mode="oauth_pkce",
+        credentials={
+            "access_token": "stale-access",
+            "refresh_token": "persistent-refresh-token",
+        },
+        expires_at=datetime.now(UTC) - timedelta(seconds=10),
+        actor_id="malo",
+    )
+
+    info = auth_service.refresh_connection(household_id, "malo", "rema1000")
+    assert info.status == "connected"
+    assert "fresh-access-without-rotation" not in info.model_dump_json()
+
+    creds = store.get_credentials(household_id, "rema1000")
+    assert creds is not None
+    assert creds["access_token"] == "fresh-access-without-rotation"
+    assert creds["refresh_token"] == "persistent-refresh-token"
+
+
+def test_refresh_endpoint_rejects_unsupported_missing_and_failing_cases(sqlite_engine, cipher):
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            text="invalid_grant for secret-refresh-xyz",
+        )
+
+    app, _, store, household_id = create_test_app(
+        sqlite_engine, cipher, mock_transport=httpx.MockTransport(mock_handler)
+    )
+    client = TestClient(app)
+
+    assert client.post("/api/integrations/trumf/refresh").status_code == 400
+    assert client.post("/api/integrations/oda/refresh").status_code == 400
+    assert client.post("/api/integrations/anthropic/refresh").status_code == 400
+    assert client.post("/api/integrations/unknown_provider/refresh").status_code == 404
+    assert client.post("/api/integrations/rema1000/refresh").status_code == 404
+
+    # Manual connection without refresh_token
+    store.save_connection(
+        household_id=household_id,
+        provider_id="rema1000",
+        auth_mode="session_token",
+        credentials={"session_token": "manual-only"},
+        actor_id="malo",
+    )
+    assert client.post("/api/integrations/rema1000/refresh").status_code == 400
+
+    # OAuth connection whose upstream refresh fails must redact refresh_token from error detail
+    store.save_connection(
+        household_id=household_id,
+        provider_id="coop",
+        auth_mode="oauth_pkce",
+        credentials={
+            "access_token": "old-acc",
+            "refresh_token": "secret-refresh-xyz",
+        },
+        actor_id="malo",
+    )
+    fail_resp = client.post("/api/integrations/coop/refresh")
+    assert fail_resp.status_code == 400
+    assert "secret-refresh-xyz" not in fail_resp.text
+
+
+def test_ensure_fresh_credentials_proactive_refresh_and_cache(sqlite_engine, cipher):
+    calls = 0
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={
+                "access_token": f"refreshed-access-{calls}",
+                "refresh_token": f"refreshed-refresh-{calls}",
+                "expires_in": 3600,
+            },
+        )
+
+    _, auth_service, store, household_id = create_test_app(
+        sqlite_engine, cipher, mock_transport=httpx.MockTransport(mock_handler)
+    )
+
+    # 1. Fresh connection (outside 300s margin): returns stored without network call
+    store.save_connection(
+        household_id=household_id,
+        provider_id="coop",
+        auth_mode="oauth_pkce",
+        credentials={
+            "access_token": "still-valid-access",
+            "refresh_token": "refresh-1",
+        },
+        expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        actor_id="malo",
+    )
+    creds1 = auth_service.ensure_fresh_credentials(household_id, "malo", "coop", margin_seconds=300)
+    assert creds1["access_token"] == "still-valid-access"
+    assert calls == 0
+
+    # 2. Expiring soon (within 300s margin): triggers proactive refresh
+    store.save_connection(
+        household_id=household_id,
+        provider_id="coop",
+        auth_mode="oauth_pkce",
+        credentials={
+            "access_token": "nearly-expired-access",
+            "refresh_token": "refresh-2",
+        },
+        expires_at=datetime.now(UTC) + timedelta(seconds=120),
+        actor_id="malo",
+    )
+    creds2 = auth_service.ensure_fresh_credentials(household_id, "malo", "coop", margin_seconds=300)
+    assert creds2["access_token"] == "refreshed-access-1"
+    assert creds2["refresh_token"] == "refreshed-refresh-1"
+    assert calls == 1
+
+    # 3. Calling again immediately uses newly refreshed token without extra HTTP call
+    creds3 = auth_service.ensure_fresh_credentials(household_id, "malo", "coop", margin_seconds=300)
+    assert creds3["access_token"] == "refreshed-access-1"
+    assert calls == 1
+
+    # 4. Already expired connection also refreshes
+    store.save_connection(
+        household_id=household_id,
+        provider_id="cookidoo",
+        auth_mode="oauth_password",
+        credentials={
+            "access_token": "expired-cookidoo",
+            "refresh_token": "cookidoo-ref-1",
+            "country": "no",
+        },
+        expires_at=datetime.now(UTC) - timedelta(minutes=10),
+        actor_id="malo",
+    )
+    creds4 = auth_service.ensure_fresh_credentials(
+        household_id, "malo", "cookidoo", margin_seconds=300
+    )
+    assert creds4["access_token"] == "refreshed-access-2"
+    assert creds4["country"] == "no"
+    assert calls == 2
+
+
+def test_refresh_expiring_connections_scans_and_isolates_failures(sqlite_engine, cipher):
+    refreshed_hosts: list[str] = []
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        refreshed_hosts.append(request.url.host)
+        if request.url.host == "login.coop.no":
+            return httpx.Response(500, text="upstream outage")
+        return httpx.Response(
+            200,
+            json={
+                "access_token": f"renewed-for-{request.url.host}",
+                "refresh_token": f"rotated-for-{request.url.host}",
+                "expires_in": 7200,
+            },
+        )
+
+    _, auth_service, store, household_id = create_test_app(
+        sqlite_engine, cipher, mock_transport=httpx.MockTransport(mock_handler)
+    )
+
+    # Expiring within 900s -> should refresh
+    store.save_connection(
+        household_id=household_id,
+        provider_id="rema1000",
+        auth_mode="oauth_pkce",
+        credentials={"access_token": "old-r", "refresh_token": "ref-r"},
+        expires_at=datetime.now(UTC) + timedelta(seconds=300),
+        actor_id="malo",
+    )
+    # Expired and failing upstream -> should be attempted without blocking others
+    store.save_connection(
+        household_id=household_id,
+        provider_id="coop",
+        auth_mode="oauth_pkce",
+        credentials={"access_token": "old-c", "refresh_token": "ref-c"},
+        expires_at=datetime.now(UTC) - timedelta(seconds=30),
+        actor_id="malo",
+    )
+    # Expired oauth_password -> should refresh
+    store.save_connection(
+        household_id=household_id,
+        provider_id="cookidoo",
+        auth_mode="oauth_password",
+        credentials={"access_token": "old-k", "refresh_token": "ref-k", "country": "no"},
+        expires_at=datetime.now(UTC) + timedelta(seconds=600),
+        actor_id="malo",
+    )
+    # Non-OAuth expiring soon -> must NOT be refreshed
+    store.save_connection(
+        household_id=household_id,
+        provider_id="trumf",
+        auth_mode="interactive_otp",
+        credentials={"session_cookie": "trumf-cookie", "phone": "+4712345678"},
+        expires_at=datetime.now(UTC) + timedelta(seconds=60),
+        actor_id="malo",
+    )
+
+    refreshed = auth_service.refresh_expiring_connections(margin_seconds=900)
+    assert set(refreshed) == {"rema1000", "cookidoo"}
+    assert set(refreshed_hosts) == {
+        "id.rema.no",
+        "login.coop.no",
+        "ciam.prod.cookidoo.vorwerk-digital.com",
+    }
+
+    assert (
+        store.get_credentials(household_id, "rema1000")["access_token"] == "renewed-for-id.rema.no"
+    )
+    assert (
+        store.get_credentials(household_id, "cookidoo")["access_token"]
+        == "renewed-for-ciam.prod.cookidoo.vorwerk-digital.com"
+    )
+    # Coop kept its prior credentials after failed refresh
+    assert store.get_credentials(household_id, "coop")["access_token"] == "old-c"
+
+
+async def test_refresh_forever_runs_and_cancels_cleanly(sqlite_engine, cipher):
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "access_token": "bg-refreshed-access",
+                "refresh_token": "bg-refreshed-refresh",
+                "expires_in": 3600,
+            },
+        )
+
+    _, auth_service, store, household_id = create_test_app(
+        sqlite_engine, cipher, mock_transport=httpx.MockTransport(mock_handler)
+    )
+    store.save_connection(
+        household_id=household_id,
+        provider_id="rema1000",
+        auth_mode="oauth_pkce",
+        credentials={"access_token": "stale-bg", "refresh_token": "ref-bg"},
+        expires_at=datetime.now(UTC) + timedelta(seconds=60),
+        actor_id="malo",
+    )
+
+    task = asyncio.create_task(auth_service.refresh_forever(interval=300.0))
+    # Wait briefly for the first background refresh pass to complete
+    for _ in range(50):
+        creds = store.get_credentials(household_id, "rema1000")
+        if creds and creds["access_token"] == "bg-refreshed-access":
+            break
+        await asyncio.sleep(0.01)
+
+    assert store.get_credentials(household_id, "rema1000")["access_token"] == "bg-refreshed-access"
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+def test_app_test_env_guard_is_active_in_pytest():
+    from home_kitchen.app import _is_test_env
+
+    assert _is_test_env() is True

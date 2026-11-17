@@ -75,7 +75,10 @@ def sqlite_engine(tmp_path):
                     photo_source TEXT,
                     photo_source_id TEXT,
                     image_attribution TEXT,
-                    source_language TEXT NOT NULL DEFAULT 'und'
+                    source_language TEXT NOT NULL DEFAULT 'und',
+                    recipe_type TEXT,
+                    prep_time_minutes INTEGER,
+                    prep_category TEXT
                 )
                 """
             )

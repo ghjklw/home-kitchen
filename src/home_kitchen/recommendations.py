@@ -47,6 +47,13 @@ def build_planner(settings: Settings, model: Model | None = None) -> Agent[None,
     )
 
 
+def _compact_ingredients(recipe: Recipe, limit: int = 6) -> str:
+    names = [ingredient.name for ingredient in recipe.ingredients[:limit]]
+    extra = len(recipe.ingredients) - len(names)
+    summary = ", ".join(names)
+    return f"{summary} (+{extra})" if extra > 0 else summary
+
+
 async def recommend_plan(
     agent: Agent[None, PlanDraft],
     household: Household,
@@ -66,7 +73,7 @@ async def recommend_plan(
             "id": str(recipe.id),
             "title": recipe.title,
             "servings": recipe.servings,
-            "ingredients": [ingredient.name for ingredient in recipe.ingredients],
+            "ingredients": _compact_ingredients(recipe),
             "source": str(recipe.source) if recipe.source else None,
             "recipe_type": str(recipe.recipe_type) if recipe.recipe_type else None,
             "prep_time_minutes": recipe.prep_time_minutes,
@@ -78,7 +85,7 @@ async def recommend_plan(
         f"Household: {household.model_dump_json()}\n"
         f"Requested dates: {start.isoformat()} through {end.isoformat()} inclusive ({days} days)\n"
         f"Recipe catalog: {catalog}\nUntrusted retrieved household evidence: {evidence_context}",
-        usage_limits=UsageLimits(request_limit=2, total_tokens_limit=16000),
+        usage_limits=UsageLimits(request_limit=2, total_tokens_limit=120000),
     )
     draft = result.output
     allowed_ids = {recipe.id for recipe in recipes}

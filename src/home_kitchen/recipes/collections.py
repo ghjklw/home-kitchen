@@ -509,6 +509,15 @@ class CollectionService:
                 prep_time_minutes=inferred_minutes,
                 prep_category=inferred_prep_category,
             )
+            resolve_fn = getattr(self.kitchen, "resolve_recipe_identities", None)
+            if callable(resolve_fn):
+                try:
+                    recipe = resolve_fn(recipe)
+                except Exception:
+                    _LOG.warning(
+                        "Fast alias resolution failed during collection import",
+                        exc_info=True,
+                    )
         with self.kitchen.store.engine.begin() as connection:
             if connection.dialect.name == "postgresql":
                 connection.execute(
@@ -566,6 +575,31 @@ class CollectionService:
                     index_elements=[source_links.c.provider, source_links.c.external_recipe_id]
                 )
             )
+        if existing is None and recipe is not None:
+            has_unmapped = any(
+                ing.canonical_product_id is None
+                or (bool(ing.unit and ing.unit.strip()) and ing.canonical_unit_id is None)
+                for ing in recipe.ingredients
+            )
+            kitchen_settings = getattr(self.kitchen, "settings", None)
+            if has_unmapped and kitchen_settings is not None and kitchen_settings.ai_configured:
+                try:
+                    from home_kitchen.catalogue.ai_mapper import auto_map_unmapped_ingredients
+
+                    auto_map_unmapped_ingredients(
+                        self.kitchen.store,
+                        kitchen_settings,
+                        household_id=getattr(self.kitchen, "household_id", None),
+                        actor_id=job.actor,
+                        recipe_id=recipe_id,
+                        identity_service=getattr(self.kitchen, "identities", None),
+                    )
+                except Exception:
+                    _LOG.warning(
+                        "Auto-mapping unmapped ingredients failed after collection save for %s",
+                        recipe_id,
+                        exc_info=True,
+                    )
         return recipe_id, existing is not None
 
     async def _save_async(self, job, entry, draft):

@@ -1194,6 +1194,15 @@ class CookidooRecipeService:
                 prep_time_minutes=inferred_minutes,
                 prep_category=inferred_prep_category,
             )
+            resolve_fn = getattr(self.kitchen, "resolve_recipe_identities", None)
+            if callable(resolve_fn):
+                try:
+                    new_recipe = resolve_fn(new_recipe)
+                except Exception:
+                    _LOG.warning(
+                        "Fast alias resolution failed during Cookidoo import",
+                        exc_info=True,
+                    )
 
             connection.execute(insert(recipes).values(**entity_values(new_recipe)))
 
@@ -1229,4 +1238,29 @@ class CookidooRecipeService:
                 )
             )
 
-            return recipe_id, False
+        has_unmapped = any(
+            ing.canonical_product_id is None
+            or (bool(ing.unit and ing.unit.strip()) and ing.canonical_unit_id is None)
+            for ing in new_recipe.ingredients
+        )
+        kitchen_settings = getattr(self.kitchen, "settings", None)
+        if has_unmapped and kitchen_settings is not None and kitchen_settings.ai_configured:
+            try:
+                from home_kitchen.catalogue.ai_mapper import auto_map_unmapped_ingredients
+
+                auto_map_unmapped_ingredients(
+                    self.kitchen.store,
+                    kitchen_settings,
+                    household_id=self.household_id,
+                    actor_id=actor_id,
+                    recipe_id=recipe_id,
+                    identity_service=getattr(self.kitchen, "identities", None),
+                )
+            except Exception:
+                _LOG.warning(
+                    "Auto-mapping unmapped ingredients failed after Cookidoo import for %s",
+                    recipe_id,
+                    exc_info=True,
+                )
+
+        return recipe_id, False

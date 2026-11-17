@@ -100,6 +100,24 @@
     };
   }
 
+  function formatAutoMapSummary(result) {
+    const mapped = Number(result?.mapped_occurrences || 0);
+    const processed = Number(result?.processed_unique || 0);
+    const createdProducts = Number(result?.created_products || 0);
+    const createdAliases = Number(result?.created_aliases || 0);
+    const remaining = Number(result?.remaining_unmapped || 0);
+    if (processed === 0 && mapped === 0) {
+      return remaining > 0
+        ? `Ingen ingredienser ble kartlagt automatisk (${remaining} gjenstår).`
+        : "Ingen ukartlagte ingredienser å kartlegge.";
+    }
+    return (
+      `KI-kartlegging fullført: ${mapped} forekomster koblet (${processed} unike), ` +
+      `${createdProducts} nye råvarer, ${createdAliases} nye synonymer, ` +
+      `${remaining} gjenstår.`
+    );
+  }
+
   function renderReviewDialog(root, options = {}) {
     const doc = options.document || root.ownerDocument || (typeof document !== "undefined" ? document : null);
     if (!doc) throw new Error("Document is required to render UI");
@@ -165,13 +183,53 @@
       loadData();
     });
 
+    let autoMapRunning = false;
+    const autoMapBtn = button(
+      "Kartlegg automatisk med KI",
+      () => runAutoMap(),
+      "secondary unmapped-automap-btn",
+      "Kartlegg ukartlagte ingredienser automatisk med KI",
+    );
     const refreshBtn = button("Oppdater", () => loadData(), "quiet", "Oppdater liste over ukartlagte ingredienser");
-    add(toolbar, recipeFilter, refreshBtn);
+    add(toolbar, recipeFilter, autoMapBtn, refreshBtn);
 
     const contentArea = el("div", null, "unmapped-content");
     add(container, lead, statusNode, errorNode, toolbar, contentArea);
 
     let unmappedItems = [];
+
+    async function runAutoMap() {
+      if (autoMapRunning) return;
+      autoMapRunning = true;
+      errorNode.hidden = true;
+      errorNode.textContent = "";
+      autoMapBtn.disabled = true;
+      autoMapBtn.textContent = "Kartlegger med KI …";
+      statusNode.textContent = "Kartlegger ukartlagte ingredienser automatisk med KI …";
+
+      try {
+        const payload = { batch_size: 30, max_batches: 3 };
+        if (currentFilter) {
+          payload.recipe_id = currentFilter;
+        }
+        const summary = await api("/catalogue/unmapped-ingredients/auto-map", "POST", payload);
+        const summaryText = formatAutoMapSummary(summary);
+        await loadData();
+        statusNode.textContent = summaryText;
+        notify(summaryText);
+        if (Number(summary?.mapped_occurrences || 0) > 0) {
+          onMapped(summary);
+        }
+      } catch (err) {
+        statusNode.textContent = "";
+        errorNode.hidden = false;
+        errorNode.textContent = "KI-kartlegging feilet: " + (err.message || String(err));
+      } finally {
+        autoMapRunning = false;
+        autoMapBtn.textContent = "Kartlegg automatisk med KI";
+        autoMapBtn.disabled = unmappedItems.length === 0;
+      }
+    }
 
     async function loadData() {
       errorNode.hidden = true;
@@ -227,6 +285,9 @@
 
     function renderList() {
       contentArea.replaceChildren();
+      if (!autoMapRunning) {
+        autoMapBtn.disabled = unmappedItems.length === 0;
+      }
 
       if (unmappedItems.length === 0) {
         const emptyDiv = el("div", null, "empty unmapped-empty");
@@ -604,6 +665,7 @@
     buildMapIngredientPayload,
     buildCreateProductPayload,
     buildCreateUnitPayload,
+    formatAutoMapSummary,
     renderReviewDialog,
   };
 

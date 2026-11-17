@@ -1,5 +1,6 @@
 """Household recipes, meal planning, and deliberate shopping suggestions."""
 
+import logging
 from collections import Counter
 from datetime import UTC, date, datetime, time
 from typing import Any
@@ -9,6 +10,7 @@ from home_kitchen.catalogue.identity import UnmappedIngredient, normalize_identi
 from home_kitchen.catalogue.identity_repository import PostgresIdentityRepository
 from home_kitchen.catalogue.identity_service import CanonicalIdentityService
 
+from .context import history_context
 from .models import (
     Meal,
     MealCreate,
@@ -37,7 +39,18 @@ from .shopping import ClosedSourceKey, ShoppingBuilder, ShoppingContext, default
 from .store import Store
 from .units import scale_quantity
 
+_LOG = logging.getLogger(__name__)
 _PURCHASABLE_SOURCE_UNITS = frozenset({"g", "kg", "mg", "ml", "cl", "dl", "l", "stk", "item"})
+_LOCALE_NORMALIZATION = {
+    "nob": "nb",
+    "nor": "nb",
+    "no": "nb",
+    "eng": "en",
+    "fra": "fr",
+    "fre": "fr",
+    "dan": "da",
+    "swe": "sv",
+}
 
 
 class KitchenService:
@@ -49,6 +62,7 @@ class KitchenService:
         store: Store | None = None,
         translator: RecipeTranslator | None = None,
         settings: Settings | None = None,
+        household_id: UUID | None = None,
     ):
         if store is not None:
             self.store = store
@@ -60,6 +74,7 @@ class KitchenService:
         )
         self.translator = translator
         self.settings = settings
+        self.household_id = household_id or (settings.entra_allowed_group if settings else None)
 
     def create_recipe(self, data: RecipeCreate) -> Recipe:
         resolved_data = self._resolve_recipe_identities_on_create(data)
@@ -74,7 +89,7 @@ class KitchenService:
             **self._recipe_values(resolved_data, exclude={"image_attribution", "source_language"}),
         )
         self.store.save("recipe", recipe)
-        return recipe
+        return self._auto_map_recipe_if_needed(recipe)
 
     def list_recipes(
         self,
@@ -169,8 +184,12 @@ class KitchenService:
         values["ingredients"] = self._retain_omitted_ingredient_identity_fields(
             data, existing, values["ingredients"]
         )
-        values["ingredients"] = self._resolve_ingredient_identities_on_update(
-            data, existing, values["ingredients"]
+        values["ingredients"], excluded_fields = self._resolve_ingredient_identities_on_update(
+            data,
+            existing,
+            values["ingredients"],
+            recipe_id=recipe_id,
+            recipe_locale=source_language,
         )
         self._validate_ingredient_dict_identities(values["ingredients"])
         values["image_attribution"] = (
@@ -178,7 +197,7 @@ class KitchenService:
         )
         recipe = Recipe(id=recipe_id, source_language=source_language, **values)
         self.store.save("recipe", recipe)
-        return recipe
+        return self._auto_map_recipe_if_needed(recipe, excluded_fields=excluded_fields)
 
     @staticmethod
     def _retain_omitted_ingredient_identity_fields(
@@ -258,20 +277,116 @@ class KitchenService:
             pass
         return "nb"
 
+    def _resolution_locales(self, recipe_locale: str | None = None) -> list[str]:
+        candidates = [self._household_locale(), recipe_locale or "", "nb", "en", "fr"]
+        locales: list[str] = []
+        for raw in candidates:
+            cleaned = normalize_identity_text(raw)
+            if not cleaned or cleaned == "und":
+                continue
+            normalized = _LOCALE_NORMALIZATION.get(cleaned, cleaned)
+            if normalized not in locales:
+                locales.append(normalized)
+        return locales
+
+    def _resolve_identity_across_locales(
+        self, kind: str, alias: str, locales: list[str]
+    ) -> UUID | None:
+        for locale in locales:
+            res = self.identities.resolve(kind, locale, "recipe", alias)
+            if res.status == "resolved" and len(res.candidates) == 1:
+                return res.candidates[0].id
+            if res.status == "ambiguous":
+                return None
+        return None
+
+    def resolve_recipe_identities(self, recipe: Recipe) -> Recipe:
+        """Apply fast exact alias resolution across household and recipe locales."""
+        source_lang = getattr(recipe, "source_language", None)
+        if not source_lang or source_lang == "und":
+            source_lang = detect_recipe_language(recipe)
+        locales = self._resolution_locales(source_lang)
+        new_ingredients = []
+        changed = False
+        for ingredient in recipe.ingredients:
+            updates: dict[str, Any] = {}
+            if ingredient.canonical_product_id is None and ingredient.name:
+                prod_id = self._resolve_identity_across_locales("product", ingredient.name, locales)
+                if prod_id is not None:
+                    updates["canonical_product_id"] = prod_id
+            if ingredient.canonical_unit_id is None and ingredient.unit:
+                unit_id = self._resolve_identity_across_locales("unit", ingredient.unit, locales)
+                if unit_id is not None:
+                    updates["canonical_unit_id"] = unit_id
+            if updates:
+                changed = True
+                new_ingredients.append(ingredient.model_copy(update=updates))
+            else:
+                new_ingredients.append(ingredient)
+        if changed:
+            return recipe.model_copy(update={"ingredients": new_ingredients})
+        return recipe
+
+    def _auto_map_recipe_if_needed(
+        self,
+        recipe: Recipe,
+        *,
+        excluded_fields: dict[tuple[UUID, int], set[str]] | None = None,
+    ) -> Recipe:
+        settings = self.settings
+        if settings is None or not settings.ai_configured:
+            return recipe
+        has_unmapped = False
+        for index, ingredient in enumerate(recipe.ingredients):
+            excluded = (excluded_fields or {}).get((recipe.id, index), set())
+            needs_product = "product" not in excluded and ingredient.canonical_product_id is None
+            needs_unit = (
+                "unit" not in excluded
+                and bool(ingredient.unit and ingredient.unit.strip())
+                and ingredient.canonical_unit_id is None
+            )
+            if needs_product or needs_unit:
+                has_unmapped = True
+                break
+        if not has_unmapped:
+            return recipe
+        try:
+            from home_kitchen.catalogue.ai_mapper import auto_map_unmapped_ingredients
+
+            summary = auto_map_unmapped_ingredients(
+                self.store,
+                settings,
+                household_id=self.household_id,
+                actor_id=history_context.get().actor_id or "system",
+                recipe_id=recipe.id,
+                identity_service=self.identities,
+                excluded_fields=excluded_fields,
+            )
+            if summary.get("mapped_occurrences", 0) > 0:
+                return self.store.get("recipe", recipe.id, Recipe)
+        except Exception:
+            _LOG.warning(
+                "Auto-mapping unmapped ingredients failed for recipe %s",
+                recipe.id,
+                exc_info=True,
+            )
+        return recipe
+
     def _resolve_recipe_identities_on_create(self, data: RecipeCreate) -> RecipeCreate:
-        locale = self._household_locale()
+        recipe_locale = data.source_language or detect_recipe_language(data)
+        locales = self._resolution_locales(recipe_locale)
         new_ingredients = []
         changed = False
         for ingredient in data.ingredients:
             updates: dict[str, Any] = {}
             if ingredient.canonical_product_id is None and ingredient.name:
-                res = self.identities.resolve("product", locale, "recipe", ingredient.name)
-                if res.status == "resolved" and len(res.candidates) == 1:
-                    updates["canonical_product_id"] = res.candidates[0].id
+                prod_id = self._resolve_identity_across_locales("product", ingredient.name, locales)
+                if prod_id is not None:
+                    updates["canonical_product_id"] = prod_id
             if ingredient.canonical_unit_id is None and ingredient.unit:
-                res = self.identities.resolve("unit", locale, "recipe", ingredient.unit)
-                if res.status == "resolved" and len(res.candidates) == 1:
-                    updates["canonical_unit_id"] = res.candidates[0].id
+                unit_id = self._resolve_identity_across_locales("unit", ingredient.unit, locales)
+                if unit_id is not None:
+                    updates["canonical_unit_id"] = unit_id
             if updates:
                 changed = True
                 new_ingredients.append(ingredient.model_copy(update=updates))
@@ -282,10 +397,18 @@ class KitchenService:
         return data
 
     def _resolve_ingredient_identities_on_update(
-        self, data: RecipeCreate, existing: Recipe, current_values: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
-        locale = self._household_locale()
+        self,
+        data: RecipeCreate,
+        existing: Recipe,
+        current_values: list[dict[str, Any]],
+        *,
+        recipe_id: UUID | None = None,
+        recipe_locale: str | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[tuple[UUID, int], set[str]]]:
+        locales = self._resolution_locales(recipe_locale)
         resolved = [dict(v) for v in current_values]
+        excluded_fields: dict[tuple[UUID, int], set[str]] = {}
+        target_recipe_id = recipe_id or existing.id
         for index, item in enumerate(resolved):
             incoming = data.ingredients[index] if index < len(data.ingredients) else None
             prior = existing.ingredients[index] if index < len(existing.ingredients) else None
@@ -300,6 +423,7 @@ class KitchenService:
                     == normalize_identity_text(prior.name)
                 ):
                     product_cleared = True
+                    excluded_fields.setdefault((target_recipe_id, index), set()).add("product")
 
             unit_cleared = False
             if incoming is not None and prior is not None:
@@ -311,22 +435,23 @@ class KitchenService:
                     == normalize_identity_text(prior.unit or "")
                 ):
                     unit_cleared = True
+                    excluded_fields.setdefault((target_recipe_id, index), set()).add("unit")
 
             if (
                 item.get("canonical_product_id") is None
                 and not product_cleared
                 and item.get("name")
             ):
-                res = self.identities.resolve("product", locale, "recipe", item["name"])
-                if res.status == "resolved" and len(res.candidates) == 1:
-                    item["canonical_product_id"] = res.candidates[0].id
+                prod_id = self._resolve_identity_across_locales("product", item["name"], locales)
+                if prod_id is not None:
+                    item["canonical_product_id"] = prod_id
 
             if item.get("canonical_unit_id") is None and not unit_cleared and item.get("unit"):
-                res = self.identities.resolve("unit", locale, "recipe", item["unit"])
-                if res.status == "resolved" and len(res.candidates) == 1:
-                    item["canonical_unit_id"] = res.candidates[0].id
+                unit_id = self._resolve_identity_across_locales("unit", item["unit"], locales)
+                if unit_id is not None:
+                    item["canonical_unit_id"] = unit_id
 
-        return resolved
+        return resolved, excluded_fields
 
     def _validate_canonical_identities(self, data: RecipeCreate) -> None:
         product_ids = {

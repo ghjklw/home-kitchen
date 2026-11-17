@@ -79,6 +79,10 @@ class KitchenFeatures:
         self.household_id = settings.entra_allowed_group or UUID(
             kitchen.store.ensure_setting("local_household_id", str(uuid4()))
         )
+        if kitchen.household_id is None:
+            kitchen.household_id = self.household_id
+        if kitchen.settings is None:
+            kitchen.settings = settings
         kitchen.store.photo_household_id = self.household_id
         self.catalogue_skus = CatalogueSkuService(
             self.catalogue, PostgresCatalogueSkuRepository(kitchen.store.engine)

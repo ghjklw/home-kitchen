@@ -148,6 +148,20 @@ class TripCheck(BaseModel):
     checked: bool
 
 
+class AutoMapIngredientsInput(BaseModel):
+    recipe_id: UUID | None = None
+    batch_size: int = Field(default=30, ge=1, le=100)
+    max_batches: int = Field(default=1, ge=1, le=20)
+
+
+class AutoMapIngredientsResponse(BaseModel):
+    processed_unique: int
+    mapped_occurrences: int
+    created_products: int
+    created_aliases: int
+    remaining_unmapped: int
+
+
 class ConnectorConnectRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -803,6 +817,41 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
             raise HTTPException(404, "Ingredient index out of range") from None
         except ValueError as err:
             raise HTTPException(422, str(err)) from err
+
+    @router.post("/catalogue/unmapped-ingredients/auto-map")
+    @router.post("/catalogue/identities/unmapped/auto-map")
+    async def auto_map_unmapped_ingredients_route(
+        request: Request,
+        data: AutoMapIngredientsInput | None = None,
+    ) -> AutoMapIngredientsResponse:
+        from home_kitchen.catalogue.ai_mapper import auto_map_unmapped_ingredients_async
+
+        payload = data or AutoMapIngredientsInput()
+        actor = getattr(request.state, "actor_id", None) or "system"
+        settings = getattr(features, "settings", None) or getattr(
+            features.kitchen, "settings", None
+        )
+        household_id = getattr(features, "household_id", None) or getattr(
+            features.kitchen, "household_id", None
+        )
+        try:
+            result = await auto_map_unmapped_ingredients_async(
+                features.kitchen.store,
+                settings,
+                household_id=household_id,
+                actor_id=actor,
+                recipe_id=payload.recipe_id,
+                batch_size=payload.batch_size,
+                max_batches=payload.max_batches,
+                identity_service=features.catalogue_identities,
+            )
+            return AutoMapIngredientsResponse.model_validate(result)
+        except KeyError:
+            raise HTTPException(404, "Recipe not found") from None
+        except ValueError as err:
+            raise HTTPException(422, str(err)) from err
+        except Exception as err:
+            raise HTTPException(502, "KI-kartlegging er midlertidig utilgjengelig.") from err
 
     @router.post("/catalogue/foods/{food_id}/products", status_code=201)
     def remember_food_product(

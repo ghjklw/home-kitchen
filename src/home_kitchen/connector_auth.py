@@ -41,6 +41,11 @@ TRUMF_SESSION_REFRESH_ERROR = (
     "Trumf-sesjonen kan ikke fornyes automatisk og må kobles til på nytt i nettleseren "
     "(lim inn full Cookie-header inkludert alle __Secure-authjs.session-token-deler)."
 )
+TRUMF_SESSION_CONNECT_ERROR = (
+    "Trumf-informasjonskapselen er ugyldig, utløpt eller kan ikke fornyes. "
+    "Kopier hele Cookie:-verdien fra DevTools → Network → Headers → Request Headers "
+    "(ikke Set-Cookie), inkludert alle __Secure-authjs.session-token-deler."
+)
 _TRUMF_UNKNOWN_EXPIRY_REFRESH_INTERVAL = timedelta(hours=1)
 
 DEFAULT_REMA1000_AUTHORIZE_URL = "https://id.rema.no/authorization"
@@ -563,14 +568,20 @@ class ConnectorAuthService:
         )
 
         access_token = token_data.get("access_token")
-        if not access_token:
-            raise HTTPException(
+        if not isinstance(access_token, str) or not access_token.strip():
+            raise ConnectorAuthError(
                 status_code=502,
                 detail=f"Mottok ingen access_token fra {provider_id}.",
             )
 
-        refresh_token = token_data.get("refresh_token")
-        expires_at = _parse_expires_at(token_data.get("expires_in"))
+        new_access_token, new_refresh_token, expires_at, refreshed_data = (
+            self._validate_initial_oauth_refresh(
+                provider_id=provider_id,
+                token_endpoint=transaction.token_endpoint,
+                client_id=transaction.client_id,
+                token_data=token_data,
+            )
+        )
         effective_account_id = account_id if account_id is not None else transaction.account_id
         effective_label = account_label if account_label is not None else transaction.account_label
         effective_add = add_account or transaction.add_account
@@ -580,14 +591,23 @@ class ConnectorAuthService:
             provider_id=provider_id,
             auth_mode="oauth_pkce",
             credentials={
-                "access_token": access_token,
-                "refresh_token": refresh_token,
-                "token_type": token_data.get("token_type", "Bearer"),
-                "scope": token_data.get("scope"),
+                "access_token": new_access_token,
+                "refresh_token": new_refresh_token,
+                "token_type": (
+                    refreshed_data.get("token_type") or token_data.get("token_type", "Bearer")
+                ),
+                "scope": (
+                    refreshed_data.get("scope")
+                    if refreshed_data.get("scope") is not None
+                    else token_data.get("scope")
+                ),
             },
             expires_at=expires_at,
             actor_id=actor_id,
-            metadata={"has_refresh_token": bool(refresh_token)},
+            metadata={
+                "has_refresh_token": bool(new_refresh_token),
+                "last_refreshed_at": datetime.now(UTC).isoformat(),
+            },
             account_id=effective_account_id,
             account_label=effective_label,
             add_account=effective_add,
@@ -822,14 +842,20 @@ class ConnectorAuthService:
             )
 
         access_token = token_data.get("access_token") or token_data.get("token")
-        if not access_token:
-            raise HTTPException(
+        if not isinstance(access_token, str) or not access_token.strip():
+            raise ConnectorAuthError(
                 status_code=502,
                 detail="Mottok ingen access_token fra Cookidoo.",
             )
 
-        refresh_token = token_data.get("refresh_token")
-        expires_at = _parse_expires_at(token_data.get("expires_in"))
+        new_access_token, new_refresh_token, expires_at, refreshed_data = (
+            self._validate_initial_oauth_refresh(
+                provider_id="cookidoo",
+                token_endpoint=token_url,
+                client_id=self.cookidoo_client_id,
+                token_data=token_data,
+            )
+        )
 
         # Invariant: ONLY store resulting encrypted OAuth tokens, NEVER raw password
         self.store.save_connection(
@@ -837,14 +863,20 @@ class ConnectorAuthService:
             provider_id="cookidoo",
             auth_mode="oauth_password",
             credentials={
-                "access_token": access_token,
-                "refresh_token": refresh_token,
-                "token_type": token_data.get("token_type", "Bearer"),
+                "access_token": new_access_token,
+                "refresh_token": new_refresh_token,
+                "token_type": (
+                    refreshed_data.get("token_type") or token_data.get("token_type", "Bearer")
+                ),
                 "country": country_clean,
             },
             expires_at=expires_at,
             actor_id=actor_id,
-            metadata={"country": country_clean, "has_refresh_token": bool(refresh_token)},
+            metadata={
+                "country": country_clean,
+                "has_refresh_token": bool(new_refresh_token),
+                "last_refreshed_at": datetime.now(UTC).isoformat(),
+            },
             account_id=account_id,
             account_label=account_label,
             add_account=add_account,
@@ -987,8 +1019,11 @@ class ConnectorAuthService:
             except Exception:
                 pass
 
-        if not session_cookie:
-            session_cookie = f"trumf-otp-session-{secrets.token_urlsafe(32)}"
+        if not isinstance(session_cookie, str) or not session_cookie.strip():
+            raise ConnectorAuthError(
+                status_code=502,
+                detail="Mottok ingen gyldig sesjonsinformasjonskapsel fra Trumf.",
+            )
 
         expires_at = datetime.now(UTC) + timedelta(days=365)
         effective_account_id = account_id if account_id is not None else session.account_id
@@ -1011,6 +1046,218 @@ class ConnectorAuthService:
             add_account=effective_add,
         )
 
+        return self.integrations.describe_one("trumf", actor_id)
+
+    def _execute_oauth_refresh_request(
+        self,
+        provider_id: str,
+        token_endpoint: str,
+        client_id: str,
+        refresh_token: str,
+        *,
+        rejection_status_code: int,
+        rejection_detail: str,
+        use_connector_auth_error: bool = False,
+    ) -> tuple[str, str, datetime | None, dict[str, Any]]:
+        clean_refresh_token = refresh_token.strip()
+        headers = {"Accept": "application/json"}
+        if provider_id == "cookidoo":
+            headers = {**headers, **COOKIDOO_LOGIN_HEADERS}
+
+        error_cls: type[HTTPException] = (
+            ConnectorAuthError if use_connector_auth_error else HTTPException
+        )
+
+        with self._get_http_client() as client:
+            try:
+                response = client.post(
+                    token_endpoint,
+                    data={
+                        "grant_type": "refresh_token",
+                        "client_id": client_id,
+                        "refresh_token": clean_refresh_token,
+                    },
+                    headers=headers,
+                )
+            except httpx.HTTPError as exc:
+                safe_exc = str(exc).replace(clean_refresh_token, "[REDACTED]")
+                raise error_cls(
+                    status_code=502,
+                    detail=f"Nettverksfeil mot token-endepunktet til {provider_id}: {safe_exc}",
+                ) from None
+
+        if response.status_code == 401:
+            raise error_cls(status_code=401, detail=rejection_detail)
+        if response.status_code != 200:
+            safe_body = response.text.replace(clean_refresh_token, "[REDACTED]")
+            status_code = rejection_status_code if response.status_code in (400, 403) else 502
+            detail = (
+                rejection_detail
+                if use_connector_auth_error and response.status_code in (400, 403)
+                else f"Tokenfornyelse feilet hos {provider_id}: {safe_body}"
+            )
+            raise error_cls(status_code=status_code, detail=detail)
+
+        try:
+            token_data = response.json()
+        except Exception:
+            raise error_cls(
+                status_code=502,
+                detail=f"Ugyldig JSON-respons fra token-endepunktet til {provider_id}.",
+            ) from None
+
+        if not isinstance(token_data, dict):
+            raise error_cls(
+                status_code=502,
+                detail=f"Ugyldig JSON-respons fra token-endepunktet til {provider_id}.",
+            )
+
+        access_token = token_data.get("access_token") or (
+            token_data.get("token") if provider_id == "cookidoo" else None
+        )
+        if not isinstance(access_token, str) or not access_token.strip():
+            raise error_cls(
+                status_code=502,
+                detail=f"Mottok ingen access_token fra {provider_id}.",
+            )
+
+        rotated_refresh = token_data.get("refresh_token")
+        new_refresh_token = (
+            rotated_refresh.strip()
+            if isinstance(rotated_refresh, str) and rotated_refresh.strip()
+            else clean_refresh_token
+        )
+        expires_at = _parse_expires_at(token_data.get("expires_in"))
+        return access_token, new_refresh_token, expires_at, token_data
+
+    def _validate_initial_oauth_refresh(
+        self,
+        provider_id: str,
+        token_endpoint: str,
+        client_id: str,
+        token_data: dict[str, Any],
+    ) -> tuple[str, str, datetime | None, dict[str, Any]]:
+        refresh_token = token_data.get("refresh_token")
+        if not isinstance(refresh_token, str) or not refresh_token.strip():
+            raise ConnectorAuthError(
+                status_code=401,
+                detail=(
+                    f"Mottok ingen refresh_token fra {provider_id}. "
+                    "Tilkoblingen kan ikke fornyes automatisk og ble ikke lagret."
+                ),
+            )
+
+        new_access_token, new_refresh_token, refreshed_expires_at, refreshed_data = (
+            self._execute_oauth_refresh_request(
+                provider_id=provider_id,
+                token_endpoint=token_endpoint,
+                client_id=client_id,
+                refresh_token=refresh_token,
+                rejection_status_code=401,
+                rejection_detail=(
+                    f"Tokenfornyelse ble avvist av {provider_id}. "
+                    "Tilkoblingen ble ikke lagret — prøv å logge inn på nytt."
+                ),
+                use_connector_auth_error=True,
+            )
+        )
+        expires_at = refreshed_expires_at or _parse_expires_at(token_data.get("expires_in"))
+        return new_access_token, new_refresh_token, expires_at, refreshed_data
+
+    def _validate_trumf_session(
+        self,
+        raw_cookie: str,
+        *,
+        error_detail: str,
+    ) -> tuple[str, datetime | None]:
+        if not isinstance(raw_cookie, str) or not raw_cookie.strip():
+            raise ConnectorAuthError(status_code=401, detail=error_detail)
+
+        normalized_cookie, cookie_map = _normalize_trumf_cookie(raw_cookie)
+        if not normalized_cookie:
+            raise ConnectorAuthError(status_code=401, detail=error_detail)
+
+        session_url = f"{self.trumf_base_url.rstrip('/')}/api/auth/session"
+
+        try:
+            with self._get_http_client() as client:
+                response = client.get(
+                    session_url,
+                    headers={
+                        "Cookie": normalized_cookie,
+                        "Accept": "application/json",
+                    },
+                )
+        except httpx.HTTPError as exc:
+            safe_err = f"Nettverksfeil mot Trumf: {exc}".replace(normalized_cookie, "[REDACTED]")
+            raise ConnectorAuthError(status_code=502, detail=safe_err) from None
+
+        updates, removed, cleared_session = _parse_trumf_set_cookies(
+            response.headers.get_list("set-cookie")
+        )
+
+        data: Any = None
+        if response.status_code == 200:
+            try:
+                data = response.json()
+            except Exception:
+                data = None
+
+        has_session_identity = isinstance(data, dict) and bool(
+            data.get("user") or data.get("accessToken")
+        )
+        if response.status_code != 200 or not has_session_identity or cleared_session:
+            raise ConnectorAuthError(
+                status_code=(502 if response.status_code >= 500 else 401),
+                detail=error_detail,
+            )
+
+        merged_cookies = dict(cookie_map)
+        for name in removed:
+            merged_cookies.pop(name, None)
+        merged_cookies.update(updates)
+        new_cookie = (
+            "; ".join(f"{k}={v}" for k, v in merged_cookies.items())
+            if merged_cookies
+            else normalized_cookie
+        )
+        server_expires_at = _parse_iso_datetime(data.get("expires"))
+        return new_cookie, server_expires_at
+
+    def connect_trumf_cookie(
+        self,
+        household_id: UUID,
+        actor_id: str | None,
+        raw_cookie: str,
+        *,
+        expires_at: datetime | None = None,
+        account_id: str | None = None,
+        account_label: str | None = None,
+        add_account: bool = False,
+    ) -> IntegrationInfo:
+        """Validate and renew a Trumf session cookie before saving it to ConnectorStore."""
+        new_cookie, server_expires_at = self._validate_trumf_session(
+            raw_cookie,
+            error_detail=TRUMF_SESSION_CONNECT_ERROR,
+        )
+        effective_expires_at = (
+            server_expires_at or expires_at or (datetime.now(UTC) + timedelta(hours=24))
+        )
+        self.store.save_connection(
+            household_id=household_id,
+            provider_id="trumf",
+            auth_mode="session_cookie",
+            credentials={"session_cookie": new_cookie},
+            expires_at=effective_expires_at,
+            actor_id=actor_id,
+            metadata={
+                "has_session_cookie": True,
+                "last_refreshed_at": datetime.now(UTC).isoformat(),
+            },
+            account_id=account_id,
+            account_label=account_label,
+            add_account=add_account,
+        )
         return self.integrations.describe_one("trumf", actor_id)
 
     def _refresh_single_account(
@@ -1041,63 +1288,18 @@ class ConnectorAuthService:
                 )
 
             clean_refresh_token = refresh_token.strip()
-            headers = {"Accept": "application/json"}
-            if provider_id == "cookidoo":
-                headers = {**headers, **COOKIDOO_LOGIN_HEADERS}
-
             try:
-                with self._get_http_client() as client:
-                    try:
-                        response = client.post(
-                            token_endpoint,
-                            data={
-                                "grant_type": "refresh_token",
-                                "client_id": client_id,
-                                "refresh_token": clean_refresh_token,
-                            },
-                            headers=headers,
-                        )
-                    except httpx.HTTPError as exc:
-                        raise HTTPException(
-                            status_code=502,
-                            detail=f"Nettverksfeil mot token-endepunktet til {provider_id}: {exc}",
-                        ) from None
-
-                if response.status_code == 401:
-                    raise HTTPException(
-                        status_code=401,
-                        detail=f"Tokenfornyelse avvist av {provider_id}. Koble til på nytt.",
+                access_token, new_refresh_token, expires_at, token_data = (
+                    self._execute_oauth_refresh_request(
+                        provider_id=provider_id,
+                        token_endpoint=token_endpoint,
+                        client_id=client_id,
+                        refresh_token=clean_refresh_token,
+                        rejection_status_code=400,
+                        rejection_detail=f"Tokenfornyelse avvist av {provider_id}. Koble til på nytt.",
+                        use_connector_auth_error=False,
                     )
-                if response.status_code != 200:
-                    safe_body = response.text.replace(clean_refresh_token, "[REDACTED]")
-                    status_code = 400 if response.status_code in (400, 403) else 502
-                    raise HTTPException(
-                        status_code=status_code,
-                        detail=f"Tokenfornyelse feilet hos {provider_id}: {safe_body}",
-                    )
-
-                try:
-                    token_data = response.json()
-                except Exception:
-                    raise HTTPException(
-                        status_code=502,
-                        detail=f"Ugyldig JSON-respons fra token-endepunktet til {provider_id}.",
-                    ) from None
-
-                if not isinstance(token_data, dict):
-                    raise HTTPException(
-                        status_code=502,
-                        detail=f"Ugyldig JSON-respons fra token-endepunktet til {provider_id}.",
-                    )
-
-                access_token = token_data.get("access_token") or (
-                    token_data.get("token") if provider_id == "cookidoo" else None
                 )
-                if not isinstance(access_token, str) or not access_token.strip():
-                    raise HTTPException(
-                        status_code=502,
-                        detail=f"Mottok ingen access_token fra {provider_id}.",
-                    )
             except HTTPException as exc:
                 self.store.update_account_metadata(
                     household_id,
@@ -1106,14 +1308,6 @@ class ConnectorAuthService:
                     {"last_error": str(exc.detail).replace(clean_refresh_token, "[REDACTED]")},
                 )
                 raise
-
-            rotated_refresh = token_data.get("refresh_token")
-            new_refresh_token = (
-                rotated_refresh.strip()
-                if isinstance(rotated_refresh, str) and rotated_refresh.strip()
-                else clean_refresh_token
-            )
-            expires_at = _parse_expires_at(token_data.get("expires_in"))
 
             updated_credentials: dict[str, Any] = {
                 **creds,
@@ -1166,72 +1360,22 @@ class ConnectorAuthService:
                     detail="Tilkoblingen for 'trumf' mangler sesjonsinformasjonskapsel og må kobles til på nytt.",
                 )
 
-            normalized_cookie, cookie_map = _normalize_trumf_cookie(raw_cookie)
-            session_url = f"{self.trumf_base_url.rstrip('/')}/api/auth/session"
-
             try:
-                with self._get_http_client() as client:
-                    response = client.get(
-                        session_url,
-                        headers={
-                            "Cookie": normalized_cookie,
-                            "Accept": "application/json",
-                        },
-                    )
-            except httpx.HTTPError as exc:
-                safe_err = f"Nettverksfeil mot Trumf: {exc}".replace(
-                    normalized_cookie, "[REDACTED]"
+                new_cookie, server_expires_at = self._validate_trumf_session(
+                    raw_cookie,
+                    error_detail=TRUMF_SESSION_REFRESH_ERROR,
                 )
+            except ConnectorAuthError as exc:
                 self.store.update_account_metadata(
                     household_id,
                     "trumf",
                     meta.account_id,
-                    {"last_error": safe_err},
+                    {"last_error": str(exc.detail)},
                 )
-                raise ConnectorAuthError(status_code=502, detail=safe_err) from None
-
-            updates, removed, cleared_session = _parse_trumf_set_cookies(
-                response.headers.get_list("set-cookie")
-            )
-
-            data: Any = None
-            if response.status_code == 200:
-                try:
-                    data = response.json()
-                except Exception:
-                    data = None
-
-            if (
-                response.status_code != 200
-                or not isinstance(data, dict)
-                or not data.get("user")
-                or cleared_session
-            ):
-                self.store.update_account_metadata(
-                    household_id,
-                    "trumf",
-                    meta.account_id,
-                    {"last_error": TRUMF_SESSION_REFRESH_ERROR},
-                )
-                raise ConnectorAuthError(
-                    status_code=(502 if response.status_code >= 500 else 401),
-                    detail=TRUMF_SESSION_REFRESH_ERROR,
-                )
-
-            merged_cookies = dict(cookie_map)
-            for name in removed:
-                merged_cookies.pop(name, None)
-            merged_cookies.update(updates)
-            new_cookie = (
-                "; ".join(f"{k}={v}" for k, v in merged_cookies.items())
-                if merged_cookies
-                else normalized_cookie
-            )
+                raise
 
             expires_at = (
-                _parse_iso_datetime(data.get("expires"))
-                or meta.expires_at
-                or (datetime.now(UTC) + timedelta(hours=24))
+                server_expires_at or meta.expires_at or (datetime.now(UTC) + timedelta(hours=24))
             )
 
             updated_credentials: dict[str, Any] = {

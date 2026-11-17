@@ -255,21 +255,19 @@ test("buildTrumfConnectPayload handles cookie and optional expiry date", () => {
   assert.equal(buildTrumfConnectPayload(null, null), null);
 });
 
-test("buildTrumfSessionCookie and buildTrumfConnectPayload combine .0 and .1 token chunks cleanly", () => {
+test("buildTrumfSessionCookie and buildTrumfConnectPayload normalize Cookie headers cleanly", () => {
   assert.equal(
-    buildTrumfSessionCookie("", "chunk0-val", "chunk1-val"),
+    buildTrumfSessionCookie("Cookie: __Secure-authjs.session-token.0=chunk0-val; __Secure-authjs.session-token.1=chunk1-val"),
     "__Secure-authjs.session-token.0=chunk0-val; __Secure-authjs.session-token.1=chunk1-val",
   );
   assert.equal(
     buildTrumfSessionCookie(
-      "",
-      "__Secure-authjs.session-token.0=chunk0-val;",
-      "__Secure-authjs.session-token.1=chunk1-val",
+      "__Secure-authjs.session-token.0=chunk0-val\n__Secure-authjs.session-token.1=chunk1-val",
     ),
     "__Secure-authjs.session-token.0=chunk0-val; __Secure-authjs.session-token.1=chunk1-val",
   );
   assert.deepEqual(
-    buildTrumfConnectPayload("", "2027-01-15", "part0", "part1"),
+    buildTrumfConnectPayload("Cookie: __Secure-authjs.session-token.0=part0; __Secure-authjs.session-token.1=part1", "2027-01-15"),
     {
       auth_mode: "session_cookie",
       session_cookie: "__Secure-authjs.session-token.0=part0; __Secure-authjs.session-token.1=part1",
@@ -707,7 +705,7 @@ test("Cookidoo manual cookie fallback details form calls connect endpoint", asyn
   assert.deepEqual(harness.notices, ["Cookidoo / Thermomix TM6 er tilkoblet."]);
 });
 
-test("Trumf primary session cookie flow supports full Cookie header, .0/.1 chunk fields, and optional SMS OTP", async () => {
+test("Trumf primary session cookie flow uses single Cookie-header field and optional SMS OTP", async () => {
   const harness = setupModalHarness(async (path, method, body) => {
     if (path === "/integrations/trumf/connect") {
       return { status: "connected" };
@@ -739,16 +737,14 @@ test("Trumf primary session cookie flow supports full Cookie header, .0/.1 chunk
   assert.ok(openBtn, "Button 'Åpne Trumf-innlogging' is present");
 
   const cookieInput = harness.findInput("Informasjonskapsel (cookie)");
-  const token0Input = harness.findInput("__Secure-authjs.session-token.0 (valgfritt)");
-  const token1Input = harness.findInput("__Secure-authjs.session-token.1 (valgfritt)");
-  assert.ok(cookieInput && token0Input && token1Input);
+  assert.ok(cookieInput);
   assert.equal(cookieInput.type, "password");
-  assert.equal(token0Input.type, "password");
-  assert.equal(token1Input.type, "password");
+  assert.equal(harness.findInput("__Secure-authjs.session-token.0 (valgfritt)"), null);
+  assert.equal(harness.findInput("__Secure-authjs.session-token.1 (valgfritt)"), null);
 
-  // 1. Submit using dedicated .0 and .1 chunk fields
-  token0Input.value = "tok-part-zero";
-  token1Input.value = "tok-part-one";
+  // 1. Submit using Cookie header (even with leading 'Cookie:' prefix)
+  cookieInput.value =
+    "Cookie: __Secure-authjs.session-token.0=tok-part-zero; __Secure-authjs.session-token.1=tok-part-one";
   const cookieForm = primarySection.querySelectorAll("form")[0];
   await cookieForm.submit();
 
@@ -765,7 +761,7 @@ test("Trumf primary session cookie flow supports full Cookie header, .0/.1 chunk
   assert.equal(harness.modal.open, false);
   assert.deepEqual(harness.notices, ["Trumf er tilkoblet."]);
 
-  // 2. Submit using full Cookie header
+  // 2. Submit using raw Cookie header value (without 'Cookie:' prefix)
   const fullHarness = setupModalHarness(async () => ({ status: "connected" }));
   fullHarness.openConnectorModal({ id: "trumf", name: "Trumf" });
   fullHarness.findInput("Informasjonskapsel (cookie)").value =
@@ -812,7 +808,7 @@ test("Trumf primary session cookie flow supports full Cookie header, .0/.1 chunk
     body: { session_id: "otp-sess-1", otp: "123456" },
   });
 
-  // 4. Test validation error when all cookie fields are empty
+  // 4. Test validation error when cookie field is empty
   const errHarness = setupModalHarness(async () => ({}));
   errHarness.openConnectorModal({ id: "trumf", name: "Trumf" });
   const errPrimary = errHarness.modalContent.querySelectorAll(".connector-trumf-cookie")[0];
@@ -903,7 +899,7 @@ test("api() error handling distinguishes Entra ID 401 from integration 401 provi
   }
 });
 
-test("Trumf login URL points to https://www.trumf.no/ without 404 /logg-inn path", () => {
+test("Trumf login URL points to https://www.trumf.no/trumf-profil/kvitteringer without 404 /logg-inn path", () => {
   const fs = require("node:fs");
   const path = require("node:path");
   const appSource = fs.readFileSync(path.join(__dirname, "../src/home_kitchen/static/app.js"), "utf8");
@@ -913,7 +909,7 @@ test("Trumf login URL points to https://www.trumf.no/ without 404 /logg-inn path
   harness.openConnectorModal({ id: "trumf", name: "Trumf" });
   harness.findButton("Åpne Trumf-innlogging").click();
   assert.deepEqual(harness.openedWindows[0], {
-    url: "https://www.trumf.no/",
+    url: "https://www.trumf.no/trumf-profil/kvitteringer",
     target: "_blank",
     features: "noopener,noreferrer",
   });
@@ -1120,8 +1116,13 @@ test("Coop modal explains no.coop.members://auth/callback and Trumf modal explai
   const trumfText = harness.modalContent.textContent;
   assert.doesNotMatch(trumfText, /OAuth PKCE/);
   assert.match(trumfText, /Sesjonsinformasjonskapsel/);
-  assert.match(trumfText, /Cookie/);
-  assert.match(trumfText, /__Secure-authjs\.session-token\.0/);
-  assert.match(trumfText, /__Secure-authjs\.session-token\.1/);
+  assert.match(trumfText, /https:\/\/www\.trumf\.no\/trumf-profil\/kvitteringer/);
+  assert.match(trumfText, /F12.*Network.*F5/);
+  assert.match(trumfText, /Headers → Request Headers/);
+  assert.match(trumfText, /Cookie:/);
+  assert.match(trumfText, /ikke Set-Cookie/);
+  assert.match(trumfText, /Copy value/);
+  assert.doesNotMatch(trumfText, /__Secure-authjs\.session-token\.0 \(valgfritt\)/);
+  assert.doesNotMatch(trumfText, /__Secure-authjs\.session-token\.1 \(valgfritt\)/);
   assert.match(trumfText, /Bekreft med SMS-kode/);
 });

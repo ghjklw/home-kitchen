@@ -186,24 +186,11 @@
     };
   }
 
-  function cleanTrumfChunkValue(raw, cookieName) {
-    let val = String(raw || "").trim();
-    if (!val) return "";
-    val = val.replace(/^(?:cookie|set-cookie):\s*/i, "").trim();
-    const prefix = cookieName + "=";
-    if (val.startsWith(prefix)) {
-      val = val.slice(prefix.length).trim();
-    }
-    return val.replace(/;+\s*$/, "").trim();
-  }
-
-  function buildTrumfSessionCookie(cookieOrHeader, token0, token1) {
+  function buildTrumfSessionCookie(cookieOrHeader) {
     const full = String(cookieOrHeader || "")
       .trim()
       .replace(/^(?:cookie|set-cookie):\s*/i, "")
       .trim();
-    const clean0 = cleanTrumfChunkValue(token0, "__Secure-authjs.session-token.0");
-    const clean1 = cleanTrumfChunkValue(token1, "__Secure-authjs.session-token.1");
 
     const chunkMap = new Map();
     if (full) {
@@ -218,8 +205,6 @@
         }
       }
     }
-    if (clean0) chunkMap.set("__Secure-authjs.session-token.0", clean0);
-    if (clean1) chunkMap.set("__Secure-authjs.session-token.1", clean1);
 
     if (chunkMap.size > 0) {
       return Array.from(chunkMap.entries())
@@ -229,8 +214,8 @@
     return full;
   }
 
-  function buildTrumfConnectPayload(cookieOrToken, expiryDate, token0, token1) {
-    const trimmed = buildTrumfSessionCookie(cookieOrToken, token0, token1);
+  function buildTrumfConnectPayload(cookieOrToken, expiryDate) {
+    const trimmed = buildTrumfSessionCookie(cookieOrToken);
     if (!trimmed) return null;
     const payload = {
       auth_mode: "session_cookie",

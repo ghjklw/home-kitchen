@@ -228,15 +228,27 @@ def test_pkce_complete_exchanges_code_and_stores_encrypted_tokens(sqlite_engine,
     def mock_handler(request: httpx.Request) -> httpx.Response:
         captured_requests.append(request)
         if request.url.path == "/token":
-            return httpx.Response(
-                200,
-                json={
-                    "access_token": "rema-access-token-xyz-123",
-                    "refresh_token": "rema-refresh-token-abc-456",
-                    "token_type": "Bearer",
-                    "expires_in": 3600,
-                },
-            )
+            body = urllib.parse.parse_qs(request.read().decode())
+            if body.get("grant_type") == ["authorization_code"]:
+                return httpx.Response(
+                    200,
+                    json={
+                        "access_token": "rema-access-token-xyz-123",
+                        "refresh_token": "rema-refresh-token-abc-456",
+                        "token_type": "Bearer",
+                        "expires_in": 3600,
+                    },
+                )
+            if body.get("grant_type") == ["refresh_token"]:
+                return httpx.Response(
+                    200,
+                    json={
+                        "access_token": "rema-access-token-renewed-999",
+                        "refresh_token": "rema-refresh-token-rotated-777",
+                        "token_type": "Bearer",
+                        "expires_in": 7200,
+                    },
+                )
         return httpx.Response(404)
 
     mock_transport = httpx.MockTransport(mock_handler)
@@ -266,8 +278,8 @@ def test_pkce_complete_exchanges_code_and_stores_encrypted_tokens(sqlite_engine,
     assert "rema-access-token" not in serialized_info
     assert "rema-refresh-token" not in serialized_info
 
-    # Verify request sent to token endpoint
-    assert len(captured_requests) == 1
+    # Verify both authorization_code exchange and pre-save refresh_token test were sent
+    assert len(captured_requests) == 2
     req = captured_requests[0]
     assert req.method == "POST"
     assert req.url.path == "/token"
@@ -276,17 +288,24 @@ def test_pkce_complete_exchanges_code_and_stores_encrypted_tokens(sqlite_engine,
     assert body["code"] == ["auth-code-789"]
     assert "code_verifier" in body
 
-    # Verify encrypted storage in DB
+    refresh_req = captured_requests[1]
+    assert refresh_req.method == "POST"
+    assert refresh_req.url.path == "/token"
+    refresh_body = urllib.parse.parse_qs(refresh_req.read().decode())
+    assert refresh_body["grant_type"] == ["refresh_token"]
+    assert refresh_body["refresh_token"] == ["rema-refresh-token-abc-456"]
+
+    # Verify encrypted storage in DB holds freshly renewed tokens
     credentials = store.get_credentials(household_id, "rema1000")
     assert credentials is not None
-    assert credentials["access_token"] == "rema-access-token-xyz-123"
-    assert credentials["refresh_token"] == "rema-refresh-token-abc-456"
+    assert credentials["access_token"] == "rema-access-token-renewed-999"
+    assert credentials["refresh_token"] == "rema-refresh-token-rotated-777"
 
     # Verify expiration set
     meta = store.get_connection_metadata(household_id, "rema1000")
     assert meta is not None
     assert meta.expires_at is not None
-    assert meta.expires_at > datetime.now(UTC)
+    assert meta.expires_at > datetime.now(UTC) + timedelta(hours=1)
 
 
 def test_pkce_complete_parses_redirect_url_query_and_fragment(sqlite_engine, cipher):
@@ -370,7 +389,10 @@ def test_pkce_callback_redirects_and_completes_flow(sqlite_engine, cipher):
 
 def test_pkce_security_replay_and_state_mismatch_rejection(sqlite_engine, cipher):
     def mock_handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        return httpx.Response(
+            200,
+            json={"access_token": "tok", "refresh_token": "ref-tok", "expires_in": 3600},
+        )
 
     mock_transport = httpx.MockTransport(mock_handler)
     app, auth_service, _, household_id = create_test_app(
@@ -510,8 +532,8 @@ def test_trumf_pkce_start_callback_and_refresh_flow(sqlite_engine, cipher):
 
     creds = store.get_credentials(household_id, "trumf")
     assert creds is not None
-    assert creds["access_token"] == "trumf-access-123"
-    assert creds["refresh_token"] == "trumf-refresh-456"
+    assert creds["access_token"] == "trumf-access-rotated-789"
+    assert creds["refresh_token"] == "trumf-refresh-rotated-012"
 
     meta = store.get_connection_metadata(household_id, "trumf")
     assert meta is not None
@@ -526,7 +548,9 @@ def test_trumf_pkce_start_callback_and_refresh_flow(sqlite_engine, cipher):
     assert trumf_info["auth_type"] == "oauth_pkce"
     assert trumf_info["accounts"][0]["refresh_available"] is True
     assert "trumf-access-123" not in json.dumps(trumf_info)
+    assert "trumf-access-rotated-789" not in json.dumps(trumf_info)
     assert "trumf-refresh-456" not in json.dumps(trumf_info)
+    assert "trumf-refresh-rotated-012" not in json.dumps(trumf_info)
 
     # 3. Refresh endpoint uses standard OAuth2 refresh_token grant against id.trumf.no
     refresh_resp = client.post("/api/integrations/trumf/refresh")
@@ -583,6 +607,17 @@ def test_cookidoo_login_success_and_no_password_stored_invariant(sqlite_engine, 
     def mock_handler(request: httpx.Request) -> httpx.Response:
         received_requests.append(request)
         if request.url.path == "/token-srv/token":
+            body = urllib.parse.parse_qs(request.read().decode())
+            if body.get("grant_type") == ["refresh_token"]:
+                return httpx.Response(
+                    200,
+                    json={
+                        "access_token": "cidaas-bearer-access-renewed-9999",
+                        "refresh_token": "cidaas-bearer-refresh-rotated-8888",
+                        "token_type": "Bearer",
+                        "expires_in": 86400,
+                    },
+                )
             return httpx.Response(
                 200,
                 json={
@@ -617,24 +652,25 @@ def test_cookidoo_login_success_and_no_password_stored_invariant(sqlite_engine, 
     # Redaction check: Tokens and password NOT in HTTP response
     resp_str = json.dumps(info)
     assert plain_password not in resp_str
-    assert "cidaas-bearer-access-token" not in resp_str
-    assert "cidaas-bearer-refresh-token" not in resp_str
+    assert "cidaas-bearer-access" not in resp_str
+    assert "cidaas-bearer-refresh" not in resp_str
 
-    # Request validation: sent to Cidaas token endpoint
-    assert len(received_requests) in (1, 2)
-    req = received_requests[-1]
-    assert req.method == "POST"
-    assert req.url.path == "/token-srv/token"
-    data = urllib.parse.parse_qs(req.read().decode())
-    assert data["grant_type"] == ["password"]
-    assert data["username"] == ["chef@example.com"]
-    assert data["password"] == [plain_password]
+    # Request validation: password login followed by immediate refresh_token validation
+    token_reqs = [r for r in received_requests if r.url.path == "/token-srv/token"]
+    assert len(token_reqs) == 2
+    login_data = urllib.parse.parse_qs(token_reqs[0].read().decode())
+    assert login_data["grant_type"] == ["password"]
+    assert login_data["username"] == ["chef@example.com"]
+    assert login_data["password"] == [plain_password]
+    refresh_data = urllib.parse.parse_qs(token_reqs[1].read().decode())
+    assert refresh_data["grant_type"] == ["refresh_token"]
+    assert refresh_data["refresh_token"] == ["cidaas-bearer-refresh-token-7766"]
 
-    # Stored credentials check
+    # Stored credentials check (persisted refreshed tokens)
     creds = store.get_credentials(household_id, "cookidoo")
     assert creds is not None
-    assert creds["access_token"] == "cidaas-bearer-access-token-9988"
-    assert creds["refresh_token"] == "cidaas-bearer-refresh-token-7766"
+    assert creds["access_token"] == "cidaas-bearer-access-renewed-9999"
+    assert creds["refresh_token"] == "cidaas-bearer-refresh-rotated-8888"
     assert creds["country"] == "no"
 
     # ABSOLUTE INVARIANT: The raw password is NEVER stored anywhere
@@ -689,6 +725,18 @@ def test_cookidoo_login_cidaas_pkce_flow(sqlite_engine, cipher):
             return httpx.Response(302, headers={"Location": redirect_location})
         if request.url.path == "/token-srv/token":
             data = urllib.parse.parse_qs(request.read().decode())
+            if data.get("grant_type") == ["refresh_token"]:
+                assert data["refresh_token"] == ["cidaas-pkce-refresh-token-002"]
+                assert data["client_id"] == ["mobile-android"]
+                return httpx.Response(
+                    200,
+                    json={
+                        "access_token": "cidaas-pkce-access-renewed-003",
+                        "refresh_token": "cidaas-pkce-refresh-rotated-004",
+                        "token_type": "Bearer",
+                        "expires_in": 43200,
+                    },
+                )
             assert data["grant_type"] == ["authorization_code"]
             assert data["code"] == ["cidaas-code-999"]
             assert data["client_id"] == ["mobile-android"]
@@ -726,13 +774,13 @@ def test_cookidoo_login_cidaas_pkce_flow(sqlite_engine, cipher):
     # Redaction checks
     resp_str = json.dumps(info)
     assert plain_password not in resp_str
-    assert "cidaas-pkce-access-token" not in resp_str
+    assert "cidaas-pkce-access" not in resp_str
 
     # Store verification
     creds = store.get_credentials(household_id, "cookidoo")
     assert creds is not None
-    assert creds["access_token"] == "cidaas-pkce-access-token-001"
-    assert creds["refresh_token"] == "cidaas-pkce-refresh-token-002"
+    assert creds["access_token"] == "cidaas-pkce-access-renewed-003"
+    assert creds["refresh_token"] == "cidaas-pkce-refresh-rotated-004"
     assert "password" not in creds
     for val in creds.values():
         assert val != plain_password
@@ -908,7 +956,14 @@ def test_trumf_otp_replay_and_security(sqlite_engine, cipher):
 
 
 def test_manual_connect_fallback_remains_functional(sqlite_engine, cipher):
-    app, _, store, household_id = create_test_app(sqlite_engine, cipher)
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/auth/session":
+            return httpx.Response(200, json={"user": {"name": "Malo"}})
+        return httpx.Response(404)
+
+    app, _, store, household_id = create_test_app(
+        sqlite_engine, cipher, mock_transport=httpx.MockTransport(mock_handler)
+    )
     client = TestClient(app)
 
     # 1. Rema 1000 manual token fallback
@@ -1633,3 +1688,297 @@ def test_trumf_auto_refresh_respects_expiry_and_unknown_expiry_interval(sqlite_e
     )
     assert auth_service.refresh_expiring_connections(margin_seconds=900) == ["trumf"]
     assert calls == 2
+
+
+# =============================================================================
+# 7. Pre-Save Auth & Renewal Validation (Never Save Invalid/Unrenewable Creds)
+# =============================================================================
+
+
+@pytest.mark.parametrize("provider_id", ["rema1000", "coop"])
+def test_pkce_complete_rejects_missing_refresh_token_without_saving(
+    sqlite_engine, cipher, provider_id: str
+):
+    from home_kitchen.connector_auth import ConnectorAuthError
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"access_token": "acc-no-refresh", "expires_in": 3600})
+
+    app, auth_service, store, household_id = create_test_app(
+        sqlite_engine, cipher, mock_transport=httpx.MockTransport(mock_handler)
+    )
+    store.save_connection(
+        household_id=household_id,
+        provider_id=provider_id,
+        auth_mode="oauth_pkce",
+        credentials={"access_token": "existing-acc", "refresh_token": "existing-ref"},
+        actor_id="malo",
+    )
+    client = TestClient(app)
+
+    state = client.post(f"/api/integrations/{provider_id}/pkce/start").json()["state"]
+    with pytest.raises(ConnectorAuthError):
+        auth_service.complete_pkce(provider_id, household_id, "malo", code="c1", state=state)
+
+    state2 = client.post(f"/api/integrations/{provider_id}/pkce/start").json()["state"]
+    resp = client.post(
+        f"/api/integrations/{provider_id}/pkce/complete",
+        json={"code": "c1", "state": state2},
+    )
+    assert resp.status_code == 401
+    assert "refresh_token" in resp.json()["detail"]
+
+    # Existing valid credentials must remain untouched
+    creds = store.get_credentials(household_id, provider_id)
+    assert creds is not None
+    assert creds["access_token"] == "existing-acc"
+    assert creds["refresh_token"] == "existing-ref"
+
+
+@pytest.mark.parametrize(
+    ("refresh_status", "expected_status"),
+    [(401, 401), (400, 401), (500, 502)],
+)
+def test_pkce_complete_rejects_failed_test_refresh_without_saving(
+    sqlite_engine, cipher, refresh_status: int, expected_status: int
+):
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        body = urllib.parse.parse_qs(request.read().decode())
+        if body.get("grant_type") == ["authorization_code"]:
+            return httpx.Response(
+                200,
+                json={"access_token": "init-acc", "refresh_token": "bad-ref", "expires_in": 3600},
+            )
+        return httpx.Response(refresh_status, json={"error": "invalid_grant"})
+
+    app, _, store, household_id = create_test_app(
+        sqlite_engine, cipher, mock_transport=httpx.MockTransport(mock_handler)
+    )
+    client = TestClient(app)
+
+    state = client.post("/api/integrations/coop/pkce/start").json()["state"]
+    resp = client.post(
+        "/api/integrations/coop/pkce/complete",
+        json={"code": "c1", "state": state},
+    )
+    assert resp.status_code == expected_status
+    assert store.get_credentials(household_id, "coop") is None
+
+
+def test_pkce_complete_preserves_initial_refresh_token_when_omitted_on_test_refresh(
+    sqlite_engine, cipher
+):
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        body = urllib.parse.parse_qs(request.read().decode())
+        if body.get("grant_type") == ["authorization_code"]:
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "init-acc",
+                    "refresh_token": "persistent-ref-123",
+                    "expires_in": 3600,
+                },
+            )
+        return httpx.Response(
+            200,
+            json={"access_token": "renewed-acc-456", "expires_in": 7200},
+        )
+
+    app, _, store, household_id = create_test_app(
+        sqlite_engine, cipher, mock_transport=httpx.MockTransport(mock_handler)
+    )
+    client = TestClient(app)
+
+    state = client.post("/api/integrations/rema1000/pkce/start").json()["state"]
+    resp = client.post(
+        "/api/integrations/rema1000/pkce/complete",
+        json={"code": "c1", "state": state},
+    )
+    assert resp.status_code == 200
+    creds = store.get_credentials(household_id, "rema1000")
+    assert creds is not None
+    assert creds["access_token"] == "renewed-acc-456"
+    assert creds["refresh_token"] == "persistent-ref-123"
+
+
+def test_cookidoo_login_rejects_unrenewable_tokens_without_saving(sqlite_engine, cipher):
+    def mock_handler_no_refresh(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"access_token": "cookidoo-acc", "expires_in": 3600})
+
+    app1, _, store1, hid1 = create_test_app(
+        sqlite_engine, cipher, mock_transport=httpx.MockTransport(mock_handler_no_refresh)
+    )
+    resp1 = TestClient(app1).post(
+        "/api/integrations/cookidoo/login",
+        json={"email": "chef@example.com", "password": "pw"},
+    )
+    assert resp1.status_code == 401
+    assert store1.get_credentials(hid1, "cookidoo") is None
+
+    def mock_handler_failing_refresh(request: httpx.Request) -> httpx.Response:
+        body = urllib.parse.parse_qs(request.read().decode())
+        if body.get("grant_type") == ["password"]:
+            return httpx.Response(
+                200,
+                json={"access_token": "init", "refresh_token": "bad-ref", "expires_in": 3600},
+            )
+        return httpx.Response(401, json={"error": "invalid_grant"})
+
+    app2, _, store2, hid2 = create_test_app(
+        sqlite_engine, cipher, mock_transport=httpx.MockTransport(mock_handler_failing_refresh)
+    )
+    resp2 = TestClient(app2).post(
+        "/api/integrations/cookidoo/login",
+        json={"email": "chef@example.com", "password": "pw"},
+    )
+    assert resp2.status_code == 401
+    assert store2.get_credentials(hid2, "cookidoo") is None
+
+
+def test_trumf_connect_normalizes_validates_and_merges_sliding_renewal(sqlite_engine, cipher):
+    seen_requests: list[httpx.Request] = []
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        seen_requests.append(request)
+        if request.url.path == "/api/auth/session":
+            return httpx.Response(
+                200,
+                json={
+                    "accessToken": "trumf-jwt-123",
+                    "expires": "2026-12-20T10:00:00.000Z",
+                },
+                headers=[
+                    (
+                        "Set-Cookie",
+                        "__Secure-authjs.session-token.0=renewed-0; Path=/; HttpOnly; Secure",
+                    ),
+                    (
+                        "Set-Cookie",
+                        "__Secure-authjs.session-token.1=renewed-1; Path=/; HttpOnly; Secure",
+                    ),
+                ],
+            )
+        return httpx.Response(404)
+
+    app, _, store, household_id = create_test_app(
+        sqlite_engine, cipher, mock_transport=httpx.MockTransport(mock_handler)
+    )
+    client = TestClient(app)
+
+    # Test both POST /connect and PUT /api/integrations/trumf
+    resp = client.put(
+        "/api/integrations/trumf",
+        json={
+            "auth_mode": "session_cookie",
+            "session_cookie": (
+                "Cookie: __Secure-authjs.session-token.0=old-0; Path=/; HttpOnly; Secure; "
+                "__Secure-authjs.session-token.1=old-1; ng.visitorGroup=123"
+            ),
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "connected"
+    assert len(seen_requests) == 1
+    assert (
+        seen_requests[0].headers["cookie"]
+        == "__Secure-authjs.session-token.0=old-0; __Secure-authjs.session-token.1=old-1; ng.visitorGroup=123"
+    )
+
+    creds = store.get_credentials(household_id, "trumf")
+    assert creds is not None
+    assert (
+        creds["session_cookie"]
+        == "__Secure-authjs.session-token.0=renewed-0; __Secure-authjs.session-token.1=renewed-1; ng.visitorGroup=123"
+    )
+    meta = store.get_connection_metadata(household_id, "trumf")
+    assert meta is not None
+    assert meta.expires_at == datetime(2026, 12, 20, 10, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("cookie_payload", "session_response"),
+    [
+        # Partial .0 cookie -> Trumf returns {}
+        ("__Secure-authjs.session-token.0=only-zero", lambda: httpx.Response(200, json={})),
+        # ng.visitorGroup-only cookie -> Trumf returns null
+        (
+            "ng.visitorGroup=groupA",
+            lambda: httpx.Response(
+                200, content=b"null", headers={"Content-Type": "application/json"}
+            ),
+        ),
+        # Expired session -> Trumf returns 401
+        (
+            "__Secure-authjs.session-token.0=expired",
+            lambda: httpx.Response(401, json={"error": "unauthorized"}),
+        ),
+        # Sliding renewal cleared session with Max-Age=0
+        (
+            "__Secure-authjs.session-token.0=a; __Secure-authjs.session-token.1=b",
+            lambda: httpx.Response(
+                200,
+                json={"user": {"name": "Malo"}},
+                headers=[("Set-Cookie", "__Secure-authjs.session-token.0=; Path=/; Max-Age=0")],
+            ),
+        ),
+    ],
+)
+def test_trumf_connect_rejects_invalid_or_unrenewable_cookie_without_overwriting(
+    sqlite_engine, cipher, cookie_payload: str, session_response
+):
+    app, _, store, household_id = create_test_app(
+        sqlite_engine,
+        cipher,
+        mock_transport=httpx.MockTransport(lambda req: session_response()),
+    )
+    client = TestClient(app)
+
+    # Seed existing valid Trumf credentials
+    existing_cookie = (
+        "__Secure-authjs.session-token.0=valid-0; __Secure-authjs.session-token.1=valid-1"
+    )
+    store.save_connection(
+        household_id=household_id,
+        provider_id="trumf",
+        auth_mode="session_cookie",
+        credentials={"session_cookie": existing_cookie},
+        actor_id="malo",
+    )
+
+    resp = client.post(
+        "/api/integrations/trumf/connect",
+        json={"auth_mode": "session_cookie", "session_cookie": cookie_payload},
+    )
+    assert resp.status_code == 401
+    detail = resp.json()["detail"]
+    assert "Request Headers" in detail
+    assert "Cookie:" in detail
+    assert "__Secure-authjs.session-token" in detail
+
+    # Existing valid credentials must NOT be overwritten
+    creds = store.get_credentials(household_id, "trumf")
+    assert creds is not None
+    assert creds["session_cookie"] == existing_cookie
+
+
+def test_trumf_otp_verify_rejects_empty_cookie_instead_of_fabricating(sqlite_engine, cipher):
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/auth/otp/send":
+            return httpx.Response(200, json={"status": "sent"})
+        if request.url.path == "/api/auth/otp/verify":
+            return httpx.Response(200, json={"status": "ok"})
+        return httpx.Response(404)
+
+    app, _, store, household_id = create_test_app(
+        sqlite_engine, cipher, mock_transport=httpx.MockTransport(mock_handler)
+    )
+    client = TestClient(app)
+    sid = client.post("/api/integrations/trumf/login/start", json={"phone": "+4790000000"}).json()[
+        "session_id"
+    ]
+    verify_resp = client.post(
+        "/api/integrations/trumf/login/verify",
+        json={"session_id": sid, "otp": "123456"},
+    )
+    assert verify_resp.status_code == 502
+    assert store.get_credentials(household_id, "trumf") is None

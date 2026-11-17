@@ -2,10 +2,12 @@
 
 from collections.abc import Callable
 from datetime import date
+from typing import Annotated
 from uuid import UUID
 
 from fastmcp import FastMCP
 from fastmcp.server.auth import AuthProvider
+from pydantic import Field
 
 from .mcp_auth import MCPActorMiddleware
 from .models import (
@@ -46,9 +48,17 @@ def build_mcp(
         mcp.add_middleware(MCPActorMiddleware())
 
     @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True})
-    def list_recipes() -> list[Recipe]:
-        """List saved household recipes."""
-        return service.list_recipes()
+    def list_recipes(
+        recipe_type: str | None = None,
+        prep_category: str | None = None,
+        max_prep_minutes: Annotated[int | None, Field(ge=1, le=2880)] = None,
+    ) -> list[Recipe]:
+        """List saved household recipes, optionally filtered by type, prep category, or max prep time."""
+        return service.list_recipes(
+            recipe_type=recipe_type,
+            prep_category=prep_category,
+            max_prep_minutes=max_prep_minutes,
+        )
 
     @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True})
     def get_recipe(recipe_id: UUID) -> Recipe:

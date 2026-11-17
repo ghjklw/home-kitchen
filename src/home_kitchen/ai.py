@@ -10,7 +10,16 @@ from pydantic_ai.usage import UsageLimits
 
 from home_kitchen.ai_credentials import anthropic_model
 from home_kitchen.models import PurchaseEstimate, RecipeCreate
+from home_kitchen.recommendations import PlanDraft, build_planner, recommend_plan
 from home_kitchen.settings import Household, Settings
+
+__all__ = [
+    "PlanDraft",
+    "build_planner",
+    "draft_recipe",
+    "recipe_agent",
+    "recommend_plan",
+]
 
 if TYPE_CHECKING:
     from home_kitchen.recipes.models import EditableRecipeDraft
@@ -35,6 +44,7 @@ def recipe_agent(
             "Write user-facing recipe text in the household's configured language; nb means "
             "Norwegian Bokmål, and an absent or unknown language defaults to Bokmål. Preserve "
             "provider titles and source_ingredients exactly as source evidence. "
+            "Preserve recipe metadata (recipe_type, prep_time_minutes, prep_category) when present in the source. "
             "Keep source servings unchanged: portion arithmetic belongs to the application. "
             "Reference original ingredient indices in source_indices; retain source_ingredients "
             "unchanged. Clearly proposed substitutions may use an empty source_indices list. "
@@ -77,6 +87,15 @@ async def draft_recipe(
         provenance=source.provenance,
         photo_source=source.photo_source,
         image_attribution=source.image_attribution,
+        recipe_type=source.recipe_type
+        if source.recipe_type is not None
+        else output.get("recipe_type"),
+        prep_time_minutes=source.prep_time_minutes
+        if source.prep_time_minutes is not None
+        else output.get("prep_time_minutes"),
+        prep_category=source.prep_category
+        if source.prep_category is not None
+        else output.get("prep_category"),
     )
     adapted = EditableRecipeDraft.model_validate(output)
     from home_kitchen.recipes.source_quantities import (

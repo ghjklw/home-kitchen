@@ -12,7 +12,7 @@ from typing import Annotated
 from uuid import UUID
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, HttpUrl, StringConstraints
@@ -189,8 +189,16 @@ def create_app(
         return data
 
     @app.get("/api/recipes")
-    def list_recipes() -> list[Recipe]:
-        return service.list_recipes()
+    def list_recipes(
+        recipe_type: str | None = None,
+        prep_category: str | None = None,
+        max_prep_minutes: int | None = Query(default=None, ge=1, le=2880),
+    ) -> list[Recipe]:
+        return service.list_recipes(
+            recipe_type=recipe_type,
+            prep_category=prep_category,
+            max_prep_minutes=max_prep_minutes,
+        )
 
     @app.post("/api/recipes", status_code=201)
     def create_recipe(data: RecipeCreate) -> Recipe:

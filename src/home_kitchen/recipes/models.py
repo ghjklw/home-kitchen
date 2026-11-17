@@ -1,20 +1,25 @@
 """Recipe acquisition contracts shared by transports and provider adapters."""
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, HttpUrl, model_validator
+from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
 from home_kitchen.imports import ImportedDraft
 from home_kitchen.models import (
     AdaptationProvenance,
     NonBlank,
     PhotoSource,
+    PrepCategory,
     PurchaseEstimate,
     Quantity,
     RecipeCreate,
     RecipeImageAttribution,
+    RecipeType,
     SourceIndex,
     SourceIngredient,
+    derive_prep_category,
+    normalize_prep_category_value,
+    normalize_recipe_type_value,
     validate_source_metadata,
 )
 from home_kitchen.settings import Household
@@ -54,6 +59,19 @@ class EditableRecipeDraft(BaseModel):
     provenance: AdaptationProvenance | None = None
     photo_source: PhotoSource | None = None
     image_attribution: RecipeImageAttribution | None = None
+    recipe_type: RecipeType | None = None
+    prep_time_minutes: int | None = Field(default=None, ge=1, le=2880)
+    prep_category: PrepCategory | None = None
+
+    @field_validator("recipe_type", mode="before")
+    @classmethod
+    def normalize_recipe_type(cls, value: Any) -> Any:
+        return normalize_recipe_type_value(value)
+
+    @field_validator("prep_category", mode="before")
+    @classmethod
+    def normalize_prep_category(cls, value: Any) -> Any:
+        return normalize_prep_category_value(value)
 
     @model_validator(mode="after")
     def valid_references(self) -> "EditableRecipeDraft":
@@ -63,6 +81,7 @@ class EditableRecipeDraft(BaseModel):
             self.source_url,
             self.provenance,
         )
+        self.prep_category = derive_prep_category(self.prep_time_minutes, self.prep_category)
         return self
 
 

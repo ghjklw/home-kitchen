@@ -459,3 +459,18 @@ test("maps structured drafts without presenting a synthesized summary as source 
   });
   assert.deepEqual(rowFromDraft({ name: "flour", quantity: "1", unit: "kg", source_indices: [2] }).source_indices, [2]);
 });
+
+test("AI revision preserves recipe metadata fields when supplied", () => {
+  const payload = buildRevisionRequest({
+    title: "Suppe",
+    servings: 2,
+    ingredients: [{ name: "gulrot", quantity: "2", unit: "stk" }],
+    instructions: ["Kok"],
+    recipe_type: "middag",
+    prep_time_minutes: 25,
+    prep_category: "rask",
+  }, { isEditing: true, source: "manual" }, "gjør den raskere");
+  assert.equal(payload.recipe.recipe_type, "middag");
+  assert.equal(payload.recipe.prep_time_minutes, 25);
+  assert.equal(payload.recipe.prep_category, "rask");
+});

@@ -2,18 +2,29 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
+import pytest
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic_ai.models.test import TestModel
 from sqlalchemy import create_engine, text
 
-from home_kitchen.catalogue.ai_mapper import auto_map_unmapped_ingredients
-from home_kitchen.catalogue.identity import CanonicalProduct, CanonicalUnit
+from home_kitchen.catalogue.ai_mapper import (
+    _build_batch_prompt,
+    _collect_unmapped_groups,
+    _load_existing_catalogue,
+    auto_map_unmapped_ingredients,
+)
+from home_kitchen.catalogue.identity import (
+    CanonicalProduct,
+    CanonicalUnit,
+    strip_ingredient_attributes,
+)
 from home_kitchen.catalogue.identity_service import CanonicalIdentityService
 from home_kitchen.connector_store import ConnectorStore
 from home_kitchen.connector_store import metadata as connector_metadata
@@ -21,7 +32,7 @@ from home_kitchen.cookidoo_recipes import CookidooRecipeService
 from home_kitchen.feature_api import feature_router
 from home_kitchen.imports import ImportedDraft
 from home_kitchen.models import Ingredient, Recipe, RecipeCreate
-from home_kitchen.recipes.collections import CollectionEntry, CollectionService
+from home_kitchen.recipes.collections import CollectionEntry, CollectionJob, CollectionService
 from home_kitchen.service import KitchenService
 from home_kitchen.settings import Settings
 
@@ -376,9 +387,7 @@ def test_kitchen_service_create_and_update_auto_map_and_survive_ai_failure():
         assert updated.title == "Resilient Soup v2"
 
 
-def test_collection_save_and_cookidoo_import_trigger_automap_with_failure_safety(tmp_path):
-    db_path = tmp_path / "automap_imports.db"
-    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+def _create_import_sqlite_schema(engine) -> None:
     connector_metadata.create_all(engine)
     with engine.begin() as conn:
         conn.execute(
@@ -423,6 +432,12 @@ def test_collection_save_and_cookidoo_import_trigger_automap_with_failure_safety
             )
         )
 
+
+def test_collection_save_and_cookidoo_import_skip_per_recipe_ai_and_run_sql_resolution(tmp_path):
+    db_path = tmp_path / "automap_imports.db"
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    _create_import_sqlite_schema(engine)
+
     try:
         repo = MemoryIdentityRepository()
         identities = CanonicalIdentityService(repo)
@@ -440,7 +455,7 @@ def test_collection_save_and_cookidoo_import_trigger_automap_with_failure_safety
         cipher = Fernet(Fernet.generate_key())
         cstore = ConnectorStore(engine, cipher)
 
-        # 1. CollectionService._save calls auto_map_unmapped_ingredients and ignores AI errors
+        # 1. CollectionService._save runs SQL/alias resolution only (no per-recipe AI call)
         collection_provider = SimpleNamespace(
             id="oda",
             generation=lambda _actor: 1,
@@ -471,15 +486,28 @@ def test_collection_save_and_cookidoo_import_trigger_automap_with_failure_safety
             patch("home_kitchen.recipes.collections.time.monotonic", return_value=1e18),
             patch(
                 "home_kitchen.catalogue.ai_mapper.auto_map_unmapped_ingredients",
-                side_effect=RuntimeError("AI error"),
-            ) as mocked_collection_map,
+            ) as mocked_collection_sync,
+            patch(
+                "home_kitchen.catalogue.ai_mapper.auto_map_unmapped_ingredients_async",
+                new_callable=AsyncMock,
+            ) as mocked_collection_async,
         ):
             rec_id, existed = collections._save(job, entry, draft)
             assert existed is False
             assert rec_id is not None
-            assert mocked_collection_map.call_count == 1
+            assert mocked_collection_sync.call_count == 0
+            assert mocked_collection_async.call_count == 0
 
-        # 2. CookidooRecipeService.import_recipe_atomic triggers auto_map and ignores AI errors
+        with engine.connect() as conn:
+            saved_ing = json.loads(
+                conn.execute(
+                    text("SELECT ingredients FROM recipes WHERE id = :id"), {"id": rec_id.hex}
+                ).scalar_one()
+            )
+            assert saved_ing[0]["canonical_product_id"] == str(known_salt.id)
+            assert saved_ing[1]["canonical_product_id"] is None
+
+        # 2. CookidooRecipeService.import_recipe_atomic runs SQL resolution only (no AI call)
         cookidoo_service = CookidooRecipeService(
             kitchen,
             fake_history,  # type: ignore[arg-type]
@@ -491,21 +519,424 @@ def test_collection_save_and_cookidoo_import_trigger_automap_with_failure_safety
             provider="cookidoo",
             title="Kremet suppe",
             source_url="https://cookidoo.no/recipes/recipe/nb-NO/r123",
-            ingredients=["200 g gulrot"],
+            ingredients=["1 ts salt", "200 g gulrot"],
             instructions=["Kok"],
         )
-        with patch(
-            "home_kitchen.catalogue.ai_mapper.auto_map_unmapped_ingredients",
-            side_effect=RuntimeError("AI timeout"),
-        ) as mocked_cookidoo_map:
+        with (
+            patch(
+                "home_kitchen.catalogue.ai_mapper.auto_map_unmapped_ingredients",
+            ) as mocked_cookidoo_sync,
+            patch(
+                "home_kitchen.catalogue.ai_mapper.auto_map_unmapped_ingredients_async",
+                new_callable=AsyncMock,
+            ) as mocked_cookidoo_async,
+        ):
             cid, cexisted = cookidoo_service.import_recipe_atomic(
                 "malo", cookidoo_entry, reviewed=True
             )
             assert cexisted is False
             assert cid is not None
-            assert mocked_cookidoo_map.call_count == 1
+            assert mocked_cookidoo_sync.call_count == 0
+            assert mocked_cookidoo_async.call_count == 0
+
+        with engine.connect() as conn:
+            cookidoo_ing = json.loads(
+                conn.execute(
+                    text("SELECT ingredients FROM recipes WHERE id = :id"), {"id": cid.hex}
+                ).scalar_one()
+            )
+            assert cookidoo_ing[0]["canonical_product_id"] == str(known_salt.id)
+            assert cookidoo_ing[1]["canonical_product_id"] is None
     finally:
         engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_bulk_collection_import_runs_batched_ai_mapping_once_with_failure_safety(tmp_path):
+    db_path = tmp_path / "bulk_import.db"
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    _create_import_sqlite_schema(engine)
+
+    try:
+        repo = MemoryIdentityRepository()
+        identities = CanonicalIdentityService(repo)
+        known_salt = identities.create_product("salt")
+        identities.add_alias("product", "nb", "recipe", "salt", known_salt.id)
+
+        store = SimpleNamespace(engine=engine, get_setting=lambda _k: None)
+        kitchen = KitchenService(
+            store=store,  # type: ignore[arg-type]
+            identity_service=identities,
+            settings=_configured_settings(),
+            household_id=uuid4(),
+        )
+        fake_history = SimpleNamespace(record=lambda *a, **kw: None)
+        collection_provider = SimpleNamespace(
+            id="cookidoo",
+            generation=lambda _actor: 1,
+            lock_generation=lambda *a, **kw: None,
+            validate_source=lambda _entry: None,
+        )
+        collections = CollectionService(
+            kitchen,
+            fake_history,  # type: ignore[arg-type]
+            providers={"cookidoo": collection_provider},  # type: ignore[dict-item]
+        )
+
+        entries = [
+            CollectionEntry(
+                id="c1",
+                provider="cookidoo",
+                title="Suppe 1",
+                source_url="https://cookidoo.no/recipes/recipe/nb-NO/c1",
+                ingredients=["1 ts salt", "200 g gulrot"],
+                instructions=["Kok"],
+            ),
+            CollectionEntry(
+                id="c2",
+                provider="cookidoo",
+                title="Suppe 2",
+                source_url="https://cookidoo.no/recipes/recipe/nb-NO/c2",
+                ingredients=["100 g gulrot", "1 stk løk"],
+                instructions=["Fres"],
+            ),
+            CollectionEntry(
+                id="c3",
+                provider="cookidoo",
+                title="Suppe 3",
+                source_url="https://cookidoo.no/recipes/recipe/nb-NO/c3",
+                ingredients=["2 ts økologisk salt", "300 g potet"],
+                instructions=["Stek"],
+            ),
+        ]
+        view = CollectionJob(
+            job_id=uuid4(),
+            provider="cookidoo",
+            status="importing",
+            kinds=["saved"],
+            entries=entries,
+            total=len(entries),
+        )
+        job = SimpleNamespace(
+            actor="malo",
+            generation=1,
+            cancelled=False,
+            created=1e18,
+            provider=collection_provider,
+            view=view,
+        )
+
+        with (
+            patch("home_kitchen.recipes.collections.time.monotonic", return_value=1e18),
+            patch(
+                "home_kitchen.catalogue.ai_mapper.auto_map_unmapped_ingredients_async",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("AI unavailable"),
+            ) as mocked_bulk_map,
+        ):
+            await collections._import(job, entries)
+
+        # AI mapping is invoked ONCE across all 3 imported recipes, and failure does not fail import
+        assert view.status == "completed"
+        assert view.processed == 3
+        assert all(entry.status == "imported" for entry in entries)
+        assert mocked_bulk_map.call_count == 1
+        call_kwargs = mocked_bulk_map.call_args.kwargs
+        assert call_kwargs["batch_size"] == 40
+        assert call_kwargs["max_batches"] == 10
+        assert len(call_kwargs["recipe_ids"]) == 3
+
+        # Deterministic SQL + attribute-stripped resolution already mapped salt & økologisk salt
+        with engine.connect() as conn:
+            saved_ingredients = []
+            for entry in entries:
+                assert entry.recipe_id is not None
+                saved_ingredients.append(
+                    json.loads(
+                        conn.execute(
+                            text("SELECT ingredients FROM recipes WHERE id = :id"),
+                            {"id": entry.recipe_id.hex},
+                        ).scalar_one()
+                    )
+                )
+            assert saved_ingredients[0][0]["canonical_product_id"] == str(known_salt.id)
+            assert saved_ingredients[1][0]["canonical_product_id"] is None
+            assert saved_ingredients[2][0]["canonical_product_id"] == str(known_salt.id)
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_bulk_collection_import_deduplicates_and_maps_end_to_end(tmp_path):
+    db_path = tmp_path / "bulk_import_e2e.db"
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    _create_import_sqlite_schema(engine)
+
+    try:
+        repo = MemoryIdentityRepository()
+        identities = CanonicalIdentityService(repo)
+        known_gram = identities.create_unit("g")
+        identities.add_alias("unit", "nb", "recipe", "g", known_gram.id)
+
+        store = SimpleNamespace(engine=engine, get_setting=lambda _k: None)
+        kitchen = KitchenService(
+            store=store,  # type: ignore[arg-type]
+            identity_service=identities,
+            settings=_configured_settings(),
+            household_id=uuid4(),
+        )
+        fake_history = SimpleNamespace(record=lambda *a, **kw: None)
+        collection_provider = SimpleNamespace(
+            id="cookidoo",
+            generation=lambda _actor: 1,
+            lock_generation=lambda *a, **kw: None,
+            validate_source=lambda _entry: None,
+        )
+        collections = CollectionService(
+            kitchen,
+            fake_history,  # type: ignore[arg-type]
+            providers={"cookidoo": collection_provider},  # type: ignore[dict-item]
+        )
+
+        entries = [
+            CollectionEntry(
+                id="b1",
+                provider="cookidoo",
+                title="R1",
+                source_url="https://cookidoo.no/recipes/recipe/nb-NO/b1",
+                ingredients=["200 g gulrot"],
+                instructions=["Kok"],
+            ),
+            CollectionEntry(
+                id="b2",
+                provider="cookidoo",
+                title="R2",
+                source_url="https://cookidoo.no/recipes/recipe/nb-NO/b2",
+                ingredients=["100 g gulrot"],
+                instructions=["Stek"],
+            ),
+        ]
+        view = CollectionJob(
+            job_id=uuid4(),
+            provider="cookidoo",
+            status="importing",
+            kinds=["saved"],
+            entries=entries,
+            total=len(entries),
+        )
+        job = SimpleNamespace(
+            actor="malo",
+            generation=1,
+            cancelled=False,
+            created=1e18,
+            provider=collection_provider,
+            view=view,
+        )
+        from home_kitchen.catalogue import ai_mapper as ai_mapper_mod
+
+        orig_builder = ai_mapper_mod.build_ingredient_mapper
+        builder_calls = 0
+
+        def fake_builder(settings, model=None):
+            nonlocal builder_calls
+            builder_calls += 1
+            return orig_builder(
+                settings,
+                model=TestModel(
+                    custom_output_args={
+                        "mappings": [
+                            {
+                                "item_index": 0,
+                                "source_name": "gulrot",
+                                "source_unit": "g",
+                                "new_product_name": "gulrot",
+                                "aliases": [{"locale": "nb", "alias": "gulrot"}],
+                            }
+                        ]
+                    }
+                ),
+            )
+
+        with (
+            patch("home_kitchen.recipes.collections.time.monotonic", return_value=1e18),
+            patch(
+                "home_kitchen.catalogue.ai_mapper.build_ingredient_mapper", side_effect=fake_builder
+            ),
+        ):
+            await collections._import(job, entries)
+
+        assert builder_calls == 1
+        assert view.status == "completed"
+        gulrot_prod = repo.products[("gulrot", "")]
+        with engine.connect() as conn:
+            for entry in entries:
+                assert entry.recipe_id is not None
+                row_ing = json.loads(
+                    conn.execute(
+                        text("SELECT ingredients FROM recipes WHERE id = :id"),
+                        {"id": entry.recipe_id.hex},
+                    ).scalar_one()
+                )
+                assert row_ing[0]["canonical_product_id"] == str(gulrot_prod.id)
+    finally:
+        engine.dispose()
+
+
+def test_deterministic_attribute_stripping_maps_to_existing_products_without_ai():
+    assert strip_ingredient_attributes("økologisk gulrot") == ("gulrot", ["økologisk"])
+    assert strip_ingredient_attributes("paprika, finskåret") == ("paprika", ["finskåret"])
+
+    repo = MemoryIdentityRepository()
+    identities = CanonicalIdentityService(repo)
+    gulrot = identities.create_product("gulrot")
+    identities.add_alias("product", "en", "recipe", "carrot", gulrot.id)
+    paprika = identities.create_product("paprika")
+    helmelk = identities.create_product("helmelk")
+    gram = identities.create_unit("g")
+
+    store = MemoryStore()
+    service = KitchenService(store=store, identity_service=identities)
+    # Create recipe directly in store without resolving yet so ai_mapper deterministic step is exercised
+    recipe = Recipe(
+        id=uuid4(),
+        title="Variant Salad",
+        servings=2,
+        source_language="nb",
+        ingredients=[
+            Ingredient(name="økologisk gulrot", quantity="200", unit="g"),
+            Ingredient(name="organic carrots", quantity="100", unit="g"),
+            Ingredient(name="paprika, finskåret", quantity="150", unit="g"),
+            Ingredient(name="økologisk helmelk", quantity="2", unit="g"),
+        ],
+        instructions=["Mix"],
+    )
+    store.save("recipe", recipe)
+
+    with patch(
+        "home_kitchen.catalogue.ai_mapper.build_ingredient_mapper",
+        side_effect=AssertionError(
+            "AI agent must not be called when deterministic matching suffices"
+        ),
+    ):
+        result = auto_map_unmapped_ingredients(
+            store,
+            _configured_settings(),
+            household_id=uuid4(),
+            identity_service=identities,
+        )
+
+    assert result["processed_unique"] == 4
+    assert result["mapped_occurrences"] == 4
+    assert result["created_products"] == 0
+    assert result["remaining_unmapped"] == 0
+    assert len(repo.products) == 3
+
+    updated = store.get("recipe", recipe.id, Recipe)
+    assert updated.ingredients[0].canonical_product_id == gulrot.id
+    assert updated.ingredients[1].canonical_product_id == gulrot.id
+    assert updated.ingredients[2].canonical_product_id == paprika.id
+    assert updated.ingredients[3].canonical_product_id == helmelk.id
+    assert all(ing.canonical_unit_id == gram.id for ing in updated.ingredients)
+
+    # Full variant strings are recorded as aliases so future lookups resolve directly
+    assert (
+        identities.resolve("product", "nb", "recipe", "økologisk gulrot").candidates[0].id
+        == gulrot.id
+    )
+    assert (
+        identities.resolve("product", "nb", "recipe", "organic carrots").candidates[0].id
+        == gulrot.id
+    )
+    assert (
+        identities.resolve("product", "nb", "recipe", "paprika, finskåret").candidates[0].id
+        == paprika.id
+    )
+    assert (
+        identities.resolve("product", "nb", "recipe", "økologisk helmelk").candidates[0].id
+        == helmelk.id
+    )
+
+    # Fast SQL/service resolution also resolves stripped variants during create_recipe
+    service_recipe = service.create_recipe(
+        RecipeCreate(
+            title="Fresh Carrot Soup",
+            servings=2,
+            ingredients=[Ingredient(name="økologisk gulrot", quantity="100", unit="g")],
+            instructions=["Boil"],
+        )
+    )
+    assert service_recipe.ingredients[0].canonical_product_id == gulrot.id
+
+
+def test_ai_mapper_prompt_includes_aliases_and_python_prevents_duplicate_products():
+    repo = MemoryIdentityRepository()
+    identities = CanonicalIdentityService(repo)
+    gulrot = identities.create_product("gulrot")
+    identities.add_alias("product", "en", "recipe", "carrot", gulrot.id)
+
+    store = MemoryStore()
+    # "gulrot-suppe-ingrediens" won't match deterministically, e.g. French "carottes râpées"
+    # when "fr" alias isn't registered yet, and AI erroneously proposes new_product_name="Gulrot"
+    # or "økologisk gulrot" instead of existing_product_id.
+    recipe = Recipe(
+        id=uuid4(),
+        title="Råkost",
+        servings=2,
+        source_language="fr",
+        ingredients=[
+            Ingredient(name="carottes bio", quantity="2", unit="stk"),
+        ],
+        instructions=["Râper"],
+    )
+    store.save("recipe", recipe)
+
+    catalogue = _load_existing_catalogue(store, identities)
+    groups, _ = _collect_unmapped_groups([recipe])
+    prompt = _build_batch_prompt(groups, catalogue)
+    assert "Existing canonical_products:" in prompt
+    assert "Existing product_aliases:" in prompt
+    assert "gulrot" in prompt
+    assert "carrot" in prompt
+
+    # AI tries to create duplicate product "Gulrot" (with variant "økologisk") instead of existing_product_id
+    model = TestModel(
+        custom_output_args={
+            "mappings": [
+                {
+                    "item_index": 0,
+                    "source_name": "carottes bio",
+                    "source_unit": "stk",
+                    "existing_product_id": None,
+                    "new_product_name": "Gulrot",
+                    "new_product_variant": "økologisk",
+                    "new_unit_symbol": "stk",
+                    "aliases": [
+                        {"locale": "nb", "alias": "gulrot"},
+                        {"locale": "fr", "alias": "carottes bio"},
+                    ],
+                }
+            ]
+        }
+    )
+
+    result = auto_map_unmapped_ingredients(
+        store,
+        _configured_settings(),
+        household_id=uuid4(),
+        identity_service=identities,
+        model=model,
+    )
+
+    assert result["created_products"] == 0
+    assert result["mapped_occurrences"] == 1
+    assert result["remaining_unmapped"] == 0
+    assert len(repo.products) == 1
+
+    updated = store.get("recipe", recipe.id, Recipe)
+    assert updated.ingredients[0].canonical_product_id == gulrot.id
+    assert (
+        identities.resolve("product", "fr", "recipe", "carottes bio").candidates[0].id == gulrot.id
+    )
 
 
 def test_auto_map_api_route():

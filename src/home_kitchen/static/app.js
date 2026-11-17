@@ -6560,7 +6560,7 @@ function openConnectorModal(integration, options = {}) {
       container,
       el(
         "p",
-        "Trumf benytter nettleserinnlogging for tilgang til kjøpshistorikk og kvitteringer. Logg inn på Trumf og lim inn sesjonsinformasjonskapselen eller tokenet under.",
+        "Koble til Trumf med ett klikk via Trumf-innlogging for automatisk synkronisering og fornyelse av kvitteringer og kjøpshistorikk.",
         "muted",
       ),
       accountLabelField.wrap,
@@ -6568,11 +6568,54 @@ function openConnectorModal(integration, options = {}) {
 
     const flow = el("div", null, "connector-guided-flow stack");
 
-    // Step 1: Open Trumf in a new tab
+    // Primary 1-click OAuth PKCE flow
     const step1 = el("div", null, "connector-step connector-step-1 stack");
-    add(step1, el("h3", "Trinn 1: Logg inn på Trumf"));
+    add(step1, el("h3", "1-klikks innlogging med Trumf"));
     add(
       step1,
+      el(
+        "p",
+        "Trykk på knappen under for å åpne Trumf-innlogging i en ny fane. Etter innlogging blir du sendt automatisk tilbake hit og tilkoblingen fullføres.",
+        "muted",
+      ),
+    );
+    const step1Error = el("p", "", "form-error");
+    step1Error.setAttribute("role", "alert");
+    const step1Notice = el("p", "", "callout info");
+    step1Notice.hidden = true;
+    const pkceBtn = button("Koble til med Trumf-konto (OAuth PKCE)", async () => {
+      step1Error.textContent = "";
+      pkceBtn.disabled = true;
+      try {
+        const startMeta = accountMetaPayload();
+        const data = Object.keys(startMeta).length
+          ? await api("/integrations/trumf/pkce/start", "POST", startMeta)
+          : await api("/integrations/trumf/pkce/start", "POST");
+        if (!data || !data.authorize_url) {
+          throw new Error("Mottok ingen innloggingslenke fra tjeneren.");
+        }
+        window.open(data.authorize_url, "_blank", "noopener,noreferrer");
+        step1Notice.textContent =
+          "Trumf-innloggingen er åpnet i en ny fane. Etter innlogging blir du sendt automatisk tilbake til Innstillinger.";
+        step1Notice.hidden = false;
+      } catch (err) {
+        step1Error.textContent = err.message;
+      } finally {
+        pkceBtn.disabled = false;
+      }
+    }, "primary");
+    add(step1, step1Error, add(el("div", null, "actions"), pkceBtn), step1Notice);
+    add(flow, step1);
+    add(container, flow);
+
+    // Secondary collapsible cookie fallback
+    const details = el("details", null, "connector-manual-details");
+    const summary = el("summary", "Sesjonsinformasjonskapsel (avansert)");
+    add(details, summary);
+
+    const manualBody = el("div", null, "stack");
+    add(
+      manualBody,
       el(
         "p",
         "Åpne Trumf i en ny fane og logg inn med BankID eller SMS. Åpne deretter Nettverk-fanen i nettleserens utviklerverktøy, velg en forespørsel mot www.trumf.no, og kopier hele Cookie-forespørselsheaderen (slik at alle deler som __Secure-authjs.session-token.0 og __Secure-authjs.session-token.1 blir med og automatisk fornyelse fungerer).",
@@ -6581,14 +6624,11 @@ function openConnectorModal(integration, options = {}) {
     );
     const openBtn = button("Åpne Trumf-innlogging", () => {
       window.open("https://www.trumf.no/", "_blank", "noopener,noreferrer");
-    });
-    add(step1, openBtn);
-    add(flow, step1);
+    }, "quiet");
+    add(manualBody, add(el("div", null, "actions"), openBtn));
 
-    // Step 2: Paste session cookie or token
-    const form = el("form", null, "connector-step connector-step-2 stack");
+    const form = el("form", null, "stack");
     form.autocomplete = "off";
-    add(form, el("h3", "Trinn 2: Lim inn sesjon"));
     const cookieField = field(
       "Informasjonskapsel (cookie)",
       "password",
@@ -6620,8 +6660,9 @@ function openConnectorModal(integration, options = {}) {
       await refreshView();
       notify(`${integration.name || integration.id} er tilkoblet.`);
     });
-    add(flow, form);
-    add(container, flow);
+    add(manualBody, form);
+    add(details, manualBody);
+    add(container, details);
 
   } else {
     add(container, accountLabelField.wrap);

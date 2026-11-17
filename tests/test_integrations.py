@@ -129,7 +129,7 @@ def test_connector_integrations_unconnected_report_not_configured():
     trumf = TrumfIntegration().describe("actor-1")
     assert trumf.id == "trumf"
     assert trumf.status == "not_configured"
-    assert trumf.supported_auth_modes == ["interactive_otp", "session_cookie"]
+    assert trumf.supported_auth_modes == ["oauth_pkce", "interactive_otp", "session_cookie"]
 
 
 def test_connector_integrations_connected_and_expired_states():
@@ -168,3 +168,49 @@ def test_connector_integrations_connected_and_expired_states():
     assert trumf.auth_mode == "session_cookie"
     assert trumf.expires_at == past
     assert "utløpt" in trumf.expiry_prompt.lower()
+
+
+def test_trumf_oauth_pkce_reports_refresh_available_when_refresh_token_present():
+    class MockConnectorStatus:
+        def __init__(self, auth_mode, expires_at, is_expired, metadata=None, account_id="default"):
+            self.auth_mode = auth_mode
+            self.expires_at = expires_at
+            self.is_expired = is_expired
+            self.metadata = metadata or {}
+            self.account_id = account_id
+
+    class MockStore:
+        def __init__(self, statuses, creds):
+            self.statuses = statuses
+            self.creds = creds
+
+        def list_credentials(self, household_id, provider_id):
+            return self.statuses.get(provider_id, [])
+
+        def get_credentials(self, household_id, provider_id, account_id="default"):
+            return self.creds.get((provider_id, account_id))
+
+    future = datetime.now(UTC) + timedelta(days=30)
+    household_id = uuid4()
+    store = MockStore(
+        {
+            "trumf": [
+                MockConnectorStatus("oauth_pkce", future, False, {"has_refresh_token": True}, "a1"),
+                MockConnectorStatus(
+                    "oauth_pkce", future, False, {"has_refresh_token": False}, "a2"
+                ),
+                MockConnectorStatus("oauth_pkce", future, False, {}, "a3"),
+            ]
+        },
+        {
+            ("trumf", "a1"): {"access_token": "acc1", "refresh_token": "ref1"},
+            ("trumf", "a2"): {"access_token": "acc2"},
+            ("trumf", "a3"): {"access_token": "acc3", "refresh_token": "ref3"},
+        },
+    )
+
+    trumf = TrumfIntegration(store, household_id).describe("actor-1")
+    assert trumf.status == "connected"
+    assert trumf.auth_mode == "oauth_pkce"
+    assert trumf.auth_type == "oauth_pkce"
+    assert [a.refresh_available for a in trumf.accounts] == [True, False, True]

@@ -8,6 +8,8 @@ preserving source="cookidoo" and source_url without overwriting existing saved r
 
 from __future__ import annotations
 
+import asyncio
+import html
 import logging
 import re
 from datetime import UTC, datetime
@@ -70,6 +72,116 @@ class CookidooError(HTTPException):
         super().__init__(status_code=status_code, detail=detail)
 
 
+_COOKIDOO_IMAGE_TRANSFORMATION = "t_web400x328"
+
+
+def _strip_html(text: str) -> str:
+    with_spaces = re.sub(r"<br\s*/?>", " ", text, flags=re.IGNORECASE)
+    stripped = re.sub(r"<[^>]+>", "", with_spaces)
+    return re.sub(r"\s+", " ", html.unescape(stripped)).strip()
+
+
+def _sanitize_cookidoo_image_url(raw_url: Any, domain: str) -> str | None:
+    if not isinstance(raw_url, str):
+        return None
+    cleaned = raw_url.strip()
+    if not cleaned:
+        return None
+    if "{transformation}" in cleaned:
+        cleaned = cleaned.replace("{transformation}", _COOKIDOO_IMAGE_TRANSFORMATION)
+    if cleaned.startswith("/"):
+        cleaned = f"https://{domain}{cleaned}"
+    parsed = urlparse(cleaned)
+    if parsed.scheme != "https" or parsed.username or parsed.password:
+        return None
+    return cleaned
+
+
+def _parse_int_like(val: Any) -> int | None:
+    if isinstance(val, bool) or val is None:
+        return None
+    if isinstance(val, (int, float)):
+        num = int(round(val))
+        return num if num > 0 else None
+    if isinstance(val, str):
+        match = re.search(r"\d+", val)
+        if match:
+            num = int(match.group(0))
+            return num if num > 0 else None
+    return None
+
+
+def _extract_servings(raw: dict[str, Any]) -> int:
+    candidates: list[Any] = [raw.get("servings")]
+    if isinstance(raw.get("yield"), dict):
+        candidates.append(raw["yield"].get("value"))
+    if isinstance(raw.get("servingSize"), dict):
+        serving_size = raw["servingSize"]
+        if isinstance(serving_size.get("quantity"), dict):
+            candidates.append(serving_size["quantity"].get("value"))
+        candidates.append(serving_size.get("value"))
+    candidates.append(raw.get("recipeYield"))
+    for cand in candidates:
+        parsed = _parse_int_like(cand)
+        if parsed is not None:
+            return parsed
+    return 4
+
+
+def _format_ingredient_item(item: Any) -> str | None:
+    if isinstance(item, str):
+        cleaned = _strip_html(item)
+        return cleaned or None
+    if not isinstance(item, dict):
+        return None
+    if any(k in item for k in ("ingredientNotation", "unitNotation", "quantity", "preparation")):
+        qty_obj = item.get("quantity")
+        qty_val = qty_obj.get("value") if isinstance(qty_obj, dict) else qty_obj
+        qty_str = ""
+        if isinstance(qty_val, (int, float)) and not isinstance(qty_val, bool):
+            qty_str = str(int(qty_val)) if float(qty_val).is_integer() else str(qty_val)
+        elif isinstance(qty_val, str) and qty_val.strip():
+            qty_str = qty_val.strip()
+        unit_str = str(item.get("unitNotation") or item.get("unit") or "").strip()
+        name_str = str(
+            item.get("ingredientNotation")
+            or item.get("text")
+            or item.get("name")
+            or item.get("ingredient")
+            or ""
+        ).strip()
+        prep_str = str(item.get("preparation") or "").strip()
+        main = " ".join(part for part in (qty_str, unit_str, name_str) if part)
+        if main and prep_str and prep_str not in main:
+            line = f"{main}, {prep_str}"
+        else:
+            line = main or prep_str
+        cleaned = _strip_html(line)
+        return cleaned or None
+    text_val = item.get("text") or item.get("name") or item.get("ingredient")
+    if text_val and str(text_val).strip():
+        cleaned = _strip_html(str(text_val))
+        return cleaned or None
+    return None
+
+
+def _format_instruction_item(item: Any) -> str | None:
+    if isinstance(item, str):
+        cleaned = _strip_html(item)
+        return cleaned or None
+    if isinstance(item, dict):
+        text_val = (
+            item.get("formattedText")
+            or item.get("text")
+            or item.get("description")
+            or item.get("instruction")
+        )
+        if text_val and str(text_val).strip():
+            cleaned = _strip_html(str(text_val))
+            return cleaned or None
+    return None
+
+
 def normalize_cookidoo_recipe(
     raw: dict[str, Any],
     provider: str = "cookidoo",
@@ -77,6 +189,10 @@ def normalize_cookidoo_recipe(
     locale: str | None = None,
 ) -> CollectionEntry:
     """Normalize raw Cookidoo API recipe or created recipe into CollectionEntry."""
+    if isinstance(raw.get("recipeContent"), dict):
+        content = raw["recipeContent"]
+        raw = {**content, **{k: v for k, v in raw.items() if k != "recipeContent"}}
+
     country_clean = (country or "no").strip().lower() or "no"
     domain = _cookidoo_domain_for_country(country_clean)
     effective_locale = locale or (
@@ -89,54 +205,58 @@ def normalize_cookidoo_recipe(
         raw.get("id") or raw.get("recipeId") or raw.get("external_id") or raw.get("recipe_id") or ""
     ).strip()
 
-    title = str(
-        raw.get("title") or raw.get("recipeName") or raw.get("name") or "Uten tittel"
-    ).strip()
+    raw_title = raw.get("title") or raw.get("recipeName") or raw.get("name") or "Uten tittel"
+    title = _strip_html(str(raw_title)) or "Uten tittel"
 
     source_url = raw.get("url") or raw.get("source_url") or raw.get("sourceUrl")
     if not source_url and recipe_id:
         source_url = f"https://{domain}/recipes/recipe/{effective_locale}/{recipe_id}"
 
-    image_url = raw.get("imageUrl") or raw.get("image_url") or raw.get("image")
-    if isinstance(image_url, str):
-        image_url = image_url.strip() or None
-        if image_url and image_url.startswith("/"):
-            image_url = f"https://{domain}{image_url}"
-        if image_url:
-            parsed_img = urlparse(image_url)
-            if parsed_img.scheme != "https" or parsed_img.username or parsed_img.password:
-                image_url = None
-    else:
-        image_url = None
+    raw_image = raw.get("imageUrl") or raw.get("image_url") or raw.get("image")
+    if not raw_image and isinstance(raw.get("descriptiveAssets"), list):
+        for asset in raw["descriptiveAssets"]:
+            if isinstance(asset, dict):
+                cand = (
+                    asset.get("square")
+                    or asset.get("landscape")
+                    or asset.get("portrait")
+                    or asset.get("url")
+                )
+                if cand:
+                    raw_image = cand
+                    break
+    if not raw_image:
+        raw_image = raw.get("listThumbnail") or raw.get("landscapeImage")
+    image_url = _sanitize_cookidoo_image_url(raw_image, domain)
 
-    # Extract servings
-    servings = 4
-    if "servings" in raw and raw["servings"]:
-        try:
-            servings = int(raw["servings"])
-        except (ValueError, TypeError):
-            servings = 4
-    elif "yield" in raw and isinstance(raw["yield"], dict):
-        try:
-            servings = int(raw["yield"].get("value", 4))
-        except (ValueError, TypeError):
-            servings = 4
+    servings = _extract_servings(raw)
 
-    # Extract ingredients (supports list of str or list of dicts)
+    # Extract ingredients (flat list or grouped recipeIngredientGroups)
     raw_ingredients = (
-        raw.get("ingredients") or raw.get("ingredient_list") or raw.get("recipeIngredients") or []
+        raw.get("ingredients")
+        or raw.get("ingredient_list")
+        or raw.get("recipeIngredients")
+        or raw.get("recipeIngredient")
+        or []
     )
     ingredients: list[str] = []
     if isinstance(raw_ingredients, list):
         for item in raw_ingredients:
-            if isinstance(item, str) and item.strip():
-                ingredients.append(item.strip())
-            elif isinstance(item, dict):
-                text_val = item.get("text") or item.get("name") or item.get("ingredient")
-                if text_val and str(text_val).strip():
-                    ingredients.append(str(text_val).strip())
+            formatted = _format_ingredient_item(item)
+            if formatted:
+                ingredients.append(formatted)
+    if not ingredients and isinstance(raw.get("recipeIngredientGroups"), list):
+        for group in raw["recipeIngredientGroups"]:
+            if not isinstance(group, dict):
+                continue
+            group_items = group.get("recipeIngredients") or group.get("ingredients") or []
+            if isinstance(group_items, list):
+                for item in group_items:
+                    formatted = _format_ingredient_item(item)
+                    if formatted:
+                        ingredients.append(formatted)
 
-    # Extract instructions (supports list of str or list of dicts)
+    # Extract instructions (flat list or grouped recipeStepGroups)
     raw_instructions = (
         raw.get("instructions")
         or raw.get("steps")
@@ -147,12 +267,19 @@ def normalize_cookidoo_recipe(
     instructions: list[str] = []
     if isinstance(raw_instructions, list):
         for item in raw_instructions:
-            if isinstance(item, str) and item.strip():
-                instructions.append(item.strip())
-            elif isinstance(item, dict):
-                text_val = item.get("text") or item.get("description") or item.get("instruction")
-                if text_val and str(text_val).strip():
-                    instructions.append(str(text_val).strip())
+            formatted = _format_instruction_item(item)
+            if formatted:
+                instructions.append(formatted)
+    if not instructions and isinstance(raw.get("recipeStepGroups"), list):
+        for group in raw["recipeStepGroups"]:
+            if not isinstance(group, dict):
+                continue
+            group_steps = group.get("recipeSteps") or group.get("steps") or []
+            if isinstance(group_steps, list):
+                for step in group_steps:
+                    formatted = _format_instruction_item(step)
+                    if formatted:
+                        instructions.append(formatted)
 
     badges = list(raw.get("badges") or ["Lagret i Cookidoo"])
 
@@ -167,6 +294,25 @@ def normalize_cookidoo_recipe(
         metadata["prep_time"] = raw.get("prepTime") or raw.get("prep_time")
     if raw.get("totalTime") or raw.get("total_time"):
         metadata["total_time"] = raw.get("totalTime") or raw.get("total_time")
+    raw_times = raw.get("times")
+    if isinstance(raw_times, list):
+        for t in raw_times:
+            if not isinstance(t, dict):
+                continue
+            t_type = str(t.get("type") or "").strip()
+            qty = t.get("quantity")
+            val = qty.get("value") if isinstance(qty, dict) else t.get("value")
+            if val is None:
+                continue
+            if t_type == "prepTime" and "prep_time" not in metadata:
+                metadata["prep_time"] = val
+            elif t_type == "totalTime" and "total_time" not in metadata:
+                metadata["total_time"] = val
+    elif isinstance(raw_times, dict):
+        if raw_times.get("prepTime") is not None and "prep_time" not in metadata:
+            metadata["prep_time"] = raw_times["prepTime"]
+        if raw_times.get("totalTime") is not None and "total_time" not in metadata:
+            metadata["total_time"] = raw_times["totalTime"]
     if raw.get("tools"):
         metadata["tools"] = raw["tools"]
 
@@ -308,6 +454,63 @@ class CookidooCollectionProvider:
         if not valid_path:
             raise ValueError("Cookidoo-kildelenken samsvarer ikke med oppskriftens identitet")
 
+    async def _get_json(
+        self,
+        client: httpx.AsyncClient,
+        path_or_url: str,
+        headers: dict[str, str],
+        base_url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        allow_not_found: bool = False,
+    ) -> dict[str, Any] | list[Any] | None:
+        if path_or_url.startswith(("https://", "http://")):
+            parsed_target = urlparse(path_or_url)
+            base_host = (urlparse(base_url).hostname or "").lower()
+            target_host = (parsed_target.hostname or "").lower()
+            if parsed_target.scheme != "https" or (
+                target_host != base_host and not _COOKIDOO_HOST_RE.fullmatch(target_host)
+            ):
+                raise CookidooError(
+                    status_code=502,
+                    detail="Cookidoo returnerte en ugyldig pagineringslenke.",
+                )
+            full_url = path_or_url
+        else:
+            rel = path_or_url if path_or_url.startswith("/") else f"/{path_or_url}"
+            full_url = f"{base_url.rstrip('/')}{rel}"
+
+        try:
+            response = await client.get(full_url, params=params, headers=headers)
+        except httpx.HTTPError as exc:
+            raise CookidooError(
+                status_code=502,
+                detail=f"Nettverksfeil mot Cookidoo: {exc}",
+            ) from exc
+
+        if response.status_code in (401, 403):
+            raise CookidooError(
+                status_code=401,
+                detail="Cookidoo avviste forespørselen. Vennligst logg inn på nytt under Innstillinger.",
+            )
+        if response.status_code == 404 and allow_not_found:
+            return None
+        if response.status_code >= 400:
+            raise CookidooError(
+                status_code=response.status_code,
+                detail=f"Cookidoo API returnerte en feil ({response.status_code}). Vennligst prøv igjen senere.",
+            )
+        try:
+            return response.json()
+        except ValueError:
+            if allow_not_found:
+                _LOG.warning("Cookidoo returned non-JSON response for %s", path_or_url)
+                return None
+            raise CookidooError(
+                status_code=502,
+                detail="Cookidoo returnerte et ugyldig svar (forventet JSON).",
+            ) from None
+
     async def _fetch_from_api(
         self,
         endpoint_paths: list[str],
@@ -320,35 +523,77 @@ class CookidooCollectionProvider:
             transport=self.transport,
             timeout=15.0,
         ) as client:
-            last_error: Exception | None = None
+            last_error: CookidooError | None = None
             for path in endpoint_paths:
-                full_url = f"{base_url.rstrip('/')}{path}"
                 try:
-                    response = await client.get(full_url, params=params, headers=headers)
-                    if response.status_code == 401 or response.status_code == 403:
-                        raise CookidooError(
-                            status_code=401,
-                            detail="Cookidoo avviste forespørselen. Vennligst logg inn på nytt under Innstillinger.",
-                        )
-                    if response.status_code == 404:
+                    data = await self._get_json(
+                        client,
+                        path,
+                        headers,
+                        base_url,
+                        params=params or None,
+                        allow_not_found=True,
+                    )
+                except CookidooError as exc:
+                    if exc.status_code == 401:
+                        raise
+                    if exc.status_code == 502:
+                        last_error = exc
                         continue
-                    if response.status_code >= 400:
-                        raise CookidooError(
-                            status_code=response.status_code,
-                            detail=f"Cookidoo API returnerte en feil ({response.status_code}). Vennligst prøv igjen senere.",
-                        )
-                    return response.json()
-                except httpx.HTTPError as exc:
-                    last_error = exc
-                    continue
+                    raise
+                if data is not None:
+                    return data
 
             if last_error is not None:
-                raise CookidooError(
-                    status_code=502,
-                    detail=f"Nettverksfeil mot Cookidoo: {last_error}",
-                ) from last_error
+                raise last_error
 
             return {"recipes": [], "has_more": False}
+
+    @staticmethod
+    def _extract_next_link(data: Any) -> str | None:
+        if not isinstance(data, dict):
+            return None
+        for key in ("links", "_links"):
+            links = data.get(key)
+            if isinstance(links, dict):
+                nxt = links.get("next")
+                if isinstance(nxt, dict) and isinstance(nxt.get("href"), str) and nxt["href"]:
+                    return nxt["href"]
+                if isinstance(nxt, str) and nxt:
+                    return nxt
+            elif isinstance(links, list):
+                for item in links:
+                    if (
+                        isinstance(item, dict)
+                        and item.get("rel") == "next"
+                        and isinstance(item.get("href"), str)
+                        and item["href"]
+                    ):
+                        return item["href"]
+        return None
+
+    async def _fetch_paginated_collection(
+        self,
+        client: httpx.AsyncClient,
+        initial_path: str,
+        headers: dict[str, str],
+        base_url: str,
+        *,
+        max_pages: int = 10,
+    ) -> list[dict[str, Any]]:
+        pages: list[dict[str, Any]] = []
+        seen_urls: set[str] = set()
+        next_target: str | None = initial_path
+        for _ in range(max_pages):
+            if not next_target or next_target in seen_urls:
+                break
+            seen_urls.add(next_target)
+            payload = await self._get_json(client, next_target, headers, base_url)
+            if not isinstance(payload, dict):
+                break
+            pages.append(payload)
+            next_target = self._extract_next_link(payload)
+        return pages
 
     def _build_request_context(self) -> tuple[dict[str, str], str, str, str]:
         creds, _ = self._get_credentials_or_fail()
@@ -373,17 +618,139 @@ class CookidooCollectionProvider:
         )
         return headers, base_url, country, locale
 
+    async def _hydrate_recipe_summaries(
+        self,
+        client: httpx.AsyncClient,
+        items: list[dict[str, Any]],
+        headers: dict[str, str],
+        base_url: str,
+        country: str,
+    ) -> list[CollectionEntry]:
+        domain = _cookidoo_domain_for_country(country)
+        sem = asyncio.Semaphore(5)
+
+        async def _resolve_one(item: dict[str, Any]) -> CollectionEntry:
+            recipe_id = str(item["id"]).strip()
+            badges = list(dict.fromkeys(item.get("badges") or ["Lagret i Cookidoo"]))
+            fallback_thumb = _sanitize_cookidoo_image_url(item.get("thumbnail"), domain)
+            raw_inline = item.get("raw")
+            if isinstance(raw_inline, dict) and (
+                raw_inline.get("title") or raw_inline.get("recipeName") or raw_inline.get("name")
+            ):
+                merged_raw = dict(raw_inline)
+                merged_raw["badges"] = badges
+                entry = normalize_cookidoo_recipe(
+                    merged_raw, provider=self.id, country=country, locale="en"
+                )
+                if not entry.image_url and fallback_thumb:
+                    entry.image_url = fallback_thumb
+                return entry
+
+            async with sem:
+                recipe_data: dict[str, Any] | list[Any] | None = None
+                try:
+                    recipe_data = await self._get_json(
+                        client,
+                        f"/recipes/recipe/en/{recipe_id}",
+                        headers,
+                        base_url,
+                        allow_not_found=True,
+                    )
+                except CookidooError as exc:
+                    if exc.status_code == 401:
+                        raise
+                    recipe_data = None
+
+            if isinstance(recipe_data, dict):
+                raw_recipe = (
+                    recipe_data.get("recipe")
+                    if isinstance(recipe_data.get("recipe"), dict)
+                    else recipe_data
+                )
+                if isinstance(raw_recipe, dict):
+                    merged_raw = dict(raw_recipe)
+                    merged_raw.setdefault("id", recipe_id)
+                    merged_raw["badges"] = badges
+                    entry = normalize_cookidoo_recipe(
+                        merged_raw, provider=self.id, country=country, locale="en"
+                    )
+                    if not entry.image_url and fallback_thumb:
+                        entry.image_url = fallback_thumb
+                    return entry
+
+            primary_badge = badges[0] if badges else "Cookidoo"
+            return CollectionEntry(
+                id=recipe_id,
+                provider=self.id,
+                title=f"{primary_badge} ({recipe_id})",
+                source_url=f"https://{domain}/recipes/recipe/en/{recipe_id}",
+                image_url=fallback_thumb,
+                badges=badges,
+                metadata={"recipe_id": recipe_id, "provider": self.id},
+            )
+
+        return list(await asyncio.gather(*(_resolve_one(item) for item in items)))
+
     async def extract_entry(self, entry: CollectionEntry) -> ImportedDraft:
         """Fetch detailed recipe ingredients and instructions from Cookidoo when missing from list."""
         self.validate_source(entry)
         assert entry.source_url is not None
+
+        inline_ingredients = entry.ingredients or entry.metadata.get("ingredients") or []
+        inline_instructions = entry.instructions or entry.metadata.get("instructions") or []
+        if inline_ingredients and inline_instructions:
+            return ImportedDraft(
+                title=entry.title,
+                servings=entry.servings or entry.metadata.get("servings") or 4,
+                ingredients=list(inline_ingredients),
+                instructions=list(inline_instructions),
+                source_url=entry.source_url,
+                image_url=entry.image_url,
+            )
+
         headers, base_url, country, locale = self._build_request_context()
         parsed = urlparse(entry.source_url)
+
+        if parsed.path.startswith("/created-recipes/"):
+            async with httpx.AsyncClient(transport=self.transport, timeout=15.0) as client:
+                pages = await self._fetch_paginated_collection(
+                    client, "/created-recipes/en", headers, base_url
+                )
+            for page_data in pages:
+                items = page_data.get("items") or page_data.get("createdRecipes") or []
+                if not isinstance(items, list):
+                    continue
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    item_id = str(
+                        item.get("recipeId") or item.get("id") or item.get("recipe_id") or ""
+                    ).strip()
+                    if item_id == entry.id:
+                        detail = normalize_cookidoo_recipe(
+                            item, provider=self.id, country=country, locale="en"
+                        )
+                        if not detail.ingredients or not detail.instructions:
+                            raise ValueError(
+                                "Cookidoo-oppskriften mangler ingredienser eller fremgangsmåte"
+                            )
+                        return ImportedDraft(
+                            title=detail.title or entry.title,
+                            servings=detail.servings or entry.servings or 4,
+                            ingredients=detail.ingredients,
+                            instructions=detail.instructions,
+                            source_url=entry.source_url,
+                            image_url=detail.image_url or entry.image_url,
+                        )
+            raise ValueError("Fant ikke den egne Cookidoo-oppskriften for import")
+
         candidate_paths = [
-            f"/api/v2/recipes/{entry.id}",
+            f"/recipes/recipe/en/{entry.id}",
             parsed.path,
+            f"/api/v2/recipes/{entry.id}",
         ]
-        data = await self._fetch_from_api(candidate_paths, {}, headers, base_url)
+        deduped_paths = list(dict.fromkeys(p for p in candidate_paths if p))
+        data = await self._fetch_from_api(deduped_paths, {}, headers, base_url)
         raw_recipe = (
             data.get("recipe")
             if isinstance(data, dict) and isinstance(data.get("recipe"), dict)
@@ -408,90 +775,225 @@ class CookidooCollectionProvider:
             image_url=detail.image_url or entry.image_url,
         )
 
+    @staticmethod
+    def _collect_managed_list_items(
+        detail: dict[str, Any],
+        col_title: str,
+        col_thumb: Any,
+        by_id: dict[str, dict[str, Any]],
+    ) -> None:
+        def _record(recipe_id: str, raw: dict[str, Any] | None = None) -> None:
+            rid = recipe_id.strip()
+            if not rid:
+                return
+            slot = by_id.get(rid)
+            if slot is None:
+                slot = {"id": rid, "badges": [col_title], "thumbnail": col_thumb, "raw": raw}
+                by_id[rid] = slot
+            else:
+                if col_title not in slot["badges"]:
+                    slot["badges"].append(col_title)
+                if not slot.get("raw") and raw:
+                    slot["raw"] = raw
+                if not slot.get("thumbnail") and col_thumb:
+                    slot["thumbnail"] = col_thumb
+
+        chapters = detail.get("chapters")
+        if isinstance(chapters, list):
+            for chapter in chapters:
+                if not isinstance(chapter, dict):
+                    continue
+                for rec in chapter.get("recipes") or []:
+                    if isinstance(rec, str):
+                        _record(rec)
+                    elif isinstance(rec, dict):
+                        rid = str(
+                            rec.get("id") or rec.get("recipeId") or rec.get("recipe_id") or ""
+                        )
+                        _record(rid, rec)
+                for rid in chapter.get("recipeIds") or []:
+                    if isinstance(rid, str):
+                        _record(rid)
+
+        for rec in detail.get("recipes") or []:
+            if isinstance(rec, str):
+                _record(rec)
+            elif isinstance(rec, dict):
+                rid = str(rec.get("id") or rec.get("recipeId") or rec.get("recipe_id") or "")
+                _record(rid, rec)
+
+        for rid in detail.get("recipeIds") or []:
+            if isinstance(rid, str):
+                _record(rid)
+
     async def page(self, actor_id: str, kind: str, page: int, size: int) -> CollectionPage:
         """Fetch a page of recipes for the given collection kind."""
-        headers, base_url, country, locale = self._build_request_context()
+        headers, base_url, country, _locale = self._build_request_context()
+        domain = _cookidoo_domain_for_country(country)
+        start = max(0, (page - 1) * size)
+        end = start + size
 
         if kind in ("saved", "liked", "all"):
-            paths = [
-                "/api/v2/user/recipes",
-                "/api/recipe-collections",
-                "/api/v2/user/collections",
-                "/api/collections",
-                "/recipes/saved",
-                "/recipes",
-            ]
-        elif kind in ("created", "custom"):
-            paths = [
-                f"/created-recipes/{locale}",
-                f"/created-recipes/{country}",
-                "/created-recipes",
-                "/api/v2/user/custom-recipes",
-            ]
-        elif kind == "bookmarks":
-            paths = [
-                "/api/v2/user/bookmarks",
-                "/api/v2/user/recipes",
-                "/recipes/saved",
-            ]
-        else:
-            raise CookidooError(
-                status_code=400,
-                detail=f"Ugyldig samlingstype for Cookidoo: {kind}. Velg 'saved', 'created' eller 'bookmarks'.",
-            )
-
-        params = {
-            "page": page,
-            "size": size,
-            "limit": size,
-            "offset": (page - 1) * size,
-        }
-
-        data = await self._fetch_from_api(paths, params, headers, base_url)
-
-        # Extract items from various payload layouts
-        raw_recipes: list[dict[str, Any]] = []
-        has_more = False
-
-        if isinstance(data, list):
-            raw_recipes = [item for item in data if isinstance(item, dict)]
-            has_more = len(raw_recipes) >= size
-        elif isinstance(data, dict):
-            has_more = bool(data.get("hasMore") or data.get("has_more") or False)
-            if "recipes" in data and isinstance(data["recipes"], list):
-                raw_recipes = data["recipes"]
-            elif "createdRecipes" in data and isinstance(data["createdRecipes"], list):
-                raw_recipes = data["createdRecipes"]
-            elif "items" in data and isinstance(data["items"], list):
-                raw_recipes = data["items"]
-            elif "data" in data and isinstance(data["data"], list):
-                raw_recipes = data["data"]
-            elif "collections" in data and isinstance(data["collections"], list):
-                for col in data["collections"]:
-                    if isinstance(col, dict):
-                        col_name = col.get("name") or col.get("title") or "Samling"
-                        for rec in col.get("recipes", []):
+            async with httpx.AsyncClient(transport=self.transport, timeout=15.0) as client:
+                pages = await self._fetch_paginated_collection(
+                    client, "/organize/en/api/custom-list", headers, base_url
+                )
+                by_id: dict[str, dict[str, Any]] = {}
+                for payload in pages:
+                    customlists = payload.get("customlists")
+                    if not isinstance(customlists, list):
+                        continue
+                    for cl in customlists:
+                        if not isinstance(cl, dict):
+                            continue
+                        list_title = str(
+                            cl.get("title") or cl.get("name") or "Lagret i Cookidoo"
+                        ).strip()
+                        list_thumb = cl.get("listThumbnail") or cl.get("thumbnail")
+                        for rid in cl.get("recipeIds") or []:
+                            if not isinstance(rid, str) or not rid.strip():
+                                continue
+                            clean_id = rid.strip()
+                            slot = by_id.get(clean_id)
+                            if slot is None:
+                                by_id[clean_id] = {
+                                    "id": clean_id,
+                                    "badges": [list_title],
+                                    "thumbnail": list_thumb,
+                                    "raw": None,
+                                }
+                            else:
+                                if list_title not in slot["badges"]:
+                                    slot["badges"].append(list_title)
+                                if not slot.get("thumbnail") and list_thumb:
+                                    slot["thumbnail"] = list_thumb
+                        for rec in cl.get("recipes") or []:
                             if isinstance(rec, dict):
-                                rec_copy = dict(rec)
-                                rec_copy.setdefault("badges", []).append(col_name)
-                                raw_recipes.append(rec_copy)
-            if not has_more and "total" in data:
-                try:
-                    has_more = int(data["total"]) > (page * size)
-                except (ValueError, TypeError):
-                    pass
+                                clean_id = str(
+                                    rec.get("id")
+                                    or rec.get("recipeId")
+                                    or rec.get("recipe_id")
+                                    or ""
+                                ).strip()
+                                if not clean_id:
+                                    continue
+                                slot = by_id.get(clean_id)
+                                if slot is None:
+                                    by_id[clean_id] = {
+                                        "id": clean_id,
+                                        "badges": [list_title],
+                                        "thumbnail": list_thumb,
+                                        "raw": rec,
+                                    }
+                                else:
+                                    if list_title not in slot["badges"]:
+                                        slot["badges"].append(list_title)
+                                    if not slot.get("raw"):
+                                        slot["raw"] = rec
+                all_items = list(by_id.values())
+                page_items = all_items[start:end]
+                entries = await self._hydrate_recipe_summaries(
+                    client, page_items, headers, base_url, country
+                )
+                return CollectionPage(entries=entries, has_more=len(all_items) > end)
 
-        entries: list[CollectionEntry] = []
-        for raw in raw_recipes:
-            entry = normalize_cookidoo_recipe(
-                raw,
-                provider=self.id,
-                country=country,
-                locale=locale,
+        if kind in ("created", "custom"):
+            async with httpx.AsyncClient(transport=self.transport, timeout=15.0) as client:
+                pages = await self._fetch_paginated_collection(
+                    client, "/created-recipes/en", headers, base_url
+                )
+            all_entries: list[CollectionEntry] = []
+            seen_ids: set[str] = set()
+            for payload in pages:
+                items = (
+                    payload.get("items")
+                    or payload.get("createdRecipes")
+                    or payload.get("recipes")
+                    or []
+                )
+                if not isinstance(items, list):
+                    continue
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    item_copy = dict(item)
+                    rid = str(
+                        item_copy.get("recipeId")
+                        or item_copy.get("id")
+                        or item_copy.get("recipe_id")
+                        or ""
+                    ).strip()
+                    if not rid or rid in seen_ids:
+                        continue
+                    seen_ids.add(rid)
+                    item_copy.setdefault("url", f"https://{domain}/created-recipes/en/{rid}")
+                    item_copy.setdefault("badges", ["Opprettet i Cookidoo"])
+                    all_entries.append(
+                        normalize_cookidoo_recipe(
+                            item_copy,
+                            provider=self.id,
+                            country=country,
+                            locale="en",
+                        )
+                    )
+            return CollectionPage(
+                entries=all_entries[start:end],
+                has_more=len(all_entries) > end,
             )
-            entries.append(entry)
 
-        return CollectionPage(entries=entries, has_more=has_more)
+        if kind == "bookmarks":
+            async with httpx.AsyncClient(transport=self.transport, timeout=15.0) as client:
+                pages = await self._fetch_paginated_collection(
+                    client, "/organize/en/api/managed-list", headers, base_url
+                )
+                managed_lists: list[dict[str, Any]] = []
+                for payload in pages:
+                    ml_items = payload.get("managedlists")
+                    if isinstance(ml_items, list):
+                        managed_lists.extend(m for m in ml_items if isinstance(m, dict))
+
+                sem = asyncio.Semaphore(5)
+
+                async def _fetch_managed_detail(
+                    ml: dict[str, Any],
+                ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+                    col_id = str(ml.get("collectionId") or ml.get("id") or "").strip()
+                    if not col_id:
+                        return ml, None
+                    async with sem:
+                        detail = await self._get_json(
+                            client,
+                            f"/organize/en/api/managed-list/{col_id}",
+                            headers,
+                            base_url,
+                            allow_not_found=True,
+                        )
+                    return ml, detail if isinstance(detail, dict) else None
+
+                detail_results = await asyncio.gather(
+                    *(_fetch_managed_detail(ml) for ml in managed_lists)
+                )
+                by_id: dict[str, dict[str, Any]] = {}
+                for ml, detail in detail_results:
+                    if not detail:
+                        continue
+                    col_title = str(
+                        detail.get("title") or ml.get("title") or "Bokmerker i Cookidoo"
+                    ).strip()
+                    col_thumb = detail.get("landscapeImage") or ml.get("landscapeImage")
+                    self._collect_managed_list_items(detail, col_title, col_thumb, by_id)
+
+                all_items = list(by_id.values())
+                page_items = all_items[start:end]
+                entries = await self._hydrate_recipe_summaries(
+                    client, page_items, headers, base_url, country
+                )
+                return CollectionPage(entries=entries, has_more=len(all_items) > end)
+
+        raise CookidooError(
+            status_code=400,
+            detail=f"Ugyldig samlingstype for Cookidoo: {kind}. Velg 'saved', 'created' eller 'bookmarks'.",
+        )
 
 
 class CookidooRecipeService:

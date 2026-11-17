@@ -251,8 +251,20 @@ class StoredConnectorIntegration:
             can_refresh = (
                 self.provider_id in _REFRESHABLE_PROVIDERS and auth_mode in _OAUTH_REFRESH_MODES
             )
-            if can_refresh and "has_refresh_token" in meta:
-                can_refresh = bool(meta["has_refresh_token"])
+            if can_refresh:
+                if "has_refresh_token" in meta:
+                    can_refresh = bool(meta["has_refresh_token"])
+                elif self.store is not None and self.household_id is not None:
+                    get_creds_fn = getattr(self.store, "get_credentials", None)
+                    if callable(get_creds_fn):
+                        creds = get_creds_fn(
+                            self.household_id,
+                            self.provider_id,
+                            account_id=account_id,
+                        )
+                        if isinstance(creds, dict):
+                            raw_refresh = creds.get("refresh_token")
+                            can_refresh = isinstance(raw_refresh, str) and bool(raw_refresh.strip())
 
         last_err_raw = meta.get("last_error")
         last_error = str(last_err_raw) if isinstance(last_err_raw, str) and last_err_raw else None
@@ -392,12 +404,12 @@ class TrumfIntegration(StoredConnectorIntegration):
         super().__init__(
             provider_id="trumf",
             name="Trumf",
-            supported_auth_modes=["interactive_otp", "session_cookie"],
+            supported_auth_modes=["oauth_pkce", "interactive_otp", "session_cookie"],
             capabilities=["purchase_history", "receipt_sync"],
-            detail="Koble til Trumf med sesjonsinformasjonskapsel for automatisk kvitterings- og kjøpshistorikk.",
+            detail="Koble til Trumf med Trumf-konto (OAuth PKCE) eller sesjonsinformasjonskapsel for automatisk kvitterings- og kjøpshistorikk.",
             store=store,
             household_id=household_id,
-            default_expiry_prompt="Sesjonen for Trumf har utløpt. Oppdater informasjonskapselen for å fortsette synkronisering.",
+            default_expiry_prompt="Sesjonen for Trumf har utløpt. Koble til på nytt eller forny tilkoblingen.",
         )
 
 

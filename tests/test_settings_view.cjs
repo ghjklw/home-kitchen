@@ -683,8 +683,11 @@ test("Cookidoo manual cookie fallback details form calls connect endpoint", asyn
   assert.deepEqual(harness.notices, ["Cookidoo / Thermomix TM6 er tilkoblet."]);
 });
 
-test("Trumf guided browser sign-in opens login link and saves session cookie", async () => {
+test("Trumf primary 1-click OAuth PKCE flow and collapsible session cookie fallback", async () => {
   const harness = setupModalHarness(async (path, method, body) => {
+    if (path === "/integrations/trumf/pkce/start") {
+      return { authorize_url: "https://id.trumf.no/connect/authorize?client_id=trumf" };
+    }
     if (path === "/integrations/trumf/connect") {
       return { status: "connected" };
     }
@@ -693,8 +696,29 @@ test("Trumf guided browser sign-in opens login link and saves session cookie", a
 
   harness.openConnectorModal({ id: "trumf", name: "Trumf" });
 
+  // Primary 1-click OAuth PKCE button
+  const pkceBtn = harness.findButton("Koble til med Trumf-konto (OAuth PKCE)");
+  assert.ok(pkceBtn, "Primary button 'Koble til med Trumf-konto (OAuth PKCE)' is present");
+  await pkceBtn.click();
+
+  assert.equal(harness.calls.length, 1);
+  assert.deepEqual(harness.calls[0], {
+    path: "/integrations/trumf/pkce/start",
+    method: "POST",
+    body: undefined,
+  });
+  assert.deepEqual(harness.openedWindows[0], {
+    url: "https://id.trumf.no/connect/authorize?client_id=trumf",
+    target: "_blank",
+    features: "noopener,noreferrer",
+  });
+
+  // Secondary collapsible cookie fallback
+  const details = harness.findDetails("Sesjonsinformasjonskapsel (avansert)");
+  assert.ok(details, "Collapsible fallback 'Sesjonsinformasjonskapsel (avansert)' is present");
+
   const openBtn = harness.findButton("Åpne Trumf-innlogging");
-  assert.ok(openBtn, "Button 'Åpne Trumf-innlogging' is present");
+  assert.ok(openBtn, "Button 'Åpne Trumf-innlogging' is present inside fallback");
 
   const cookieInput = harness.findInput("Informasjonskapsel (cookie)");
   assert.ok(cookieInput, "Cookie input is present");
@@ -704,12 +728,11 @@ test("Trumf guided browser sign-in opens login link and saves session cookie", a
   assert.ok(saveBtn, "Button 'Lagre og koble til' is present");
 
   cookieInput.value = "trumf_session=test_cookie_12345";
-  const forms = harness.modalContent.querySelectorAll("form");
-  const form = forms[0];
+  const form = details.querySelectorAll("form")[0];
   await form.submit();
 
-  assert.equal(harness.calls.length, 1);
-  assert.deepEqual(harness.calls[0], {
+  assert.equal(harness.calls.length, 2);
+  assert.deepEqual(harness.calls[1], {
     path: "/integrations/trumf/connect",
     method: "POST",
     body: {
@@ -723,7 +746,8 @@ test("Trumf guided browser sign-in opens login link and saves session cookie", a
   // Test validation error when cookie is empty
   const errHarness = setupModalHarness(async () => ({}));
   errHarness.openConnectorModal({ id: "trumf", name: "Trumf" });
-  const errForm = errHarness.modalContent.querySelectorAll("form")[0];
+  const errDetails = errHarness.findDetails("Sesjonsinformasjonskapsel (avansert)");
+  const errForm = errDetails.querySelectorAll("form")[0];
   await errForm.submit();
   const errAlert = errHarness.findError(errForm);
   assert.ok(errAlert);
@@ -1025,6 +1049,8 @@ test("Coop modal explains no.coop.members://auth/callback and Trumf modal explai
 
   harness.openConnectorModal({ id: "trumf", name: "Trumf" });
   const trumfText = harness.modalContent.textContent;
+  assert.match(trumfText, /Koble til med Trumf-konto \(OAuth PKCE\)/);
+  assert.match(trumfText, /Sesjonsinformasjonskapsel \(avansert\)/);
   assert.match(trumfText, /Cookie/);
   assert.match(trumfText, /__Secure-authjs\.session-token\.0/);
   assert.match(trumfText, /__Secure-authjs\.session-token\.1/);

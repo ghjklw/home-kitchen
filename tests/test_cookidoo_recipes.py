@@ -322,6 +322,84 @@ def test_normalize_cookidoo_recipe_handles_variants_and_sanitizes_images():
     )
     assert insecure.image_url is None
 
+    # Official Cookidoo recipe detail shape (/recipes/recipe/en/{id})
+    official = normalize_cookidoo_recipe(
+        {
+            "id": "r587526",
+            "title": "Gougères au fromage",
+            "servingSize": {"quantity": {"value": 20}, "unitNotation": "pièces"},
+            "recipeIngredientGroups": [
+                {
+                    "title": "Pâte",
+                    "recipeIngredients": [
+                        {
+                            "quantity": {"value": 200},
+                            "unitNotation": "g",
+                            "ingredientNotation": "fromage",
+                            "preparation": "râpé",
+                        },
+                        {
+                            "quantity": {"value": 2},
+                            "unitNotation": "",
+                            "ingredientNotation": "œufs",
+                        },
+                    ],
+                }
+            ],
+            "recipeStepGroups": [
+                {
+                    "title": "Préparation",
+                    "recipeSteps": [
+                        {
+                            "title": "1",
+                            "formattedText": "Râper le fromage <nobr>10 sec/vitesse 7</nobr>.",
+                        }
+                    ],
+                }
+            ],
+            "times": [{"type": "totalTime", "quantity": {"value": 1800}}],
+            "descriptiveAssets": [
+                {
+                    "square": "https://assets.tmecosys.com/image/upload/{transformation}/gougeres.jpg",
+                }
+            ],
+        },
+        locale="en",
+    )
+    assert official.id == "r587526"
+    assert official.servings == 20
+    assert official.ingredients == ["200 g fromage, râpé", "2 œufs"]
+    assert official.instructions == ["Râper le fromage 10 sec/vitesse 7."]
+    assert official.metadata["total_time"] == 1800
+    assert (
+        official.image_url == "https://assets.tmecosys.com/image/upload/t_web400x328/gougeres.jpg"
+    )
+
+    # Created recipe item shape (/created-recipes/en)
+    created = normalize_cookidoo_recipe(
+        {
+            "recipeId": "01GCCC2PPVY882SM52F2ZBNQZW",
+            "recipeContent": {
+                "name": "Compote pomme/prune",
+                "image": "https://ugc.assets.tmecosys.com/image/upload/{transformation}/compote.jpg",
+                "recipeIngredient": ["500 g pommes", "200 g prunes"],
+                "recipeInstructions": ["Cuire <nobr>15 min/100°C</nobr>."],
+                "totalTime": 900,
+                "recipeYield": "6 portions",
+            },
+        },
+        locale="en",
+    )
+    assert created.id == "01GCCC2PPVY882SM52F2ZBNQZW"
+    assert created.title == "Compote pomme/prune"
+    assert created.servings == 6
+    assert (
+        created.image_url == "https://ugc.assets.tmecosys.com/image/upload/t_web400x328/compote.jpg"
+    )
+    assert created.ingredients == ["500 g pommes", "200 g prunes"]
+    assert created.instructions == ["Cuire 15 min/100°C."]
+    assert created.metadata["total_time"] == 900
+
 
 def test_cookidoo_provider_credentials_fencing_and_url_validation(connector_store, sqlite_engine):
     hid = uuid4()
@@ -402,44 +480,75 @@ async def test_cookidoo_provider_page_mock_transport_fallbacks_and_errors(connec
         assert request.headers["authorization"] == "Bearer tok-abc"
         assert request.headers["cookie"] == "v_sess=xyz"
 
-        if request.url.path == "/api/v2/user/recipes":
-            return httpx.Response(404)
-        if request.url.path == "/api/recipe-collections":
+        if request.url.path == "/organize/en/api/custom-list":
             return httpx.Response(
                 200,
                 json={
-                    "collections": [
+                    "customlists": [
                         {
-                            "name": "Favoritter",
-                            "recipes": [
+                            "id": "list-1",
+                            "title": "Favoritter",
+                            "recipeIds": ["r10", "r-missing"],
+                            "listThumbnail": "https://assets.tmecosys.com/image/upload/{transformation}/thumb.jpg",
+                        }
+                    ],
+                },
+            )
+        if request.url.path == "/recipes/recipe/en/r10":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "r10",
+                    "title": "Fiskegrateng",
+                    "servingSize": {"quantity": {"value": 4}},
+                    "recipeIngredientGroups": [
+                        {
+                            "recipeIngredients": [
                                 {
-                                    "id": "r10",
-                                    "title": "Fiskegrateng",
-                                    "servings": 4,
-                                    "ingredients": ["400 g torsk", "2 dl makaroni"],
-                                    "instructions": ["Kok makaroni", "Stek i ovn"],
-                                }
-                            ],
+                                    "quantity": {"value": 400},
+                                    "unitNotation": "g",
+                                    "ingredientNotation": "torsk",
+                                },
+                                {
+                                    "quantity": {"value": 2},
+                                    "unitNotation": "dl",
+                                    "ingredientNotation": "makaroni",
+                                },
+                            ]
                         }
                     ],
-                    "total": 25,
+                    "recipeStepGroups": [
+                        {
+                            "recipeSteps": [
+                                {"formattedText": "Kok makaroni"},
+                                {"formattedText": "Stek i ovn <nobr>30 min</nobr>"},
+                            ]
+                        }
+                    ],
                 },
             )
-        if request.url.path == "/created-recipes/nb-NO":
+        if request.url.path == "/recipes/recipe/en/r-missing":
+            return httpx.Response(404)
+        if request.url.path == "/created-recipes/en":
             return httpx.Response(
                 200,
                 json={
-                    "createdRecipes": [
+                    "meta": {"totalCount": 1},
+                    "items": [
                         {
-                            "id": "c1",
-                            "title": "Egen vaffelrøre",
-                            "url": "https://cookidoo.no/created-recipes/nb-NO/c1",
+                            "recipeId": "c1",
+                            "recipeContent": {
+                                "name": "Egen vaffelrøre",
+                                "image": "https://ugc.assets.tmecosys.com/image/upload/{transformation}/vaffel.jpg",
+                                "recipeIngredient": ["3 dl hvetemel", "2 egg"],
+                                "recipeInstructions": ["Visp sammen", "Stek vafler"],
+                                "recipeYield": 4,
+                            },
                         }
                     ],
-                    "hasMore": False,
                 },
             )
-        if request.url.path == "/api/v2/user/bookmarks":
+        if request.url.path == "/organize/en/api/managed-list":
             return httpx.Response(401)
         return httpx.Response(500)
 
@@ -448,16 +557,31 @@ async def test_cookidoo_provider_page_mock_transport_fallbacks_and_errors(connec
     )
 
     saved_page = await provider.page("malo", "saved", 1, 20)
-    assert saved_page.has_more is True
-    assert len(saved_page.entries) == 1
-    assert saved_page.entries[0].id == "r10"
+    assert saved_page.has_more is False
+    assert [e.id for e in saved_page.entries] == ["r10", "r-missing"]
+    assert saved_page.entries[0].title == "Fiskegrateng"
     assert saved_page.entries[0].badges == ["Favoritter"]
     assert saved_page.entries[0].ingredients == ["400 g torsk", "2 dl makaroni"]
+    assert saved_page.entries[0].instructions == ["Kok makaroni", "Stek i ovn 30 min"]
+    # Graceful fallback when single recipe detail 404s
+    assert saved_page.entries[1].title == "Favoritter (r-missing)"
+    assert (
+        saved_page.entries[1].image_url
+        == "https://assets.tmecosys.com/image/upload/t_web400x328/thumb.jpg"
+    )
 
     created_page = await provider.page("malo", "created", 1, 20)
     assert created_page.has_more is False
     assert created_page.entries[0].id == "c1"
-    assert created_page.entries[0].source_url == "https://cookidoo.no/created-recipes/nb-NO/c1"
+    assert created_page.entries[0].title == "Egen vaffelrøre"
+    assert (
+        created_page.entries[0].source_url == "https://cookidoo.international/created-recipes/en/c1"
+    )
+    assert (
+        created_page.entries[0].image_url
+        == "https://ugc.assets.tmecosys.com/image/upload/t_web400x328/vaffel.jpg"
+    )
+    assert created_page.entries[0].ingredients == ["3 dl hvetemel", "2 egg"]
 
     with pytest.raises(CookidooError) as auth_err:
         await provider.page("malo", "bookmarks", 1, 20)
@@ -467,6 +591,88 @@ async def test_cookidoo_provider_page_mock_transport_fallbacks_and_errors(connec
     with pytest.raises(CookidooError) as kind_err:
         await provider.page("malo", "unknown", 1, 20)
     assert kind_err.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_cookidoo_provider_html_response_returns_clean_502_and_bookmarks_managed_list(
+    connector_store,
+):
+    hid = uuid4()
+    _save_cookidoo_connection(connector_store, hid, access_token="tok-abc")
+
+    def html_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<!doctype html><html><body>Login</body></html>")
+
+    html_provider = CookidooCollectionProvider(
+        connector_store, hid, transport=httpx.MockTransport(html_handler)
+    )
+    with pytest.raises(CookidooError) as exc:
+        await html_provider.page("malo", "created", 1, 20)
+    assert exc.value.status_code == 502
+    assert "JSON" in exc.value.detail
+
+    def bookmarks_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/organize/en/api/managed-list":
+            return httpx.Response(
+                200,
+                json={
+                    "managedlists": [
+                        {
+                            "collectionId": "col338667",
+                            "title": "Min Kokebok",
+                            "recipeCount": 2,
+                            "landscapeImage": "https://assets.tmecosys.com/image/upload/{transformation}/col.jpg",
+                        }
+                    ]
+                },
+            )
+        if request.url.path == "/organize/en/api/managed-list/col338667":
+            return httpx.Response(
+                200,
+                json={
+                    "title": "Min Kokebok",
+                    "chapters": [
+                        {
+                            "title": "Hovedretter",
+                            "recipes": [
+                                {
+                                    "id": "r201",
+                                    "title": "Lasagne",
+                                    "descriptiveAssets": [
+                                        {
+                                            "square": "https://assets.tmecosys.com/image/upload/{transformation}/lasagne.jpg"
+                                        }
+                                    ],
+                                }
+                            ],
+                            "recipeIds": ["r202"],
+                        }
+                    ],
+                },
+            )
+        if request.url.path == "/recipes/recipe/en/r202":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "r202",
+                    "title": "Kyllingcurry",
+                    "servingSize": {"quantity": {"value": 4}},
+                    "recipeIngredientGroups": [{"recipeIngredients": ["500 g kylling"]}],
+                    "recipeStepGroups": [{"recipeSteps": [{"formattedText": "Stek kylling"}]}],
+                },
+            )
+        return httpx.Response(404)
+
+    bm_provider = CookidooCollectionProvider(
+        connector_store, hid, transport=httpx.MockTransport(bookmarks_handler)
+    )
+    bm_page = await bm_provider.page("malo", "bookmarks", 1, 20)
+    assert bm_page.has_more is False
+    assert [e.id for e in bm_page.entries] == ["r201", "r202"]
+    assert bm_page.entries[0].title == "Lasagne"
+    assert bm_page.entries[0].badges == ["Min Kokebok"]
+    assert bm_page.entries[1].title == "Kyllingcurry"
+    assert bm_page.entries[1].badges == ["Min Kokebok"]
 
 
 @pytest.mark.asyncio
@@ -528,50 +734,108 @@ def test_rest_api_cookidoo_preview_import_and_provider_isolation(sqlite_engine, 
     hid = uuid4()
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/v2/user/recipes":
+        if request.url.path == "/organize/en/api/custom-list":
             return httpx.Response(
                 200,
                 json={
-                    "hasMore": False,
-                    "recipes": [
+                    "customlists": [
                         {
-                            "id": "r1",
-                            "title": "Risotto med sopp",
-                            "servings": 4,
-                            "ingredients": ["300 g risottoris", "200 g sjampinjong"],
-                            "instructions": ["Stek sopp", "Tilsett kraft litt etter litt"],
-                        },
-                        {
-                            "id": "r2",
-                            "title": "Pannekaker",
-                            "url": "https://cookidoo.international/recipes/recipe/nb-NO/r2",
-                        },
-                    ],
+                            "id": "cl-1",
+                            "title": "Lagret i Cookidoo",
+                            "recipeIds": ["r1", "r2"],
+                        }
+                    ]
                 },
             )
-        if request.url.path == "/created-recipes/nb-NO":
+        if request.url.path == "/recipes/recipe/en/r1":
             return httpx.Response(
                 200,
                 json={
-                    "hasMore": False,
-                    "createdRecipes": [
+                    "id": "r1",
+                    "title": "Risotto med sopp",
+                    "servingSize": {"quantity": {"value": 4}},
+                    "recipeIngredientGroups": [
                         {
-                            "id": "r1",
-                            "title": "Risotto med sopp",
-                            "badges": ["Mine oppskrifter"],
+                            "recipeIngredients": [
+                                {
+                                    "quantity": {"value": 300},
+                                    "unitNotation": "g",
+                                    "ingredientNotation": "risottoris",
+                                },
+                                {
+                                    "quantity": {"value": 200},
+                                    "unitNotation": "g",
+                                    "ingredientNotation": "sjampinjong",
+                                },
+                            ]
+                        }
+                    ],
+                    "recipeStepGroups": [
+                        {
+                            "recipeSteps": [
+                                {"formattedText": "Stek sopp"},
+                                {"formattedText": "Tilsett kraft litt etter litt"},
+                            ]
                         }
                     ],
                 },
             )
-        if request.url.path == "/api/v2/recipes/r2":
+        if request.url.path == "/recipes/recipe/en/r2":
             return httpx.Response(
                 200,
                 json={
                     "id": "r2",
                     "title": "Pannekaker",
-                    "servings": 4,
-                    "ingredients": ["3 dl hvetemel", "6 dl melk", "3 egg"],
-                    "instructions": ["Visp sammen røren", "Stek gylne pannekaker"],
+                    "servingSize": {"quantity": {"value": 4}},
+                    "recipeIngredientGroups": [
+                        {
+                            "recipeIngredients": [
+                                "3 dl hvetemel",
+                                "6 dl melk",
+                                "3 egg",
+                            ]
+                        }
+                    ],
+                    "recipeStepGroups": [
+                        {
+                            "recipeSteps": [
+                                {"formattedText": "Visp sammen røren"},
+                                {"formattedText": "Stek gylne pannekaker"},
+                            ]
+                        }
+                    ],
+                },
+            )
+        if request.url.path == "/created-recipes/en":
+            return httpx.Response(
+                200,
+                json={
+                    "meta": {"totalCount": 2},
+                    "items": [
+                        {
+                            "recipeId": "r1",
+                            "badges": ["Mine oppskrifter"],
+                            "recipeContent": {
+                                "name": "Risotto med sopp",
+                                "recipeIngredient": ["300 g risottoris", "200 g sjampinjong"],
+                                "recipeInstructions": [
+                                    "Stek sopp",
+                                    "Tilsett kraft litt etter litt",
+                                ],
+                                "recipeYield": 4,
+                            },
+                        },
+                        {
+                            "recipeId": "01GCCC2PPVY882SM52F2ZBNQZW",
+                            "recipeContent": {
+                                "name": "Compote pomme/prune",
+                                "image": "https://ugc.assets.tmecosys.com/image/upload/{transformation}/compote.jpg",
+                                "recipeIngredient": ["500 g pommes", "200 g prunes"],
+                                "recipeInstructions": ["Cuire <nobr>15 min</nobr>."],
+                                "recipeYield": 4,
+                            },
+                        },
+                    ],
                 },
             )
         return httpx.Response(404)
@@ -618,9 +882,13 @@ def test_rest_api_cookidoo_preview_import_and_provider_isolation(sqlite_engine, 
         job = _settled(client, preview.json()["job_id"])
         assert job["provider"] == "cookidoo"
         assert job["status"] == "ready"
-        assert [e["id"] for e in job["entries"]] == ["r1", "r2"]
+        assert [e["id"] for e in job["entries"]] == ["r1", "r2", "01GCCC2PPVY882SM52F2ZBNQZW"]
         # r1 merged badges from both saved and created
         assert job["entries"][0]["badges"] == ["Lagret i Cookidoo", "Mine oppskrifter"]
+        assert (
+            job["entries"][2]["image_url"]
+            == "https://ugc.assets.tmecosys.com/image/upload/t_web400x328/compote.jpg"
+        )
 
         # Import requires reviewed=True
         denied = client.post(
@@ -629,24 +897,25 @@ def test_rest_api_cookidoo_preview_import_and_provider_isolation(sqlite_engine, 
         )
         assert denied.status_code == 422
 
-        # Import both r1 (inline) and r2 (fetched from /api/v2/recipes/r2)
+        # Import r1, r2, and created recipe (without hitting 404)
         imported = client.post(
             f"/api/recipe-collections/{job['job_id']}/import",
-            json={"selected_ids": ["r1", "r2"], "reviewed": True},
+            json={"selected_ids": ["r1", "r2", "01GCCC2PPVY882SM52F2ZBNQZW"], "reviewed": True},
         )
         assert imported.status_code == 202, imported.text
         done = _settled(client, job["job_id"])
         assert done["status"] == "completed"
-        assert [e["status"] for e in done["entries"]] == ["imported", "imported"]
+        assert [e["status"] for e in done["entries"]] == ["imported", "imported", "imported"]
 
         with sqlite_engine.connect() as conn:
             saved_rows = conn.execute(select(recipes)).all()
             link_rows = conn.execute(select(source_links)).all()
-        assert len(saved_rows) == 2
+        assert len(saved_rows) == 3
         assert {row.source for row in saved_rows} == {RecipeSource.COOKIDOO}
         assert {row.source_url for row in saved_rows} == {
-            "https://cookidoo.international/recipes/recipe/nb-NO/r1",
-            "https://cookidoo.international/recipes/recipe/nb-NO/r2",
+            "https://cookidoo.international/recipes/recipe/en/r1",
+            "https://cookidoo.international/recipes/recipe/en/r2",
+            "https://cookidoo.international/created-recipes/en/01GCCC2PPVY882SM52F2ZBNQZW",
         }
         assert {row.provider for row in link_rows} == {"cookidoo"}
 
@@ -673,18 +942,33 @@ async def test_mcp_cookidoo_collection_tools_are_provider_and_actor_scoped(sqlit
     hid = uuid4()
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/v2/user/recipes":
+        if request.url.path == "/organize/en/api/custom-list":
             return httpx.Response(
                 200,
                 json={
-                    "hasMore": False,
-                    "recipes": [
+                    "customlists": [
                         {
-                            "id": "mcp-r1",
-                            "title": "Kjøttboller",
-                            "servings": 4,
-                            "ingredients": ["400 g kjøttdeig", "1 egg"],
-                            "instructions": ["Form boller", "Stek i panne"],
+                            "id": "cl-mcp",
+                            "title": "Lagret i Cookidoo",
+                            "recipeIds": ["mcp-r1"],
+                        }
+                    ]
+                },
+            )
+        if request.url.path == "/recipes/recipe/en/mcp-r1":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "mcp-r1",
+                    "title": "Kjøttboller",
+                    "servingSize": {"quantity": {"value": 4}},
+                    "recipeIngredientGroups": [{"recipeIngredients": ["400 g kjøttdeig", "1 egg"]}],
+                    "recipeStepGroups": [
+                        {
+                            "recipeSteps": [
+                                {"formattedText": "Form boller"},
+                                {"formattedText": "Stek i panne"},
+                            ]
                         }
                     ],
                 },
@@ -775,12 +1059,12 @@ async def test_cookidoo_domain_resolution_uses_international_for_norway(connecto
 
     def handler(request: httpx.Request) -> httpx.Response:
         hosts_seen.append(request.url.host)
-        if request.url.path == "/api/v2/user/recipes":
+        if request.url.path == "/organize/en/api/custom-list":
             return httpx.Response(
                 200,
-                json={"hasMore": False, "recipes": [{"id": "r42", "title": "Fiskesuppe"}]},
+                json={"customlists": [{"id": "cl1", "title": "Favoritter", "recipeIds": ["r42"]}]},
             )
-        if request.url.path == "/api/v2/recipes/r42":
+        if request.url.path == "/recipes/recipe/en/r42":
             return httpx.Response(
                 200,
                 json={
@@ -796,9 +1080,8 @@ async def test_cookidoo_domain_resolution_uses_international_for_norway(connecto
         connector_store, hid, transport=httpx.MockTransport(handler)
     )
     page = await provider.page("malo", "saved", 1, 20)
-    assert hosts_seen == ["cookidoo.international"]
-    assert page.entries[0].source_url == "https://cookidoo.international/recipes/recipe/nb-NO/r42"
+    assert hosts_seen == ["cookidoo.international", "cookidoo.international"]
+    assert page.entries[0].source_url == "https://cookidoo.international/recipes/recipe/en/r42"
 
     draft = await provider.extract_entry(page.entries[0])
-    assert hosts_seen == ["cookidoo.international", "cookidoo.international"]
-    assert str(draft.source_url) == "https://cookidoo.international/recipes/recipe/nb-NO/r42"
+    assert str(draft.source_url) == "https://cookidoo.international/recipes/recipe/en/r42"

@@ -203,11 +203,17 @@ def create_app(
         include_stats: Annotated[bool, Query()] = False,
         stats: Annotated[bool, Query()] = False,
     ) -> list[Recipe]:
+        if include_stats or stats:
+            return service.list_recipes(
+                recipe_type=recipe_type,
+                prep_category=prep_category,
+                max_prep_minutes=max_prep_minutes,
+                include_stats=True,
+            )
         return service.list_recipes(
             recipe_type=recipe_type,
             prep_category=prep_category,
             max_prep_minutes=max_prep_minutes,
-            include_stats=include_stats or stats,
         )
 
     @app.post("/api/recipes", status_code=201)

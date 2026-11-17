@@ -1931,6 +1931,9 @@ function recipeForm(draft = {}, source = "manual") {
       provenance: draft.provenance || null,
       photo_source: draft.photo_source || null,
       image_attribution: draft.image_attribution || null,
+      recipe_type: draft.recipe_type || null,
+      prep_time_minutes: draft.prep_time_minutes ?? null,
+      prep_category: draft.prep_category || null,
     };
     await api(
       isEditing ? "/recipes/" + encodeURIComponent(draft.id) : "/recipes",
@@ -1992,6 +1995,9 @@ function recipeForm(draft = {}, source = "manual") {
       provenance: draft.provenance || null,
       photo_source: draft.photo_source || null,
       image_attribution: draft.image_attribution || null,
+      recipe_type: draft.recipe_type || null,
+      prep_time_minutes: draft.prep_time_minutes ?? null,
+      prep_category: draft.prep_category || null,
     });
     const revise = button("Se over KI-forslaget", async () => {
       revise.disabled = true;
@@ -2012,7 +2018,13 @@ function recipeForm(draft = {}, source = "manual") {
             if (!response?.adapted)
               throw new Error("KI-en ga ikke et redigerbart utkast. Oppskriften din er uendret.");
             const revisedDraft = isEditing
-              ? { ...response.adapted, id: draft.id }
+              ? {
+                  recipe_type: draft.recipe_type ?? null,
+                  prep_time_minutes: draft.prep_time_minutes ?? null,
+                  prep_category: draft.prep_category ?? null,
+                  ...response.adapted,
+                  id: draft.id,
+                }
               : response.adapted;
             if (isEditing) {
               const sourceIngredients = revisionValues.ingredients.map((item) =>
@@ -2232,6 +2244,9 @@ function removeRecipeImage(recipe) {
           provenance: recipe.provenance || null,
           photo_source: recipe.photo_source || null,
           image_attribution: null,
+          recipe_type: recipe.recipe_type || null,
+          prep_time_minutes: recipe.prep_time_minutes ?? null,
+          prep_category: recipe.prep_category || null,
         });
         state.recipes = state.recipes.map((item) => item.id === recipe.id ? updated : item);
         viewRecipe(updated);

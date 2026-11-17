@@ -13,14 +13,18 @@ from .models import (
     Meal,
     MealCreate,
     PlannedMealRecipe,
+    PrepCategory,
     PurchaseEstimate,
     Recipe,
     RecipeCreate,
     RecipeTranslation,
+    RecipeType,
     RegularItem,
     ShoppingItem,
     ShoppingItemCreate,
     WeekShopping,
+    normalize_prep_category_value,
+    normalize_recipe_type_value,
 )
 from .recipes.language import detect_recipe_language
 from .recipes.source_quantities import normalize_source_quantity, source_ingredient_parts
@@ -69,8 +73,38 @@ class KitchenService:
         self.store.save("recipe", recipe)
         return recipe
 
-    def list_recipes(self) -> list[Recipe]:
-        return self.store.list("recipe", Recipe)
+    def list_recipes(
+        self,
+        recipe_type: RecipeType | str | None = None,
+        prep_category: PrepCategory | str | None = None,
+        max_prep_minutes: int | None = None,
+    ) -> list[Recipe]:
+        recipes = self.store.list("recipe", Recipe)
+        normalized_type = normalize_recipe_type_value(recipe_type)
+        if normalized_type is not None:
+            target_type = str(normalized_type).strip().casefold()
+            recipes = [
+                r
+                for r in recipes
+                if r.recipe_type is not None
+                and str(r.recipe_type).strip().casefold() == target_type
+            ]
+        normalized_category = normalize_prep_category_value(prep_category)
+        if normalized_category is not None:
+            target_category = str(normalized_category).strip().casefold()
+            recipes = [
+                r
+                for r in recipes
+                if r.prep_category is not None
+                and str(r.prep_category).strip().casefold() == target_category
+            ]
+        if max_prep_minutes is not None:
+            recipes = [
+                r
+                for r in recipes
+                if r.prep_time_minutes is not None and r.prep_time_minutes <= max_prep_minutes
+            ]
+        return recipes
 
     def get_recipe(self, recipe_id: UUID) -> Recipe:
         return self.store.get("recipe", recipe_id, Recipe)

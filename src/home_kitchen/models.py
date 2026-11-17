@@ -65,6 +65,58 @@ class RecipeSource(StrEnum):
     AI = "ai"
 
 
+class RecipeType(StrEnum):
+    MIDDAG = "middag"
+    DESSERT = "dessert"
+    FROKOST = "frokost"
+    LUNSJ = "lunsj"
+    TILBEHOR = "tilbehør"
+    BAKST = "bakst"
+    ANNET = "annet"
+
+
+class PrepCategory(StrEnum):
+    RASK = "rask"
+    NORMAL = "normal"
+    LANGTID = "langtid"
+    BATCH_COOKING = "batch_cooking"
+
+
+def normalize_recipe_type_value(value: Any) -> Any:
+    """Normalize recipe_type strings (case, whitespace, ASCII 'tilbehor' alias)."""
+    if isinstance(value, str):
+        value = value.strip().casefold()
+        if not value:
+            return None
+        if value == "tilbehor":
+            return RecipeType.TILBEHOR
+    return value
+
+
+def normalize_prep_category_value(value: Any) -> Any:
+    """Normalize prep_category strings (case, whitespace, batch-cooking aliases)."""
+    if isinstance(value, str):
+        value = value.strip().casefold()
+        if not value:
+            return None
+        if value in ("batch-cooking", "batchcooking", "batch cooking"):
+            return PrepCategory.BATCH_COOKING
+    return value
+
+
+def derive_prep_category(
+    prep_time_minutes: int | None, prep_category: PrepCategory | None
+) -> PrepCategory | None:
+    """Auto-derive prep_category from prep_time_minutes when omitted."""
+    if prep_category is None and prep_time_minutes is not None:
+        if prep_time_minutes <= 30:
+            return PrepCategory.RASK
+        if prep_time_minutes <= 75:
+            return PrepCategory.NORMAL
+        return PrepCategory.LANGTID
+    return prep_category
+
+
 class SourceIngredient(BaseModel):
     index: SourceIndex
     text: NonBlank
@@ -132,6 +184,19 @@ class RecipeCreate(BaseModel):
     photo_source: PhotoSource | None = None
     image_attribution: RecipeImageAttribution | None = None
     source_language: NonBlank | None = None
+    recipe_type: RecipeType | None = None
+    prep_time_minutes: int | None = Field(default=None, ge=1, le=2880)
+    prep_category: PrepCategory | None = None
+
+    @field_validator("recipe_type", mode="before")
+    @classmethod
+    def normalize_recipe_type(cls, value: Any) -> Any:
+        return normalize_recipe_type_value(value)
+
+    @field_validator("prep_category", mode="before")
+    @classmethod
+    def normalize_prep_category(cls, value: Any) -> Any:
+        return normalize_prep_category_value(value)
 
     @model_validator(mode="after")
     def valid_source_metadata(self) -> "RecipeCreate":
@@ -145,6 +210,7 @@ class RecipeCreate(BaseModel):
             # A caller may be editing the image URL while echoing a prior Recipe
             # response. Drop stale credit; only the selection service may attach it.
             self.image_attribution = None
+        self.prep_category = derive_prep_category(self.prep_time_minutes, self.prep_category)
         return self
 
     @field_validator("image_url")

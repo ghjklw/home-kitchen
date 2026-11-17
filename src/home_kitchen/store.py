@@ -59,6 +59,9 @@ recipes = Table(
     Column("photo_source_id", Uuid, ForeignKey("recipe_photos.id")),
     Column("image_attribution", JSONB),
     Column("source_language", Text, nullable=False, server_default="und"),
+    Column("recipe_type", Text),
+    Column("prep_time_minutes", Integer),
+    Column("prep_category", Text),
 )
 recipe_translations = Table(
     "kitchen_recipe_translations",
@@ -153,6 +156,8 @@ def entity_values(entity: BaseModel) -> dict:
         values["photo_source_id"] = entity.photo_source.id if entity.photo_source else None
         values["source_url"] = str(entity.source_url) if entity.source_url else None
         values["image_url"] = str(entity.image_url) if entity.image_url else None
+        values["recipe_type"] = str(entity.recipe_type) if entity.recipe_type else None
+        values["prep_category"] = str(entity.prep_category) if entity.prep_category else None
     return values
 
 

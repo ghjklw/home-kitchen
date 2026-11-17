@@ -70,6 +70,11 @@ COOKIDOO_LOGIN_HEADERS = {
 }
 
 DEFAULT_TRUMF_BASE_URL = "https://www.trumf.no"
+DEFAULT_TRUMF_AUTHORIZE_URL = "https://id.trumf.no/connect/authorize"
+DEFAULT_TRUMF_TOKEN_URL = "https://id.trumf.no/connect/token"
+DEFAULT_TRUMF_CLIENT_ID = "trumf"
+DEFAULT_TRUMF_SCOPE = "openid profile offline_access api.rest http://id.trumf.no/scopes/medlem"
+DEFAULT_TRUMF_REDIRECT_URI = "http://localhost:18099/api/integrations/trumf/pkce/callback"
 
 
 class PKCEStartRequest(BaseModel):
@@ -314,6 +319,11 @@ class ConnectorAuthService:
         cookidoo_redirect_uri: str = DEFAULT_COOKIDOO_REDIRECT_URI,
         cookidoo_scope: str = DEFAULT_COOKIDOO_SCOPE,
         trumf_base_url: str = DEFAULT_TRUMF_BASE_URL,
+        trumf_authorize_url: str = DEFAULT_TRUMF_AUTHORIZE_URL,
+        trumf_token_url: str = DEFAULT_TRUMF_TOKEN_URL,
+        trumf_redirect_uri: str | None = None,
+        trumf_client_id: str = DEFAULT_TRUMF_CLIENT_ID,
+        trumf_scope: str = DEFAULT_TRUMF_SCOPE,
         settings: Settings | None = None,
     ):
         self.store = store
@@ -341,6 +351,18 @@ class ConnectorAuthService:
         self.cookidoo_redirect_uri = cookidoo_redirect_uri
         self.cookidoo_scope = cookidoo_scope
         self.trumf_base_url = trumf_base_url
+        self.trumf_authorize_url = trumf_authorize_url
+        self.trumf_token_url = trumf_token_url
+        if trumf_redirect_uri is not None:
+            self.trumf_redirect_uri = trumf_redirect_uri
+        elif settings is not None and getattr(settings, "public_url", None):
+            self.trumf_redirect_uri = (
+                f"{str(settings.public_url).rstrip('/')}/api/integrations/trumf/pkce/callback"
+            )
+        else:
+            self.trumf_redirect_uri = DEFAULT_TRUMF_REDIRECT_URI
+        self.trumf_client_id = trumf_client_id
+        self.trumf_scope = trumf_scope
         self.settings = settings
         self._lock = threading.Lock()
         self._refresh_locks: dict[tuple[UUID, str, str], threading.RLock] = {}
@@ -366,12 +388,14 @@ class ConnectorAuthService:
             return self.rema1000_token_url, self.rema1000_client_id
         if provider_id == "coop":
             return self.coop_token_url, self.coop_client_id
+        if provider_id == "trumf":
+            return self.trumf_token_url, self.trumf_client_id
         if provider_id == "cookidoo":
             return (
                 f"{self.cookidoo_base_url.rstrip('/')}/token-srv/token",
                 self.cookidoo_client_id,
             )
-        if provider_id in ("trumf", "oda", "anthropic"):
+        if provider_id in ("oda", "anthropic"):
             raise HTTPException(
                 status_code=400,
                 detail=f"Tokenfornyelse støttes ikke for '{provider_id}'.",
@@ -388,8 +412,8 @@ class ConnectorAuthService:
         account_label: str | None = None,
         add_account: bool = False,
     ) -> PKCEStartResponse:
-        if provider_id not in ("rema1000", "coop"):
-            if provider_id in ("trumf", "cookidoo", "oda", "anthropic"):
+        if provider_id not in ("rema1000", "coop", "trumf"):
+            if provider_id in ("cookidoo", "oda", "anthropic"):
                 raise HTTPException(
                     status_code=400,
                     detail=f"PKCE-flyt støttes ikke for '{provider_id}'.",
@@ -408,6 +432,16 @@ class ConnectorAuthService:
             instructions = (
                 "Logg inn med din Rema 1000 Æ-konto i nettleseren. Etter innlogging, "
                 "kopier fullførings-URL-en eller autorisasjonskoden og lim den inn her."
+            )
+        elif provider_id == "trumf":
+            auth_url = self.trumf_authorize_url
+            tok_url = self.trumf_token_url
+            used_redirect_uri = redirect_uri or self.trumf_redirect_uri
+            client_id = self.trumf_client_id
+            scope = self.trumf_scope
+            instructions = (
+                "Logg inn med din Trumf-konto i nettleseren. Etter innlogging blir du "
+                "sendt automatisk tilbake hit for å fullføre tilkoblingen."
             )
         else:  # coop
             auth_url = self.coop_authorize_url
@@ -480,8 +514,8 @@ class ConnectorAuthService:
         account_label: str | None = None,
         add_account: bool = False,
     ) -> IntegrationInfo:
-        if provider_id not in ("rema1000", "coop"):
-            if provider_id in ("trumf", "cookidoo", "oda", "anthropic"):
+        if provider_id not in ("rema1000", "coop", "trumf"):
+            if provider_id in ("cookidoo", "oda", "anthropic"):
                 raise HTTPException(
                     status_code=400,
                     detail=f"PKCE-flyt støttes ikke for '{provider_id}'.",
@@ -1232,9 +1266,7 @@ class ConnectorAuthService:
     ) -> bool:
         if not creds:
             return False
-        if provider_id == "trumf":
-            if auth_mode not in TRUMF_REFRESH_MODES:
-                return False
+        if provider_id == "trumf" and auth_mode in TRUMF_REFRESH_MODES:
             raw_cookie = creds.get("session_cookie") or creds.get("cookie")
             return isinstance(raw_cookie, str) and bool(raw_cookie.strip())
         if auth_mode not in OAUTH_REFRESH_MODES:
@@ -1247,7 +1279,8 @@ class ConnectorAuthService:
         now = datetime.now(UTC)
         deadline = now + timedelta(seconds=margin_seconds)
         expires_at = getattr(status, "expires_at", None)
-        if provider_id == "trumf":
+        auth_mode = getattr(status, "auth_mode", "")
+        if provider_id == "trumf" and auth_mode in TRUMF_REFRESH_MODES:
             if expires_at is not None:
                 return expires_at <= deadline
             meta = getattr(status, "metadata", None) or {}
@@ -1270,24 +1303,29 @@ class ConnectorAuthService:
         account_id: str | None = None,
     ) -> IntegrationInfo:
         """Exchange stored refresh_token(s) or renew Trumf session cookie."""
-        is_trumf = provider_id == "trumf"
-        if is_trumf:
-            token_endpoint, client_id = "", ""
-        else:
-            token_endpoint, client_id = self._refresh_config(provider_id)
+        token_endpoint, client_id = self._refresh_config(provider_id)
 
         def refresh_one(target_account_id: str) -> None:
-            if is_trumf:
-                self._refresh_trumf_account(household_id, actor_id, target_account_id)
-            else:
-                self._refresh_single_account(
-                    household_id,
-                    actor_id,
-                    provider_id,
-                    target_account_id,
-                    token_endpoint,
-                    client_id,
+            if provider_id == "trumf":
+                meta = self.store.get_connection_metadata(
+                    household_id, provider_id, account_id=target_account_id
                 )
+                if meta is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Ingen lagret tilkobling funnet for '{provider_id}' (konto '{target_account_id}').",
+                    )
+                if meta.auth_mode in TRUMF_REFRESH_MODES:
+                    self._refresh_trumf_account(household_id, actor_id, target_account_id)
+                    return
+            self._refresh_single_account(
+                household_id,
+                actor_id,
+                provider_id,
+                target_account_id,
+                token_endpoint,
+                client_id,
+            )
 
         cleaned_account_id = account_id.strip() if isinstance(account_id, str) else None
         if cleaned_account_id:
@@ -1315,7 +1353,16 @@ class ConnectorAuthService:
             )
         ]
         if not refreshable_accounts:
-            missing_label = "sesjonsinformasjonskapsel" if is_trumf else "refresh_token"
+            if provider_id == "trumf" and all(
+                acc.auth_mode in TRUMF_REFRESH_MODES for acc in accounts
+            ):
+                missing_label = "sesjonsinformasjonskapsel"
+            elif provider_id == "trumf" and any(
+                acc.auth_mode in TRUMF_REFRESH_MODES for acc in accounts
+            ):
+                missing_label = "refresh_token eller sesjonsinformasjonskapsel"
+            else:
+                missing_label = "refresh_token"
             raise HTTPException(
                 status_code=400,
                 detail=f"Tilkoblingene for '{provider_id}' mangler {missing_label} og må kobles til på nytt.",

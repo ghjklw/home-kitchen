@@ -442,10 +442,133 @@ def test_pkce_unsupported_providers_rejected(sqlite_engine, cipher):
     app, _, _, _ = create_test_app(sqlite_engine, cipher)
     client = TestClient(app)
 
-    # Trumf and Cookidoo do not use PKCE
-    assert client.post("/api/integrations/trumf/pkce/start").status_code == 400
+    # Cookidoo, Oda, and Anthropic do not use guided PKCE
     assert client.post("/api/integrations/cookidoo/pkce/start").status_code == 400
+    assert client.post("/api/integrations/oda/pkce/start").status_code == 400
     assert client.post("/api/integrations/unknown_foo/pkce/start").status_code == 404
+
+
+def test_trumf_pkce_start_callback_and_refresh_flow(sqlite_engine, cipher):
+    captured_requests: list[httpx.Request] = []
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        captured_requests.append(request)
+        if str(request.url) == "https://id.trumf.no/connect/token":
+            body = urllib.parse.parse_qs(request.read().decode())
+            if body.get("grant_type") == ["authorization_code"]:
+                return httpx.Response(
+                    200,
+                    json={
+                        "access_token": "trumf-access-123",
+                        "refresh_token": "trumf-refresh-456",
+                        "expires_in": 3600,
+                        "token_type": "Bearer",
+                    },
+                )
+            if body.get("grant_type") == ["refresh_token"]:
+                return httpx.Response(
+                    200,
+                    json={
+                        "access_token": "trumf-access-rotated-789",
+                        "refresh_token": "trumf-refresh-rotated-012",
+                        "expires_in": 7200,
+                        "token_type": "Bearer",
+                    },
+                )
+        return httpx.Response(404)
+
+    app, auth_service, store, household_id = create_test_app(
+        sqlite_engine, cipher, mock_transport=httpx.MockTransport(mock_handler)
+    )
+    client = TestClient(app, follow_redirects=False)
+
+    # 1. Start Trumf PKCE -> defaults to http://localhost:18099/api/integrations/trumf/pkce/callback
+    start_resp = client.post("/api/integrations/trumf/pkce/start")
+    assert start_resp.status_code == 200
+    start_data = start_resp.json()
+    assert start_data["provider_id"] == "trumf"
+    assert (
+        start_data["redirect_uri"] == "http://localhost:18099/api/integrations/trumf/pkce/callback"
+    )
+    parsed_auth = urllib.parse.urlsplit(start_data["authorize_url"])
+    assert parsed_auth.netloc == "id.trumf.no"
+    assert parsed_auth.path == "/connect/authorize"
+    query = urllib.parse.parse_qs(parsed_auth.query)
+    assert query["client_id"] == ["trumf"]
+    assert query["redirect_uri"] == ["http://localhost:18099/api/integrations/trumf/pkce/callback"]
+    assert query["scope"] == [
+        "openid profile offline_access api.rest http://id.trumf.no/scopes/medlem"
+    ]
+    assert query["code_challenge_method"] == ["S256"]
+
+    # 2. Callback completes PKCE and redirects to /#settings
+    cb_resp = client.get(
+        f"/api/integrations/trumf/pkce/callback?code=trumf-auth-code-1&state={start_data['state']}"
+    )
+    assert cb_resp.status_code == 302
+    assert cb_resp.headers["location"] == "/#settings"
+
+    creds = store.get_credentials(household_id, "trumf")
+    assert creds is not None
+    assert creds["access_token"] == "trumf-access-123"
+    assert creds["refresh_token"] == "trumf-refresh-456"
+
+    meta = store.get_connection_metadata(household_id, "trumf")
+    assert meta is not None
+    assert meta.auth_mode == "oauth_pkce"
+    assert meta.expires_at is not None
+
+    # Integrations endpoint exposes oauth_pkce & refresh_available=True without secrets
+    integrations = {item["id"]: item for item in client.get("/api/integrations").json()}
+    trumf_info = integrations["trumf"]
+    assert trumf_info["status"] == "connected"
+    assert trumf_info["auth_mode"] == "oauth_pkce"
+    assert trumf_info["auth_type"] == "oauth_pkce"
+    assert trumf_info["accounts"][0]["refresh_available"] is True
+    assert "trumf-access-123" not in json.dumps(trumf_info)
+    assert "trumf-refresh-456" not in json.dumps(trumf_info)
+
+    # 3. Refresh endpoint uses standard OAuth2 refresh_token grant against id.trumf.no
+    refresh_resp = client.post("/api/integrations/trumf/refresh")
+    assert refresh_resp.status_code == 200
+    refresh_info = refresh_resp.json()
+    assert refresh_info["auth_mode"] == "oauth_pkce"
+    assert refresh_info["accounts"][0]["refresh_available"] is True
+    assert "trumf-access-rotated-789" not in json.dumps(refresh_info)
+
+    updated_creds = store.get_credentials(household_id, "trumf")
+    assert updated_creds is not None
+    assert updated_creds["access_token"] == "trumf-access-rotated-789"
+    assert updated_creds["refresh_token"] == "trumf-refresh-rotated-012"
+
+    # 4. Background refresh_expiring_connections picks up expiring Trumf oauth_pkce account
+    store.save_connection(
+        household_id=household_id,
+        provider_id="trumf",
+        auth_mode="oauth_pkce",
+        credentials={"access_token": "stale", "refresh_token": "trumf-refresh-rotated-012"},
+        expires_at=datetime.now(UTC) + timedelta(seconds=60),
+        actor_id="malo",
+    )
+    refreshed = auth_service.refresh_expiring_connections(margin_seconds=900)
+    assert refreshed == ["trumf"]
+
+    # 5. public_url setting overrides Trumf default redirect_uri cleanly
+    custom_settings = Settings(
+        local_dev=True,
+        public_url="http://localhost:19000",
+        database_url=SecretStr("postgresql+psycopg://user:pwd@localhost/db"),
+    )
+    custom_auth = ConnectorAuthService(
+        store=store,
+        integrations=auth_service.integrations,
+        household_id=household_id,
+        settings=custom_settings,
+    )
+    custom_start = custom_auth.start_pkce("trumf", household_id)
+    assert (
+        custom_start.redirect_uri == "http://localhost:19000/api/integrations/trumf/pkce/callback"
+    )
 
 
 # =============================================================================

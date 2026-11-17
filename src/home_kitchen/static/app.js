@@ -2961,8 +2961,9 @@ function recipeCollectionForm(resumeJobId = null, initialProvider = null) {
     const providerName = isCookidoo ? "Cookidoo" : "Oda";
     const collectionChoices = isCookidoo
       ? [
-          ["custom", "Mine samlinger"],
-          ["managed", "Cookidoo-samlinger"],
+          ["saved", "Lagrede oppskrifter"],
+          ["created", "Egne oppskrifter"],
+          ["bookmarks", "Bokmerker"],
         ]
       : [
           ["liked", "Oppskrifter jeg liker"],
@@ -6375,11 +6376,14 @@ function openConnectorModal(integration, options = {}) {
     step2.hidden = true;
     step2.style.display = "none";
     add(step2, el("h3", "Trinn 2: Fullfør tilkobling"));
+    const step2Instruction = integration.id === "coop"
+      ? "Etter innlogging blir du sendt videre til no.coop.members://auth/callback?... (eller tilbake hit). Kopier hele denne omdirigerings-URL-en (eller autorisasjonskoden) og lim den inn her."
+      : "Kopier hele nettadressen (URL) fra adressefeltet eller autorisasjonskoden etter fullført innlogging, og lim den inn her.";
     add(
       step2,
       el(
         "p",
-        "Kopier hele nettadressen (URL) fra adressefeltet eller autorisasjonskoden etter fullført innlogging, og lim den inn her.",
+        step2Instruction,
         "muted",
       ),
     );
@@ -6571,7 +6575,7 @@ function openConnectorModal(integration, options = {}) {
       step1,
       el(
         "p",
-        "Åpne Trumf i en ny fane, logg inn med BankID eller SMS, og kopier deretter sesjonsinformasjonskapselen (f.eks. trumf_session eller __Secure-authjs.session-token).",
+        "Åpne Trumf i en ny fane og logg inn med BankID eller SMS. Åpne deretter Nettverk-fanen i nettleserens utviklerverktøy, velg en forespørsel mot www.trumf.no, og kopier hele Cookie-forespørselsheaderen (slik at alle deler som __Secure-authjs.session-token.0 og __Secure-authjs.session-token.1 blir med og automatisk fornyelse fungerer).",
         "muted",
       ),
     );
@@ -6589,7 +6593,7 @@ function openConnectorModal(integration, options = {}) {
       "Informasjonskapsel (cookie)",
       "password",
       "",
-      "Lim inn Trumf-informasjonskapsel fra en innlogget nettleser",
+      "Lim inn full Cookie-header (inkludert alle __Secure-authjs.session-token-deler)",
     );
     const expiryField = field("Utløpsdato (valgfritt)", "date", "");
     add(form, cookieField.wrap, expiryField.wrap);

@@ -307,8 +307,8 @@ def test_normalize_cookidoo_recipe_handles_variants_and_sanitizes_images():
     assert entry.provider == "cookidoo"
     assert entry.title == "Kremet blomkålsuppe"
     assert entry.servings == 6
-    assert entry.source_url == "https://cookidoo.no/recipes/recipe/nb-NO/r12345"
-    assert entry.image_url == "https://cookidoo.no/images/r12345.jpg"
+    assert entry.source_url == "https://cookidoo.international/recipes/recipe/nb-NO/r12345"
+    assert entry.image_url == "https://cookidoo.international/images/r12345.jpg"
     assert entry.ingredients == ["500 g blomkål", "2 dl fløte", "1 ts salt"]
     assert entry.instructions == [
         "Kutt blomkål i buketter.",
@@ -364,6 +364,8 @@ def test_cookidoo_provider_credentials_fencing_and_url_validation(connector_stor
 
     # URL validation
     for valid_url in (
+        "https://cookidoo.international/recipes/recipe/nb-NO/r100",
+        "https://cookidoo.international/created-recipes/nb-NO/c1",
         "https://cookidoo.no/recipes/recipe/nb-NO/r100",
         "https://cookidoo.de/recipes/recipe/de-DE/r200",
         "https://cookidoo.thermomix.com/recipes/recipe/en-US/r300",
@@ -542,7 +544,7 @@ def test_rest_api_cookidoo_preview_import_and_provider_isolation(sqlite_engine, 
                         {
                             "id": "r2",
                             "title": "Pannekaker",
-                            "url": "https://cookidoo.no/recipes/recipe/nb-NO/r2",
+                            "url": "https://cookidoo.international/recipes/recipe/nb-NO/r2",
                         },
                     ],
                 },
@@ -643,8 +645,8 @@ def test_rest_api_cookidoo_preview_import_and_provider_isolation(sqlite_engine, 
         assert len(saved_rows) == 2
         assert {row.source for row in saved_rows} == {RecipeSource.COOKIDOO}
         assert {row.source_url for row in saved_rows} == {
-            "https://cookidoo.no/recipes/recipe/nb-NO/r1",
-            "https://cookidoo.no/recipes/recipe/nb-NO/r2",
+            "https://cookidoo.international/recipes/recipe/nb-NO/r1",
+            "https://cookidoo.international/recipes/recipe/nb-NO/r2",
         }
         assert {row.provider for row in link_rows} == {"cookidoo"}
 
@@ -753,3 +755,50 @@ async def test_mcp_cookidoo_collection_tools_are_provider_and_actor_scoped(sqlit
                 await mcp.call_tool("get_recipe_collection_preview", {"job_id": job_id})
         finally:
             history_context.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_cookidoo_domain_resolution_uses_international_for_norway(connector_store):
+    from home_kitchen.cookidoo_recipes import (
+        DEFAULT_COOKIDOO_NO_URL,
+        _cookidoo_domain_for_country,
+    )
+
+    assert DEFAULT_COOKIDOO_NO_URL == "https://cookidoo.international"
+    for country in (None, "", "no", "NO", "nb", "nn", "nb-no", "international"):
+        assert _cookidoo_domain_for_country(country) == "cookidoo.international"
+    assert _cookidoo_domain_for_country("de") == "cookidoo.de"
+
+    hid = uuid4()
+    _save_cookidoo_connection(connector_store, hid, country="no")
+    hosts_seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hosts_seen.append(request.url.host)
+        if request.url.path == "/api/v2/user/recipes":
+            return httpx.Response(
+                200,
+                json={"hasMore": False, "recipes": [{"id": "r42", "title": "Fiskesuppe"}]},
+            )
+        if request.url.path == "/api/v2/recipes/r42":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "r42",
+                    "title": "Fiskesuppe",
+                    "ingredients": ["400 g laks"],
+                    "instructions": ["Kok opp kraft"],
+                },
+            )
+        return httpx.Response(404)
+
+    provider = CookidooCollectionProvider(
+        connector_store, hid, transport=httpx.MockTransport(handler)
+    )
+    page = await provider.page("malo", "saved", 1, 20)
+    assert hosts_seen == ["cookidoo.international"]
+    assert page.entries[0].source_url == "https://cookidoo.international/recipes/recipe/nb-NO/r42"
+
+    draft = await provider.extract_entry(page.entries[0])
+    assert hosts_seen == ["cookidoo.international", "cookidoo.international"]
+    assert str(draft.source_url) == "https://cookidoo.international/recipes/recipe/nb-NO/r42"

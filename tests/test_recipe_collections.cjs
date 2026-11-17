@@ -166,14 +166,14 @@ test("supports Cookidoo provider normalization, progress text, and connection gu
     job_id: "job-cookidoo-1",
     provider: "cookidoo",
     status: "previewing",
-    kinds: ["custom", "managed"],
+    kinds: ["saved", "created", "bookmarks"],
     entries: [{ id: "c-1", provider: "cookidoo", title: "Risotto", status: "pending" }],
     pages_read: 2,
     processed: 0,
     total: 1,
   });
   assert.equal(cookidooJob.provider, "cookidoo");
-  assert.deepEqual(cookidooJob.kinds, ["custom", "managed"]);
+  assert.deepEqual(cookidooJob.kinds, ["saved", "created", "bookmarks"]);
   assert.equal(progress(cookidooJob), "Hentet 2 Cookidoo-sider · 1 oppskrifter funnet …");
   assert.equal(progress({ ...cookidooJob, pages_read: 0 }), "Henter oppskrifter fra Cookidoo …");
 
@@ -372,7 +372,7 @@ test("DOM: recipeCollectionForm provides unified Oda / Cookidoo tabs and sends p
   assert.deepEqual(JSON.parse(JSON.stringify(harness.apiCalls[0])), {
     path: "/recipe-collections",
     method: "POST",
-    body: { provider: "cookidoo", kinds: ["custom", "managed"] },
+    body: { provider: "cookidoo", kinds: ["saved", "created", "bookmarks"] },
   });
   assert.equal(harness.root.querySelectorAll(".collection-entry").length, 1);
 });

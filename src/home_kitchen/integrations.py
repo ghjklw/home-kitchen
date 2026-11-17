@@ -14,8 +14,9 @@ from home_kitchen.settings import Settings
 if TYPE_CHECKING:
     from home_kitchen.connector_store import ConnectorStore
 
-_REFRESHABLE_PROVIDERS = frozenset({"rema1000", "coop", "cookidoo"})
+_REFRESHABLE_PROVIDERS = frozenset({"rema1000", "coop", "cookidoo", "trumf"})
 _OAUTH_REFRESH_MODES = frozenset({"oauth_pkce", "oauth_password"})
+_TRUMF_REFRESH_MODES = frozenset({"session_cookie", "interactive_otp", "manual_session_cookie"})
 
 
 def _parse_optional_datetime(val: Any) -> datetime | None:
@@ -230,11 +231,28 @@ class StoredConnectorIntegration:
         meta = getattr(conn_status, "metadata", None) or {}
         if not isinstance(meta, dict):
             meta = {}
-        can_refresh = (
-            self.provider_id in _REFRESHABLE_PROVIDERS and auth_mode in _OAUTH_REFRESH_MODES
-        )
-        if can_refresh and "has_refresh_token" in meta:
-            can_refresh = bool(meta["has_refresh_token"])
+        account_id = str(getattr(conn_status, "account_id", "default") or "default")
+        if self.provider_id == "trumf" and auth_mode in _TRUMF_REFRESH_MODES:
+            can_refresh = False
+            if "has_session_cookie" in meta:
+                can_refresh = bool(meta["has_session_cookie"])
+            elif self.store is not None and self.household_id is not None:
+                get_creds_fn = getattr(self.store, "get_credentials", None)
+                if callable(get_creds_fn):
+                    creds = get_creds_fn(
+                        self.household_id,
+                        self.provider_id,
+                        account_id=account_id,
+                    )
+                    if isinstance(creds, dict):
+                        raw_cookie = creds.get("session_cookie") or creds.get("cookie")
+                        can_refresh = isinstance(raw_cookie, str) and bool(raw_cookie.strip())
+        else:
+            can_refresh = (
+                self.provider_id in _REFRESHABLE_PROVIDERS and auth_mode in _OAUTH_REFRESH_MODES
+            )
+            if can_refresh and "has_refresh_token" in meta:
+                can_refresh = bool(meta["has_refresh_token"])
 
         last_err_raw = meta.get("last_error")
         last_error = str(last_err_raw) if isinstance(last_err_raw, str) and last_err_raw else None
@@ -246,7 +264,7 @@ class StoredConnectorIntegration:
         )
 
         return IntegrationAccountInfo(
-            account_id=str(getattr(conn_status, "account_id", "default") or "default"),
+            account_id=account_id,
             account_label=getattr(conn_status, "account_label", None),
             auth_mode=auth_mode,
             auth_type=auth_mode,

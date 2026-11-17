@@ -998,3 +998,34 @@ test("renderConnectionSettings renders per-account rows, actions, and add-anothe
     body: undefined,
   });
 });
+
+test("Coop modal explains no.coop.members://auth/callback and Trumf modal explains full Cookie header", async () => {
+  const harness = setupModalHarness(async (path) => {
+    if (path === "/integrations/coop/pkce/start") {
+      return { authorize_url: "https://login.coop.no/authorize?client_id=7WrQEdeXwUudArpQVjmZEvrTgVs1WkRr" };
+    }
+    return { status: "connected" };
+  });
+
+  harness.openConnectorModal({ id: "coop", name: "Coop" });
+  const coopText = harness.modalContent.textContent;
+  assert.match(coopText, /no\.coop\.members:\/\/auth\/callback/);
+  assert.doesNotMatch(coopText, /minside\.coop\.no/);
+
+  await harness.findButton("Åpne innlogging").click();
+  const coopStep2 = harness.modalContent.querySelectorAll("form").find((f) => f.className.includes("connector-step-2"));
+  const pasteInput = harness.findInput("Lim inn nettadressen eller koden etter innlogging");
+  pasteInput.value = "no.coop.members://auth/callback?code=coop-app-code&state=state-1";
+  await coopStep2.submit();
+  assert.deepEqual(harness.calls[1], {
+    path: "/integrations/coop/pkce/complete",
+    method: "POST",
+    body: { redirect_url: "no.coop.members://auth/callback?code=coop-app-code&state=state-1" },
+  });
+
+  harness.openConnectorModal({ id: "trumf", name: "Trumf" });
+  const trumfText = harness.modalContent.textContent;
+  assert.match(trumfText, /Cookie/);
+  assert.match(trumfText, /__Secure-authjs\.session-token\.0/);
+  assert.match(trumfText, /__Secure-authjs\.session-token\.1/);
+});

@@ -202,6 +202,9 @@ def test_cipher_missing_in_production_returns_none():
 def build_test_app(sqlite_engine, cipher, actor_id="malo"):
     from types import SimpleNamespace
 
+    import httpx
+
+    from home_kitchen.connector_auth import ConnectorAuthService
     from home_kitchen.feature_api import feature_router
     from home_kitchen.integrations import (
         AIIntegration,
@@ -239,9 +242,24 @@ def build_test_app(sqlite_engine, cipher, actor_id="malo"):
         ]
     )
 
+    connector_auth = ConnectorAuthService(
+        store=store,
+        integrations=registry,
+        household_id=household_id,
+        transport=httpx.MockTransport(
+            lambda request: (
+                httpx.Response(200, json={"user": {"name": "Malo"}})
+                if request.url.path == "/api/auth/session"
+                else httpx.Response(404)
+            )
+        ),
+        settings=settings,
+    )
+
     features = SimpleNamespace(
         integrations=registry,
         connector_store=store,
+        connector_auth=connector_auth,
         household_id=household_id,
         oda=MockOda(),
     )

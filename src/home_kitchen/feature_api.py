@@ -446,6 +446,19 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
                 400, "Oppskriftsassistenten konfigureres i miljøet av administratoren"
             )
         auth_mode, credentials = _extract_credentials(provider_id, data)
+        if provider_id == "trumf":
+            try:
+                return get_connector_auth().connect_trumf_cookie(
+                    household_id=features.household_id,
+                    actor_id=actor,
+                    raw_cookie=credentials["session_cookie"],
+                    expires_at=data.expires_at,
+                    account_id=data.account_id,
+                    account_label=data.account_label,
+                    add_account=data.add_account,
+                )
+            except RuntimeError as exc:
+                raise HTTPException(503, str(exc)) from None
         try:
             features.connector_store.save_connection(
                 household_id=features.household_id,

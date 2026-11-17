@@ -308,6 +308,8 @@ def test_api_multi_account_lifecycle_pkce_trumf_and_delete(sqlite_engine, cipher
                     "expires_in": 86400 * 30,
                 },
             )
+        if request.url.path == "/api/auth/session":
+            return httpx.Response(200, json={"user": {"name": "Trumf User"}})
         return httpx.Response(404)
 
     app, store, _, hid = build_multi_account_app(

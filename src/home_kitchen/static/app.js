@@ -6640,16 +6640,49 @@ function openConnectorModal(integration, options = {}) {
 
     const primaryStep = el("div", null, "connector-step connector-trumf-cookie stack");
     add(primaryStep, el("h3", "Sesjonsinformasjonskapsel"));
+    const instructions = el("ol", null, "muted stack");
     add(
-      primaryStep,
-      el(
-        "p",
-        "Åpne Trumf i en ny fane og logg inn med BankID eller SMS. Kopier deretter enten hele Cookie-headeren fra Nettverk-fanen, eller fyll inn begge delene (__Secure-authjs.session-token.0 og __Secure-authjs.session-token.1) fra Applikasjon → Informasjonskapsler slik at automatisk fornyelse via /api/auth/session fungerer.",
-        "muted",
+      instructions,
+      add(
+        el("li"),
+        "Åpne ",
+        el("code", "https://www.trumf.no/trumf-profil/kvitteringer"),
+        " og logg inn.",
+      ),
+      add(
+        el("li"),
+        "Trykk ",
+        el("code", "F12"),
+        " → fanen ",
+        el("strong", "Network"),
+        " → trykk ",
+        el("code", "F5"),
+        " for å laste siden på nytt.",
+      ),
+      add(
+        el("li"),
+        "Klikk på den første forespørselen (",
+        el("code", "kvitteringer"),
+        " eller ",
+        el("code", "session"),
+        ").",
+      ),
+      add(
+        el("li"),
+        "Under ",
+        el("strong", "Headers → Request Headers"),
+        ", finn ",
+        add(el("strong"), el("code", "Cookie:")),
+        " (ikke ",
+        el("code", "Set-Cookie"),
+        "), høyreklikk verdien → ",
+        el("strong", "Copy value"),
+        ", og lim den inn her.",
       ),
     );
+    add(primaryStep, instructions);
     const openBtn = button("Åpne Trumf-innlogging", () => {
-      window.open("https://www.trumf.no/", "_blank", "noopener,noreferrer");
+      window.open("https://www.trumf.no/trumf-profil/kvitteringer", "_blank", "noopener,noreferrer");
     }, "quiet");
     add(primaryStep, add(el("div", null, "actions"), openBtn));
 
@@ -6659,47 +6692,24 @@ function openConnectorModal(integration, options = {}) {
       "Informasjonskapsel (cookie)",
       "password",
       "",
-      "Lim inn full Cookie-header (inkludert alle __Secure-authjs.session-token-deler)",
-    );
-    const token0Field = field(
-      "__Secure-authjs.session-token.0 (valgfritt)",
-      "password",
-      "",
-      "Lim inn del 0 fra DevTools → Applikasjon → Cookies",
-    );
-    const token1Field = field(
-      "__Secure-authjs.session-token.1 (valgfritt)",
-      "password",
-      "",
-      "Lim inn del 1 fra DevTools → Applikasjon → Cookies",
+      "Lim inn hele Cookie:-verdien fra Request Headers (ikke Set-Cookie)",
     );
     const expiryField = field("Utløpsdato (valgfritt)", "date", "");
-    add(form, cookieField.wrap, token0Field.wrap, token1Field.wrap, expiryField.wrap);
+    add(form, cookieField.wrap, expiryField.wrap);
 
     formSubmit(form, "Lagre og koble til", async () => {
       const cookieVal = cookieField.input.value.trim();
-      const token0Val = token0Field.input.value.trim();
-      const token1Val = token1Field.input.value.trim();
       let basePayload = null;
       if (typeof window.KitchenSettingsView?.buildTrumfConnectPayload === "function") {
         basePayload = window.KitchenSettingsView.buildTrumfConnectPayload(
           cookieVal,
           expiryField.input.value,
-          token0Val,
-          token1Val,
         );
-      } else {
-        const parts = [];
-        if (cookieVal) parts.push(cookieVal);
-        if (token0Val) parts.push(`__Secure-authjs.session-token.0=${token0Val}`);
-        if (token1Val) parts.push(`__Secure-authjs.session-token.1=${token1Val}`);
-        const combined = parts.join("; ").trim();
-        if (combined) {
-          basePayload = {
-            auth_mode: "session_cookie",
-            session_cookie: combined,
-          };
-        }
+      } else if (cookieVal) {
+        basePayload = {
+          auth_mode: "session_cookie",
+          session_cookie: cookieVal,
+        };
       }
       if (!basePayload) {
         throw new Error("Vennligst oppgi informasjonskapsel for Trumf.");

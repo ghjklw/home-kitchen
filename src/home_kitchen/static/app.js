@@ -6350,22 +6350,30 @@ async function disconnectConnectorAccount(providerId, accountId, accountName) {
 }
 async function refreshConnectorAccount(integration, account) {
   try {
-    await api(
-      `/integrations/${integration.id}/refresh?account_id=${encodeURIComponent(account.account_id)}`,
-      "POST",
-    );
+    const query = account?.account_id
+      ? `?account_id=${encodeURIComponent(account.account_id)}`
+      : "";
+    await api(`/integrations/${integration.id}/refresh${query}`, "POST");
     await loadConnectionStatus();
     await refreshView();
-    const label = window.KitchenSettingsView?.accountDisplayName
-      ? window.KitchenSettingsView.accountDisplayName(account)
-      : (account.account_label || account.account_id);
-    notify(`${integration.name || integration.id} (${label}) er fornyet.`);
+    const label = account
+      ? (window.KitchenSettingsView?.accountDisplayName
+          ? window.KitchenSettingsView.accountDisplayName(account)
+          : (account.account_label || account.account_id))
+      : null;
+    notify(
+      label
+        ? `${integration.name || integration.id} (${label}) er fornyet.`
+        : `${integration.name || integration.id} er fornyet.`,
+    );
   } catch (error) {
-    notify(error.message, true);
-    openConnectorModal(integration, {
-      accountId: account.account_id,
-      accountLabel: account.account_label || "",
-    });
+    notify(error?.message || "Kunne ikke fornye tilkoblingen.", true);
+    try {
+      await loadConnectionStatus();
+      await refreshView();
+    } catch {
+      // Best-effort UI refresh after failure notification
+    }
   }
 }
 function openConnectorModal(integration, options = {}) {
@@ -6727,85 +6735,6 @@ function openConnectorModal(integration, options = {}) {
     });
     add(primaryStep, form);
     add(container, primaryStep);
-
-    const supportsOtp =
-      !Array.isArray(integration.supported_auth_modes) ||
-      integration.supported_auth_modes.includes("interactive_otp");
-    if (supportsOtp) {
-      const otpDetails = el("details", null, "connector-manual-details");
-      add(otpDetails, el("summary", "Bekreft med SMS-kode"));
-
-      const otpBody = el("div", null, "stack");
-      add(
-        otpBody,
-        el(
-          "p",
-          "Alternativt kan du logge inn med telefonnummer og engangskode på SMS hvis Trumf støtter det.",
-          "muted",
-        ),
-      );
-      let activeOtpSessionId = null;
-      const phoneForm = el("form", null, "stack connector-trumf-otp-start");
-      phoneForm.autocomplete = "off";
-      const phoneField = field("Telefonnummer", "tel", "", "F.eks. +4790000000");
-      add(phoneForm, phoneField.wrap);
-
-      const verifyForm = el("form", null, "stack connector-trumf-otp-verify");
-      verifyForm.autocomplete = "off";
-      verifyForm.hidden = true;
-      verifyForm.style.display = "none";
-      const otpField = field("Engangskode fra SMS", "text", "", "6-sifret kode");
-      const otpNotice = el("p", "", "callout info");
-      otpNotice.hidden = true;
-      add(verifyForm, otpNotice, otpField.wrap);
-
-      formSubmit(phoneForm, "Send SMS-kode", async () => {
-        const phone = phoneField.input.value.trim();
-        if (!phone) {
-          throw new Error("Vennligst oppgi telefonnummer for Trumf.");
-        }
-        const res = await api("/integrations/trumf/login/start", "POST", {
-          phone,
-          ...accountMetaPayload(),
-        });
-        if (!res?.session_id) {
-          throw new Error("Mottok ingen sesjons-ID fra Trumf.");
-        }
-        activeOtpSessionId = res.session_id;
-        otpNotice.textContent = res.detail || "Engangskode er sendt på SMS til ditt telefonnummer.";
-        otpNotice.hidden = false;
-        verifyForm.hidden = false;
-        verifyForm.style.display = "";
-        otpField.input.focus();
-      });
-
-      formSubmit(verifyForm, "Bekreft med SMS-kode", async () => {
-        const otp = otpField.input.value.trim();
-        if (!activeOtpSessionId || !otp) {
-          throw new Error("Vennligst oppgi engangskoden fra SMS.");
-        }
-        const basePayload =
-          typeof window.KitchenSettingsView?.buildTrumfVerifyPayload === "function"
-            ? window.KitchenSettingsView.buildTrumfVerifyPayload(activeOtpSessionId, otp)
-            : { session_id: activeOtpSessionId, otp };
-        if (!basePayload) {
-          throw new Error("Vennligst oppgi engangskoden fra SMS.");
-        }
-        await api("/integrations/trumf/login/verify", "POST", {
-          ...basePayload,
-          ...accountMetaPayload(),
-        });
-        const modal = $("#modal");
-        if (modal && modal.open) modal.close();
-        await loadConnectionStatus();
-        await refreshView();
-        notify(`${integration.name || integration.id} er tilkoblet.`);
-      });
-
-      add(otpBody, phoneForm, verifyForm);
-      add(otpDetails, otpBody);
-      add(container, otpDetails);
-    }
 
   } else {
     add(container, accountLabelField.wrap);
@@ -7487,21 +7416,40 @@ function renderConnectionSettings() {
             add(accRow, el("p", account.last_error, "callout danger connection-expiry"));
           }
           const accActions = add(el("div", null, "actions connection-account-actions"));
+          if (account.refresh_available) {
+            add(
+              accActions,
+              button(
+                "Forny",
+                () => refreshConnectorAccount(integration, account),
+                account.status === "expired" ? "primary" : "quiet",
+              ),
+              button(
+                "Koble til på nytt",
+                () =>
+                  openConnectorModal(integration, {
+                    accountId: account.account_id,
+                    accountLabel: account.account_label || "",
+                  }),
+                "quiet",
+              ),
+            );
+          } else {
+            add(
+              accActions,
+              button(
+                "Koble til på nytt",
+                () =>
+                  openConnectorModal(integration, {
+                    accountId: account.account_id,
+                    accountLabel: account.account_label || "",
+                  }),
+                account.status === "expired" ? "primary" : "quiet",
+              ),
+            );
+          }
           add(
             accActions,
-            button(
-              "Forny",
-              () => {
-                if (account.refresh_available) {
-                  return refreshConnectorAccount(integration, account);
-                }
-                openConnectorModal(integration, {
-                  accountId: account.account_id,
-                  accountLabel: account.account_label || "",
-                });
-              },
-              account.status === "expired" ? "primary" : "quiet",
-            ),
             button(
               "Koble fra",
               () => disconnectConnectorAccount(integration.id, account.account_id, accName),
@@ -7523,17 +7471,38 @@ function renderConnectionSettings() {
         );
         add(row, actions);
       } else {
+        if (integration.last_error) {
+          add(row, el("p", integration.last_error, "callout danger connection-expiry"));
+        }
+        const supportsRefresh =
+          typeof integration.refresh_available === "boolean"
+            ? integration.refresh_available
+            : accounts.some((account) => Boolean(account?.refresh_available));
         const actions = add(el("div", null, "actions connection-actions"));
         if (status === "connected") {
+          if (supportsRefresh) {
+            add(actions, button("Forny", () => refreshConnectorAccount(integration, null), "quiet"));
+          }
           add(
             actions,
             button("Oppdater tilkobling", () => openConnectorModal(integration), "quiet"),
             button("Koble fra", () => disconnectConnector(integration.id, integration.name), "quiet danger"),
           );
         } else if (status === "expired") {
+          if (supportsRefresh) {
+            add(
+              actions,
+              button("Forny tilkobling", () => refreshConnectorAccount(integration, null), "primary"),
+              button("Koble til på nytt", () => openConnectorModal(integration), "quiet"),
+            );
+          } else {
+            add(
+              actions,
+              button("Forny tilkobling", () => openConnectorModal(integration), "primary"),
+            );
+          }
           add(
             actions,
-            button("Forny tilkobling", () => openConnectorModal(integration), "primary"),
             button("Koble fra", () => disconnectConnector(integration.id, integration.name), "quiet danger"),
           );
         } else {

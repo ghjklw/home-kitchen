@@ -705,15 +705,9 @@ test("Cookidoo manual cookie fallback details form calls connect endpoint", asyn
   assert.deepEqual(harness.notices, ["Cookidoo / Thermomix TM6 er tilkoblet."]);
 });
 
-test("Trumf primary session cookie flow uses single Cookie-header field and optional SMS OTP", async () => {
+test("Trumf primary session cookie flow uses single Cookie-header field without SMS OTP", async () => {
   const harness = setupModalHarness(async (path, method, body) => {
     if (path === "/integrations/trumf/connect") {
-      return { status: "connected" };
-    }
-    if (path === "/integrations/trumf/login/start") {
-      return { session_id: "otp-sess-1", detail: "Engangskode er sendt på SMS." };
-    }
-    if (path === "/integrations/trumf/login/verify") {
       return { status: "connected" };
     }
     throw new Error("Unexpected endpoint " + path);
@@ -722,11 +716,26 @@ test("Trumf primary session cookie flow uses single Cookie-header field and opti
   harness.openConnectorModal({
     id: "trumf",
     name: "Trumf",
-    supported_auth_modes: ["session_cookie", "interactive_otp"],
+    supported_auth_modes: ["session_cookie"],
   });
 
-  // No OAuth PKCE dead-end button
+  // No OAuth PKCE dead-end button and no SMS OTP section
   assert.equal(harness.findButton("Koble til med Trumf-konto (OAuth PKCE)"), null);
+  assert.equal(harness.findDetails("Bekreft med SMS-kode"), null);
+  assert.equal(harness.findInput("Telefonnummer"), null);
+  assert.equal(harness.findInput("Engangskode fra SMS"), null);
+  assert.equal(
+    harness.modalContent
+      .querySelectorAll("form")
+      .find((f) => f.className.includes("connector-trumf-otp-start")),
+    undefined,
+  );
+  assert.equal(
+    harness.modalContent
+      .querySelectorAll("form")
+      .find((f) => f.className.includes("connector-trumf-otp-verify")),
+    undefined,
+  );
 
   // Primary session cookie section (not collapsed inside <details>)
   const primarySection = harness.modalContent.querySelectorAll(".connector-trumf-cookie")[0];
@@ -777,38 +786,7 @@ test("Trumf primary session cookie flow uses single Cookie-header field and opti
     },
   });
 
-  // 3. Optional secondary SMS OTP flow
-  const otpDetails = harness.findDetails("Bekreft med SMS-kode");
-  assert.ok(otpDetails, "Optional secondary 'Bekreft med SMS-kode' details is present");
-  harness.openConnectorModal({
-    id: "trumf",
-    name: "Trumf",
-    supported_auth_modes: ["session_cookie", "interactive_otp"],
-  });
-  const phoneInput = harness.findInput("Telefonnummer");
-  phoneInput.value = "+4790000000";
-  const phoneForm = harness.modalContent
-    .querySelectorAll("form")
-    .find((f) => f.className.includes("connector-trumf-otp-start"));
-  await phoneForm.submit();
-  assert.deepEqual(harness.calls[1], {
-    path: "/integrations/trumf/login/start",
-    method: "POST",
-    body: { phone: "+4790000000" },
-  });
-  const otpInput = harness.findInput("Engangskode fra SMS");
-  otpInput.value = "123456";
-  const verifyForm = harness.modalContent
-    .querySelectorAll("form")
-    .find((f) => f.className.includes("connector-trumf-otp-verify"));
-  await verifyForm.submit();
-  assert.deepEqual(harness.calls[2], {
-    path: "/integrations/trumf/login/verify",
-    method: "POST",
-    body: { session_id: "otp-sess-1", otp: "123456" },
-  });
-
-  // 4. Test validation error when cookie field is empty
+  // 3. Test validation error when cookie field is empty
   const errHarness = setupModalHarness(async () => ({}));
   errHarness.openConnectorModal({ id: "trumf", name: "Trumf" });
   const errPrimary = errHarness.modalContent.querySelectorAll(".connector-trumf-cookie")[0];
@@ -969,6 +947,7 @@ test("renderConnectionSettings renders per-account rows, actions, and add-anothe
 
   const calls = [];
   const modalCalls = [];
+  const notices = [];
   const documentMock = {
     createElement: (tag) => new MockNode(tag),
   };
@@ -1014,6 +993,7 @@ test("renderConnectionSettings renders per-account rows, actions, and add-anothe
     ],
   };
 
+  let apiHandler = async () => ({});
   const fns = [
     "el",
     "add",
@@ -1045,9 +1025,9 @@ test("renderConnectionSettings renders per-account rows, actions, and add-anothe
     windowMock,
     async (reqPath, method = "GET", body) => {
       calls.push({ reqPath, method, body });
-      return {};
+      return apiHandler(reqPath, method, body);
     },
-    () => {},
+    (msg, isError = false) => notices.push({ msg, isError }),
     async () => {},
     async () => {},
     async () => {},
@@ -1069,23 +1049,106 @@ test("renderConnectionSettings renders per-account rows, actions, and add-anothe
   await addAnotherBtn.click();
   assert.deepEqual(modalCalls[0], { id: "rema1000", opts: { addAccount: true } });
 
-  // Clicking Forny on refreshable account calls refresh endpoint with account_id
+  // Clicking Forny on refreshable account calls refresh endpoint with account_id (and NOT modal)
   const firstRenewBtn = rows[0].querySelectorAll("button").find((b) => b.textContent === "Forny");
+  assert.ok(firstRenewBtn);
   await firstRenewBtn.click();
   assert.deepEqual(calls[0], {
     reqPath: "/integrations/rema1000/refresh?account_id=default",
     method: "POST",
     body: undefined,
   });
+  assert.equal(modalCalls.length, 1);
+
+  // Separate 'Koble til på nytt' button opens modal for manual reconnect
+  const firstReconnectBtn = rows[0].querySelectorAll("button").find((b) => b.textContent === "Koble til på nytt");
+  assert.ok(firstReconnectBtn);
+  await firstReconnectBtn.click();
+  assert.deepEqual(modalCalls[1], {
+    id: "rema1000",
+    opts: { accountId: "default", accountLabel: "Malo" },
+  });
+
+  // Refresh failure notifies error and does NOT open modal
+  apiHandler = async () => {
+    throw new Error("Trumf-sesjonen kan ikke fornyes automatisk.");
+  };
+  await firstRenewBtn.click();
+  assert.deepEqual(notices[notices.length - 1], {
+    msg: "Trumf-sesjonen kan ikke fornyes automatisk.",
+    isError: true,
+  });
+  assert.equal(modalCalls.length, 2);
+  apiHandler = async () => ({});
+
+  // Non-refreshable account does NOT show Forny, shows 'Koble til på nytt' opening modal
+  assert.equal(
+    rows[1].querySelectorAll("button").find((b) => b.textContent === "Forny"),
+    undefined,
+  );
+  const secondReconnectBtn = rows[1].querySelectorAll("button").find((b) => b.textContent === "Koble til på nytt");
+  assert.ok(secondReconnectBtn);
+  await secondReconnectBtn.click();
+  assert.deepEqual(modalCalls[2], {
+    id: "rema1000",
+    opts: { accountId: "acc_abc12345", accountLabel: "Partner" },
+  });
 
   // Clicking Koble fra on second account calls per-account DELETE endpoint
   const secondDisconnectBtn = rows[1].querySelectorAll("button").find((b) => b.textContent === "Koble fra");
   await secondDisconnectBtn.click();
-  assert.deepEqual(calls[1], {
+  assert.deepEqual(calls[2], {
     reqPath: "/integrations/rema1000/accounts/acc_abc12345",
     method: "DELETE",
     body: undefined,
   });
+
+  // Single-account / expired branch: Forny tilkobling calls POST /integrations/{id}/refresh when refresh_available=true
+  state.integrations = [
+    {
+      id: "trumf",
+      name: "Trumf",
+      status: "expired",
+      auth_mode: "session_cookie",
+      supported_auth_modes: ["session_cookie"],
+      detail: "Trumf",
+      refresh_available: true,
+      accounts: [],
+    },
+    {
+      id: "cookidoo",
+      name: "Cookidoo / Thermomix TM6",
+      status: "expired",
+      auth_mode: "oauth_password",
+      supported_auth_modes: ["oauth_password", "session_cookie", "credentials"],
+      detail: "Cookidoo",
+      refresh_available: false,
+      accounts: [],
+    },
+  ];
+  const singleSection = renderConnectionSettings();
+  const cards = singleSection.querySelectorAll(".connection-card");
+  assert.equal(cards.length, 2);
+
+  const trumfRenewBtn = cards[0].querySelectorAll("button").find((b) => b.textContent === "Forny tilkobling");
+  assert.ok(trumfRenewBtn);
+  await trumfRenewBtn.click();
+  assert.deepEqual(calls[3], {
+    reqPath: "/integrations/trumf/refresh",
+    method: "POST",
+    body: undefined,
+  });
+  assert.equal(modalCalls.length, 3);
+
+  const trumfManualBtn = cards[0].querySelectorAll("button").find((b) => b.textContent === "Koble til på nytt");
+  assert.ok(trumfManualBtn);
+  await trumfManualBtn.click();
+  assert.deepEqual(modalCalls[3], { id: "trumf", opts: undefined });
+
+  const cookidooRenewBtn = cards[1].querySelectorAll("button").find((b) => b.textContent === "Forny tilkobling");
+  assert.ok(cookidooRenewBtn);
+  await cookidooRenewBtn.click();
+  assert.deepEqual(modalCalls[4], { id: "cookidoo", opts: undefined });
 });
 
 test("Coop modal explains no.coop.members://auth/callback and Trumf modal explains full Cookie header", async () => {
@@ -1124,5 +1187,6 @@ test("Coop modal explains no.coop.members://auth/callback and Trumf modal explai
   assert.match(trumfText, /Copy value/);
   assert.doesNotMatch(trumfText, /__Secure-authjs\.session-token\.0 \(valgfritt\)/);
   assert.doesNotMatch(trumfText, /__Secure-authjs\.session-token\.1 \(valgfritt\)/);
-  assert.match(trumfText, /Bekreft med SMS-kode/);
+  assert.doesNotMatch(trumfText, /Bekreft med SMS-kode/);
+  assert.doesNotMatch(trumfText, /Telefonnummer/);
 });

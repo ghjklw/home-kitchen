@@ -73,6 +73,9 @@
         delegated_user_pkce: "Oda-kontoen din (OAuth)",
         federation: "Føderert administrert identitet",
         api_key: configured ? "API-nøkkel er satt opp (hemmeligheten er skjult)" : "API-nøkkel",
+        oauth_pkce: configured ? "OAuth-innlogging er lagret (hemmeligheten er skjult)" : "OAuth-innlogging (PKCE)",
+        oauth_password: configured ? "OAuth-økt er lagret (hemmeligheten er skjult)" : "E-post og passord",
+        interactive_otp: configured ? "SMS-innlogging er lagret (hemmeligheten er skjult)" : "SMS-engangskode",
         session_token: configured ? "Sesjonstoken er lagret (hemmeligheten er skjult)" : "Sesjonstoken",
         session_cookie: configured ? "Sesjonsinformasjonskapsel er lagret (hemmeligheten er skjult)" : "Sesjonsinformasjonskapsel",
         credentials: configured ? "Brukernavn og passord er lagret (hemmeligheten er skjult)" : "Brukernavn og passord",
@@ -80,6 +83,27 @@
         manual_session_cookie: configured ? "Sesjonsinformasjonskapsel er lagret (hemmeligheten er skjult)" : "Sesjonsinformasjonskapsel",
       }[mode] || "Ikke oppgitt"
     );
+  }
+
+  function accountDisplayName(account) {
+    if (!account) return "Standardkonto";
+    const label = String(account.account_label || "").trim();
+    if (label) return label;
+    return account.account_id === "default" || !account.account_id
+      ? "Standardkonto"
+      : String(account.account_id);
+  }
+
+  function formatAccountExpiry(account) {
+    const raw = account?.token_expires_at || account?.expires_at;
+    if (!raw) return null;
+    const date = new Date(raw);
+    if (isNaN(date.getTime())) return null;
+    try {
+      return date.toLocaleDateString("nb-NO", { year: "numeric", month: "short", day: "numeric" });
+    } catch {
+      return date.toISOString().slice(0, 10);
+    }
   }
 
   function integrationExpiryNotice(integration, nowMs = Date.now()) {
@@ -195,6 +219,8 @@
     editShoppingCategoryRow,
     integrationStatusLabel,
     integrationAuthLabel,
+    accountDisplayName,
+    formatAccountExpiry,
     normalizeIntegrationResponse,
     connectionStatusSnapshot,
     odaNeedsReconnect,

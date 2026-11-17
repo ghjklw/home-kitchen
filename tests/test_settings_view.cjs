@@ -809,3 +809,192 @@ test("api() error handling distinguishes Entra ID 401 from integration 401 provi
     globalThis.fetch = originalFetch;
   }
 });
+
+test("Trumf login URL points to https://www.trumf.no/ without 404 /logg-inn path", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const appSource = fs.readFileSync(path.join(__dirname, "../src/home_kitchen/static/app.js"), "utf8");
+  assert.doesNotMatch(appSource, /trumf\.no\/logg-inn/);
+
+  const harness = setupModalHarness(async () => ({}));
+  harness.openConnectorModal({ id: "trumf", name: "Trumf" });
+  harness.findButton("Åpne Trumf-innlogging").click();
+  assert.deepEqual(harness.openedWindows[0], {
+    url: "https://www.trumf.no/",
+    target: "_blank",
+    features: "noopener,noreferrer",
+  });
+});
+
+test("guided modal supports optional account label and addAccount multi-account flow", async () => {
+  const harness = setupModalHarness(async (path) => {
+    if (path === "/integrations/rema1000/pkce/start") {
+      return { authorize_url: "https://id.rema.no/authorization" };
+    }
+    return { status: "connected" };
+  });
+
+  harness.openConnectorModal({ id: "rema1000", name: "Rema 1000" }, { addAccount: true });
+  const labelInput = harness.findInput("Kontoetikett (valgfritt, f.eks. Malo)");
+  assert.ok(labelInput, "Account label input exists");
+  labelInput.value = "Partner";
+
+  await harness.findButton("Åpne innlogging").click();
+  assert.deepEqual(harness.calls[0], {
+    path: "/integrations/rema1000/pkce/start",
+    method: "POST",
+    body: { account_label: "Partner", add_account: true },
+  });
+
+  const step2 = harness.modalContent.querySelectorAll("form").find((f) => f.className.includes("connector-step-2"));
+  const pasteInput = harness.findInput("Lim inn nettadressen eller koden etter innlogging");
+  pasteInput.value = "code-partner-123";
+  await step2.submit();
+
+  assert.deepEqual(harness.calls[1], {
+    path: "/integrations/rema1000/pkce/complete",
+    method: "POST",
+    body: { code: "code-partner-123", account_label: "Partner", add_account: true },
+  });
+});
+
+test("settings view helpers format multi-account display names, auth labels, and expiry", () => {
+  const {
+    accountDisplayName,
+    formatAccountExpiry,
+  } = require("../src/home_kitchen/static/settings-view.js");
+
+  assert.equal(accountDisplayName({ account_id: "default", account_label: "Malo" }), "Malo");
+  assert.equal(accountDisplayName({ account_id: "default", account_label: null }), "Standardkonto");
+  assert.equal(accountDisplayName({ account_id: "acc_12345678", account_label: "" }), "acc_12345678");
+  assert.ok(formatAccountExpiry({ token_expires_at: "2026-12-31T12:00:00Z" }));
+  assert.equal(formatAccountExpiry({}), null);
+  assert.equal(integrationAuthLabel("oauth_pkce", true), "OAuth-innlogging er lagret (hemmeligheten er skjult)");
+  assert.equal(integrationAuthLabel("interactive_otp", true), "SMS-innlogging er lagret (hemmeligheten er skjult)");
+});
+
+test("renderConnectionSettings renders per-account rows, actions, and add-another-account button", async () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const appSource = fs.readFileSync(path.join(__dirname, "../src/home_kitchen/static/app.js"), "utf8");
+
+  const calls = [];
+  const modalCalls = [];
+  const documentMock = {
+    createElement: (tag) => new MockNode(tag),
+  };
+  const windowMock = {
+    KitchenSettingsView: require("../src/home_kitchen/static/settings-view.js"),
+  };
+  const state = {
+    settingsRefreshInFlight: false,
+    oda: null,
+    integrationsError: null,
+    odaStatusError: null,
+    integrations: [
+      {
+        id: "rema1000",
+        name: "Rema 1000",
+        status: "connected",
+        auth_mode: "oauth_pkce",
+        supported_auth_modes: ["oauth_pkce", "session_token"],
+        detail: "Rema 1000",
+        accounts: [
+          {
+            account_id: "default",
+            account_label: "Malo",
+            auth_mode: "oauth_pkce",
+            auth_type: "oauth_pkce",
+            status: "connected",
+            connected_by_actor_id: "user-malo",
+            token_expires_at: "2026-12-31T12:00:00Z",
+            refresh_available: true,
+          },
+          {
+            account_id: "acc_abc12345",
+            account_label: "Partner",
+            auth_mode: "session_token",
+            auth_type: "session_token",
+            status: "expired",
+            connected_by_actor_id: "user-partner",
+            token_expires_at: "2025-01-01T12:00:00Z",
+            refresh_available: false,
+          },
+        ],
+      },
+    ],
+  };
+
+  const fns = [
+    "el",
+    "add",
+    "button",
+    "disconnectConnector",
+    "disconnectConnectorAccount",
+    "refreshConnectorAccount",
+    "renderConnectionSettings",
+  ];
+  const { renderConnectionSettings } = new Function(
+    "document",
+    "state",
+    "window",
+    "api",
+    "notify",
+    "loadConnectionStatus",
+    "refreshView",
+    "refreshConnectionSettings",
+    "connectOdaAccount",
+    "disconnectOdaAccount",
+    "openConnectorModal",
+    `
+    ${fns.map((f) => extractFunction(appSource, f)).join("\n")}
+    return { renderConnectionSettings };
+    `,
+  )(
+    documentMock,
+    state,
+    windowMock,
+    async (reqPath, method = "GET", body) => {
+      calls.push({ reqPath, method, body });
+      return {};
+    },
+    () => {},
+    async () => {},
+    async () => {},
+    async () => {},
+    async () => {},
+    async () => {},
+    (integration, opts) => modalCalls.push({ id: integration.id, opts }),
+  );
+
+  const section = renderConnectionSettings();
+  const rows = section.querySelectorAll(".connection-account-row");
+  assert.equal(rows.length, 2);
+  assert.match(rows[0].textContent, /Malo/);
+  assert.match(rows[0].textContent, /Koblet til av user-malo/);
+  assert.match(rows[1].textContent, /Partner/);
+  assert.match(rows[1].textContent, /Koblet til av user-partner/);
+
+  const addAnotherBtn = section.querySelectorAll("button").find((b) => b.textContent === "Koble til en konto til");
+  assert.ok(addAnotherBtn, "Should render 'Koble til en konto til' button");
+  await addAnotherBtn.click();
+  assert.deepEqual(modalCalls[0], { id: "rema1000", opts: { addAccount: true } });
+
+  // Clicking Forny on refreshable account calls refresh endpoint with account_id
+  const firstRenewBtn = rows[0].querySelectorAll("button").find((b) => b.textContent === "Forny");
+  await firstRenewBtn.click();
+  assert.deepEqual(calls[0], {
+    reqPath: "/integrations/rema1000/refresh?account_id=default",
+    method: "POST",
+    body: undefined,
+  });
+
+  // Clicking Koble fra on second account calls per-account DELETE endpoint
+  const secondDisconnectBtn = rows[1].querySelectorAll("button").find((b) => b.textContent === "Koble fra");
+  await secondDisconnectBtn.click();
+  assert.deepEqual(calls[1], {
+    reqPath: "/integrations/rema1000/accounts/acc_abc12345",
+    method: "DELETE",
+    body: undefined,
+  });
+});

@@ -131,6 +131,8 @@ class KitchenFeatures:
             engine=kitchen.store.engine,
             settings=settings,
             oda_service=self.oda,
+            connector_store=self.connector_store,
+            household_id=self.household_id,
         )
         self.recipe_providers = create_recipe_providers(settings, ai_agent=ai)
         self.recipe_photos = PhotoRecipeService(

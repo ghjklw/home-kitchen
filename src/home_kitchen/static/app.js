@@ -6179,15 +6179,65 @@ async function disconnectConnector(providerId, providerName) {
     notify(error.message, true);
   }
 }
-function openConnectorModal(integration) {
-  const root = openDialog(`Koble til ${integration.name || integration.id}`);
+async function disconnectConnectorAccount(providerId, accountId, accountName) {
+  try {
+    await api(`/integrations/${providerId}/accounts/${encodeURIComponent(accountId)}`, "DELETE");
+    await loadConnectionStatus();
+    await refreshView();
+    notify(`${accountName || accountId} er koblet fra.`);
+  } catch (error) {
+    notify(error.message, true);
+  }
+}
+async function refreshConnectorAccount(integration, account) {
+  try {
+    await api(
+      `/integrations/${integration.id}/refresh?account_id=${encodeURIComponent(account.account_id)}`,
+      "POST",
+    );
+    await loadConnectionStatus();
+    await refreshView();
+    const label = window.KitchenSettingsView?.accountDisplayName
+      ? window.KitchenSettingsView.accountDisplayName(account)
+      : (account.account_label || account.account_id);
+    notify(`${integration.name || integration.id} (${label}) er fornyet.`);
+  } catch (error) {
+    notify(error.message, true);
+    openConnectorModal(integration, {
+      accountId: account.account_id,
+      accountLabel: account.account_label || "",
+    });
+  }
+}
+function openConnectorModal(integration, options = {}) {
+  const modalOptions = options && typeof options === "object" ? options : {};
+  const dialogTitle = modalOptions.addAccount
+    ? `Koble til en konto til (${integration.name || integration.id})`
+    : modalOptions.accountId
+      ? `Oppdater ${modalOptions.accountLabel || modalOptions.accountId} (${integration.name || integration.id})`
+      : `Koble til ${integration.name || integration.id}`;
+  const root = openDialog(dialogTitle);
   const container = el("div", null, "stack connector-modal-content");
+  const accountLabelField = field(
+    "Kontoetikett (valgfritt, f.eks. Malo)",
+    "text",
+    modalOptions.accountLabel || "",
+    "F.eks. Malo eller felles konto",
+  );
+  function accountMetaPayload() {
+    const meta = {};
+    const label = accountLabelField.input.value.trim();
+    if (label) meta.account_label = label;
+    if (modalOptions.accountId) meta.account_id = modalOptions.accountId;
+    if (modalOptions.addAccount) meta.add_account = true;
+    return meta;
+  }
 
   if (integration.id === "rema1000" || integration.id === "coop") {
     const introText = integration.id === "rema1000"
       ? "Logg inn med din Rema 1000 Æ-konto for å hente kvitteringer og priskutt automatisk."
       : "Logg inn med din Coop-konto for automatisk kvitterings- og kjøpshistorikk.";
-    add(container, el("p", introText, "muted"));
+    add(container, el("p", introText, "muted"), accountLabelField.wrap);
 
     const flow = el("div", null, "connector-guided-flow stack");
 
@@ -6208,7 +6258,10 @@ function openConnectorModal(integration) {
       step1Error.textContent = "";
       openLoginBtn.disabled = true;
       try {
-        const data = await api(`/integrations/${integration.id}/pkce/start`, "POST");
+        const startMeta = accountMetaPayload();
+        const data = Object.keys(startMeta).length
+          ? await api(`/integrations/${integration.id}/pkce/start`, "POST", startMeta)
+          : await api(`/integrations/${integration.id}/pkce/start`, "POST");
         if (!data || !data.authorize_url) {
           throw new Error("Mottok ingen innloggingslenke fra tjeneren.");
         }
@@ -6257,9 +6310,10 @@ function openConnectorModal(integration) {
       if (!val) {
         throw new Error("Vennligst lim inn nettadressen eller koden etter innlogging.");
       }
-      const payload = (typeof window.KitchenSettingsView?.parsePkceCompletionPayload === "function")
+      const basePayload = (typeof window.KitchenSettingsView?.parsePkceCompletionPayload === "function")
         ? window.KitchenSettingsView.parsePkceCompletionPayload(val)
         : (/^https?:\/\//i.test(val) ? { redirect_url: val } : { code: val });
+      const payload = { ...basePayload, ...accountMetaPayload() };
       await api(`/integrations/${integration.id}/pkce/complete`, "POST", payload);
       const modal = $("#modal");
       if (modal && modal.open) modal.close();
@@ -6302,6 +6356,7 @@ function openConnectorModal(integration) {
       const payload = {
         auth_mode: "session_token",
         session_token: tokenVal,
+        ...accountMetaPayload(),
       };
       if (manualExpiryField.input.value) {
         payload.expires_at = new Date(manualExpiryField.input.value + "T23:59:59Z").toISOString();
@@ -6332,6 +6387,7 @@ function openConnectorModal(integration) {
         "Passordet lagres aldri – kun det resulterende OAuth-tokenet lagres trygt kryptert.",
         "callout connector-security-note",
       ),
+      accountLabelField.wrap,
     );
 
     const loginForm = el("form", null, "stack");
@@ -6349,9 +6405,10 @@ function openConnectorModal(integration) {
       if (!email || !password) {
         throw new Error("Vennligst oppgi både e-post og passord for Cookidoo.");
       }
-      const payload = (typeof window.KitchenSettingsView?.buildCookidooLoginPayload === "function")
+      const basePayload = (typeof window.KitchenSettingsView?.buildCookidooLoginPayload === "function")
         ? window.KitchenSettingsView.buildCookidooLoginPayload(email, password, country)
         : { email, password, country };
+      const payload = { ...basePayload, ...accountMetaPayload() };
       await api("/integrations/cookidoo/login", "POST", payload);
       const modal = $("#modal");
       if (modal && modal.open) modal.close();
@@ -6393,6 +6450,7 @@ function openConnectorModal(integration) {
       const payload = {
         auth_mode: "session_cookie",
         session_cookie: cookieVal,
+        ...accountMetaPayload(),
       };
       if (manualExpiryField.input.value) {
         payload.expires_at = new Date(manualExpiryField.input.value + "T23:59:59Z").toISOString();
@@ -6415,6 +6473,7 @@ function openConnectorModal(integration) {
         "Trumf benytter nettleserinnlogging for tilgang til kjøpshistorikk og kvitteringer. Logg inn på Trumf og lim inn sesjonsinformasjonskapselen eller tokenet under.",
         "muted",
       ),
+      accountLabelField.wrap,
     );
 
     const flow = el("div", null, "connector-guided-flow stack");
@@ -6431,7 +6490,7 @@ function openConnectorModal(integration) {
       ),
     );
     const openBtn = button("Åpne Trumf-innlogging", () => {
-      window.open("https://www.trumf.no/logg-inn", "_blank", "noopener,noreferrer");
+      window.open("https://www.trumf.no/", "_blank", "noopener,noreferrer");
     });
     add(step1, openBtn);
     add(flow, step1);
@@ -6454,12 +6513,13 @@ function openConnectorModal(integration) {
       if (!cookieVal) {
         throw new Error("Vennligst oppgi informasjonskapsel for Trumf.");
       }
-      const payload = (typeof window.KitchenSettingsView?.buildTrumfConnectPayload === "function")
+      const basePayload = (typeof window.KitchenSettingsView?.buildTrumfConnectPayload === "function")
         ? window.KitchenSettingsView.buildTrumfConnectPayload(cookieVal, expiryField.input.value)
         : {
             auth_mode: "session_cookie",
             session_cookie: cookieVal,
           };
+      const payload = { ...basePayload, ...accountMetaPayload() };
       if (expiryField.input.value && !payload.expires_at) {
         payload.expires_at = new Date(expiryField.input.value + "T23:59:59Z").toISOString();
       }
@@ -6474,6 +6534,7 @@ function openConnectorModal(integration) {
     add(container, flow);
 
   } else {
+    add(container, accountLabelField.wrap);
     const form = el("form", null, "stack");
     form.autocomplete = "off";
     const tokenField = field("Sesjonstoken (token)", "password", "");
@@ -6482,7 +6543,11 @@ function openConnectorModal(integration) {
     formSubmit(form, "Lagre og koble til", async () => {
       const val = tokenField.input.value.trim();
       if (!val) throw new Error("Vennligst oppgi sesjonstoken.");
-      const payload = { session_token: val, auth_mode: "session_token" };
+      const payload = {
+        session_token: val,
+        auth_mode: "session_token",
+        ...accountMetaPayload(),
+      };
       if (expiryField.input.value) {
         payload.expires_at = new Date(expiryField.input.value + "T23:59:59Z").toISOString();
       }
@@ -7099,26 +7164,112 @@ function renderConnectionSettings() {
       }
       add(row, actions);
     } else if (["rema1000", "coop", "trumf", "cookidoo"].includes(integration.id)) {
-      const actions = add(el("div", null, "actions connection-actions"));
-      if (status === "connected") {
+      const multiAccountProvider = ["rema1000", "coop", "trumf"].includes(integration.id);
+      const accounts = Array.isArray(integration.accounts) ? integration.accounts : [];
+      if (accounts.length > 0 && multiAccountProvider) {
+        const list = add(el("div", null, "connection-accounts-list stack"));
+        accounts.forEach((account) => {
+          const accName = window.KitchenSettingsView?.accountDisplayName
+            ? window.KitchenSettingsView.accountDisplayName(account)
+            : (account.account_label || account.account_id || "Standardkonto");
+          const accRow = add(el("div", null, "connection-account-row"));
+          add(
+            accRow,
+            add(
+              el("div", null, "connection-account-heading"),
+              el("strong", accName),
+              el(
+                "span",
+                window.KitchenSettingsView.integrationStatusLabel(account.status || status),
+                "connection-status",
+              ),
+            ),
+          );
+          const metaParts = [
+            window.KitchenSettingsView.integrationAuthLabel(account.auth_mode || account.auth_type, true),
+          ];
+          if (account.connected_by_actor_id) {
+            metaParts.push(`Koblet til av ${account.connected_by_actor_id}`);
+          }
+          const formattedExpiry = window.KitchenSettingsView?.formatAccountExpiry
+            ? window.KitchenSettingsView.formatAccountExpiry(account)
+            : null;
+          if (formattedExpiry) {
+            metaParts.push(`Utløper: ${formattedExpiry}`);
+          }
+          add(accRow, el("p", metaParts.join(" · "), "muted connection-account-meta"));
+          const accNotice = window.KitchenSettingsView.integrationExpiryNotice(account);
+          if (accNotice) {
+            add(
+              accRow,
+              el(
+                "p",
+                accNotice,
+                account.status === "expired" ? "callout danger connection-expiry" : "callout connection-expiry",
+              ),
+            );
+          }
+          if (account.last_error) {
+            add(accRow, el("p", account.last_error, "callout danger connection-expiry"));
+          }
+          const accActions = add(el("div", null, "actions connection-account-actions"));
+          add(
+            accActions,
+            button(
+              "Forny",
+              () => {
+                if (account.refresh_available) {
+                  return refreshConnectorAccount(integration, account);
+                }
+                openConnectorModal(integration, {
+                  accountId: account.account_id,
+                  accountLabel: account.account_label || "",
+                });
+              },
+              account.status === "expired" ? "primary" : "quiet",
+            ),
+            button(
+              "Koble fra",
+              () => disconnectConnectorAccount(integration.id, account.account_id, accName),
+              "quiet danger",
+            ),
+          );
+          add(accRow, accActions);
+          add(list, accRow);
+        });
+        add(row, list);
+        const actions = add(el("div", null, "actions connection-actions"));
         add(
           actions,
-          button("Oppdater tilkobling", () => openConnectorModal(integration), "quiet"),
-          button("Koble fra", () => disconnectConnector(integration.id, integration.name), "quiet danger"),
+          button(
+            "Koble til en konto til",
+            () => openConnectorModal(integration, { addAccount: true }),
+            "quiet",
+          ),
         );
-      } else if (status === "expired") {
-        add(
-          actions,
-          button("Forny tilkobling", () => openConnectorModal(integration), "primary"),
-          button("Koble fra", () => disconnectConnector(integration.id, integration.name), "quiet danger"),
-        );
+        add(row, actions);
       } else {
-        add(
-          actions,
-          button("Koble til", () => openConnectorModal(integration), "primary"),
-        );
+        const actions = add(el("div", null, "actions connection-actions"));
+        if (status === "connected") {
+          add(
+            actions,
+            button("Oppdater tilkobling", () => openConnectorModal(integration), "quiet"),
+            button("Koble fra", () => disconnectConnector(integration.id, integration.name), "quiet danger"),
+          );
+        } else if (status === "expired") {
+          add(
+            actions,
+            button("Forny tilkobling", () => openConnectorModal(integration), "primary"),
+            button("Koble fra", () => disconnectConnector(integration.id, integration.name), "quiet danger"),
+          );
+        } else {
+          add(
+            actions,
+            button("Koble til", () => openConnectorModal(integration), "primary"),
+          );
+        }
+        add(row, actions);
       }
-      add(row, actions);
     }
     section.append(row);
   });

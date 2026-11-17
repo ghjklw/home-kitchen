@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 from fastmcp import Client
+from fastmcp.exceptions import ToolError
 from pydantic import ValidationError
 from pydantic_ai.models.test import TestModel
 from starlette.testclient import TestClient
@@ -378,9 +379,9 @@ async def test_mcp_list_recipes_rejects_out_of_bounds_max_prep_minutes():
     mock_service = MagicMock()
     mcp = build_mcp(mock_service, get_household=lambda: Household())
     async with Client(mcp) as client:
-        with pytest.raises(Exception):
+        with pytest.raises(ToolError):
             await client.call_tool("list_recipes", {"max_prep_minutes": 0})
-        with pytest.raises(Exception):
+        with pytest.raises(ToolError):
             await client.call_tool("list_recipes", {"max_prep_minutes": 2881})
     mock_service.list_recipes.assert_not_called()
 

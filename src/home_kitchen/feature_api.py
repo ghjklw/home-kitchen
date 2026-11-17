@@ -31,6 +31,7 @@ from home_kitchen.catalogue.models import FoodCatalogueItem
 from home_kitchen.catalogue.overview_models import ProductOverview, ProductPreferencesUpdate
 from home_kitchen.catalogue.sku_models import RetailerProductOption, RetailerProductSnapshot
 from home_kitchen.connector_auth import (
+    ConnectorAuthError,
     ConnectorAuthService,
     CookidooLoginRequest,
     PKCECompleteRequest,
@@ -170,6 +171,7 @@ class ConnectorConnectRequest(BaseModel):
     session_cookie: SecretStr | None = None
     token: SecretStr | None = None
     cookie: SecretStr | None = None
+    api_key: SecretStr | None = None
     username: str | None = None
     password: SecretStr | None = None
     raw_payload: SecretStr | None = None
@@ -182,13 +184,20 @@ class ConnectorConnectRequest(BaseModel):
 def _extract_credentials(
     provider_id: str, data: ConnectorConnectRequest
 ) -> tuple[str, dict[str, str]]:
-    if provider_id not in {"rema1000", "coop", "trumf", "cookidoo"}:
+    if provider_id not in {"rema1000", "coop", "trumf", "cookidoo", "kassal"}:
         raise HTTPException(404, f"Ukjent leverandør: {provider_id}")
 
     auth_mode = data.auth_mode
     credentials: dict[str, str] = {}
 
-    if provider_id == "rema1000":
+    if provider_id == "kassal":
+        key = data.api_key or data.token or data.session_token or data.raw_payload
+        if not key or not key.get_secret_value().strip():
+            raise HTTPException(422, "Kassal.app krever en gyldig API-nøkkel")
+        auth_mode = "api_key"
+        credentials["api_key"] = key.get_secret_value().strip()
+
+    elif provider_id == "rema1000":
         token = data.session_token or data.token or data.raw_payload
         if not token or not token.get_secret_value().strip():
             raise HTTPException(422, "Rema 1000 krever et gyldig sesjonstoken")
@@ -446,6 +455,18 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
                 400, "Oppskriftsassistenten konfigureres i miljøet av administratoren"
             )
         auth_mode, credentials = _extract_credentials(provider_id, data)
+        if provider_id == "kassal":
+            try:
+                return get_connector_auth().connect_kassal_key(
+                    household_id=features.household_id,
+                    actor_id=actor,
+                    api_key=credentials["api_key"],
+                    account_id=data.account_id,
+                    account_label=data.account_label,
+                    add_account=data.add_account,
+                )
+            except ConnectorAuthError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=exc.detail) from None
         if provider_id == "trumf":
             try:
                 return get_connector_auth().connect_trumf_cookie(

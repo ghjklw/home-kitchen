@@ -6736,6 +6736,62 @@ function openConnectorModal(integration, options = {}) {
     add(primaryStep, form);
     add(container, primaryStep);
 
+  } else if (integration.id === "kassal") {
+    add(
+      container,
+      el(
+        "p",
+        "Koble til Kassal.app for å automatisk berike strekkoder (EAN) på kvitteringer med varenavn, merkevare og vekt.",
+        "muted",
+      ),
+      accountLabelField.wrap,
+    );
+
+    const step = el("div", null, "connector-step connector-kassal stack");
+    const linkPara = el("p", null, "muted");
+    add(
+      linkPara,
+      "Få en personlig API-nøkkel på ",
+      add(el("a", "kassal.app/api", null), { href: "https://kassal.app/api", target: "_blank", rel: "noopener,noreferrer" }),
+      ".",
+    );
+    add(step, linkPara);
+
+    const form = el("form", null, "stack");
+    form.autocomplete = "off";
+    const apiKeyField = field(
+      "API-nøkkel fra kassal.app",
+      "password",
+      "",
+      "Lim inn din personlige Bearer API-nøkkel",
+    );
+    add(form, apiKeyField.wrap);
+
+    formSubmit(form, "Lagre og koble til", async () => {
+      const keyVal = apiKeyField.input.value.trim();
+      let basePayload = null;
+      if (typeof window.KitchenSettingsView?.buildKassalConnectPayload === "function") {
+        basePayload = window.KitchenSettingsView.buildKassalConnectPayload(keyVal);
+      } else if (keyVal) {
+        basePayload = {
+          auth_mode: "api_key",
+          api_key: keyVal,
+        };
+      }
+      if (!basePayload) {
+        throw new Error("Vennligst oppgi API-nøkkel for Kassal.app.");
+      }
+      const payload = { ...basePayload, ...accountMetaPayload() };
+      await api(`/integrations/${integration.id}/connect`, "POST", payload);
+      const modal = $("#modal");
+      if (modal && modal.open) modal.close();
+      await loadConnectionStatus();
+      await refreshView();
+      notify(`${integration.name || integration.id} er tilkoblet.`);
+    });
+    add(step, form);
+    add(container, step);
+
   } else {
     add(container, accountLabelField.wrap);
     const form = el("form", null, "stack");
@@ -7366,7 +7422,7 @@ function renderConnectionSettings() {
         add(actions, setup);
       }
       add(row, actions);
-    } else if (["rema1000", "coop", "trumf", "cookidoo"].includes(integration.id)) {
+    } else if (["rema1000", "coop", "trumf", "cookidoo", "kassal"].includes(integration.id)) {
       const multiAccountProvider = ["rema1000", "coop", "trumf"].includes(integration.id);
       const accounts = Array.isArray(integration.accounts) ? integration.accounts : [];
       if (accounts.length > 0 && multiAccountProvider) {

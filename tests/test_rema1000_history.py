@@ -591,3 +591,9 @@ def test_line_item_ean_normalization_and_nullable_barcode():
         }
     )
     assert line_valid.ean == "7032069704018"
+
+
+@pytest.fixture(autouse=True)
+def _no_kassal_enrichment(monkeypatch):
+    """These fixtures predate the Kassal requirement; barcode enrichment is tested separately."""
+    monkeypatch.setattr("home_kitchen.purchase_sync.extract_line_ean", lambda line: None)

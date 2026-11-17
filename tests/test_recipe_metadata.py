@@ -569,10 +569,13 @@ def test_alembic_migration_0026_metadata():
         assert "recipe_type" in dropped_cols
 
 
-def test_alembic_single_head_is_0026_recipe_metadata():
+def test_alembic_single_head_includes_0026_recipe_metadata():
     from alembic.config import Config
     from alembic.script import ScriptDirectory
 
     config = Config(str(Path(__file__).parents[1] / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ["0026_recipe_metadata"]
+    heads = script.get_heads()
+    assert len(heads) == 1
+    revisions = {rev.revision for rev in script.walk_revisions()}
+    assert "0026_recipe_metadata" in revisions

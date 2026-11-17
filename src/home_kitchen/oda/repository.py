@@ -133,6 +133,13 @@ class OdaRepository:
                 is not None
             )
 
+    def list_connected_actors(self) -> list[str]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(connections.c.actor_id).order_by(connections.c.actor_id)
+            ).all()
+        return [str(row[0]) for row in rows]
+
     def connection_generation(self, actor: str) -> int | None:
         """Read a non-secret cache fence only while this actor is connected."""
         with self.engine.connect() as connection:

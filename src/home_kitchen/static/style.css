@@ -797,6 +797,29 @@ h3 {
 .connection-actions {
   margin-top: 8px;
 }
+.connection-accounts-list {
+  margin-top: 10px;
+  gap: 10px;
+}
+.connection-account-row {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--card);
+}
+.connection-account-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.connection-account-meta {
+  font-size: 13px;
+  margin: 4px 0 8px;
+}
+.connection-account-actions {
+  margin-top: 6px;
+}
 .connector-guided-flow {
   display: grid;
   gap: 14px;

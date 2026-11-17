@@ -69,6 +69,9 @@ DEFAULT_TRUMF_BASE_URL = "https://www.trumf.no"
 class PKCEStartRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
     redirect_uri: str | None = None
+    account_id: str | None = None
+    account_label: str | None = None
+    add_account: bool = False
 
 
 class PKCEStartResponse(BaseModel):
@@ -84,6 +87,9 @@ class PKCECompleteRequest(BaseModel):
     redirect_url: str | None = None
     code: str | None = None
     state: str | None = None
+    account_id: str | None = None
+    account_label: str | None = None
+    add_account: bool = False
 
 
 class CookidooLoginRequest(BaseModel):
@@ -91,11 +97,17 @@ class CookidooLoginRequest(BaseModel):
     email: str = Field(min_length=1)
     password: SecretStr
     country: str = "no"
+    account_id: str | None = None
+    account_label: str | None = None
+    add_account: bool = False
 
 
 class TrumfOTPStartRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
     phone: str = Field(min_length=3)
+    account_id: str | None = None
+    account_label: str | None = None
+    add_account: bool = False
 
 
 class TrumfOTPStartResponse(BaseModel):
@@ -107,6 +119,14 @@ class TrumfOTPVerifyRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
     session_id: str = Field(min_length=1)
     otp: str = Field(min_length=1)
+    account_id: str | None = None
+    account_label: str | None = None
+    add_account: bool = False
+
+
+class RefreshRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    account_id: str | None = None
 
 
 class PKCETransaction(BaseModel):
@@ -118,6 +138,9 @@ class PKCETransaction(BaseModel):
     client_id: str
     token_endpoint: str
     created_at: datetime
+    account_id: str | None = None
+    account_label: str | None = None
+    add_account: bool = False
 
 
 class TrumfOTPSession(BaseModel):
@@ -125,6 +148,9 @@ class TrumfOTPSession(BaseModel):
     phone: str
     household_id: UUID
     created_at: datetime
+    account_id: str | None = None
+    account_label: str | None = None
+    add_account: bool = False
 
 
 def _parse_expires_at(expires_in: Any) -> datetime | None:
@@ -227,15 +253,17 @@ class ConnectorAuthService:
         self.trumf_base_url = trumf_base_url
         self.settings = settings
         self._lock = threading.Lock()
-        self._refresh_locks: dict[tuple[UUID, str], threading.RLock] = {}
+        self._refresh_locks: dict[tuple[UUID, str, str], threading.RLock] = {}
         self._pkce_transactions: dict[str, PKCETransaction] = {}
         self._trumf_sessions: dict[str, TrumfOTPSession] = {}
 
     def _get_http_client(self) -> httpx.Client:
         return httpx.Client(transport=self.transport, timeout=30.0)
 
-    def _connection_lock(self, household_id: UUID, provider_id: str) -> threading.RLock:
-        key = (household_id, provider_id)
+    def _connection_lock(
+        self, household_id: UUID, provider_id: str, account_id: str = "default"
+    ) -> threading.RLock:
+        key = (household_id, provider_id, account_id)
         with self._lock:
             lock = self._refresh_locks.get(key)
             if lock is None:
@@ -265,6 +293,10 @@ class ConnectorAuthService:
         provider_id: str,
         household_id: UUID,
         redirect_uri: str | None = None,
+        *,
+        account_id: str | None = None,
+        account_label: str | None = None,
+        add_account: bool = False,
     ) -> PKCEStartResponse:
         if provider_id not in ("rema1000", "coop"):
             if provider_id in ("trumf", "cookidoo", "oda", "anthropic"):
@@ -320,6 +352,9 @@ class ConnectorAuthService:
             client_id=client_id,
             token_endpoint=tok_url,
             created_at=now,
+            account_id=account_id,
+            account_label=account_label,
+            add_account=add_account,
         )
         with self._lock:
             # Clean up old transactions (> 15 min)
@@ -349,6 +384,10 @@ class ConnectorAuthService:
         code: str | None = None,
         state: str | None = None,
         redirect_url: str | None = None,
+        *,
+        account_id: str | None = None,
+        account_label: str | None = None,
+        add_account: bool = False,
     ) -> IntegrationInfo:
         if provider_id not in ("rema1000", "coop"):
             if provider_id in ("trumf", "cookidoo", "oda", "anthropic"):
@@ -407,6 +446,9 @@ class ConnectorAuthService:
 
         refresh_token = token_data.get("refresh_token")
         expires_at = _parse_expires_at(token_data.get("expires_in"))
+        effective_account_id = account_id if account_id is not None else transaction.account_id
+        effective_label = account_label if account_label is not None else transaction.account_label
+        effective_add = add_account or transaction.add_account
 
         self.store.save_connection(
             household_id=household_id,
@@ -420,6 +462,10 @@ class ConnectorAuthService:
             },
             expires_at=expires_at,
             actor_id=actor_id,
+            metadata={"has_refresh_token": bool(refresh_token)},
+            account_id=effective_account_id,
+            account_label=effective_label,
+            add_account=effective_add,
         )
 
         return self.integrations.describe_one(provider_id, actor_id)
@@ -473,6 +519,10 @@ class ConnectorAuthService:
         email: str,
         password: str,
         country: str = "no",
+        *,
+        account_id: str | None = None,
+        account_label: str | None = None,
+        add_account: bool = False,
     ) -> IntegrationInfo:
         if not email or not email.strip() or not password or not password.strip():
             raise HTTPException(status_code=422, detail="E-post og passord må oppgis.")
@@ -669,7 +719,10 @@ class ConnectorAuthService:
             },
             expires_at=expires_at,
             actor_id=actor_id,
-            metadata={"country": country_clean},
+            metadata={"country": country_clean, "has_refresh_token": bool(refresh_token)},
+            account_id=account_id,
+            account_label=account_label,
+            add_account=add_account,
         )
 
         return self.integrations.describe_one("cookidoo", actor_id)
@@ -678,6 +731,10 @@ class ConnectorAuthService:
         self,
         household_id: UUID,
         phone: str,
+        *,
+        account_id: str | None = None,
+        account_label: str | None = None,
+        add_account: bool = False,
     ) -> TrumfOTPStartResponse:
         cleaned_phone = phone.strip()
         if not cleaned_phone or len(cleaned_phone) < 3:
@@ -719,6 +776,9 @@ class ConnectorAuthService:
                 phone=cleaned_phone,
                 household_id=household_id,
                 created_at=now,
+                account_id=account_id,
+                account_label=account_label,
+                add_account=add_account,
             )
 
         return TrumfOTPStartResponse(
@@ -732,6 +792,10 @@ class ConnectorAuthService:
         actor_id: str | None,
         session_id: str,
         otp: str,
+        *,
+        account_id: str | None = None,
+        account_label: str | None = None,
+        add_account: bool = False,
     ) -> IntegrationInfo:
         cleaned_otp = otp.strip()
         if not cleaned_otp:
@@ -802,6 +866,9 @@ class ConnectorAuthService:
             session_cookie = f"trumf-otp-session-{secrets.token_urlsafe(32)}"
 
         expires_at = datetime.now(UTC) + timedelta(days=365)
+        effective_account_id = account_id if account_id is not None else session.account_id
+        effective_label = account_label if account_label is not None else session.account_label
+        effective_add = add_account or session.add_account
 
         self.store.save_connection(
             household_id=household_id,
@@ -814,26 +881,31 @@ class ConnectorAuthService:
             expires_at=expires_at,
             actor_id=actor_id,
             metadata={"phone": session.phone},
+            account_id=effective_account_id,
+            account_label=effective_label,
+            add_account=effective_add,
         )
 
         return self.integrations.describe_one("trumf", actor_id)
 
-    def refresh_connection(
+    def _refresh_single_account(
         self,
         household_id: UUID,
         actor_id: str | None,
         provider_id: str,
-    ) -> IntegrationInfo:
-        """Exchange a stored refresh_token for fresh OAuth tokens."""
-        token_endpoint, client_id = self._refresh_config(provider_id)
-
-        with self._connection_lock(household_id, provider_id):
-            meta = self.store.get_connection_metadata(household_id, provider_id)
-            creds = self.store.get_credentials(household_id, provider_id)
+        account_id: str,
+        token_endpoint: str,
+        client_id: str,
+    ) -> None:
+        with self._connection_lock(household_id, provider_id, account_id):
+            meta = self.store.get_connection_metadata(
+                household_id, provider_id, account_id=account_id
+            )
+            creds = self.store.get_credentials(household_id, provider_id, account_id=account_id)
             if meta is None or creds is None:
                 raise HTTPException(
                     status_code=404,
-                    detail=f"Ingen lagret tilkobling funnet for '{provider_id}'.",
+                    detail=f"Ingen lagret tilkobling funnet for '{provider_id}' (konto '{account_id}').",
                 )
 
             refresh_token = creds.get("refresh_token")
@@ -848,58 +920,67 @@ class ConnectorAuthService:
             if provider_id == "cookidoo":
                 headers = {**headers, **COOKIDOO_LOGIN_HEADERS}
 
-            with self._get_http_client() as client:
-                try:
-                    response = client.post(
-                        token_endpoint,
-                        data={
-                            "grant_type": "refresh_token",
-                            "client_id": client_id,
-                            "refresh_token": clean_refresh_token,
-                        },
-                        headers=headers,
+            try:
+                with self._get_http_client() as client:
+                    try:
+                        response = client.post(
+                            token_endpoint,
+                            data={
+                                "grant_type": "refresh_token",
+                                "client_id": client_id,
+                                "refresh_token": clean_refresh_token,
+                            },
+                            headers=headers,
+                        )
+                    except httpx.HTTPError as exc:
+                        raise HTTPException(
+                            status_code=502,
+                            detail=f"Nettverksfeil mot token-endepunktet til {provider_id}: {exc}",
+                        ) from None
+
+                if response.status_code == 401:
+                    raise HTTPException(
+                        status_code=401,
+                        detail=f"Tokenfornyelse avvist av {provider_id}. Koble til på nytt.",
                     )
-                except httpx.HTTPError as exc:
+                if response.status_code != 200:
+                    safe_body = response.text.replace(clean_refresh_token, "[REDACTED]")
+                    status_code = 400 if response.status_code in (400, 403) else 502
+                    raise HTTPException(
+                        status_code=status_code,
+                        detail=f"Tokenfornyelse feilet hos {provider_id}: {safe_body}",
+                    )
+
+                try:
+                    token_data = response.json()
+                except Exception:
                     raise HTTPException(
                         status_code=502,
-                        detail=f"Nettverksfeil mot token-endepunktet til {provider_id}: {exc}",
+                        detail=f"Ugyldig JSON-respons fra token-endepunktet til {provider_id}.",
                     ) from None
 
-            if response.status_code == 401:
-                raise HTTPException(
-                    status_code=401,
-                    detail=f"Tokenfornyelse avvist av {provider_id}. Koble til på nytt.",
-                )
-            if response.status_code != 200:
-                safe_body = response.text.replace(clean_refresh_token, "[REDACTED]")
-                status_code = 400 if response.status_code in (400, 403) else 502
-                raise HTTPException(
-                    status_code=status_code,
-                    detail=f"Tokenfornyelse feilet hos {provider_id}: {safe_body}",
-                )
+                if not isinstance(token_data, dict):
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"Ugyldig JSON-respons fra token-endepunktet til {provider_id}.",
+                    )
 
-            try:
-                token_data = response.json()
-            except Exception:
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"Ugyldig JSON-respons fra token-endepunktet til {provider_id}.",
-                ) from None
-
-            if not isinstance(token_data, dict):
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"Ugyldig JSON-respons fra token-endepunktet til {provider_id}.",
+                access_token = token_data.get("access_token") or (
+                    token_data.get("token") if provider_id == "cookidoo" else None
                 )
-
-            access_token = token_data.get("access_token") or (
-                token_data.get("token") if provider_id == "cookidoo" else None
-            )
-            if not isinstance(access_token, str) or not access_token.strip():
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"Mottok ingen access_token fra {provider_id}.",
+                if not isinstance(access_token, str) or not access_token.strip():
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"Mottok ingen access_token fra {provider_id}.",
+                    )
+            except HTTPException as exc:
+                self.store.update_account_metadata(
+                    household_id,
+                    provider_id,
+                    meta.account_id,
+                    {"last_error": str(exc.detail).replace(clean_refresh_token, "[REDACTED]")},
                 )
+                raise
 
             rotated_refresh = token_data.get("refresh_token")
             new_refresh_token = (
@@ -918,7 +999,14 @@ class ConnectorAuthService:
             if token_data.get("scope") is not None:
                 updated_credentials["scope"] = token_data["scope"]
 
-            effective_actor = actor_id if actor_id is not None else meta.actor_id
+            updated_metadata = dict(meta.metadata)
+            updated_metadata.pop("last_error", None)
+            updated_metadata["last_refreshed_at"] = datetime.now(UTC).isoformat()
+            updated_metadata["has_refresh_token"] = bool(new_refresh_token)
+
+            effective_actor = (
+                actor_id if actor_id is not None else (meta.updated_by_actor_id or meta.actor_id)
+            )
             self.store.save_connection(
                 household_id=household_id,
                 provider_id=provider_id,
@@ -926,10 +1014,88 @@ class ConnectorAuthService:
                 credentials=updated_credentials,
                 expires_at=expires_at,
                 actor_id=effective_actor,
-                metadata=meta.metadata,
+                metadata=updated_metadata,
+                account_id=meta.account_id,
+                account_label=meta.account_label,
             )
 
-            return self.integrations.describe_one(provider_id, effective_actor)
+    def refresh_connection(
+        self,
+        household_id: UUID,
+        actor_id: str | None,
+        provider_id: str,
+        account_id: str | None = None,
+    ) -> IntegrationInfo:
+        """Exchange stored refresh_token(s) for fresh OAuth tokens."""
+        token_endpoint, client_id = self._refresh_config(provider_id)
+
+        cleaned_account_id = account_id.strip() if isinstance(account_id, str) else None
+        if cleaned_account_id:
+            self._refresh_single_account(
+                household_id,
+                actor_id,
+                provider_id,
+                cleaned_account_id,
+                token_endpoint,
+                client_id,
+            )
+            return self.integrations.describe_one(provider_id, actor_id)
+
+        accounts = self.store.list_credentials(household_id, provider_id)
+        if not accounts:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Ingen lagret tilkobling funnet for '{provider_id}'.",
+            )
+
+        if len(accounts) == 1:
+            self._refresh_single_account(
+                household_id,
+                actor_id,
+                provider_id,
+                accounts[0].account_id,
+                token_endpoint,
+                client_id,
+            )
+            return self.integrations.describe_one(provider_id, actor_id)
+
+        refreshable_accounts = [
+            acc
+            for acc in accounts
+            if acc.auth_mode in OAUTH_REFRESH_MODES
+            and (
+                (creds := self.store.get_credentials(household_id, provider_id, acc.account_id))
+                is not None
+                and isinstance(creds.get("refresh_token"), str)
+                and bool(creds["refresh_token"].strip())
+            )
+        ]
+        if not refreshable_accounts:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Tilkoblingene for '{provider_id}' mangler refresh_token og må kobles til på nytt.",
+            )
+
+        success_count = 0
+        last_exc: HTTPException | None = None
+        for acc in refreshable_accounts:
+            try:
+                self._refresh_single_account(
+                    household_id,
+                    actor_id,
+                    provider_id,
+                    acc.account_id,
+                    token_endpoint,
+                    client_id,
+                )
+                success_count += 1
+            except HTTPException as exc:
+                last_exc = exc
+
+        if success_count == 0 and last_exc is not None:
+            raise last_exc
+
+        return self.integrations.describe_one(provider_id, actor_id)
 
     def ensure_fresh_credentials(
         self,
@@ -937,11 +1103,23 @@ class ConnectorAuthService:
         actor_id: str | None,
         provider_id: str,
         margin_seconds: int = 300,
+        account_id: str | None = None,
     ) -> dict[str, Any]:
         """Return stored credentials, proactively refreshing if nearing or past expiry."""
-        with self._connection_lock(household_id, provider_id):
-            meta = self.store.get_connection_metadata(household_id, provider_id)
-            creds = self.store.get_credentials(household_id, provider_id)
+        meta = self.store.get_connection_metadata(household_id, provider_id, account_id=account_id)
+        if meta is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Ingen lagret tilkobling funnet for '{provider_id}'.",
+            )
+        target_account_id = meta.account_id
+        with self._connection_lock(household_id, provider_id, target_account_id):
+            meta = self.store.get_connection_metadata(
+                household_id, provider_id, account_id=target_account_id
+            )
+            creds = self.store.get_credentials(
+                household_id, provider_id, account_id=target_account_id
+            )
             if meta is None or creds is None:
                 raise HTTPException(
                     status_code=404,
@@ -956,20 +1134,26 @@ class ConnectorAuthService:
                 and isinstance(creds.get("refresh_token"), str)
                 and creds["refresh_token"].strip()
             ):
-                self.refresh_connection(household_id, actor_id, provider_id)
-                refreshed = self.store.get_credentials(household_id, provider_id)
+                self.refresh_connection(
+                    household_id, actor_id, provider_id, account_id=target_account_id
+                )
+                refreshed = self.store.get_credentials(
+                    household_id, provider_id, account_id=target_account_id
+                )
                 if refreshed is not None:
                     return refreshed
 
             return creds
 
     def refresh_expiring_connections(self, margin_seconds: int = 900) -> list[str]:
-        """Scan ConnectorStore for OAuth connections nearing expiry and renew them proactively."""
+        """Scan ConnectorStore for all OAuth accounts nearing expiry and renew them proactively."""
         refreshed: list[str] = []
         deadline = datetime.now(UTC) + timedelta(seconds=margin_seconds)
-        connections = self.store.list_connections(self.household_id)
+        connections = self.store.list_credentials(self.household_id)
 
-        for provider_id, status in connections.items():
+        for status in connections:
+            provider_id = status.provider_id
+            account_id = status.account_id
             if provider_id not in REFRESHABLE_PROVIDERS:
                 continue
             if status.auth_mode not in OAUTH_REFRESH_MODES:
@@ -977,17 +1161,35 @@ class ConnectorAuthService:
             if status.expires_at is None or status.expires_at > deadline:
                 continue
             try:
-                creds = self.store.get_credentials(self.household_id, provider_id)
+                creds = self.store.get_credentials(
+                    self.household_id, provider_id, account_id=account_id
+                )
                 if (
                     not creds
                     or not isinstance(creds.get("refresh_token"), str)
                     or not creds["refresh_token"].strip()
                 ):
                     continue
-                self.refresh_connection(self.household_id, status.actor_id, provider_id)
+                self.refresh_connection(
+                    self.household_id,
+                    status.updated_by_actor_id or status.actor_id,
+                    provider_id,
+                    account_id=account_id,
+                )
                 refreshed.append(provider_id)
-            except Exception:
-                _LOG.warning("Proactive token refresh failed for provider %s", provider_id)
+            except Exception as exc:
+                if not isinstance(exc, HTTPException):
+                    self.store.update_account_metadata(
+                        self.household_id,
+                        provider_id,
+                        account_id,
+                        {"last_error": "Automatisk tokenfornyelse feilet"},
+                    )
+                _LOG.warning(
+                    "Proactive token refresh failed for provider %s account %s",
+                    provider_id,
+                    account_id,
+                )
 
         return refreshed
 

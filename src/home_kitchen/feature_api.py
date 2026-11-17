@@ -36,6 +36,7 @@ from home_kitchen.connector_auth import (
     PKCECompleteRequest,
     PKCEStartRequest,
     PKCEStartResponse,
+    RefreshRequest,
     TrumfOTPStartRequest,
     TrumfOTPStartResponse,
     TrumfOTPVerifyRequest,
@@ -159,6 +160,9 @@ class ConnectorConnectRequest(BaseModel):
     password: SecretStr | None = None
     raw_payload: SecretStr | None = None
     expires_at: datetime | None = None
+    account_id: str | None = None
+    account_label: str | None = None
+    add_account: bool = False
 
 
 def _extract_credentials(
@@ -412,6 +416,7 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
         return features.integrations.describe(authenticated_actor(request))
 
     @router.post("/integrations/{provider_id}/connect")
+    @router.put("/integrations/{provider_id}")
     def connect_integration(
         provider_id: str,
         data: ConnectorConnectRequest,
@@ -435,6 +440,9 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
                 credentials=credentials,
                 expires_at=data.expires_at,
                 actor_id=actor,
+                account_id=data.account_id,
+                account_label=data.account_label,
+                add_account=data.add_account,
             )
         except RuntimeError as exc:
             raise HTTPException(503, str(exc)) from None
@@ -444,8 +452,13 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
         except KeyError:
             raise HTTPException(404, f"Ukjent leverandør: {provider_id}") from None
 
-    @router.delete("/integrations/{provider_id}/connection", status_code=204)
-    def disconnect_integration(provider_id: str, request: Request, response: Response) -> Response:
+    @router.delete("/integrations/{provider_id}/accounts/{account_id}", status_code=204)
+    def disconnect_integration_account(
+        provider_id: str,
+        account_id: str,
+        request: Request,
+        response: Response,
+    ) -> Response:
         actor = authenticated_actor(request)
         response.headers["Cache-Control"] = "no-store"
         if provider_id == "oda":
@@ -453,7 +466,33 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
             return Response(status_code=204)
         if provider_id not in {"rema1000", "coop", "trumf", "cookidoo"}:
             raise HTTPException(404, f"Ukjent leverandør: {provider_id}")
-        features.connector_store.delete_connection(features.household_id, provider_id)
+        deleted = features.connector_store.delete_account_credentials(
+            features.household_id, provider_id, account_id
+        )
+        if not deleted:
+            raise HTTPException(
+                404, f"Ingen tilkoblet konto '{account_id}' funnet for '{provider_id}'."
+            )
+        return Response(status_code=204)
+
+    @router.delete("/integrations/{provider_id}/connection", status_code=204)
+    @router.delete("/integrations/{provider_id}", status_code=204)
+    def disconnect_integration(
+        provider_id: str,
+        request: Request,
+        response: Response,
+        account_id: str | None = Query(default=None),
+    ) -> Response:
+        actor = authenticated_actor(request)
+        response.headers["Cache-Control"] = "no-store"
+        if provider_id == "oda":
+            features.oda.disconnect(actor)
+            return Response(status_code=204)
+        if provider_id not in {"rema1000", "coop", "trumf", "cookidoo"}:
+            raise HTTPException(404, f"Ukjent leverandør: {provider_id}")
+        features.connector_store.delete_connection(
+            features.household_id, provider_id, account_id=account_id
+        )
         return Response(status_code=204)
 
     @router.post("/integrations/{provider_id}/pkce/start")
@@ -462,6 +501,9 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
         request: Request,
         response: Response,
         data: PKCEStartRequest | None = None,
+        account_id: str | None = Query(default=None),
+        account_label: str | None = Query(default=None),
+        add_account: bool = Query(default=False),
     ) -> PKCEStartResponse:
         authenticated_actor(request)
         response.headers["Cache-Control"] = "no-store"
@@ -469,6 +511,11 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
             provider_id=provider_id,
             household_id=features.household_id,
             redirect_uri=data.redirect_uri if data else None,
+            account_id=(data.account_id if data and data.account_id is not None else account_id),
+            account_label=(
+                data.account_label if data and data.account_label is not None else account_label
+            ),
+            add_account=bool((data and data.add_account) or add_account),
         )
 
     @router.post("/integrations/{provider_id}/pkce/complete")
@@ -487,6 +534,9 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
             code=data.code,
             state=data.state,
             redirect_url=data.redirect_url,
+            account_id=data.account_id,
+            account_label=data.account_label,
+            add_account=data.add_account,
         )
 
     @router.get("/integrations/{provider_id}/pkce/callback")
@@ -495,6 +545,9 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
         request: Request,
         code: str | None = None,
         state: str | None = None,
+        account_id: str | None = None,
+        account_label: str | None = None,
+        add_account: bool = False,
     ) -> RedirectResponse:
         actor = authenticated_actor(request)
         get_connector_auth().complete_pkce(
@@ -504,6 +557,9 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
             code=code,
             state=state,
             redirect_url=str(request.url),
+            account_id=account_id,
+            account_label=account_label,
+            add_account=add_account,
         )
         return RedirectResponse(url="/#settings", status_code=302)
 
@@ -521,6 +577,9 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
             email=data.email,
             password=data.password.get_secret_value(),
             country=data.country,
+            account_id=data.account_id,
+            account_label=data.account_label,
+            add_account=data.add_account,
         )
 
     @router.post("/integrations/trumf/login/start")
@@ -534,6 +593,9 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
         return get_connector_auth().start_trumf_otp(
             household_id=features.household_id,
             phone=data.phone,
+            account_id=data.account_id,
+            account_label=data.account_label,
+            add_account=data.add_account,
         )
 
     @router.post("/integrations/trumf/login/verify")
@@ -549,6 +611,9 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
             actor_id=actor,
             session_id=data.session_id,
             otp=data.otp,
+            account_id=data.account_id,
+            account_label=data.account_label,
+            add_account=data.add_account,
         )
 
     @router.post("/integrations/{provider_id}/refresh")
@@ -556,13 +621,19 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
         provider_id: str,
         request: Request,
         response: Response,
+        account_id: str | None = Query(default=None),
+        data: RefreshRequest | None = None,
     ) -> IntegrationInfo:
         actor = authenticated_actor(request)
         response.headers["Cache-Control"] = "no-store"
+        target_account_id = (
+            account_id if account_id is not None else (data.account_id if data else None)
+        )
         return get_connector_auth().refresh_connection(
             household_id=features.household_id,
             actor_id=actor,
             provider_id=provider_id,
+            account_id=target_account_id,
         )
 
     @router.get("/inventory")

@@ -297,6 +297,17 @@ function formatRecipeBadge(recipe) {
   else if (timeText) prepText = timeText;
   return [typeText, prepText].filter(Boolean).join(" · ");
 }
+function renderRecipeStatsBadges(recipe) {
+  const formatter = window.KitchenRecipeQuickFeedback?.formatRecipeStatsBadges;
+  if (typeof formatter !== "function") return null;
+  const labels = formatter(recipe?.activity_stats || recipe?.stats);
+  if (!labels.length) return null;
+  const wrap = el("div", null, "recipe-stats-badges");
+  labels.forEach((label) => {
+    add(wrap, el("span", label, "badge recipe-stat-badge"));
+  });
+  return wrap;
+}
 function day(offset) {
   const date = new Date(state.week);
   date.setDate(date.getDate() + offset);
@@ -737,6 +748,7 @@ async function refreshView() {
   pauseBasketMatchPolling();
   try {
     if (state.view === "week") state.meals = await api("/meals" + range());
+    if (state.view === "recipes") state.recipes = await api("/recipes?include_stats=true");
     if (state.view === "settings") await loadConnectionStatus();
     if (state.view === "shopping") {
       const results = await Promise.all([
@@ -1505,7 +1517,7 @@ function renderRecipes(main) {
         await api("/recipe-collections/" + encodeURIComponent(jobId) + "/cancel", "POST", {}),
       );
       rememberRecipeCollectionJob(job);
-      state.recipes = await api("/recipes");
+      state.recipes = await api("/recipes?include_stats=true");
       if (state.view === "recipes") render();
     } catch (error) {
       collectionSummary.textContent = error.message;
@@ -1633,6 +1645,7 @@ function renderRecipes(main) {
                 " ingredienser",
               "muted",
             ),
+            renderRecipeStatsBadges(recipe),
             add(
               el("div", null, "actions"),
               button("Vis oppskrift", () => viewRecipe(recipe)),
@@ -2083,7 +2096,7 @@ function recipeForm(draft = {}, source = "manual") {
       isEditing ? "PUT" : "POST",
       payload,
     );
-    state.recipes = await api("/recipes");
+    state.recipes = await api("/recipes?include_stats=true");
     $("#modal").close();
     navigate("recipes");
     notify(isEditing ? "Oppskriften er lagret." : "Oppskriften er lagt til i samlingen.");
@@ -2249,12 +2262,85 @@ function viewRecipe(recipe) {
   const root = openDialog(recipe.title);
   const body = el("div", null, "recipe-body");
   const metaBadge = formatRecipeBadge(recipe);
+  const statsContainer = el("div", null, "recipe-stats-host");
+  function updateStatsDisplay(currentRecipe) {
+    statsContainer.replaceChildren();
+    const badges = renderRecipeStatsBadges(currentRecipe);
+    if (badges) add(statsContainer, badges);
+  }
+  updateStatsDisplay(recipe);
   add(
     body,
     recipeImage(recipe),
     metaBadge ? el("span", metaBadge, "badge recipe-badge-meta") : null,
     el("p", formatUiCount(recipe.servings) + " porsjoner", "muted"),
+    statsContainer,
   );
+  if (recipe?.id && window.KitchenRecipeQuickFeedback?.renderQuickFeedbackBar) {
+    let statsUpdateSeq = 0;
+    const quickFeedbackWrap = el("section", null, "quick-feedback-widget");
+    const quickFeedbackLabel = el("p", "Hurtigvurdering", "quick-feedback-label");
+    const quickFeedbackBar = window.KitchenRecipeQuickFeedback.renderQuickFeedbackBar(
+      recipe,
+      async (result, payload) => {
+        const seq = ++statsUpdateSeq;
+        let nextStats = result?.activity_stats || result?.stats || null;
+        if (!nextStats && typeof api === "function") {
+          try {
+            const fetched = await api("/recipes/" + encodeURIComponent(recipe.id) + "/stats");
+            if (seq !== statsUpdateSeq) return;
+            if (
+              fetched &&
+              typeof fetched === "object" &&
+              (
+                "times_planned" in fetched ||
+                "times_cooked" in fetched ||
+                "times_ordered" in fetched ||
+                "latest_rating" in fetched ||
+                "average_rating" in fetched ||
+                "would_make_again" in fetched ||
+                "feedback_count" in fetched
+              )
+            ) {
+              nextStats = fetched;
+            }
+          } catch {}
+        }
+        if (seq !== statsUpdateSeq) return;
+        if (!nextStats) {
+          const prev = recipe.activity_stats || recipe.stats || {};
+          nextStats = {
+            ...prev,
+            ...(payload?.rating != null ? { latest_rating: payload.rating } : {}),
+            ...(payload?.would_make_again != null
+              ? { would_make_again: payload.would_make_again }
+              : {}),
+            feedback_count: (Number(prev.feedback_count) || 0) + 1,
+          };
+          if (nextStats.average_rating == null && payload?.rating != null) {
+            nextStats.average_rating = payload.rating;
+          }
+        }
+        recipe.activity_stats = nextStats;
+        recipe.stats = nextStats;
+        if (Array.isArray(state?.recipes)) {
+          state.recipes = state.recipes.map((item) =>
+            item.id === recipe.id
+              ? { ...item, activity_stats: nextStats, stats: nextStats }
+              : item,
+          );
+        }
+        updateStatsDisplay(recipe);
+        if (typeof render === "function" && state?.view === "recipes") render();
+      },
+      {
+        api,
+        ...(typeof document !== "undefined" ? { document } : {}),
+      },
+    );
+    add(quickFeedbackWrap, quickFeedbackLabel, quickFeedbackBar);
+    add(body, quickFeedbackWrap);
+  }
   if (recipe.photo_source) {
     const citation = [
       recipe.photo_source.book_title,
@@ -2354,7 +2440,7 @@ function viewRecipe(recipe) {
                     "/recipes/" + encodeURIComponent(recipe.id),
                     "DELETE",
                   );
-                  state.recipes = await api("/recipes");
+                  state.recipes = await api("/recipes?include_stats=true");
                   $("#modal").close();
                   await refreshView();
                   notify("Oppskriften er slettet.");
@@ -2623,7 +2709,7 @@ function unmappedIngredientsDialog(options = {}) {
     locale: state.household?.language || "nb",
     onMapped: async () => {
       try {
-        state.recipes = await api("/recipes");
+        state.recipes = await api("/recipes?include_stats=true");
         if (state.view === "recipes") render();
       } catch {}
     },
@@ -2987,7 +3073,7 @@ function recipeCollectionForm(resumeJobId = null, initialProvider = null) {
         if (cancelGeneration !== generation || job.job_id !== cancelJobId) return;
         draw(job);
         if (job.status === "cancelled") {
-          state.recipes = await api("/recipes");
+          state.recipes = await api("/recipes?include_stats=true");
           if (state.view === "recipes") await refreshView();
         }
       } catch (error) {
@@ -3155,7 +3241,7 @@ function recipeCollectionForm(resumeJobId = null, initialProvider = null) {
           job = nextJob;
           draw(job);
           if (job.status === "completed" || job.status === "cancelled") {
-            state.recipes = await api("/recipes");
+            state.recipes = await api("/recipes?include_stats=true");
             if (state.view === "recipes") await refreshView();
           }
         } catch (error) {
@@ -7606,7 +7692,7 @@ async function refreshTrackedRecipeCollectionJob() {
     if (state.recipeCollectionJob?.job_id !== jobId) return;
     rememberRecipeCollectionJob(job);
     if (["completed", "cancelled"].includes(job.status)) {
-      state.recipes = await api("/recipes");
+      state.recipes = await api("/recipes?include_stats=true");
       if (state.view === "recipes") render();
     }
   } catch {}
@@ -7636,7 +7722,7 @@ async function start() {
     ) state.selectedDate = requestedDay;
     [state.household, state.recipes] = await Promise.all([
       api("/household"),
-      api("/recipes"),
+      api("/recipes?include_stats=true"),
     ]);
     await loadConnectionStatus();
     if (rememberedCollectionId) {

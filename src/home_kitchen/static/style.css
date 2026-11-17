@@ -1149,6 +1149,100 @@ h3 {
   color: #2b5c46;
   border: 1px solid #c2d8c9;
 }
+.recipe-stats-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0 12px;
+}
+.badge.recipe-stat-badge {
+  margin-bottom: 0;
+  background: #f2f4ea;
+  color: #273d33;
+  border: 1px solid var(--line);
+  font-size: 11px;
+  padding: 4px 8px;
+}
+.quick-feedback-widget {
+  margin: 14px 0 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #f7f6ee;
+}
+.quick-feedback-label {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--muted);
+}
+.recipe-quick-feedback-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+}
+.quick-feedback-stars,
+.quick-feedback-thumbs {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.quick-feedback-star,
+.quick-feedback-thumb {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  line-height: 1;
+}
+.quick-feedback-star {
+  font-size: 20px;
+  color: #8c948b;
+}
+.quick-feedback-star:hover {
+  color: #8f5c00;
+  border-color: #d6b669;
+  background: #fdf8ea;
+}
+.quick-feedback-star[aria-pressed="true"],
+.quick-feedback-star:has(~ .quick-feedback-star[aria-pressed="true"]) {
+  color: #8f5c00;
+  background: #fbf1d4;
+  border-color: #c9972c;
+}
+.quick-feedback-thumb {
+  font-size: 18px;
+}
+.quick-feedback-thumb-up[aria-pressed="true"] {
+  background: var(--accent);
+  border-color: var(--green);
+  color: var(--green);
+  box-shadow: inset 0 0 0 1px var(--green);
+}
+.quick-feedback-thumb-down[aria-pressed="true"] {
+  background: #f9e8e5;
+  border-color: #973f32;
+  color: #973f32;
+  box-shadow: inset 0 0 0 1px #973f32;
+}
+.quick-feedback-star:focus-visible,
+.quick-feedback-thumb:focus-visible {
+  outline: 2px solid #fffef9;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 5px #244c3e;
+}
+.quick-feedback-status {
+  font-size: 13px;
+  color: var(--muted);
+}
+.quick-feedback-error {
+  flex: 1 1 100%;
+  font-size: 13px;
+  color: #923e30;
+}
 .recipe-filters {
   margin: 12px 0 18px;
   display: flex;

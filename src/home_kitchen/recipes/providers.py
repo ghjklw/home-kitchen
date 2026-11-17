@@ -106,6 +106,9 @@ class AIRecipeProvider:
                     original_source=RecipeSource.IMPORTED,
                     source_url=imported.source_url,
                 ),
+                recipe_type=imported.recipe_type,
+                prep_time_minutes=imported.prep_time_minutes,
+                prep_category=imported.prep_category,
             )
         elif request.recipe is not None:
             recipe = request.recipe

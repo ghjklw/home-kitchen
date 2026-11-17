@@ -21,6 +21,7 @@ from home_kitchen.models import (
     Recipe,
     RecipeCreate,
     RecipeType,
+    infer_recipe_metadata,
 )
 from home_kitchen.recipes.models import EditableRecipeDraft
 from home_kitchen.recommendations import build_planner, recommend_plan
@@ -579,3 +580,89 @@ def test_alembic_single_head_includes_0026_recipe_metadata():
     assert len(heads) == 1
     revisions = {rev.revision for rev in script.walk_revisions()}
     assert "0026_recipe_metadata" in revisions
+
+
+def test_infer_recipe_metadata_multilingual_clamping_and_batch():
+    # Baking (NO/FR/EN)
+    assert infer_recipe_metadata("Sjokoladekake", prep_time_minutes=45) == (
+        RecipeType.BAKST,
+        45,
+        PrepCategory.NORMAL,
+    )
+    assert infer_recipe_metadata("Pain au chocolat", prep_time_minutes=120) == (
+        RecipeType.BAKST,
+        120,
+        PrepCategory.LANGTID,
+    )
+    assert infer_recipe_metadata("Blueberry muffins", prep_time_minutes=25) == (
+        RecipeType.BAKST,
+        25,
+        PrepCategory.RASK,
+    )
+
+    # Dessert
+    assert infer_recipe_metadata("Tiramisu", prep_time_minutes=30) == (
+        RecipeType.DESSERT,
+        30,
+        PrepCategory.RASK,
+    )
+    assert infer_recipe_metadata("Crème brûlée", prep_time_minutes=60) == (
+        RecipeType.DESSERT,
+        60,
+        PrepCategory.NORMAL,
+    )
+
+    # Lunch & Breakfast
+    assert infer_recipe_metadata("Quiche Lorraine", prep_time_minutes=50) == (
+        RecipeType.LUNSJ,
+        50,
+        PrepCategory.NORMAL,
+    )
+    assert infer_recipe_metadata("Havregrøt med bær", prep_time_minutes=10) == (
+        RecipeType.FROKOST,
+        10,
+        PrepCategory.RASK,
+    )
+
+    # Tilbehør vs main dish with sauce ("med ...")
+    assert infer_recipe_metadata("Hjemmelaget aioli", prep_time_minutes=10) == (
+        RecipeType.TILBEHOR,
+        10,
+        PrepCategory.RASK,
+    )
+    assert infer_recipe_metadata("Laks med sandefjordsmør og saus", prep_time_minutes=25) == (
+        RecipeType.MIDDAG,
+        25,
+        PrepCategory.RASK,
+    )
+
+    # Batch cooking via servings >= 6 or batch keywords
+    assert infer_recipe_metadata("Kyllingcurry", servings=6, prep_time_minutes=30) == (
+        RecipeType.MIDDAG,
+        30,
+        PrepCategory.BATCH_COOKING,
+    )
+    assert infer_recipe_metadata("Ukens lammegryte", servings=4, prep_time_minutes=90) == (
+        RecipeType.MIDDAG,
+        90,
+        PrepCategory.BATCH_COOKING,
+    )
+
+    # Clamping & explicit overrides
+    assert infer_recipe_metadata("Sourdough", prep_time_minutes=5000) == (
+        RecipeType.MIDDAG,
+        2880,
+        PrepCategory.LANGTID,
+    )
+    assert infer_recipe_metadata("Ukjent", prep_time_minutes=0) == (
+        RecipeType.MIDDAG,
+        None,
+        None,
+    )
+    assert infer_recipe_metadata(
+        "Suppe",
+        categories=["Desserter"],
+        prep_time_minutes=20,
+        recipe_type="annet",
+        prep_category="langtid",
+    ) == (RecipeType.ANNET, 20, PrepCategory.LANGTID)

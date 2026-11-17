@@ -20,7 +20,16 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from home_kitchen.history import HistoryEntryCreate, HistoryRepository
 from home_kitchen.imports import ImportedDraft, import_recipe, validate_url
-from home_kitchen.models import Ingredient, PurchaseEstimate, Recipe, RecipeSource, SourceIngredient
+from home_kitchen.models import (
+    Ingredient,
+    PrepCategory,
+    PurchaseEstimate,
+    Recipe,
+    RecipeSource,
+    RecipeType,
+    SourceIngredient,
+    infer_recipe_metadata,
+)
 from home_kitchen.recipes.source_quantities import source_ingredient_parts
 from home_kitchen.service import KitchenService
 from home_kitchen.store import entity_values, metadata, recipes
@@ -66,6 +75,9 @@ class CollectionEntry(BaseModel):
     servings: int | None = None
     ingredients: list[str] = Field(default_factory=list)
     instructions: list[str] = Field(default_factory=list)
+    recipe_type: RecipeType | None = None
+    prep_time_minutes: int | None = None
+    prep_category: PrepCategory | None = None
 
 
 class CollectionPage(BaseModel):
@@ -338,6 +350,23 @@ class CollectionService:
                                         dict.fromkeys([*existing.badges, *entry.badges])
                                     )
                                     existing.metadata.update(entry.metadata)
+                                    if existing.image_url is None and entry.image_url is not None:
+                                        existing.image_url = entry.image_url
+                                    if (
+                                        existing.recipe_type is None
+                                        and entry.recipe_type is not None
+                                    ):
+                                        existing.recipe_type = entry.recipe_type
+                                    if (
+                                        existing.prep_time_minutes is None
+                                        and entry.prep_time_minutes is not None
+                                    ):
+                                        existing.prep_time_minutes = entry.prep_time_minutes
+                                    if (
+                                        existing.prep_category is None
+                                        and entry.prep_category is not None
+                                    ):
+                                        existing.prep_category = entry.prep_category
                                     if not existing.source_url and entry.source_url:
                                         existing.source_url = entry.source_url
                                         await asyncio.to_thread(self._inspect_entry, existing, prov)
@@ -442,10 +471,26 @@ class CollectionService:
         if draft is not None and str(draft.source_url) != entry.source_url:
             raise ValueError("Extracted source URL changed; preview the source again")
         source = RecipeSource.COOKIDOO if entry.provider == "cookidoo" else RecipeSource.IMPORTED
-        recipe = (
-            None
-            if draft is None
-            else Recipe(
+        if draft is None:
+            recipe = None
+        else:
+            raw_type = draft.recipe_type or entry.recipe_type
+            raw_minutes = (
+                draft.prep_time_minutes
+                if draft.prep_time_minutes is not None
+                else entry.prep_time_minutes
+            )
+            raw_prep_category = draft.prep_category or entry.prep_category
+            inferred_type, inferred_minutes, inferred_prep_category = infer_recipe_metadata(
+                title=draft.title,
+                ingredients=draft.ingredients,
+                categories=entry.badges,
+                prep_time_minutes=raw_minutes,
+                servings=draft.servings,
+                recipe_type=raw_type,
+                prep_category=raw_prep_category,
+            )
+            recipe = Recipe(
                 id=uuid4(),
                 title=draft.title,
                 servings=draft.servings,
@@ -455,13 +500,15 @@ class CollectionService:
                 instructions=draft.instructions,
                 source=source,
                 source_url=entry.source_url,
-                image_url=draft.image_url,
+                image_url=draft.image_url or entry.image_url,
                 source_ingredients=[
                     SourceIngredient(index=index, text=raw)
                     for index, raw in enumerate(draft.ingredients)
                 ],
+                recipe_type=inferred_type,
+                prep_time_minutes=inferred_minutes,
+                prep_category=inferred_prep_category,
             )
-        )
         with self.kitchen.store.engine.begin() as connection:
             if connection.dialect.name == "postgresql":
                 connection.execute(
@@ -556,6 +603,9 @@ class CollectionService:
                                     instructions=instructions,
                                     source_url=entry.source_url,
                                     image_url=entry.image_url,
+                                    recipe_type=entry.recipe_type,
+                                    prep_time_minutes=entry.prep_time_minutes,
+                                    prep_category=entry.prep_category,
                                 )
                             else:
                                 extract_entry = getattr(prov, "extract_entry", None)
@@ -563,6 +613,8 @@ class CollectionService:
                                     draft = await extract_entry(entry)
                                 else:
                                     draft = await self.extractor(entry.source_url)
+                                if draft.image_url is None and entry.image_url is not None:
+                                    draft = draft.model_copy(update={"image_url": entry.image_url})
                             await asyncio.to_thread(self._fence, job)
                             entry.recipe_id, existed = await self._save_async(job, entry, draft)
                             entry.status = "already_imported" if existed else "imported"

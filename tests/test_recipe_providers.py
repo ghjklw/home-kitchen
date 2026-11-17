@@ -162,6 +162,9 @@ async def test_url_shape_keeps_original_words_and_locked_attribution(monkeypatch
         ingredients=["a pinch of salt"],
         instructions=["Simmer"],
         source_url="https://www.matprat.no/soup/",
+        recipe_type="lunsj",
+        prep_time_minutes=20,
+        prep_category="rask",
     )
     fetch = AsyncMock(return_value=imported)
     monkeypatch.setattr("home_kitchen.recipes.providers.imports.import_recipe", fetch)
@@ -187,6 +190,9 @@ async def test_url_shape_keeps_original_words_and_locked_attribution(monkeypatch
     adapted = result.adapted
     assert adapted is not None
     assert adapted.servings == 2
+    assert adapted.recipe_type == "lunsj"
+    assert adapted.prep_time_minutes == 20
+    assert adapted.prep_category == "rask"
     assert adapted.source_ingredients[0].text == "a pinch of salt"
     assert adapted.ingredients[0].quantity is None
     assert adapted.ingredients[0].unit is None

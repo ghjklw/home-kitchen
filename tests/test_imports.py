@@ -270,3 +270,42 @@ async def test_oda_import_uses_mocked_public_html_and_does_not_follow_to_other_h
     )
     with pytest.raises(ValueError, match="supports public HTTPS"):
         await imports.import_recipe("https://oda.com/no/recipes/2353-oda-buns/")
+
+
+def test_url_import_extracts_total_time_and_assigns_metadata():
+    matprat_data = {
+        "@context": "https://schema.org",
+        "@type": "Recipe",
+        "name": "Blomkålsuppe",
+        "recipeYield": "4 porsjoner",
+        "totalTime": "PT25M",
+        "recipeIngredient": ["1 blomkål", "5 dl kraft"],
+        "recipeInstructions": [{"@type": "HowToStep", "text": "Kok og mos."}],
+    }
+    matprat_html = (
+        "<!doctype html><html><head><script type='application/ld+json'>"
+        + json.dumps(matprat_data)
+        + "</script></head><body><h1>Blomkålsuppe</h1></body></html>"
+    )
+    matprat_draft = imports.parse_recipe(
+        matprat_html, "https://www.matprat.no/oppskrifter/blomkalsuppe/"
+    )
+    assert matprat_draft.recipe_type == "lunsj"
+    assert matprat_draft.prep_time_minutes == 25
+    assert matprat_draft.prep_category == "rask"
+
+    oda_data = {
+        "@context": "https://schema.org",
+        "@type": "Recipe",
+        "name": "Langtidsbakt brød",
+        "recipeYield": "2",
+        "totalTime": "PT1H45M",
+        "recipeCategory": "Bakst",
+        "recipeIngredient": ["500 g mel"],
+        "recipeInstructions": ["Elt og stek."],
+    }
+    oda_html = "<script type='application/ld+json'>" + json.dumps(oda_data) + "</script>"
+    oda_draft = imports.parse_recipe(oda_html, "https://oda.com/no/recipes/2353-oda-buns/")
+    assert oda_draft.recipe_type == "bakst"
+    assert oda_draft.prep_time_minutes == 105
+    assert oda_draft.prep_category == "langtid"

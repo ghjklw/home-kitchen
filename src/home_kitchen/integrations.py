@@ -404,9 +404,9 @@ class TrumfIntegration(StoredConnectorIntegration):
         super().__init__(
             provider_id="trumf",
             name="Trumf",
-            supported_auth_modes=["oauth_pkce", "interactive_otp", "session_cookie"],
+            supported_auth_modes=["session_cookie", "interactive_otp"],
             capabilities=["purchase_history", "receipt_sync"],
-            detail="Koble til Trumf med Trumf-konto (OAuth PKCE) eller sesjonsinformasjonskapsel for automatisk kvitterings- og kjøpshistorikk.",
+            detail="Koble til Trumf med sesjonsinformasjonskapsel for automatisk kvitterings- og kjøpshistorikk.",
             store=store,
             household_id=household_id,
             default_expiry_prompt="Sesjonen for Trumf har utløpt. Koble til på nytt eller forny tilkoblingen.",

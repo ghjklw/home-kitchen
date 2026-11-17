@@ -1828,7 +1828,7 @@ function recipeForm(draft = {}, source = "manual") {
   );
   prepTimeMinutes.input.name = "prep_time_minutes";
   prepTimeMinutes.input.min = 1;
-  prepTimeMinutes.input.max = 1440;
+  prepTimeMinutes.input.max = 2880;
   prepTimeMinutes.input.step = 1;
   prepTimeMinutes.input.placeholder = "f.eks. 30";
   const prepCategory = field("Tidskategori (valgfritt)", "select", draft.prep_category || "");
@@ -2154,9 +2154,6 @@ function recipeForm(draft = {}, source = "manual") {
       provenance: draft.provenance || null,
       photo_source: draft.photo_source || null,
       image_attribution: draft.image_attribution || null,
-      recipe_type: draft.recipe_type || null,
-      prep_time_minutes: draft.prep_time_minutes ?? null,
-      prep_category: draft.prep_category || null,
     });
     const revise = button("Se over KI-forslaget", async () => {
       revise.disabled = true;
@@ -3317,9 +3314,10 @@ function importForm() {
   add(form, url.wrap);
   formSubmit(form, "Lag utkast fra lenke", async () => {
     const response = await api("/recipe-drafts/ai", "POST", { url: url.input.value });
-    if (!response?.adapted)
+    const draft = response?.adapted || response?.imported;
+    if (!draft)
       throw new Error("KI-en ga ikke et redigerbart oppskriftsutkast. Ingenting ble lagret.");
-    recipeForm(response.adapted, "ai");
+    recipeForm(draft, response?.adapted ? "ai" : "imported");
   }, { settingsOnFailure: true });
   add(root, form);
 }
@@ -6560,72 +6558,26 @@ function openConnectorModal(integration, options = {}) {
       container,
       el(
         "p",
-        "Koble til Trumf med ett klikk via Trumf-innlogging for automatisk synkronisering og fornyelse av kvitteringer og kjøpshistorikk.",
+        "Koble til Trumf med sesjonsinformasjonskapsel for automatisk synkronisering og fornyelse av kvitteringer og kjøpshistorikk.",
         "muted",
       ),
       accountLabelField.wrap,
     );
 
-    const flow = el("div", null, "connector-guided-flow stack");
-
-    // Primary 1-click OAuth PKCE flow
-    const step1 = el("div", null, "connector-step connector-step-1 stack");
-    add(step1, el("h3", "1-klikks innlogging med Trumf"));
+    const primaryStep = el("div", null, "connector-step connector-trumf-cookie stack");
+    add(primaryStep, el("h3", "Sesjonsinformasjonskapsel"));
     add(
-      step1,
+      primaryStep,
       el(
         "p",
-        "Trykk på knappen under for å åpne Trumf-innlogging i en ny fane. Etter innlogging blir du sendt automatisk tilbake hit og tilkoblingen fullføres.",
-        "muted",
-      ),
-    );
-    const step1Error = el("p", "", "form-error");
-    step1Error.setAttribute("role", "alert");
-    const step1Notice = el("p", "", "callout info");
-    step1Notice.hidden = true;
-    const pkceBtn = button("Koble til med Trumf-konto (OAuth PKCE)", async () => {
-      step1Error.textContent = "";
-      pkceBtn.disabled = true;
-      try {
-        const startMeta = accountMetaPayload();
-        const data = Object.keys(startMeta).length
-          ? await api("/integrations/trumf/pkce/start", "POST", startMeta)
-          : await api("/integrations/trumf/pkce/start", "POST");
-        if (!data || !data.authorize_url) {
-          throw new Error("Mottok ingen innloggingslenke fra tjeneren.");
-        }
-        window.open(data.authorize_url, "_blank", "noopener,noreferrer");
-        step1Notice.textContent =
-          "Trumf-innloggingen er åpnet i en ny fane. Etter innlogging blir du sendt automatisk tilbake til Innstillinger.";
-        step1Notice.hidden = false;
-      } catch (err) {
-        step1Error.textContent = err.message;
-      } finally {
-        pkceBtn.disabled = false;
-      }
-    }, "primary");
-    add(step1, step1Error, add(el("div", null, "actions"), pkceBtn), step1Notice);
-    add(flow, step1);
-    add(container, flow);
-
-    // Secondary collapsible cookie fallback
-    const details = el("details", null, "connector-manual-details");
-    const summary = el("summary", "Sesjonsinformasjonskapsel (avansert)");
-    add(details, summary);
-
-    const manualBody = el("div", null, "stack");
-    add(
-      manualBody,
-      el(
-        "p",
-        "Åpne Trumf i en ny fane og logg inn med BankID eller SMS. Åpne deretter Nettverk-fanen i nettleserens utviklerverktøy, velg en forespørsel mot www.trumf.no, og kopier hele Cookie-forespørselsheaderen (slik at alle deler som __Secure-authjs.session-token.0 og __Secure-authjs.session-token.1 blir med og automatisk fornyelse fungerer).",
+        "Åpne Trumf i en ny fane og logg inn med BankID eller SMS. Kopier deretter enten hele Cookie-headeren fra Nettverk-fanen, eller fyll inn begge delene (__Secure-authjs.session-token.0 og __Secure-authjs.session-token.1) fra Applikasjon → Informasjonskapsler slik at automatisk fornyelse via /api/auth/session fungerer.",
         "muted",
       ),
     );
     const openBtn = button("Åpne Trumf-innlogging", () => {
       window.open("https://www.trumf.no/", "_blank", "noopener,noreferrer");
     }, "quiet");
-    add(manualBody, add(el("div", null, "actions"), openBtn));
+    add(primaryStep, add(el("div", null, "actions"), openBtn));
 
     const form = el("form", null, "stack");
     form.autocomplete = "off";
@@ -6635,20 +6587,49 @@ function openConnectorModal(integration, options = {}) {
       "",
       "Lim inn full Cookie-header (inkludert alle __Secure-authjs.session-token-deler)",
     );
+    const token0Field = field(
+      "__Secure-authjs.session-token.0 (valgfritt)",
+      "password",
+      "",
+      "Lim inn del 0 fra DevTools → Applikasjon → Cookies",
+    );
+    const token1Field = field(
+      "__Secure-authjs.session-token.1 (valgfritt)",
+      "password",
+      "",
+      "Lim inn del 1 fra DevTools → Applikasjon → Cookies",
+    );
     const expiryField = field("Utløpsdato (valgfritt)", "date", "");
-    add(form, cookieField.wrap, expiryField.wrap);
+    add(form, cookieField.wrap, token0Field.wrap, token1Field.wrap, expiryField.wrap);
 
     formSubmit(form, "Lagre og koble til", async () => {
       const cookieVal = cookieField.input.value.trim();
-      if (!cookieVal) {
+      const token0Val = token0Field.input.value.trim();
+      const token1Val = token1Field.input.value.trim();
+      let basePayload = null;
+      if (typeof window.KitchenSettingsView?.buildTrumfConnectPayload === "function") {
+        basePayload = window.KitchenSettingsView.buildTrumfConnectPayload(
+          cookieVal,
+          expiryField.input.value,
+          token0Val,
+          token1Val,
+        );
+      } else {
+        const parts = [];
+        if (cookieVal) parts.push(cookieVal);
+        if (token0Val) parts.push(`__Secure-authjs.session-token.0=${token0Val}`);
+        if (token1Val) parts.push(`__Secure-authjs.session-token.1=${token1Val}`);
+        const combined = parts.join("; ").trim();
+        if (combined) {
+          basePayload = {
+            auth_mode: "session_cookie",
+            session_cookie: combined,
+          };
+        }
+      }
+      if (!basePayload) {
         throw new Error("Vennligst oppgi informasjonskapsel for Trumf.");
       }
-      const basePayload = (typeof window.KitchenSettingsView?.buildTrumfConnectPayload === "function")
-        ? window.KitchenSettingsView.buildTrumfConnectPayload(cookieVal, expiryField.input.value)
-        : {
-            auth_mode: "session_cookie",
-            session_cookie: cookieVal,
-          };
       const payload = { ...basePayload, ...accountMetaPayload() };
       if (expiryField.input.value && !payload.expires_at) {
         payload.expires_at = new Date(expiryField.input.value + "T23:59:59Z").toISOString();
@@ -6660,9 +6641,87 @@ function openConnectorModal(integration, options = {}) {
       await refreshView();
       notify(`${integration.name || integration.id} er tilkoblet.`);
     });
-    add(manualBody, form);
-    add(details, manualBody);
-    add(container, details);
+    add(primaryStep, form);
+    add(container, primaryStep);
+
+    const supportsOtp =
+      !Array.isArray(integration.supported_auth_modes) ||
+      integration.supported_auth_modes.includes("interactive_otp");
+    if (supportsOtp) {
+      const otpDetails = el("details", null, "connector-manual-details");
+      add(otpDetails, el("summary", "Bekreft med SMS-kode"));
+
+      const otpBody = el("div", null, "stack");
+      add(
+        otpBody,
+        el(
+          "p",
+          "Alternativt kan du logge inn med telefonnummer og engangskode på SMS hvis Trumf støtter det.",
+          "muted",
+        ),
+      );
+      let activeOtpSessionId = null;
+      const phoneForm = el("form", null, "stack connector-trumf-otp-start");
+      phoneForm.autocomplete = "off";
+      const phoneField = field("Telefonnummer", "tel", "", "F.eks. +4790000000");
+      add(phoneForm, phoneField.wrap);
+
+      const verifyForm = el("form", null, "stack connector-trumf-otp-verify");
+      verifyForm.autocomplete = "off";
+      verifyForm.hidden = true;
+      verifyForm.style.display = "none";
+      const otpField = field("Engangskode fra SMS", "text", "", "6-sifret kode");
+      const otpNotice = el("p", "", "callout info");
+      otpNotice.hidden = true;
+      add(verifyForm, otpNotice, otpField.wrap);
+
+      formSubmit(phoneForm, "Send SMS-kode", async () => {
+        const phone = phoneField.input.value.trim();
+        if (!phone) {
+          throw new Error("Vennligst oppgi telefonnummer for Trumf.");
+        }
+        const res = await api("/integrations/trumf/login/start", "POST", {
+          phone,
+          ...accountMetaPayload(),
+        });
+        if (!res?.session_id) {
+          throw new Error("Mottok ingen sesjons-ID fra Trumf.");
+        }
+        activeOtpSessionId = res.session_id;
+        otpNotice.textContent = res.detail || "Engangskode er sendt på SMS til ditt telefonnummer.";
+        otpNotice.hidden = false;
+        verifyForm.hidden = false;
+        verifyForm.style.display = "";
+        otpField.input.focus();
+      });
+
+      formSubmit(verifyForm, "Bekreft med SMS-kode", async () => {
+        const otp = otpField.input.value.trim();
+        if (!activeOtpSessionId || !otp) {
+          throw new Error("Vennligst oppgi engangskoden fra SMS.");
+        }
+        const basePayload =
+          typeof window.KitchenSettingsView?.buildTrumfVerifyPayload === "function"
+            ? window.KitchenSettingsView.buildTrumfVerifyPayload(activeOtpSessionId, otp)
+            : { session_id: activeOtpSessionId, otp };
+        if (!basePayload) {
+          throw new Error("Vennligst oppgi engangskoden fra SMS.");
+        }
+        await api("/integrations/trumf/login/verify", "POST", {
+          ...basePayload,
+          ...accountMetaPayload(),
+        });
+        const modal = $("#modal");
+        if (modal && modal.open) modal.close();
+        await loadConnectionStatus();
+        await refreshView();
+        notify(`${integration.name || integration.id} er tilkoblet.`);
+      });
+
+      add(otpBody, phoneForm, verifyForm);
+      add(otpDetails, otpBody);
+      add(container, otpDetails);
+    }
 
   } else {
     add(container, accountLabelField.wrap);

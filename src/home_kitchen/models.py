@@ -1,5 +1,7 @@
 """Validated household kitchen data."""
 
+import re
+from collections.abc import Iterable
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from enum import StrEnum
@@ -116,6 +118,196 @@ def derive_prep_category(
             return PrepCategory.NORMAL
         return PrepCategory.LANGTID
     return prep_category
+
+
+_BATCH_KEYWORDS_RE = re.compile(
+    r"(?:\b(?:batch(?:\s*cooking)?|meal[\s-]?prep|ukens|lasagn[ae])\b|gryte)",
+    re.IGNORECASE,
+)
+_RECIPE_TYPE_PATTERNS: tuple[tuple[RecipeType, re.Pattern[str]], ...] = (
+    (
+        RecipeType.DESSERT,
+        re.compile(
+            r"(?:\b(?:cr[eè]me|glace|flan|gelato)\b|"
+            r"(?:desserts?|tiramisu|mousses?|compotes?|kompott|sorbets?|iskrem|"
+            r"pudding(?:er)?|fromasj|panna\s+cotta|clafoutis|crumble))\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        RecipeType.BAKST,
+        re.compile(
+            r"(?:\b(?:cakes?|breads?|pain|pies?|tarts?|buns?|loaves|loaf|scones?|"
+            r"cookies?|brownies?|pastr(?:y|ies)|dough|baking)\b|"
+            r"(?:kake[rn]?|kaker|muffins?|brød|brioches?|bolle[rn]?|boller|"
+            r"rundstykke[rn]?|rundstykker|kjeks|bakst|focaccia|croissants?|"
+            r"baguettes?|gâteaux?|gateaux?|pâtisserie|patisserie|boulangerie|"
+            r"gougères?|gougeres?|kanelsnurr(?:er)?|skolebrød|gjærbakst|terte|"
+            r"madeleines?|financiers?|sablés?|sables?))\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        RecipeType.FROKOST,
+        re.compile(
+            r"(?:\b(?:breakfast|brunch|oatmeal|porridge|pancakes?|waffles?|"
+            r"omelettes?|omelet|crêpes?|crepes?)\b|"
+            r"(?:frokost|smoothies?|granola|müsli|musli|muesli|grøt|havregrøt|"
+            r"pannekake[rn]?|pannekaker|eggerøre|omelett|chiapudding|"
+            r"petit[\s-]d[eé]jeuner))\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        RecipeType.LUNSJ,
+        re.compile(
+            r"(?:\b(?:lunch|soups?|salads?|sandwich(?:es)?|wraps?|toast|panini|"
+            r"bagels?|gazpacho|bruschetta|veloutés?|veloutes?|potages?|soupes?|"
+            r"salades?|déjeuner|dejeuner)\b|"
+            r"(?:lunsj|suppe[rn]?|supper|salat(?:er)?|quiches?|tartines?|smørbrød))\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        RecipeType.TILBEHOR,
+        re.compile(
+            r"(?:\b(?:sauces?|dips?|sides?|side\s+dish(?:es)?|jams?|marmalades?|"
+            r"stocks?|broths?|gravy|relish|condiments?|vinaigrettes?|confitures?|"
+            r"bouillons?|accompagnements?)\b|"
+            r"(?:tilbehør|tilbehor|saus(?:er)?|chutneys?|dressings?|aioli|aïoli|"
+            r"majones|mayonnaise|pesto|salsa|guacamole|hummus|houmous|tzatziki|"
+            r"syltetøy|syltetoy|marinade[rn]?))\b",
+            re.IGNORECASE,
+        ),
+    ),
+)
+_CATEGORY_ONLY_PATTERNS: tuple[tuple[RecipeType, re.Pattern[str]], ...] = (
+    (
+        RecipeType.ANNET,
+        re.compile(
+            r"\b(?:annet|other|drikke|drinks?|beverages?|boissons?)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        RecipeType.MIDDAG,
+        re.compile(
+            r"\b(?:middag|dinner|mains?|main\s+dish(?:es)?|hovedrett(?:er)?|plats?\s+principa(?:l|ux))\b",
+            re.IGNORECASE,
+        ),
+    ),
+)
+_PRIMARY_TITLE_SPLIT_RE = re.compile(r"\s+(?:med|with|avec)\s+", re.IGNORECASE)
+
+
+def _flatten_labels(values: Iterable[str] | str | None) -> list[str]:
+    if values is None:
+        return []
+    if isinstance(values, str):
+        return [values.strip()] if values.strip() else []
+    out: list[str] = []
+    for item in values:
+        if isinstance(item, str) and item.strip():
+            out.append(item.strip())
+    return out
+
+
+def _coerce_recipe_type(value: RecipeType | str | None) -> RecipeType | None:
+    if value is None:
+        return None
+    if isinstance(value, RecipeType):
+        return value
+    normalized = normalize_recipe_type_value(value)
+    if isinstance(normalized, RecipeType):
+        return normalized
+    if isinstance(normalized, str):
+        try:
+            return RecipeType(normalized)
+        except ValueError:
+            return None
+    return None
+
+
+def _coerce_prep_category(value: PrepCategory | str | None) -> PrepCategory | None:
+    if value is None:
+        return None
+    if isinstance(value, PrepCategory):
+        return value
+    normalized = normalize_prep_category_value(value)
+    if isinstance(normalized, PrepCategory):
+        return normalized
+    if isinstance(normalized, str):
+        try:
+            return PrepCategory(normalized)
+        except ValueError:
+            return None
+    return None
+
+
+def _clamp_prep_time_minutes(value: int | float | str | None) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        num = int(round(value))
+    elif isinstance(value, str):
+        stripped = value.strip()
+        if not stripped.isdigit():
+            return None
+        num = int(stripped)
+    else:
+        return None
+    if num <= 0:
+        return None
+    return max(1, min(2880, num))
+
+
+def infer_recipe_metadata(
+    title: str,
+    ingredients: Iterable[str] | None = None,
+    categories: Iterable[str] | str | None = None,
+    tags: Iterable[str] | str | None = None,
+    prep_time_minutes: int | float | None = None,
+    servings: int | None = None,
+    recipe_type: RecipeType | str | None = None,
+    prep_category: PrepCategory | str | None = None,
+) -> tuple[RecipeType, int | None, PrepCategory | None]:
+    """Infer and normalize (recipe_type, prep_time_minutes, prep_category) for imported recipes."""
+    del ingredients  # Reserved for future signals; avoid false positives on pantry staples.
+    clamped_minutes = _clamp_prep_time_minutes(prep_time_minutes)
+    label_list = _flatten_labels(categories) + _flatten_labels(tags)
+    label_text = " ".join(label_list)
+    title_clean = (title or "").strip()
+
+    resolved_prep_category = _coerce_prep_category(prep_category)
+    if resolved_prep_category is None:
+        batch_text = f"{title_clean} {label_text}".strip()
+        is_batch_servings = (
+            isinstance(servings, int) and not isinstance(servings, bool) and servings >= 6
+        )
+        if is_batch_servings or (batch_text and _BATCH_KEYWORDS_RE.search(batch_text)):
+            resolved_prep_category = PrepCategory.BATCH_COOKING
+        else:
+            resolved_prep_category = derive_prep_category(clamped_minutes, None)
+
+    resolved_type = _coerce_recipe_type(recipe_type)
+    if resolved_type is None and label_text:
+        for candidate_type, pattern in (*_RECIPE_TYPE_PATTERNS, *_CATEGORY_ONLY_PATTERNS):
+            if pattern.search(label_text):
+                resolved_type = candidate_type
+                break
+
+    if resolved_type is None and title_clean:
+        primary_title = _PRIMARY_TITLE_SPLIT_RE.split(title_clean, maxsplit=1)[0].strip()
+        target_title = primary_title or title_clean
+        for candidate_type, pattern in _RECIPE_TYPE_PATTERNS:
+            if pattern.search(target_title):
+                resolved_type = candidate_type
+                break
+
+    if resolved_type is None:
+        resolved_type = RecipeType.MIDDAG
+
+    return resolved_type, clamped_minutes, resolved_prep_category
 
 
 class SourceIngredient(BaseModel):

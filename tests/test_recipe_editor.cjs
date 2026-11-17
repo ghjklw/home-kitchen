@@ -624,6 +624,7 @@ function buildRecipeUiHarness({ recipes = [] } = {}) {
   const badgeStart = appSource.indexOf("function formatRecipeBadge(");
   const badgeEnd = appSource.indexOf("\nfunction day(", badgeStart);
   const badgeSource = appSource.slice(badgeStart, badgeEnd);
+  const importFormSource = extractRange("function importForm(", "\nfunction discoveryForm(");
 
   const modal = { open: false, dataset: {}, showModal() { this.open = true; }, close() { this.open = false; } };
   const main = new DomNode("main");
@@ -713,10 +714,28 @@ function buildRecipeUiHarness({ recipes = [] } = {}) {
     api: async (reqPath, method = "GET", body) => {
       apiCalls.push({ path: reqPath, method, body });
       if (reqPath === "/recipes" && method === "GET") return state.recipes;
+      if (reqPath === "/recipe-drafts/ai" && method === "POST" && body?.url) {
+        return {
+          adapted: {
+            title: "Tomatsuppe",
+            servings: 4,
+            recipe_type: "lunsj",
+            prep_time_minutes: 25,
+            prep_category: "rask",
+            ingredients: [{ name: "tomat", quantity: "400", unit: "g", source_indices: [0] }],
+            instructions: ["Kok opp"],
+            source_url: body.url,
+            source_ingredients: [{ index: 0, text: "400 g tomat" }],
+          },
+        };
+      }
       return { id: "saved-1", ...(body || {}) };
     },
   };
-  vm.runInNewContext([badgeSource, renderRecipesSource, recipeFormSource, viewRecipeSlice].join("\n"), context);
+  vm.runInNewContext(
+    [badgeSource, renderRecipesSource, recipeFormSource, viewRecipeSlice, importFormSource].join("\n"),
+    context,
+  );
   return {
     main,
     dialogRoot,
@@ -843,4 +862,19 @@ test("DOM: renderRecipes and viewRecipe display recipe metadata badges and filte
   assert.equal(harness.dialogRoot.querySelector(".recipe-badge-meta").textContent, "Middag · Rask (15 min)");
   harness.context.viewRecipe(recipes[3]);
   assert.equal(harness.dialogRoot.querySelector(".recipe-badge-meta"), null);
+});
+
+test("DOM: importForm pre-populates recipe_type, prep_time_minutes, and prep_category in recipeForm", async () => {
+  const harness = buildRecipeUiHarness();
+  harness.context.importForm();
+  const urlInput = harness.fields.find((f) => f.fieldLabel === "Oppskriftslenke");
+  assert.ok(urlInput, "URL input rendered");
+  urlInput.value = "https://www.matprat.no/oppskrifter/tomatsuppe/";
+  await harness.submitForm();
+
+  const metaRow = harness.dialogRoot.querySelector(".recipe-metadata-row");
+  assert.ok(metaRow, "recipeForm opened with recipe-metadata-row");
+  assert.equal(metaRow.findAll((n) => n.name === "recipe_type")[0].value, "lunsj");
+  assert.equal(metaRow.findAll((n) => n.name === "prep_time_minutes")[0].value, "25");
+  assert.equal(metaRow.findAll((n) => n.name === "prep_category")[0].value, "rask");
 });

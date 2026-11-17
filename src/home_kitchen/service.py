@@ -16,6 +16,7 @@ from .models import (
     PrepCategory,
     PurchaseEstimate,
     Recipe,
+    RecipeActivityStats,
     RecipeCreate,
     RecipeTranslation,
     RecipeType,
@@ -78,6 +79,7 @@ class KitchenService:
         recipe_type: RecipeType | str | None = None,
         prep_category: PrepCategory | str | None = None,
         max_prep_minutes: int | None = None,
+        include_stats: bool = False,
     ) -> list[Recipe]:
         recipes = self.store.list("recipe", Recipe)
         normalized_type = normalize_recipe_type_value(recipe_type)
@@ -104,10 +106,30 @@ class KitchenService:
                 for r in recipes
                 if r.prep_time_minutes is not None and r.prep_time_minutes <= max_prep_minutes
             ]
+        if include_stats:
+            stats_map = self.store.get_recipes_activity_stats([r.id for r in recipes])
+            for recipe in recipes:
+                stats = stats_map.get(recipe.id, RecipeActivityStats())
+                recipe.activity_stats = stats
+                recipe.stats = stats
         return recipes
 
-    def get_recipe(self, recipe_id: UUID) -> Recipe:
-        return self.store.get("recipe", recipe_id, Recipe)
+    def get_recipe(self, recipe_id: UUID, include_stats: bool = False) -> Recipe:
+        recipe = self.store.get("recipe", recipe_id, Recipe)
+        if include_stats:
+            stats = self.store.get_recipe_activity_stats(recipe_id)
+            recipe.activity_stats = stats
+            recipe.stats = stats
+        return recipe
+
+    def get_recipe_stats(self, recipe_id: UUID) -> RecipeActivityStats:
+        self.get_recipe(recipe_id)
+        return self.store.get_recipe_activity_stats(recipe_id)
+
+    def get_recipes_stats(
+        self, recipe_ids: list[UUID] | None = None
+    ) -> dict[UUID, RecipeActivityStats]:
+        return self.store.get_recipes_activity_stats(recipe_ids)
 
     def update_recipe(self, recipe_id: UUID, data: RecipeCreate) -> Recipe:
         existing = self.get_recipe(recipe_id)

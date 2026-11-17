@@ -222,9 +222,23 @@ class RecipeCreate(BaseModel):
         return value
 
 
+class RecipeActivityStats(BaseModel):
+    """Derived recipe activity metrics and explicit feedback summary."""
+
+    times_planned: int = Field(default=0, ge=0)
+    times_cooked: int = Field(default=0, ge=0)
+    times_ordered: int = Field(default=0, ge=0)
+    latest_rating: Annotated[int, Field(ge=1, le=5)] | None = None
+    average_rating: float | None = None
+    would_make_again: bool | None = None
+    feedback_count: int = Field(default=0, ge=0)
+
+
 class Recipe(RecipeCreate):
     id: UUID
     source_language: NonBlank | None = "und"
+    activity_stats: RecipeActivityStats | None = None
+    stats: RecipeActivityStats | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -233,6 +247,14 @@ class Recipe(RecipeCreate):
             data = dict(data)
             data["source_language"] = "und"
         return data
+
+    @model_validator(mode="after")
+    def sync_stats(self) -> "Recipe":
+        if self.activity_stats is not None and self.stats is None:
+            self.stats = self.activity_stats
+        elif self.stats is not None and self.activity_stats is None:
+            self.activity_stats = self.stats
+        return self
 
 
 class RecipeTranslation(BaseModel):

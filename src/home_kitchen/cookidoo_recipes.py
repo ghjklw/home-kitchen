@@ -40,11 +40,19 @@ from home_kitchen.store import entity_values, recipes
 
 _LOG = logging.getLogger(__name__)
 
-DEFAULT_COOKIDOO_NO_URL = "https://cookidoo.no"
+DEFAULT_COOKIDOO_NO_URL = "https://cookidoo.international"
+_COOKIDOO_INTERNATIONAL_COUNTRIES = frozenset({"", "no", "nb", "nn", "nb-no", "international"})
 _COOKIDOO_HOST_RE = re.compile(
-    r"(?:[a-z0-9-]+\.)*cookidoo\.(?:[a-z]{2}|com|co\.uk|com\.au|vorwerk-digital\.com)"
+    r"(?:[a-z0-9-]+\.)*cookidoo\.(?:[a-z]{2}|com|co\.uk|com\.au|international|vorwerk-digital\.com)"
     r"|(?:[a-z0-9-]+\.)*cookidoo\.thermomix\.com"
 )
+
+
+def _cookidoo_domain_for_country(country: str | None) -> str:
+    country_clean = (country or "").strip().lower()
+    if country_clean in _COOKIDOO_INTERNATIONAL_COUNTRIES:
+        return "cookidoo.international"
+    return f"cookidoo.{country_clean}"
 
 
 def _dialect_insert(table, dialect_name: str):
@@ -69,9 +77,12 @@ def normalize_cookidoo_recipe(
     locale: str | None = None,
 ) -> CollectionEntry:
     """Normalize raw Cookidoo API recipe or created recipe into CollectionEntry."""
-    country_clean = (country or "no").lower()
+    country_clean = (country or "no").strip().lower() or "no"
+    domain = _cookidoo_domain_for_country(country_clean)
     effective_locale = locale or (
-        "nb-NO" if country_clean == "no" else f"{country_clean}-{country_clean.upper()}"
+        "nb-NO"
+        if country_clean in _COOKIDOO_INTERNATIONAL_COUNTRIES
+        else f"{country_clean}-{country_clean.upper()}"
     )
 
     recipe_id = str(
@@ -84,15 +95,13 @@ def normalize_cookidoo_recipe(
 
     source_url = raw.get("url") or raw.get("source_url") or raw.get("sourceUrl")
     if not source_url and recipe_id:
-        source_url = (
-            f"https://cookidoo.{country_clean}/recipes/recipe/{effective_locale}/{recipe_id}"
-        )
+        source_url = f"https://{domain}/recipes/recipe/{effective_locale}/{recipe_id}"
 
     image_url = raw.get("imageUrl") or raw.get("image_url") or raw.get("image")
     if isinstance(image_url, str):
         image_url = image_url.strip() or None
         if image_url and image_url.startswith("/"):
-            image_url = f"https://cookidoo.{country_clean}{image_url}"
+            image_url = f"https://{domain}{image_url}"
         if image_url:
             parsed_img = urlparse(image_url)
             if parsed_img.scheme != "https" or parsed_img.username or parsed_img.password:
@@ -343,7 +352,7 @@ class CookidooCollectionProvider:
 
     def _build_request_context(self) -> tuple[dict[str, str], str, str, str]:
         creds, _ = self._get_credentials_or_fail()
-        country = str(creds.get("country") or "no").lower()
+        country = str(creds.get("country") or "no").strip().lower() or "no"
         token_type = creds.get("token_type", "Bearer")
 
         headers = {
@@ -355,8 +364,13 @@ class CookidooCollectionProvider:
         if creds.get("session_cookie"):
             headers["Cookie"] = creds["session_cookie"]
 
-        base_url = self.base_url or f"https://cookidoo.{country}"
-        locale = "nb-NO" if country == "no" else f"{country}-{country.upper()}"
+        domain = _cookidoo_domain_for_country(country)
+        base_url = self.base_url or f"https://{domain}"
+        locale = (
+            "nb-NO"
+            if country in _COOKIDOO_INTERNATIONAL_COUNTRIES
+            else f"{country}-{country.upper()}"
+        )
         return headers, base_url, country, locale
 
     async def extract_entry(self, entry: CollectionEntry) -> ImportedDraft:

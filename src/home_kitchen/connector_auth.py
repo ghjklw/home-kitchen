@@ -33,9 +33,15 @@ if TYPE_CHECKING:
 
 _LOG = logging.getLogger(__name__)
 
-REFRESHABLE_PROVIDERS = ("rema1000", "coop", "cookidoo")
+REFRESHABLE_PROVIDERS = ("rema1000", "coop", "cookidoo", "trumf")
 OAUTH_REFRESH_MODES = ("oauth_pkce", "oauth_password")
+TRUMF_REFRESH_MODES = ("session_cookie", "interactive_otp", "manual_session_cookie")
 DEFAULT_REFRESH_INTERVAL_SECONDS = 300.0
+TRUMF_SESSION_REFRESH_ERROR = (
+    "Trumf-sesjonen kan ikke fornyes automatisk og må kobles til på nytt i nettleseren "
+    "(lim inn full Cookie-header inkludert alle __Secure-authjs.session-token-deler)."
+)
+_TRUMF_UNKNOWN_EXPIRY_REFRESH_INTERVAL = timedelta(hours=1)
 
 DEFAULT_REMA1000_AUTHORIZE_URL = "https://id.rema.no/authorization"
 DEFAULT_REMA1000_TOKEN_URL = "https://id.rema.no/token"
@@ -45,8 +51,8 @@ DEFAULT_REMA1000_SCOPE = "all"
 
 DEFAULT_COOP_AUTHORIZE_URL = "https://login.coop.no/authorize"
 DEFAULT_COOP_TOKEN_URL = "https://login.coop.no/oauth/token"
-DEFAULT_COOP_REDIRECT_URI = "https://minside.coop.no/api/auth/callback/auth0/"
-DEFAULT_COOP_CLIENT_ID = "RdbMJKxmpiqvlYR1DPAwrE1y5D3wJvXj"
+DEFAULT_COOP_REDIRECT_URI = "no.coop.members://auth/callback"
+DEFAULT_COOP_CLIENT_ID = "7WrQEdeXwUudArpQVjmZEvrTgVs1WkRr"
 DEFAULT_COOP_SCOPE = "openid profile email offline_access"
 DEFAULT_COOP_AUDIENCE = "https://api.coop.no"
 
@@ -153,6 +159,14 @@ class TrumfOTPSession(BaseModel):
     add_account: bool = False
 
 
+class ConnectorAuthError(HTTPException):
+    """HTTPException raised when connector authentication or session renewal fails."""
+
+
+_COOKIE_ATTR_FLAGS = frozenset({"httponly", "secure", "partitioned"})
+_COOKIE_ATTR_NAMES = frozenset({"path", "domain", "expires", "max-age", "samesite", "priority"})
+
+
 def _parse_expires_at(expires_in: Any) -> datetime | None:
     if expires_in is None:
         return None
@@ -160,6 +174,82 @@ def _parse_expires_at(expires_in: Any) -> datetime | None:
         return datetime.now(UTC) + timedelta(seconds=int(expires_in))
     except (ValueError, TypeError):
         return None
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+
+def _normalize_trumf_cookie(raw_cookie: str) -> tuple[str, dict[str, str]]:
+    """Strip Set-Cookie attributes and return (cookie_header, ordered_pairs)."""
+    cookies: dict[str, str] = {}
+    for segment in re.split(r"[\r\n;]+", raw_cookie):
+        cleaned = re.sub(r"^(?:cookie|set-cookie):\s*", "", segment.strip(), flags=re.IGNORECASE)
+        if not cleaned or cleaned.lower() in _COOKIE_ATTR_FLAGS:
+            continue
+        if "=" not in cleaned:
+            continue
+        name, val = cleaned.split("=", 1)
+        name = name.strip()
+        val = val.strip()
+        if not name or name.lower() in _COOKIE_ATTR_NAMES:
+            continue
+        cookies[name] = val
+
+    if not cookies:
+        return raw_cookie.strip(), {}
+    return "; ".join(f"{k}={v}" for k, v in cookies.items()), cookies
+
+
+def _parse_trumf_set_cookies(
+    set_cookie_headers: list[str],
+) -> tuple[dict[str, str], set[str], bool]:
+    """Parse Set-Cookie headers -> (updates, removed_names, cleared_session_token)."""
+    updates: dict[str, str] = {}
+    removed: set[str] = set()
+    cleared_session = False
+
+    for header in set_cookie_headers:
+        parts = [part.strip() for part in header.split(";") if part.strip()]
+        if not parts or "=" not in parts[0]:
+            continue
+        name, val = parts[0].split("=", 1)
+        name = name.strip()
+        val = val.strip()
+        if not name:
+            continue
+
+        max_age: int | None = None
+        for attr in parts[1:]:
+            if "=" in attr:
+                attr_name, attr_val = attr.split("=", 1)
+                if attr_name.strip().lower() == "max-age":
+                    try:
+                        max_age = int(attr_val.strip())
+                    except ValueError:
+                        pass
+
+        is_authjs_session = name == "__Secure-authjs.session-token" or name.startswith(
+            "__Secure-authjs.session-token."
+        )
+        if max_age is not None and max_age <= 0:
+            if is_authjs_session:
+                cleared_session = True
+            removed.add(name)
+            updates.pop(name, None)
+        else:
+            removed.discard(name)
+            updates[name] = val
+
+    return updates, removed, cleared_session
 
 
 def generate_pkce_pair() -> tuple[str, str]:
@@ -326,8 +416,9 @@ class ConnectorAuthService:
             client_id = self.coop_client_id
             scope = self.coop_scope
             instructions = (
-                "Logg inn med din Coop-konto i nettleseren. Etter innlogging, "
-                "kopier fullførings-URL-en eller autorisasjonskoden og lim den inn her."
+                "Logg inn med din Coop-konto i nettleseren. Etter innlogging blir du sendt til "
+                "no.coop.members://auth/callback (eller tilbake hit). Kopier hele omdirigerings-URL-en "
+                "eller autorisasjonskoden og lim den inn her."
             )
 
         params = {
@@ -1019,6 +1110,158 @@ class ConnectorAuthService:
                 account_label=meta.account_label,
             )
 
+    def _refresh_trumf_account(
+        self,
+        household_id: UUID,
+        actor_id: str | None,
+        account_id: str,
+    ) -> None:
+        with self._connection_lock(household_id, "trumf", account_id):
+            meta = self.store.get_connection_metadata(household_id, "trumf", account_id=account_id)
+            creds = self.store.get_credentials(household_id, "trumf", account_id=account_id)
+            if meta is None or creds is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Ingen lagret tilkobling funnet for 'trumf' (konto '{account_id}').",
+                )
+
+            raw_cookie = creds.get("session_cookie") or creds.get("cookie")
+            if not isinstance(raw_cookie, str) or not raw_cookie.strip():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Tilkoblingen for 'trumf' mangler sesjonsinformasjonskapsel og må kobles til på nytt.",
+                )
+
+            normalized_cookie, cookie_map = _normalize_trumf_cookie(raw_cookie)
+            session_url = f"{self.trumf_base_url.rstrip('/')}/api/auth/session"
+
+            try:
+                with self._get_http_client() as client:
+                    response = client.get(
+                        session_url,
+                        headers={
+                            "Cookie": normalized_cookie,
+                            "Accept": "application/json",
+                        },
+                    )
+            except httpx.HTTPError as exc:
+                safe_err = f"Nettverksfeil mot Trumf: {exc}".replace(
+                    normalized_cookie, "[REDACTED]"
+                )
+                self.store.update_account_metadata(
+                    household_id,
+                    "trumf",
+                    meta.account_id,
+                    {"last_error": safe_err},
+                )
+                raise ConnectorAuthError(status_code=502, detail=safe_err) from None
+
+            updates, removed, cleared_session = _parse_trumf_set_cookies(
+                response.headers.get_list("set-cookie")
+            )
+
+            data: Any = None
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                except Exception:
+                    data = None
+
+            if (
+                response.status_code != 200
+                or not isinstance(data, dict)
+                or not data.get("user")
+                or cleared_session
+            ):
+                self.store.update_account_metadata(
+                    household_id,
+                    "trumf",
+                    meta.account_id,
+                    {"last_error": TRUMF_SESSION_REFRESH_ERROR},
+                )
+                raise ConnectorAuthError(
+                    status_code=(502 if response.status_code >= 500 else 401),
+                    detail=TRUMF_SESSION_REFRESH_ERROR,
+                )
+
+            merged_cookies = dict(cookie_map)
+            for name in removed:
+                merged_cookies.pop(name, None)
+            merged_cookies.update(updates)
+            new_cookie = (
+                "; ".join(f"{k}={v}" for k, v in merged_cookies.items())
+                if merged_cookies
+                else normalized_cookie
+            )
+
+            expires_at = (
+                _parse_iso_datetime(data.get("expires"))
+                or meta.expires_at
+                or (datetime.now(UTC) + timedelta(hours=24))
+            )
+
+            updated_credentials: dict[str, Any] = {
+                **creds,
+                "session_cookie": new_cookie,
+            }
+            updated_credentials.pop("cookie", None)
+
+            updated_metadata = dict(meta.metadata)
+            updated_metadata.pop("last_error", None)
+            updated_metadata["last_refreshed_at"] = datetime.now(UTC).isoformat()
+            updated_metadata["has_session_cookie"] = True
+
+            effective_actor = (
+                actor_id if actor_id is not None else (meta.updated_by_actor_id or meta.actor_id)
+            )
+            self.store.upsert_account_credentials(
+                household_id=household_id,
+                provider_id="trumf",
+                auth_mode=meta.auth_mode,
+                credentials=updated_credentials,
+                account_id=meta.account_id,
+                account_label=meta.account_label,
+                expires_at=expires_at,
+                actor_id=effective_actor,
+                metadata=updated_metadata,
+            )
+
+    @staticmethod
+    def _has_refresh_material(
+        provider_id: str, auth_mode: str, creds: dict[str, Any] | None
+    ) -> bool:
+        if not creds:
+            return False
+        if provider_id == "trumf":
+            if auth_mode not in TRUMF_REFRESH_MODES:
+                return False
+            raw_cookie = creds.get("session_cookie") or creds.get("cookie")
+            return isinstance(raw_cookie, str) and bool(raw_cookie.strip())
+        if auth_mode not in OAUTH_REFRESH_MODES:
+            return False
+        refresh_token = creds.get("refresh_token")
+        return isinstance(refresh_token, str) and bool(refresh_token.strip())
+
+    @staticmethod
+    def _should_auto_refresh(provider_id: str, status: Any, *, margin_seconds: int) -> bool:
+        now = datetime.now(UTC)
+        deadline = now + timedelta(seconds=margin_seconds)
+        expires_at = getattr(status, "expires_at", None)
+        if provider_id == "trumf":
+            if expires_at is not None:
+                return expires_at <= deadline
+            meta = getattr(status, "metadata", None) or {}
+            last_refreshed_at = (
+                _parse_iso_datetime(meta.get("last_refreshed_at"))
+                if isinstance(meta, dict)
+                else None
+            )
+            return (
+                last_refreshed_at is None
+                or last_refreshed_at <= now - _TRUMF_UNKNOWN_EXPIRY_REFRESH_INTERVAL
+            )
+        return expires_at is not None and expires_at <= deadline
+
     def refresh_connection(
         self,
         household_id: UUID,
@@ -1026,19 +1269,29 @@ class ConnectorAuthService:
         provider_id: str,
         account_id: str | None = None,
     ) -> IntegrationInfo:
-        """Exchange stored refresh_token(s) for fresh OAuth tokens."""
-        token_endpoint, client_id = self._refresh_config(provider_id)
+        """Exchange stored refresh_token(s) or renew Trumf session cookie."""
+        is_trumf = provider_id == "trumf"
+        if is_trumf:
+            token_endpoint, client_id = "", ""
+        else:
+            token_endpoint, client_id = self._refresh_config(provider_id)
+
+        def refresh_one(target_account_id: str) -> None:
+            if is_trumf:
+                self._refresh_trumf_account(household_id, actor_id, target_account_id)
+            else:
+                self._refresh_single_account(
+                    household_id,
+                    actor_id,
+                    provider_id,
+                    target_account_id,
+                    token_endpoint,
+                    client_id,
+                )
 
         cleaned_account_id = account_id.strip() if isinstance(account_id, str) else None
         if cleaned_account_id:
-            self._refresh_single_account(
-                household_id,
-                actor_id,
-                provider_id,
-                cleaned_account_id,
-                token_endpoint,
-                client_id,
-            )
+            refresh_one(cleaned_account_id)
             return self.integrations.describe_one(provider_id, actor_id)
 
         accounts = self.store.list_credentials(household_id, provider_id)
@@ -1049,45 +1302,30 @@ class ConnectorAuthService:
             )
 
         if len(accounts) == 1:
-            self._refresh_single_account(
-                household_id,
-                actor_id,
-                provider_id,
-                accounts[0].account_id,
-                token_endpoint,
-                client_id,
-            )
+            refresh_one(accounts[0].account_id)
             return self.integrations.describe_one(provider_id, actor_id)
 
         refreshable_accounts = [
             acc
             for acc in accounts
-            if acc.auth_mode in OAUTH_REFRESH_MODES
-            and (
-                (creds := self.store.get_credentials(household_id, provider_id, acc.account_id))
-                is not None
-                and isinstance(creds.get("refresh_token"), str)
-                and bool(creds["refresh_token"].strip())
+            if self._has_refresh_material(
+                provider_id,
+                acc.auth_mode,
+                self.store.get_credentials(household_id, provider_id, acc.account_id),
             )
         ]
         if not refreshable_accounts:
+            missing_label = "sesjonsinformasjonskapsel" if is_trumf else "refresh_token"
             raise HTTPException(
                 status_code=400,
-                detail=f"Tilkoblingene for '{provider_id}' mangler refresh_token og må kobles til på nytt.",
+                detail=f"Tilkoblingene for '{provider_id}' mangler {missing_label} og må kobles til på nytt.",
             )
 
         success_count = 0
         last_exc: HTTPException | None = None
         for acc in refreshable_accounts:
             try:
-                self._refresh_single_account(
-                    household_id,
-                    actor_id,
-                    provider_id,
-                    acc.account_id,
-                    token_endpoint,
-                    client_id,
-                )
+                refresh_one(acc.account_id)
                 success_count += 1
             except HTTPException as exc:
                 last_exc = exc
@@ -1127,12 +1365,9 @@ class ConnectorAuthService:
                 )
 
             if (
-                meta.expires_at is not None
-                and meta.expires_at <= datetime.now(UTC) + timedelta(seconds=margin_seconds)
-                and provider_id in REFRESHABLE_PROVIDERS
-                and meta.auth_mode in OAUTH_REFRESH_MODES
-                and isinstance(creds.get("refresh_token"), str)
-                and creds["refresh_token"].strip()
+                provider_id in REFRESHABLE_PROVIDERS
+                and self._has_refresh_material(provider_id, meta.auth_mode, creds)
+                and self._should_auto_refresh(provider_id, meta, margin_seconds=margin_seconds)
             ):
                 self.refresh_connection(
                     household_id, actor_id, provider_id, account_id=target_account_id
@@ -1146,9 +1381,8 @@ class ConnectorAuthService:
             return creds
 
     def refresh_expiring_connections(self, margin_seconds: int = 900) -> list[str]:
-        """Scan ConnectorStore for all OAuth accounts nearing expiry and renew them proactively."""
+        """Scan ConnectorStore for all refreshable accounts due for renewal and renew them proactively."""
         refreshed: list[str] = []
-        deadline = datetime.now(UTC) + timedelta(seconds=margin_seconds)
         connections = self.store.list_credentials(self.household_id)
 
         for status in connections:
@@ -1156,19 +1390,13 @@ class ConnectorAuthService:
             account_id = status.account_id
             if provider_id not in REFRESHABLE_PROVIDERS:
                 continue
-            if status.auth_mode not in OAUTH_REFRESH_MODES:
-                continue
-            if status.expires_at is None or status.expires_at > deadline:
+            if not self._should_auto_refresh(provider_id, status, margin_seconds=margin_seconds):
                 continue
             try:
                 creds = self.store.get_credentials(
                     self.household_id, provider_id, account_id=account_id
                 )
-                if (
-                    not creds
-                    or not isinstance(creds.get("refresh_token"), str)
-                    or not creds["refresh_token"].strip()
-                ):
+                if not self._has_refresh_material(provider_id, status.auth_mode, creds):
                     continue
                 self.refresh_connection(
                     self.household_id,

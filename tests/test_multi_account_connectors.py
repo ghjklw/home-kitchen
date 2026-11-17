@@ -375,7 +375,7 @@ def test_api_multi_account_lifecycle_pkce_trumf_and_delete(sqlite_engine, cipher
     trumf = items["trumf"]
     assert trumf["account_count"] == 2
     assert [a["account_label"] for a in trumf["accounts"]] == ["Trumf Malo", "Trumf Partner"]
-    assert all(a["refresh_available"] is False for a in trumf["accounts"])
+    assert all(a["refresh_available"] is True for a in trumf["accounts"])
     assert "trumf-cookie-1" not in json.dumps(items)
     assert "trumf-cookie-2" not in json.dumps(items)
 

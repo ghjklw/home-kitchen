@@ -168,8 +168,43 @@ def test_pkce_start_generates_valid_s256_challenge(sqlite_engine, cipher):
 
 
 def test_coop_pkce_start_endpoints(sqlite_engine, cipher):
-    app, _, _, _ = create_test_app(sqlite_engine, cipher)
+    app, _, store, household_id = create_test_app(
+        sqlite_engine,
+        cipher,
+        mock_transport=httpx.MockTransport(
+            lambda req: httpx.Response(
+                200,
+                json={"access_token": "coop-acc", "refresh_token": "coop-ref", "expires_in": 3600},
+            )
+        ),
+    )
     client = TestClient(app)
+
+    # Default Coop Medlem mobile client & custom-scheme redirect URI
+    default_resp = client.post("/api/integrations/coop/pkce/start")
+    assert default_resp.status_code == 200
+    default_data = default_resp.json()
+    assert default_data["provider_id"] == "coop"
+    assert default_data["redirect_uri"] == "no.coop.members://auth/callback"
+    assert "no.coop.members://auth/callback" in default_data["instructions"]
+    default_url = urllib.parse.urlsplit(default_data["authorize_url"])
+    assert default_url.netloc == "login.coop.no"
+    assert default_url.path == "/authorize"
+    default_query = urllib.parse.parse_qs(default_url.query)
+    assert default_query["client_id"] == ["7WrQEdeXwUudArpQVjmZEvrTgVs1WkRr"]
+    assert default_query["redirect_uri"] == ["no.coop.members://auth/callback"]
+
+    # Completing with custom scheme callback URL works
+    complete_resp = client.post(
+        "/api/integrations/coop/pkce/complete",
+        json={
+            "redirect_url": (
+                f"no.coop.members://auth/callback?code=coop-mobile-code&state={default_data['state']}"
+            )
+        },
+    )
+    assert complete_resp.status_code == 200
+    assert store.get_credentials(household_id, "coop")["access_token"] == "coop-acc"
 
     response = client.post(
         "/api/integrations/coop/pkce/start",
@@ -1002,11 +1037,21 @@ def test_refresh_endpoint_rejects_unsupported_missing_and_failing_cases(sqlite_e
     )
     client = TestClient(app)
 
-    assert client.post("/api/integrations/trumf/refresh").status_code == 400
+    assert client.post("/api/integrations/trumf/refresh").status_code == 404
     assert client.post("/api/integrations/oda/refresh").status_code == 400
     assert client.post("/api/integrations/anthropic/refresh").status_code == 400
     assert client.post("/api/integrations/unknown_provider/refresh").status_code == 404
     assert client.post("/api/integrations/rema1000/refresh").status_code == 404
+
+    # Trumf connection with empty session_cookie rejected with 400
+    store.save_connection(
+        household_id=household_id,
+        provider_id="trumf",
+        auth_mode="session_cookie",
+        credentials={"session_cookie": "   "},
+        actor_id="malo",
+    )
+    assert client.post("/api/integrations/trumf/refresh").status_code == 400
 
     # Manual connection without refresh_token
     store.save_connection(
@@ -1119,6 +1164,20 @@ def test_refresh_expiring_connections_scans_and_isolates_failures(sqlite_engine,
         refreshed_hosts.append(request.url.host)
         if request.url.host == "login.coop.no":
             return httpx.Response(500, text="upstream outage")
+        if request.url.host == "www.trumf.no":
+            return httpx.Response(
+                200,
+                json={
+                    "user": {"name": "Malo"},
+                    "expires": (datetime.now(UTC) + timedelta(days=14)).isoformat(),
+                },
+                headers=[
+                    (
+                        "Set-Cookie",
+                        "__Secure-authjs.session-token.0=renewed-trumf-0; Path=/; HttpOnly; Secure",
+                    )
+                ],
+            )
         return httpx.Response(
             200,
             json={
@@ -1159,22 +1218,34 @@ def test_refresh_expiring_connections_scans_and_isolates_failures(sqlite_engine,
         expires_at=datetime.now(UTC) + timedelta(seconds=600),
         actor_id="malo",
     )
-    # Non-OAuth expiring soon -> must NOT be refreshed
+    # Trumf session expiring soon -> should refresh
     store.save_connection(
         household_id=household_id,
         provider_id="trumf",
-        auth_mode="interactive_otp",
-        credentials={"session_cookie": "trumf-cookie", "phone": "+4712345678"},
+        auth_mode="session_cookie",
+        credentials={"session_cookie": "__Secure-authjs.session-token.0=old-trumf-0"},
         expires_at=datetime.now(UTC) + timedelta(seconds=60),
+        actor_id="malo",
+    )
+    # Manual session_token expiring soon -> must NOT be refreshed
+    store.save_connection(
+        household_id=household_id,
+        provider_id="rema1000",
+        auth_mode="session_token",
+        credentials={"session_token": "manual-rema-tok"},
+        expires_at=datetime.now(UTC) + timedelta(seconds=60),
+        account_id="manual-rema",
+        add_account=True,
         actor_id="malo",
     )
 
     refreshed = auth_service.refresh_expiring_connections(margin_seconds=900)
-    assert set(refreshed) == {"rema1000", "cookidoo"}
+    assert set(refreshed) == {"rema1000", "cookidoo", "trumf"}
     assert set(refreshed_hosts) == {
         "id.rema.no",
         "login.coop.no",
         "ciam.prod.cookidoo.vorwerk-digital.com",
+        "www.trumf.no",
     }
 
     assert (
@@ -1183,6 +1254,10 @@ def test_refresh_expiring_connections_scans_and_isolates_failures(sqlite_engine,
     assert (
         store.get_credentials(household_id, "cookidoo")["access_token"]
         == "renewed-for-ciam.prod.cookidoo.vorwerk-digital.com"
+    )
+    assert (
+        store.get_credentials(household_id, "trumf")["session_cookie"]
+        == "__Secure-authjs.session-token.0=renewed-trumf-0"
     )
     # Coop kept its prior credentials after failed refresh
     assert store.get_credentials(household_id, "coop")["access_token"] == "old-c"
@@ -1230,3 +1305,208 @@ def test_app_test_env_guard_is_active_in_pytest():
     from home_kitchen.app import _is_test_env
 
     assert _is_test_env() is True
+
+
+def test_trumf_session_renewal_normalizes_cookies_merges_set_cookie_and_updates_expiry(
+    sqlite_engine, cipher
+):
+    seen_requests: list[httpx.Request] = []
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        seen_requests.append(request)
+        if request.url.path == "/api/auth/session":
+            return httpx.Response(
+                200,
+                json={
+                    "user": {"name": "Malo", "email": "malo@example.com"},
+                    "expires": "2026-12-15T12:00:00.000Z",
+                },
+                headers=[
+                    (
+                        "Set-Cookie",
+                        "__Secure-authjs.session-token.0=fresh-part-0; Path=/; Expires=Tue, 15 Dec 2026 12:00:00 GMT; HttpOnly; Secure; SameSite=Lax",
+                    ),
+                    (
+                        "Set-Cookie",
+                        "__Secure-authjs.session-token.1=fresh-part-1; Path=/; HttpOnly; Secure",
+                    ),
+                ],
+            )
+        return httpx.Response(404)
+
+    app, _, store, household_id = create_test_app(
+        sqlite_engine, cipher, mock_transport=httpx.MockTransport(mock_handler)
+    )
+    client = TestClient(app)
+
+    store.save_connection(
+        household_id=household_id,
+        provider_id="trumf",
+        auth_mode="session_cookie",
+        credentials={
+            "session_cookie": (
+                "Cookie: __Secure-authjs.session-token.0=old-part-0; Path=/; "
+                "Expires=Wed, 21 Oct 2026 07:28:00 GMT; SameSite=Lax; HttpOnly; Secure; "
+                "__Secure-authjs.session-token.1=old-part-1; keep_me=abc"
+            )
+        },
+        actor_id="malo",
+    )
+
+    # integrations list reports refresh_available=True when session_cookie is present
+    integrations = {item["id"]: item for item in client.get("/api/integrations").json()}
+    assert integrations["trumf"]["accounts"][0]["refresh_available"] is True
+
+    resp = client.post("/api/integrations/trumf/refresh")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"] == "trumf"
+    assert body["status"] == "connected"
+    assert body["accounts"][0]["refresh_available"] is True
+    assert body["accounts"][0]["last_refreshed_at"] is not None
+    assert body["accounts"][0]["last_error"] is None
+    assert "fresh-part-0" not in json.dumps(body)
+    assert "old-part-0" not in json.dumps(body)
+
+    assert len(seen_requests) == 1
+    req = seen_requests[0]
+    assert req.method == "GET"
+    assert req.url.path == "/api/auth/session"
+    assert req.headers["accept"] == "application/json"
+    assert req.headers["cookie"] == (
+        "__Secure-authjs.session-token.0=old-part-0; "
+        "__Secure-authjs.session-token.1=old-part-1; keep_me=abc"
+    )
+
+    updated_creds = store.get_credentials(household_id, "trumf")
+    assert updated_creds is not None
+    assert updated_creds["session_cookie"] == (
+        "__Secure-authjs.session-token.0=fresh-part-0; "
+        "__Secure-authjs.session-token.1=fresh-part-1; keep_me=abc"
+    )
+    meta = store.get_connection_metadata(household_id, "trumf")
+    assert meta is not None
+    assert meta.expires_at == datetime(2026, 12, 15, 12, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    "response_factory",
+    [
+        lambda: httpx.Response(200, json={}),
+        lambda: httpx.Response(200, content=b"null", headers={"Content-Type": "application/json"}),
+        lambda: httpx.Response(
+            200,
+            json={"user": {"name": "Malo"}},
+            headers=[("Set-Cookie", "__Secure-authjs.session-token.0=; Path=/; Max-Age=0")],
+        ),
+        lambda: httpx.Response(401, json={"error": "unauthorized"}),
+    ],
+)
+def test_trumf_session_renewal_failure_preserves_credentials_and_records_last_error(
+    sqlite_engine, cipher, response_factory
+):
+    from home_kitchen.connector_auth import ConnectorAuthError
+
+    app, auth_service, store, household_id = create_test_app(
+        sqlite_engine,
+        cipher,
+        mock_transport=httpx.MockTransport(lambda req: response_factory()),
+    )
+    client = TestClient(app)
+
+    original_cookie = "__Secure-authjs.session-token.0=partial-only"
+    store.save_connection(
+        household_id=household_id,
+        provider_id="trumf",
+        auth_mode="session_cookie",
+        credentials={"session_cookie": original_cookie},
+        actor_id="malo",
+    )
+
+    with pytest.raises(ConnectorAuthError):
+        auth_service.refresh_connection(household_id, "malo", "trumf")
+
+    resp = client.post("/api/integrations/trumf/refresh")
+    assert resp.status_code == 401
+    assert "__Secure-authjs.session-token" in resp.json()["detail"]
+
+    # Stored credentials must NOT be wiped
+    creds = store.get_credentials(household_id, "trumf")
+    assert creds is not None
+    assert creds["session_cookie"] == original_cookie
+
+    meta = store.get_connection_metadata(household_id, "trumf")
+    assert meta is not None
+    assert meta.metadata.get("last_error") is not None
+    assert "__Secure-authjs.session-token" in meta.metadata["last_error"]
+
+
+def test_trumf_auto_refresh_respects_expiry_and_unknown_expiry_interval(sqlite_engine, cipher):
+    calls = 0
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={"user": {"name": "Malo"}},
+            headers=[("Set-Cookie", f"__Secure-authjs.session-token.0=tok-{calls}; Path=/")],
+        )
+
+    _, auth_service, store, household_id = create_test_app(
+        sqlite_engine, cipher, mock_transport=httpx.MockTransport(mock_handler)
+    )
+
+    # 1. Far-future expires_at -> must NOT hammer trumf.no
+    store.save_connection(
+        household_id=household_id,
+        provider_id="trumf",
+        auth_mode="session_cookie",
+        credentials={"session_cookie": "__Secure-authjs.session-token.0=init"},
+        expires_at=datetime.now(UTC) + timedelta(days=14),
+        actor_id="malo",
+    )
+    assert auth_service.refresh_expiring_connections(margin_seconds=900) == []
+    assert calls == 0
+
+    # 2. Unknown expires_at (None) and never refreshed -> refreshes once (fallback +24h expiry)
+    store.save_connection(
+        household_id=household_id,
+        provider_id="trumf",
+        auth_mode="session_cookie",
+        credentials={"session_cookie": "__Secure-authjs.session-token.0=init"},
+        expires_at=None,
+        metadata={},
+        actor_id="malo",
+    )
+    assert auth_service.refresh_expiring_connections(margin_seconds=900) == ["trumf"]
+    assert calls == 1
+    meta_after = store.get_connection_metadata(household_id, "trumf")
+    assert meta_after is not None
+    assert meta_after.expires_at is not None
+
+    # 3. Unknown expires_at with recent last_refreshed_at (10 min ago) -> skipped
+    store.save_connection(
+        household_id=household_id,
+        provider_id="trumf",
+        auth_mode="session_cookie",
+        credentials={"session_cookie": "__Secure-authjs.session-token.0=init"},
+        expires_at=None,
+        metadata={"last_refreshed_at": (datetime.now(UTC) - timedelta(minutes=10)).isoformat()},
+        actor_id="malo",
+    )
+    assert auth_service.refresh_expiring_connections(margin_seconds=900) == []
+    assert calls == 1
+
+    # 4. Unknown expires_at with stale last_refreshed_at (> 1 hour ago) -> refreshed
+    store.save_connection(
+        household_id=household_id,
+        provider_id="trumf",
+        auth_mode="session_cookie",
+        credentials={"session_cookie": "__Secure-authjs.session-token.0=init"},
+        expires_at=None,
+        metadata={"last_refreshed_at": (datetime.now(UTC) - timedelta(hours=2)).isoformat()},
+        actor_id="malo",
+    )
+    assert auth_service.refresh_expiring_connections(margin_seconds=900) == ["trumf"]
+    assert calls == 2

@@ -257,7 +257,8 @@ def test_photo_and_collection_rest_routes_are_bounded_scoped_and_reviewed(test_d
             "anthropic",
             "rema1000",
             "coop",
-            "trumf",
+            "cookidoo",
+            "kassal",
             "cookidoo",
         }
         body = {"mime_type": "image/png", "data_base64": "%%%bad%%%"}

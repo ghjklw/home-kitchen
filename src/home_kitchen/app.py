@@ -35,6 +35,7 @@ from home_kitchen.models import (
     MealCreate,
     PlannedMealRecipe,
     Recipe,
+    RecipeActivityStats,
     RecipeCreate,
     RecipeTranslation,
     RecipeTranslationRequest,
@@ -188,12 +189,27 @@ def create_app(
         service.store.set_setting("household", data.model_dump_json())
         return data
 
+    @app.get("/api/recipes/stats")
+    def get_recipes_stats(
+        recipe_id: Annotated[list[UUID] | None, Query()] = None,
+    ) -> dict[UUID, RecipeActivityStats]:
+        return service.get_recipes_stats(recipe_id)
+
     @app.get("/api/recipes")
     def list_recipes(
         recipe_type: str | None = None,
         prep_category: str | None = None,
         max_prep_minutes: int | None = Query(default=None, ge=1, le=2880),
+        include_stats: Annotated[bool, Query()] = False,
+        stats: Annotated[bool, Query()] = False,
     ) -> list[Recipe]:
+        if include_stats or stats:
+            return service.list_recipes(
+                recipe_type=recipe_type,
+                prep_category=prep_category,
+                max_prep_minutes=max_prep_minutes,
+                include_stats=True,
+            )
         return service.list_recipes(
             recipe_type=recipe_type,
             prep_category=prep_category,
@@ -204,9 +220,23 @@ def create_app(
     def create_recipe(data: RecipeCreate) -> Recipe:
         return service.create_recipe(data)
 
+    @app.get("/api/recipes/{recipe_id}/stats")
+    def get_recipe_stats(recipe_id: UUID) -> RecipeActivityStats:
+        try:
+            return service.get_recipe_stats(recipe_id)
+        except KeyError:
+            raise HTTPException(404, f"Recipe not found: {recipe_id}") from None
+
     @app.get("/api/recipes/{recipe_id}")
-    def get_recipe(recipe_id: UUID) -> Recipe:
-        return service.get_recipe(recipe_id)
+    def get_recipe(
+        recipe_id: UUID,
+        include_stats: Annotated[bool, Query()] = False,
+        stats: Annotated[bool, Query()] = False,
+    ) -> Recipe:
+        try:
+            return service.get_recipe(recipe_id, include_stats=include_stats or stats)
+        except KeyError:
+            raise HTTPException(404, f"Recipe not found: {recipe_id}") from None
 
     @app.put("/api/recipes/{recipe_id}")
     def update_recipe(recipe_id: UUID, data: RecipeCreate) -> Recipe:

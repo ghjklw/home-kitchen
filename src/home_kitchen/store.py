@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+import json
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -37,7 +38,7 @@ from sqlalchemy.engine import Connection, make_url
 
 from .context import history_context
 from .history import HistoryEntryCreate, HistoryRepository
-from .models import Meal, Recipe, RecipeTranslation, RegularItem, ShoppingItem
+from .models import Meal, Recipe, RecipeActivityStats, RecipeTranslation, RegularItem, ShoppingItem
 
 Model = TypeVar("Model", bound=BaseModel)
 metadata = MetaData()
@@ -144,6 +145,8 @@ def entity_values(entity: BaseModel) -> dict:
     # JSON columns contain JSON values; native dates, UUIDs and decimals elsewhere
     # retain their database types and precision.
     if isinstance(entity, Recipe):
+        values.pop("activity_stats", None)
+        values.pop("stats", None)
         json_values = entity.model_dump(mode="json")
         for field in (
             "ingredients",
@@ -429,3 +432,177 @@ class Store:
         with self.connection() as connection:
             rows = connection.execute(query).mappings().all()
         return [RecipeTranslation.model_validate(dict(row)) for row in rows]
+
+    def get_recipe_activity_stats(self, recipe_id: UUID) -> RecipeActivityStats:
+        stats = self.get_recipes_activity_stats([recipe_id])
+        return stats.get(recipe_id, RecipeActivityStats())
+
+    def get_recipes_activity_stats(
+        self, recipe_ids: builtins.list[UUID] | None = None
+    ) -> dict[UUID, RecipeActivityStats]:
+        target_id_filter = set(recipe_ids) if recipe_ids is not None else None
+        unique_ids = list(dict.fromkeys(recipe_ids)) if recipe_ids is not None else None
+        with self.connection() as connection:
+            planned_counts: dict[UUID, int] = {}
+            if unique_ids is not None:
+                if unique_ids:
+                    meal_rows = (
+                        connection.execute(
+                            text(
+                                "SELECT recipe_id, count(*) AS count "
+                                "FROM meals "
+                                "WHERE recipe_id = ANY(:ids) "
+                                "GROUP BY recipe_id"
+                            ),
+                            {"ids": unique_ids},
+                        )
+                        .mappings()
+                        .all()
+                    )
+                else:
+                    meal_rows = []
+            else:
+                meal_rows = (
+                    connection.execute(
+                        text("SELECT recipe_id, count(*) AS count FROM meals GROUP BY recipe_id")
+                    )
+                    .mappings()
+                    .all()
+                )
+
+            for row in meal_rows:
+                r_id = row["recipe_id"]
+                if isinstance(r_id, str):
+                    r_id = UUID(r_id)
+                planned_counts[r_id] = int(row["count"])
+
+            if unique_ids is not None:
+                if unique_ids:
+                    id_strs = [str(i) for i in unique_ids]
+                    history_rows = (
+                        connection.execute(
+                            text(
+                                "SELECT id, occurred_at, kind, recipe_id, structured "
+                                "FROM kitchen_history "
+                                "WHERE recipe_id = ANY(:ids) OR structured->>'recipe_id' = ANY(:id_strs) "
+                                "ORDER BY occurred_at DESC, id DESC"
+                            ),
+                            {"ids": unique_ids, "id_strs": id_strs},
+                        )
+                        .mappings()
+                        .all()
+                    )
+                else:
+                    history_rows = []
+            else:
+                history_rows = (
+                    connection.execute(
+                        text(
+                            "SELECT id, occurred_at, kind, recipe_id, structured "
+                            "FROM kitchen_history "
+                            "WHERE recipe_id IS NOT NULL OR structured->>'recipe_id' IS NOT NULL "
+                            "ORDER BY occurred_at DESC, id DESC"
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+
+            cooked_counts: dict[UUID, int] = {}
+            ordered_counts: dict[UUID, int] = {}
+            feedback_counts: dict[UUID, int] = {}
+            ratings_by_recipe: dict[UUID, list[int]] = {}
+            latest_rating_by_recipe: dict[UUID, int] = {}
+            would_make_by_recipe: dict[UUID, bool] = {}
+
+            for row in history_rows:
+                r_id = row["recipe_id"]
+                structured = row["structured"] or {}
+                if isinstance(structured, str):
+                    try:
+                        structured = json.loads(structured)
+                    except Exception:
+                        structured = {}
+                if r_id is None and "recipe_id" in structured:
+                    try:
+                        r_id = UUID(str(structured["recipe_id"]))
+                    except (ValueError, TypeError):
+                        r_id = None
+                if r_id is None:
+                    continue
+                if isinstance(r_id, str):
+                    r_id = UUID(r_id)
+                if target_id_filter is not None and r_id not in target_id_filter:
+                    continue
+
+                kind = str(row["kind"])
+                action = str(structured.get("action") or "").lower()
+                event = str(structured.get("event") or "").lower()
+
+                # Confirmed cooking check (never infer from planning or unconfirmed meals)
+                is_cooking = kind != "planning" and (
+                    kind in ("cooked", "cooking")
+                    or action in ("recipe_cooked", "cooked", "meal_cooked", "cooking_completed")
+                    or event in ("recipe_cooked", "cooked", "meal_cooked", "cooking_completed")
+                    or (kind == "domain_event" and ("cook" in action or "cook" in event))
+                )
+                if is_cooking:
+                    cooked_counts[r_id] = cooked_counts.get(r_id, 0) + 1
+
+                # Order/purchase check traced to this recipe
+                is_ordered = (
+                    kind == "purchase"
+                    or action
+                    in (
+                        "recipe_ordered",
+                        "order_placed",
+                        "provider_order",
+                        "order_matched",
+                        "oda_order_matched",
+                    )
+                    or event in ("order", "order_placed", "recipe_ordered", "oda_order")
+                    or (kind == "domain_event" and ("order" in action or "order" in event))
+                )
+                if is_ordered:
+                    ordered_counts[r_id] = ordered_counts.get(r_id, 0) + 1
+
+                # Feedback check
+                if kind == "recipe_rating":
+                    feedback_counts[r_id] = feedback_counts.get(r_id, 0) + 1
+                    rating = structured.get("rating")
+                    if (
+                        isinstance(rating, int)
+                        and not isinstance(rating, bool)
+                        and 1 <= rating <= 5
+                    ):
+                        ratings_by_recipe.setdefault(r_id, []).append(rating)
+                        if r_id not in latest_rating_by_recipe:
+                            latest_rating_by_recipe[r_id] = rating
+                    would_make = structured.get("would_make_again")
+                    if isinstance(would_make, bool):
+                        if r_id not in would_make_by_recipe:
+                            would_make_by_recipe[r_id] = would_make
+
+            if target_id_filter is not None:
+                target_ids = target_id_filter
+            else:
+                target_ids = {r[0] for r in connection.execute(select(recipes.c.id)).all()}
+                target_ids.update(planned_counts.keys())
+                target_ids.update(cooked_counts.keys())
+                target_ids.update(ordered_counts.keys())
+                target_ids.update(feedback_counts.keys())
+
+            result: dict[UUID, RecipeActivityStats] = {}
+            for target_id in target_ids:
+                ratings = ratings_by_recipe.get(target_id, [])
+                avg_rating = round(sum(ratings) / len(ratings), 2) if ratings else None
+                result[target_id] = RecipeActivityStats(
+                    times_planned=planned_counts.get(target_id, 0),
+                    times_cooked=cooked_counts.get(target_id, 0),
+                    times_ordered=ordered_counts.get(target_id, 0),
+                    latest_rating=latest_rating_by_recipe.get(target_id),
+                    average_rating=avg_rating,
+                    would_make_again=would_make_by_recipe.get(target_id),
+                    feedback_count=feedback_counts.get(target_id, 0),
+                )
+            return result

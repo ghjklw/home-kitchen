@@ -1,6 +1,8 @@
 """Shared household actions for the PWA, REST clients and AI assistants."""
 
 import asyncio
+import os
+import sys
 from contextlib import asynccontextmanager, suppress
 from datetime import date
 from importlib.metadata import PackageNotFoundError
@@ -21,6 +23,7 @@ from starlette.requests import Request
 from home_kitchen.ai_credentials import close_ai_clients
 from home_kitchen.auth import AccessControl
 from home_kitchen.basket.repository import BasketService
+from home_kitchen.connector_auth import DEFAULT_REFRESH_INTERVAL_SECONDS, ConnectorAuthService
 from home_kitchen.feature_api import feature_router
 from home_kitchen.feature_mcp import install_feature_tools
 from home_kitchen.features import KitchenFeatures
@@ -73,6 +76,10 @@ class PlanRequest(BaseModel):
     days: int = Field(default=7, ge=1, le=14)
 
 
+def _is_test_env() -> bool:
+    return bool(os.environ.get("PYTEST_CURRENT_TEST")) or "pytest" in sys.modules
+
+
 def create_app(
     settings: Settings | None = None,
     ai: Agent[None, RecipeCreate] | None = None,
@@ -100,10 +107,20 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         cleanup = asyncio.create_task(features.recipe_photos.cleanup_forever())
+        connector_auth = getattr(features, "connector_auth", None)
+        refresh_task: asyncio.Task[None] | None = None
+        if isinstance(connector_auth, ConnectorAuthService) and not _is_test_env():
+            refresh_task = asyncio.create_task(
+                connector_auth.refresh_forever(interval=DEFAULT_REFRESH_INTERVAL_SECONDS)
+            )
         try:
             async with mcp_app.lifespan(app):
                 yield
         finally:
+            if refresh_task is not None:
+                refresh_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await refresh_task
             cleanup.cancel()
             with suppress(asyncio.CancelledError):
                 await cleanup

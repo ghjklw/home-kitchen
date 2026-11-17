@@ -550,6 +550,20 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
             otp=data.otp,
         )
 
+    @router.post("/integrations/{provider_id}/refresh")
+    def refresh_integration(
+        provider_id: str,
+        request: Request,
+        response: Response,
+    ) -> IntegrationInfo:
+        actor = authenticated_actor(request)
+        response.headers["Cache-Control"] = "no-store"
+        return get_connector_auth().refresh_connection(
+            household_id=features.household_id,
+            actor_id=actor,
+            provider_id=provider_id,
+        )
+
     @router.get("/inventory")
     def inventory() -> list[InventoryItem]:
         return features.inventory.list()

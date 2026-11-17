@@ -1260,6 +1260,52 @@ class ConnectorAuthService:
         )
         return self.integrations.describe_one("trumf", actor_id)
 
+    def connect_kassal_key(
+        self,
+        household_id: UUID,
+        actor_id: str | None,
+        api_key: str,
+        *,
+        account_id: str | None = None,
+        account_label: str | None = None,
+        add_account: bool = False,
+    ) -> IntegrationInfo:
+        """Validate Kassal.app API key before saving it to ConnectorStore."""
+        from home_kitchen.kassal import KassalAuthError, KassalClient, KassalError
+
+        clean_key = api_key.strip() if isinstance(api_key, str) else ""
+        if not clean_key:
+            raise ConnectorAuthError(
+                status_code=422, detail="Kassal.app krever en gyldig API-nøkkel."
+            )
+
+        client = KassalClient(clean_key, transport=self.transport)
+        try:
+            client.validate_key()
+        except KassalAuthError as exc:
+            raise ConnectorAuthError(status_code=401, detail=str(exc)) from exc
+        except KassalError as exc:
+            raise ConnectorAuthError(status_code=502, detail=str(exc)) from exc
+        except Exception as exc:
+            raise ConnectorAuthError(
+                status_code=502, detail=f"Feil ved validering av Kassal.app API-nøkkel: {exc}"
+            ) from exc
+
+        self.store.save_connection(
+            household_id=household_id,
+            provider_id="kassal",
+            auth_mode="api_key",
+            credentials={"api_key": clean_key},
+            actor_id=actor_id,
+            metadata={
+                "last_refreshed_at": datetime.now(UTC).isoformat(),
+            },
+            account_id=account_id,
+            account_label=account_label,
+            add_account=add_account,
+        )
+        return self.integrations.describe_one("kassal", actor_id)
+
     def _refresh_single_account(
         self,
         household_id: UUID,

@@ -114,6 +114,7 @@ class Settings(BaseSettings):
     public_url: HttpUrl | None = None
     oda_encryption_key: SecretStr | None = None
     connector_encryption_key: SecretStr | None = None
+    kassal_api_key: SecretStr | None = None
 
     @property
     def ai_configured(self) -> bool:
@@ -228,6 +229,8 @@ class Settings(BaseSettings):
             and not self.anthropic_api_key.get_secret_value().strip()
         ):
             raise ValueError("anthropic_api_key must not be blank")
+        if self.kassal_api_key is not None and not self.kassal_api_key.get_secret_value().strip():
+            raise ValueError("kassal_api_key must not be blank")
         if self.anthropic_workload_identity:
             if self.anthropic_api_key is not None:
                 raise ValueError(

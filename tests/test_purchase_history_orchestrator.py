@@ -471,3 +471,9 @@ async def test_mcp_tools_status_and_sync(memory_engine, rema_adapter):
             assert "success" in sync_text
     finally:
         history_context.reset(token)
+
+
+@pytest.fixture(autouse=True)
+def _no_kassal_enrichment(monkeypatch):
+    """These fixtures predate the Kassal requirement; barcode enrichment is tested separately."""
+    monkeypatch.setattr("home_kitchen.purchase_sync.extract_line_ean", lambda line: None)

@@ -431,3 +431,41 @@ class CookidooIntegration(StoredConnectorIntegration):
             household_id=household_id,
             default_expiry_prompt="Tilkoblingen til Cookidoo har utløpt. Koble til på nytt for å synkronisere oppskrifter.",
         )
+
+
+class KassalIntegration(StoredConnectorIntegration):
+    def __init__(
+        self,
+        store: ConnectorStore | None = None,
+        household_id: UUID | None = None,
+        settings: Settings | None = None,
+    ):
+        super().__init__(
+            provider_id="kassal",
+            name="Kassal.app",
+            supported_auth_modes=["api_key"],
+            capabilities=["ean_enrichment", "product_catalogue"],
+            detail="Koble til Kassal.app med API-nøkkel for berikelse av strekkoder (EAN) på kvitteringer.",
+            store=store,
+            household_id=household_id,
+            default_expiry_prompt="API-nøkkelen for Kassal.app er ugyldig eller utløpt.",
+        )
+        self.settings = settings
+
+    def describe(self, actor_id: str | None) -> IntegrationInfo:
+        info = super().describe(actor_id)
+        if (
+            info.status == "not_configured"
+            and self.settings is not None
+            and self.settings.kassal_api_key is not None
+            and bool(self.settings.kassal_api_key.get_secret_value().strip())
+        ):
+            return info.model_copy(
+                update={
+                    "status": "configured",
+                    "token_status": "configured",
+                    "auth_mode": "api_key",
+                    "auth_type": "api_key",
+                }
+            )
+        return info

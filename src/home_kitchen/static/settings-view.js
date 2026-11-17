@@ -239,6 +239,15 @@
     };
   }
 
+  function buildKassalConnectPayload(apiKey) {
+    const trimmed = String(apiKey || "").trim();
+    if (!trimmed) return null;
+    return {
+      auth_mode: "api_key",
+      api_key: trimmed,
+    };
+  }
+
   root.KitchenSettingsView = {
     DEFAULT_SHOPPING_CATEGORY_ORDER,
     moveShoppingCategory,
@@ -258,6 +267,7 @@
     buildTrumfVerifyPayload,
     buildTrumfSessionCookie,
     buildTrumfConnectPayload,
+    buildKassalConnectPayload,
   };
   if (typeof module !== "undefined" && module.exports)
     module.exports = root.KitchenSettingsView;

@@ -9,7 +9,7 @@ from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
@@ -1021,6 +1021,109 @@ def auto_map_unmapped_ingredients(
     return {
         "processed_unique": processed_unique,
         "mapped_occurrences": mapped_occurrences,
+        "created_products": created_products,
+        "created_aliases": created_aliases,
+        "remaining_unmapped": remaining_unmapped,
+    }
+
+
+async def auto_map_unmapped_receipt_items_async(
+    store: Any,
+    settings: Settings | None,
+    items: list[dict[str, Any]],
+    *,
+    identity_service: CanonicalIdentityService | None = None,
+    household_id: UUID | None = None,
+    actor_id: str = "receipt_sync",
+    batch_size: int = 30,
+    max_batches: int = 2,
+    model: Model | None = None,
+) -> dict[str, int]:
+    """Map unmapped receipt line items using deterministic attribute/variant matching and AI."""
+    if not items:
+        return {
+            "processed_unique": 0,
+            "created_products": 0,
+            "created_aliases": 0,
+            "remaining_unmapped": 0,
+        }
+
+    resolved_identities = _resolve_identity_service(store, identity_service)
+    catalogue = _load_existing_catalogue(store, resolved_identities)
+
+    dummy_recipe_id = uuid4()
+    groups: list[_UniqueGroup] = []
+    seen: dict[tuple[str, str | None], _UniqueGroup] = {}
+
+    for idx, item in enumerate(items):
+        name = str(item.get("name") or "").strip()
+        unit = str(item.get("unit") or "").strip() or None
+        if not name:
+            continue
+        key = (normalize_identity_text(name), normalize_identity_text(unit) if unit else None)
+        if key not in seen:
+            group = _UniqueGroup(
+                key=key[0:1] + (key[1] or "",),
+                norm_name=key[0],
+                norm_unit=key[1] or "",
+                name=name,
+                unit=unit,
+                needs_product=True,
+                needs_unit=bool(unit),
+                source_locales={"nb"},
+                occurrences=[
+                    _Occurrence(
+                        recipe_id=dummy_recipe_id,
+                        ingredient_index=idx,
+                        needs_product=True,
+                        needs_unit=bool(unit),
+                        source_locale="nb",
+                    )
+                ],
+            )
+            seen[key] = group
+            groups.append(group)
+        else:
+            seen[key].occurrences.append(
+                _Occurrence(
+                    recipe_id=dummy_recipe_id,
+                    ingredient_index=idx,
+                    needs_product=True,
+                    needs_unit=bool(unit),
+                    source_locale="nb",
+                )
+            )
+
+    remaining, _, processed_unique, created_aliases = _resolve_groups_deterministically(
+        groups, resolved_identities, catalogue
+    )
+
+    created_products = 0
+
+    can_ai = model is not None or (settings is not None and settings.ai_configured)
+    if remaining and can_ai:
+        agent = build_ingredient_mapper(settings, model)
+        batches = [remaining[i : i + batch_size] for i in range(0, len(remaining), batch_size)][
+            :max_batches
+        ]
+
+        for batch in batches:
+            prompt = _build_batch_prompt(batch, catalogue)
+            result = await agent.run(prompt, usage_limits=UsageLimits(total_tokens_limit=120_000))
+            output = result.output
+            processed_unique += len(batch)
+            _, new_prods, new_aliases = _apply_batch_decisions(
+                batch,
+                output,
+                resolved_identities,
+                catalogue,
+            )
+            created_products += new_prods
+            created_aliases += new_aliases
+
+    remaining_unmapped = sum(1 for g in remaining if g.needs_product or g.needs_unit)
+    return {
+        "processed_unique": processed_unique,
         "created_products": created_products,
         "created_aliases": created_aliases,
         "remaining_unmapped": remaining_unmapped,

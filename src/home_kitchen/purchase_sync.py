@@ -8,6 +8,9 @@ for the next sync. Revision IDs are immutable: corrections need a new revision I
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import re
 import time
 from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime
@@ -37,6 +40,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 
+_LOG = logging.getLogger(__name__)
 metadata = MetaData()
 provider_order_sources = Table(
     "provider_order_sources",
@@ -208,6 +212,159 @@ def _persist_record(
         )
 
 
+def extract_receipt_lines(record: ProviderOrderRecord) -> list[dict[str, Any]]:
+    payload = record.payload
+    if not isinstance(payload, dict):
+        return []
+    for key in ("lines", "varelinjer", "items", "receiptLines"):
+        val = payload.get(key)
+        if isinstance(val, list):
+            return [item for item in val if isinstance(item, dict)]
+    for parent_key in ("summary", "receipt", "receiptDetails"):
+        parent = payload.get(parent_key)
+        if isinstance(parent, dict):
+            for key in ("lines", "varelinjer", "items", "receiptLines"):
+                val = parent.get(key)
+                if isinstance(val, list):
+                    return [item for item in val if isinstance(item, dict)]
+    return []
+
+
+def extract_line_ean(line: dict[str, Any]) -> str | None:
+    for key in ("ean", "ean13", "gtin", "gtin13", "barcode", "varekode"):
+        val = line.get(key)
+        if val is not None:
+            clean = str(val).strip()
+            digits = re.sub(r"\D", "", clean)
+            if len(digits) >= 8:
+                return digits
+            if clean:
+                return clean
+    return None
+
+
+def extract_line_name(line: dict[str, Any]) -> str:
+    for key in (
+        "name",
+        "product_name",
+        "productName",
+        "produktNavn",
+        "produkt_navn",
+        "produktBeskrivelse",
+        "produkt_beskrivelse",
+        "vareTekst",
+        "description",
+        "item_name",
+        "title",
+    ):
+        val = line.get(key)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+    return ""
+
+
+def extract_line_unit(line: dict[str, Any]) -> str | None:
+    for key in ("unit", "enhet", "enhetsType", "enhets_type", "unit_type", "unitOfMeasure"):
+        val = line.get(key)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+    return None
+
+
+def enrich_and_map_receipt_record(
+    record: ProviderOrderRecord,
+    kassal_client: Any | None,
+    identity_service: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Enrich barcode lines via Kassal.app and resolve canonical product/unit identities.
+
+    Returns unmapped line items that require async background AI mapping.
+    """
+    lines = extract_receipt_lines(record)
+    if not lines:
+        return []
+
+    unmapped: list[dict[str, Any]] = []
+
+    for line in lines:
+        ean = extract_line_ean(line)
+        kassal_prod = None
+        if ean and kassal_client is not None:
+            kassal_prod = kassal_client.lookup_ean(ean)
+            if kassal_prod is not None:
+                line["kassal"] = {
+                    "ean": kassal_prod.ean,
+                    "name": kassal_prod.name,
+                    "brand": kassal_prod.brand,
+                    "vendor": kassal_prod.vendor,
+                    "weight": kassal_prod.weight,
+                    "weight_unit": kassal_prod.weight_unit,
+                    "category": kassal_prod.category,
+                    "image": kassal_prod.image,
+                }
+                if not line.get("unit") and kassal_prod.weight_unit:
+                    line["unit"] = kassal_prod.weight_unit
+
+        raw_name = extract_line_name(line)
+        candidate_names: list[str] = []
+        if kassal_prod and kassal_prod.name:
+            candidate_names.append(kassal_prod.name)
+        if raw_name and raw_name not in candidate_names:
+            candidate_names.append(raw_name)
+
+        candidate_unit = extract_line_unit(line)
+        if not candidate_unit and kassal_prod and kassal_prod.weight_unit:
+            candidate_unit = kassal_prod.weight_unit
+
+        prod_id: UUID | None = None
+        unit_id: UUID | None = None
+
+        if identity_service is not None:
+            from home_kitchen.catalogue.identity import candidate_identity_names
+
+            for name in candidate_names:
+                for candidate in candidate_identity_names(name):
+                    for locale in ("nb", "en", "fr"):
+                        for ctx in ("receipt", "recipe"):
+                            res = identity_service.resolve("product", locale, ctx, candidate)
+                            if res.status == "resolved" and len(res.candidates) == 1:
+                                prod_id = res.candidates[0].id
+                                break
+                        if prod_id is not None:
+                            break
+                    if prod_id is not None:
+                        break
+                if prod_id is not None:
+                    break
+
+            if candidate_unit:
+                for locale in ("nb", "en", "fr"):
+                    for ctx in ("receipt", "recipe"):
+                        res = identity_service.resolve("unit", locale, ctx, candidate_unit)
+                        if res.status == "resolved" and len(res.candidates) == 1:
+                            unit_id = res.candidates[0].id
+                            break
+                    if unit_id is not None:
+                        break
+
+        if prod_id is not None:
+            line["canonical_product_id"] = str(prod_id)
+        if unit_id is not None:
+            line["canonical_unit_id"] = str(unit_id)
+
+        if line.get("canonical_product_id") is None and candidate_names:
+            unmapped.append(
+                {
+                    "line": line,
+                    "name": candidate_names[0],
+                    "unit": candidate_unit,
+                    "ean": ean,
+                }
+            )
+
+    return unmapped
+
+
 def persist_page(
     engine: Engine,
     provider: str,
@@ -268,7 +425,19 @@ def persist_page(
             raise CheckpointConflict("account checkpoint changed before page commit")
 
 
-def sync_account(engine: Engine, provider: str, account_id: str, adapter: ProviderAdapter) -> int:
+def sync_account(
+    engine: Engine,
+    provider: str,
+    account_id: str,
+    adapter: ProviderAdapter,
+    *,
+    kassal_client: Any | None = None,
+    identity_service: Any | None = None,
+    settings: Any | None = None,
+    connector_store: ConnectorStore | None = None,
+    household_id: UUID | None = None,
+    on_unmapped_lines: Callable[[list[dict[str, Any]]], None] | None = None,
+) -> int:
     """Fetch pages; terminal-page cursor is saved for the next provider poll."""
     provider, account_id = _identity(provider, account_id)
     cursor = checkpoint(engine, provider, account_id)
@@ -281,8 +450,53 @@ def sync_account(engine: Engine, provider: str, account_id: str, adapter: Provid
             raise ValueError("provider returned a non-advancing continuation cursor")
         if page.has_more and page.next_cursor in seen:
             raise ValueError("provider returned a repeated continuation cursor")
+
+        has_eans = any(
+            any(extract_line_ean(line) for line in extract_receipt_lines(rec))
+            for rec in page.records
+        )
+        if has_eans:
+            active_kassal = kassal_client
+            if active_kassal is None:
+                if connector_store is not None and household_id is not None:
+                    creds = connector_store.get_credentials(household_id, "kassal")
+                    if creds and isinstance(creds, dict) and creds.get("api_key"):
+                        from home_kitchen.kassal import KassalClient
+
+                        active_kassal = KassalClient(creds["api_key"])
+                if (
+                    active_kassal is None
+                    and settings is not None
+                    and getattr(settings, "kassal_api_key", None)
+                ):
+                    s_key = settings.kassal_api_key
+                    clean_k = (
+                        s_key.get_secret_value()
+                        if hasattr(s_key, "get_secret_value")
+                        else str(s_key)
+                    )
+                    if clean_k.strip():
+                        from home_kitchen.kassal import KassalClient
+
+                        active_kassal = KassalClient(clean_k.strip())
+            if active_kassal is None:
+                from home_kitchen.kassal import KASSAL_MISSING_KEY_ERROR
+
+                raise ValueError(KASSAL_MISSING_KEY_ERROR)
+            kassal_client = active_kassal
+
+        all_unmapped: list[dict[str, Any]] = []
+        for rec in page.records:
+            unmapped = enrich_and_map_receipt_record(rec, kassal_client, identity_service)
+            if unmapped:
+                all_unmapped.extend(unmapped)
+
         persist_page(engine, provider, account_id, page, expected_cursor=cursor)
         count += len(page.records)
+
+        if all_unmapped and callable(on_unmapped_lines):
+            on_unmapped_lines(all_unmapped)
+
         if page.incomplete_reason is not None:
             # Persist first: the terminal cursor allows the next poll to restart,
             # while the typed failure prevents claiming a completed backfill.
@@ -468,6 +682,34 @@ class PurchaseHistorySyncService:
         self._account_adapters: dict[tuple[str, str], ProviderAdapter] = {}
         self._last_sync_time: dict[str, datetime] = {}
         self._last_sync_error: dict[str, str | None] = {}
+        self.identity_service: Any = None
+        self.mapping_store: Any = None
+        self.kassal_client: Any = None
+
+    def _dispatch_background_mapping(self, items: list[dict[str, Any]]) -> None:
+        """Run AI/variant mapping for unmapped receipt lines without blocking sync."""
+        settings = self.settings
+        if not items or settings is None or not getattr(settings, "ai_configured", False):
+            return
+        identity_service = getattr(self, "identity_service", None)
+        store = getattr(self, "mapping_store", None)
+
+        async def _run() -> None:
+            try:
+                from home_kitchen.catalogue.ai_mapper import auto_map_unmapped_receipt_items_async
+
+                await auto_map_unmapped_receipt_items_async(
+                    store, settings, items, identity_service=identity_service
+                )
+            except Exception:
+                _LOG.warning("Background receipt mapping failed", exc_info=True)
+
+        def _thread() -> None:
+            asyncio.run(_run())
+
+        import threading
+
+        threading.Thread(target=_thread, daemon=True).start()
 
     def register_adapter(
         self,
@@ -942,7 +1184,18 @@ class PurchaseHistorySyncService:
 
         for target_account_id, adapter in targets:
             try:
-                count = sync_account(self.engine, p, target_account_id, adapter)
+                count = sync_account(
+                    self.engine,
+                    p,
+                    target_account_id,
+                    adapter,
+                    kassal_client=getattr(self, "kassal_client", None),
+                    identity_service=getattr(self, "identity_service", None),
+                    settings=self.settings,
+                    connector_store=self.connector_store,
+                    household_id=self.household_id,
+                    on_unmapped_lines=self._dispatch_background_mapping,
+                )
                 total_records += count
                 accounts_synced += 1
                 last_checkpoint = checkpoint(self.engine, p, target_account_id)

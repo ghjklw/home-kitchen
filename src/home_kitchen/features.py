@@ -28,6 +28,7 @@ from home_kitchen.integrations import (
     CookidooIntegration,
     CoopIntegration,
     IntegrationRegistry,
+    KassalIntegration,
     OdaIntegration,
     Rema1000Integration,
     TrumfIntegration,
@@ -102,6 +103,7 @@ class KitchenFeatures:
                 CoopIntegration(self.connector_store, self.household_id),
                 TrumfIntegration(self.connector_store, self.household_id),
                 CookidooIntegration(self.connector_store, self.household_id),
+                KassalIntegration(self.connector_store, self.household_id, settings=settings),
             ]
         )
         self.connector_auth = ConnectorAuthService(
@@ -138,6 +140,8 @@ class KitchenFeatures:
             connector_store=self.connector_store,
             household_id=self.household_id,
         )
+        self.purchase_sync.identity_service = kitchen.identities
+        self.purchase_sync.mapping_store = kitchen.store
         self.recipe_providers = create_recipe_providers(settings, ai_agent=ai)
         self.recipe_photos = PhotoRecipeService(
             settings, self.household_id, kitchen.store.engine, household

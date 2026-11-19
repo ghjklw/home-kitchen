@@ -7,6 +7,7 @@ from home_kitchen.catalogue.identity import (
     AliasResolution,
     CanonicalProduct,
     CanonicalUnit,
+    IdentityCorrectionEvent,
     normalize_identity_text,
 )
 
@@ -20,8 +21,18 @@ class IdentityRepository(Protocol):
         self, kind: str, locale: str, context: str, alias: str, identity_id: UUID
     ) -> None: ...
     def correct_alias(
-        self, kind: str, locale: str, context: str, alias: str, identity_id: UUID
-    ) -> None: ...
+        self,
+        kind: str,
+        locale: str,
+        context: str,
+        alias: str,
+        identity_id: UUID,
+        *,
+        actor_id: str = "system",
+        household_id: UUID | None = None,
+        channel: str = "api",
+        source_type: str = "reviewed_correction",
+    ) -> IdentityCorrectionEvent | None: ...
     def resolve(
         self, kind: str, locale: str, context: str, alias: str
     ) -> list[CanonicalProduct | CanonicalUnit]: ...
@@ -64,15 +75,55 @@ class CanonicalIdentityService:
         )
 
     def correct_alias(
-        self, kind: str, locale: str, context: str, alias: str, identity_id: UUID
-    ) -> None:
-        self.repository.correct_alias(
-            kind,
-            normalize_identity_text(locale),
-            normalize_identity_text(context),
-            alias.strip(),
-            identity_id,
-        )
+        self,
+        kind: str,
+        locale: str,
+        context: str,
+        alias: str,
+        identity_id: UUID,
+        *,
+        actor_id: str = "system",
+        household_id: UUID | None = None,
+        channel: str = "api",
+        source_type: str = "reviewed_correction",
+    ) -> IdentityCorrectionEvent | None:
+        norm_locale = normalize_identity_text(locale)
+        norm_context = normalize_identity_text(context)
+        clean_alias = alias.strip()
+        try:
+            return self.repository.correct_alias(
+                kind,
+                norm_locale,
+                norm_context,
+                clean_alias,
+                identity_id,
+                actor_id=actor_id,
+                household_id=household_id,
+                channel=channel,
+                source_type=source_type,
+            )
+        except TypeError:
+            self.repository.correct_alias(
+                kind,
+                norm_locale,
+                norm_context,
+                clean_alias,
+                identity_id,
+            )
+            return None
+
+    def list_correction_events(
+        self,
+        *,
+        kind: str | None = None,
+        alias: str | None = None,
+        household_id: UUID | None = None,
+        limit: int = 50,
+    ) -> list[IdentityCorrectionEvent]:
+        lister = getattr(self.repository, "list_correction_events", None)
+        if not callable(lister):
+            return []
+        return lister(kind=kind, alias=alias, household_id=household_id, limit=limit)
 
     def resolve(self, kind: str, locale: str, context: str, alias: str) -> AliasResolution:
         candidates = self.repository.resolve(

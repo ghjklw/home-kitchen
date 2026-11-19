@@ -218,9 +218,10 @@ function connectionSettingsButton(label = "Administrer tilkoblinger i innstillin
 }
 async function loadConnectionStatus() {
   state.settingsRefreshInFlight = true;
-  const [integrationsResult, odaResult] = await Promise.allSettled([
+  const [integrationsResult, odaResult, purchaseHistoryResult] = await Promise.allSettled([
     api("/integrations"),
     api("/oda/status"),
+    api("/purchase-history/status"),
   ]);
   const snapshot = window.KitchenSettingsView.connectionStatusSnapshot(
     integrationsResult,
@@ -230,8 +231,37 @@ async function loadConnectionStatus() {
   state.oda = snapshot.oda;
   state.integrationsError = snapshot.integrationsError;
   state.odaStatusError = snapshot.odaStatusError;
+  state.purchaseHistoryStatus =
+    purchaseHistoryResult.status === "fulfilled" ? purchaseHistoryResult.value : null;
   state.settingsRefreshInFlight = false;
   return snapshot;
+}
+async function syncPurchaseHistory(provider, control) {
+  if (control) {
+    control.disabled = true;
+    control.textContent = "Synkroniserer …";
+  }
+  try {
+    const body = provider ? { provider } : {};
+    const res = await api("/purchase-history/sync", "POST", body);
+    await loadConnectionStatus();
+    await refreshView();
+    const total = Number(res?.total_records_synced || 0);
+    const results = res?.results && typeof res.results === "object" ? Object.values(res.results) : [];
+    const failed = results.filter((r) => r && (r.status === "failed" || r.status === "incomplete") && r.error);
+    if (failed.length) {
+      notify(failed.map((r) => `${r.provider}: ${r.error}`).join(" · "));
+    } else {
+      notify(`Synkroniserte ${total} kvitteringsoppføringer.`);
+    }
+  } catch (error) {
+    notify(error.message || "Kunne ikke synkronisere kvitteringer.");
+  } finally {
+    if (control && control.isConnected) {
+      control.disabled = false;
+      control.textContent = provider ? "Synkroniser kvitteringer" : "Synkroniser alle kvitteringer";
+    }
+  }
 }
 async function refreshConnectionSettings(event) {
   const control = event?.currentTarget;
@@ -7326,10 +7356,18 @@ function renderConnectionSettings() {
     add(
       el("div", null, "connection-settings-heading"),
       el("h2", "Tilkoblinger"),
-      button(
-        state.settingsRefreshInFlight ? "Oppdaterer …" : "Oppdater status",
-        refreshConnectionSettings,
-        "quiet small",
+      add(
+        el("div", null, "actions"),
+        button(
+          state.settingsRefreshInFlight ? "Oppdaterer …" : "Oppdater status",
+          refreshConnectionSettings,
+          "quiet small",
+        ),
+        button(
+          "Synkroniser alle kvitteringer",
+          (e) => syncPurchaseHistory(null, e.currentTarget),
+          "quiet small",
+        ),
       ),
     ),
     el("p", "Administrer leverandørtilgang her. Hemmeligheter vises aldri i Kjøkken.", "muted"),
@@ -7395,6 +7433,18 @@ function renderConnectionSettings() {
         "connection-auth-mode muted",
       ),
     );
+    const syncInfo = state.purchaseHistoryStatus?.providers?.[integration.id];
+    if (syncInfo && ["oda", "rema1000", "coop", "trumf"].includes(integration.id)) {
+      const syncedCount = syncInfo.coverage_window?.total_records ?? 0;
+      const syncParts = [`Kvitteringer lagret: ${syncedCount}`];
+      if (syncInfo.last_successful_sync) {
+        syncParts.push(`Sist synkronisert: ${new Date(syncInfo.last_successful_sync).toLocaleString("nb-NO")}`);
+      }
+      add(row, el("p", syncParts.join(" · "), "muted connection-sync-status"));
+      if (syncInfo.last_sync_error) {
+        add(row, el("p", syncInfo.last_sync_error, "callout danger connection-expiry"));
+      }
+    }
     const expiryNotice = window.KitchenSettingsView.integrationExpiryNotice(integration);
     if (expiryNotice) {
       add(
@@ -7411,6 +7461,7 @@ function renderConnectionSettings() {
       if (state.oda?.connected) {
         add(
           actions,
+          button("Synkroniser kvitteringer", (e) => syncPurchaseHistory("oda", e.currentTarget), "quiet"),
           button("Koble til Oda på nytt", connectOdaAccount, "quiet"),
           button("Koble fra Oda", disconnectOdaAccount, "quiet danger"),
         );
@@ -7524,6 +7575,11 @@ function renderConnectionSettings() {
             () => openConnectorModal(integration, { addAccount: true }),
             "quiet",
           ),
+          button(
+            "Synkroniser kvitteringer",
+            (e) => syncPurchaseHistory(integration.id, e.currentTarget),
+            "quiet",
+          ),
         );
         add(row, actions);
       } else {
@@ -7536,6 +7592,16 @@ function renderConnectionSettings() {
             : accounts.some((account) => Boolean(account?.refresh_available));
         const actions = add(el("div", null, "actions connection-actions"));
         if (status === "connected") {
+          if (["rema1000", "coop", "trumf"].includes(integration.id)) {
+            add(
+              actions,
+              button(
+                "Synkroniser kvitteringer",
+                (e) => syncPurchaseHistory(integration.id, e.currentTarget),
+                "quiet",
+              ),
+            );
+          }
           if (supportsRefresh) {
             add(actions, button("Forny", () => refreshConnectorAccount(integration, null), "quiet"));
           }

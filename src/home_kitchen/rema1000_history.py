@@ -28,6 +28,7 @@ from decimal import Decimal
 from typing import Any, Literal, Protocol, runtime_checkable
 from uuid import UUID, uuid4
 
+import httpx
 from pydantic import (
     AliasChoices,
     AwareDatetime,
@@ -678,6 +679,68 @@ class Rema1000FixtureSource:
             return raw
         tx = next((t for t in self._transactions if t.receipt_id == receipt_id), None)
         return parse_receipt(raw, transaction=tx)
+
+
+class Rema1000HttpSource:
+    """Live HTTP source for Rema 1000 Æ purchases and receipts."""
+
+    def __init__(
+        self,
+        session_token: str,
+        *,
+        base_url: str = "https://api.rema.no",
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
+        clean_token = session_token.strip() if isinstance(session_token, str) else ""
+        if not clean_token:
+            raise Rema1000AuthenticationError("Rema 1000-sesjonstoken mangler.")
+        self.session_token = clean_token
+        self.base_url = base_url.rstrip("/")
+        self.transport = transport
+        self._tx_cache: dict[str, Rema1000Transaction] = {}
+
+    def _client(self) -> httpx.Client:
+        return httpx.Client(
+            transport=self.transport,
+            timeout=25.0,
+            follow_redirects=False,
+            headers={
+                "Authorization": f"Bearer {self.session_token}",
+                "Accept": "application/json",
+                "User-Agent": "HomeKitchen/1.0",
+            },
+        )
+
+    def get_transactions(self, account_id: str) -> list[Rema1000Transaction]:
+        url = f"{self.base_url}/v1/receipts"
+        with self._client() as client:
+            resp = client.get(url)
+        if resp.status_code in (401, 403):
+            raise Rema1000AuthenticationError(
+                "Rema 1000-sesjonen er utløpt eller ugyldig; forny eller koble til på nytt i Innstillinger."
+            )
+        if resp.status_code >= 400:
+            raise UnsupportedRema1000Contract(f"Rema 1000 svarte med HTTP {resp.status_code}")
+        txs = parse_transactions(resp.text)
+        for tx in txs:
+            self._tx_cache[tx.receipt_id] = tx
+        return txs
+
+    def get_receipt(self, account_id: str, receipt_id: str) -> Rema1000Receipt | None:
+        url = f"{self.base_url}/v1/receipts/{receipt_id}"
+        with self._client() as client:
+            resp = client.get(url)
+        if resp.status_code == 404:
+            return None
+        if resp.status_code in (401, 403):
+            raise Rema1000AuthenticationError(
+                "Rema 1000-sesjonen er utløpt eller ugyldig; forny eller koble til på nytt i Innstillinger."
+            )
+        if resp.status_code >= 400:
+            raise UnsupportedRema1000Contract(
+                f"Rema 1000 kvittering {receipt_id} svarte med HTTP {resp.status_code}"
+            )
+        return parse_receipt(resp.text, transaction=self._tx_cache.get(receipt_id))
 
 
 class Rema1000PurchaseHistoryAdapter:

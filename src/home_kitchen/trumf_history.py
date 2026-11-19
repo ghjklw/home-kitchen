@@ -24,6 +24,7 @@ from decimal import Decimal
 from typing import Any, Literal, Protocol, runtime_checkable
 from uuid import UUID, uuid4
 
+import httpx
 from pydantic import (
     AliasChoices,
     AwareDatetime,
@@ -580,6 +581,68 @@ class TrumfFixtureSource:
             return raw
         tx = next((t for t in self._transactions if t.batch_id == batch_id), None)
         return parse_receipt(raw, transaction=tx)
+
+
+class TrumfHttpSource:
+    """Live HTTP source for Trumf kvitteringer using session cookies."""
+
+    def __init__(
+        self,
+        session_cookie: str,
+        *,
+        base_url: str = "https://www.trumf.no",
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
+        clean_cookie = session_cookie.strip() if isinstance(session_cookie, str) else ""
+        if not clean_cookie:
+            raise TrumfAuthenticationError("Trumf-informasjonskapsel mangler.")
+        self.session_cookie = clean_cookie
+        self.base_url = base_url.rstrip("/")
+        self.transport = transport
+        self._tx_cache: dict[str, TrumfTransaction] = {}
+
+    def _client(self) -> httpx.Client:
+        return httpx.Client(
+            transport=self.transport,
+            timeout=25.0,
+            follow_redirects=False,
+            headers={
+                "Cookie": self.session_cookie,
+                "Accept": "text/html, text/x-component, application/json",
+                "User-Agent": "HomeKitchen/1.0",
+            },
+        )
+
+    def get_transactions(self, account_id: str) -> list[TrumfTransaction]:
+        url = f"{self.base_url}/trumf-profil/kvitteringer"
+        with self._client() as client:
+            resp = client.get(url)
+        if resp.status_code in (401, 403, 302, 303, 307):
+            raise TrumfAuthenticationError(
+                "Trumf-sesjonen er utløpt eller ugyldig; forny eller koble til på nytt i Innstillinger."
+            )
+        if resp.status_code >= 400:
+            raise UnsupportedTrumfContract(f"Trumf svarte med HTTP {resp.status_code}")
+        txs = parse_transactions(resp.text)
+        for tx in txs:
+            self._tx_cache[tx.batch_id] = tx
+        return txs
+
+    def get_receipt(self, account_id: str, batch_id: str) -> TrumfReceipt | None:
+        url = f"{self.base_url}/trumf-profil/kvitteringer/{batch_id}"
+        with self._client() as client:
+            resp = client.get(url)
+        if resp.status_code == 404:
+            return None
+        if resp.status_code in (401, 403, 302, 303, 307):
+            raise TrumfAuthenticationError(
+                "Trumf-sesjonen er utløpt eller ugyldig; forny eller koble til på nytt i Innstillinger."
+            )
+        if resp.status_code >= 400:
+            raise UnsupportedTrumfContract(
+                f"Trumf kvittering {batch_id} svarte med HTTP {resp.status_code}"
+            )
+        return parse_receipt(resp.text, transaction=self._tx_cache.get(batch_id))
 
 
 class TrumfPurchaseHistoryAdapter:

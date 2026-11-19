@@ -13,6 +13,7 @@ from decimal import Decimal
 from typing import Any, Literal, Protocol, runtime_checkable
 from uuid import UUID, uuid4
 
+import httpx
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from home_kitchen.purchase_sync import ProviderOrderRecord, ProviderPage
@@ -28,6 +29,10 @@ def _to_camel(value: str) -> str:
 
 class UnsupportedCoopContract(ValueError):
     """The observed response needs a provider contract not present in the spec."""
+
+
+class CoopAuthenticationError(RuntimeError):
+    """Missing or invalid Coop credentials or unauthenticated response."""
 
 
 class CoopReceiptLine(BaseModel):
@@ -230,6 +235,78 @@ class CoopFixtureSource:
         if isinstance(raw, CoopReceipt):
             return raw
         return parse_receipt_detail(raw)
+
+
+class CoopHttpSource:
+    """Live HTTP source for Coop purchases and digital receipts (api.coop.no)."""
+
+    def __init__(
+        self,
+        *,
+        access_token: str | None = None,
+        session_cookie: str | None = None,
+        base_url: str = "https://api.coop.no",
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
+        clean_token = access_token.strip() if isinstance(access_token, str) else ""
+        clean_cookie = session_cookie.strip() if isinstance(session_cookie, str) else ""
+        if not clean_token and not clean_cookie:
+            raise CoopAuthenticationError("Coop-tilgangstoken eller informasjonskapsel mangler.")
+        self.access_token = clean_token or None
+        self.session_cookie = clean_cookie or None
+        self.base_url = base_url.rstrip("/")
+        self.transport = transport
+
+    def _client(self) -> httpx.Client:
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "HomeKitchen/1.0",
+        }
+        if self.access_token:
+            headers["Authorization"] = f"Bearer {self.access_token}"
+        elif self.session_cookie:
+            headers["Cookie"] = self.session_cookie
+        return httpx.Client(
+            transport=self.transport,
+            timeout=25.0,
+            follow_redirects=False,
+            headers=headers,
+        )
+
+    def get_purchases(self, account_id: str) -> list[CoopPurchaseStub]:
+        url = f"{self.base_url}/user/pay/history/list"
+        with self._client() as client:
+            resp = client.get(url)
+        if resp.status_code in (401, 403):
+            raise CoopAuthenticationError(
+                "Coop-sesjonen er utløpt eller ugyldig; forny eller koble til på nytt i Innstillinger."
+            )
+        if resp.status_code >= 400:
+            raise UnsupportedCoopContract(f"Coop svarte med HTTP {resp.status_code}")
+        data = resp.json()
+        if isinstance(data, list):
+            raw_list = data
+        elif isinstance(data, dict):
+            raw_list = data.get("purchases") or data.get("items") or []
+        else:
+            raise UnsupportedCoopContract("Coop purchase list response has unexpected shape")
+        return [CoopPurchaseStub.model_validate(item) for item in raw_list]
+
+    def get_receipt(self, account_id: str, summary_id: str) -> CoopReceipt | None:
+        url = f"{self.base_url}/user/pay/history/details"
+        with self._client() as client:
+            resp = client.get(url, params={"summaryId": summary_id})
+        if resp.status_code == 404:
+            return None
+        if resp.status_code in (401, 403):
+            raise CoopAuthenticationError(
+                "Coop-sesjonen er utløpt eller ugyldig; forny eller koble til på nytt i Innstillinger."
+            )
+        if resp.status_code >= 400:
+            raise UnsupportedCoopContract(
+                f"Coop kvittering {summary_id} svarte med HTTP {resp.status_code}"
+            )
+        return parse_receipt_detail(resp.json())
 
 
 class CoopPurchaseHistoryAdapter:

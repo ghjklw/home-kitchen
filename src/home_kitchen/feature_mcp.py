@@ -4,7 +4,6 @@ import asyncio
 import base64
 import binascii
 from datetime import date
-from decimal import Decimal, InvalidOperation
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
@@ -12,7 +11,8 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, Field
 
-from home_kitchen.basket import BasketReview, ProductSnapshot, SelectedProduct
+from home_kitchen.basket import BasketReview, SelectedProduct
+from home_kitchen.basket.application import BatchSelectionInput, select_basket_products_batch
 from home_kitchen.basket.jobs import BasketMatchJob
 from home_kitchen.basket.matching import BasketMatchResult
 from home_kitchen.basket.repository import BasketService
@@ -51,13 +51,8 @@ from home_kitchen.recipes.images import MAX_RESULTS
 from home_kitchen.recipes.photos import MAX_PHOTO_BYTES
 
 
-class BasketBatchSelectionInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    need_id: UUID
-    candidate_id: str = Field(min_length=1, max_length=200)
-    packages: int = Field(gt=0, le=99)
-    confirm_identity: bool = False
+class BasketBatchSelectionInput(BatchSelectionInput):
+    pass
 
 
 class BasketBatchSelectionInputEnvelope(BaseModel):
@@ -517,74 +512,22 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
         Each need may have one product selection. Match job ownership, age, period,
         and package details are checked again before anything is persisted.
         """
-        actor_id = actor()
-        if data.end < data.start:
-            raise ValueError("end date must be on or after start date")
-        references = [(item.need_id, item.candidate_id) for item in data.selections]
-        if len({need_id for need_id, _ in references}) != len(references):
-            raise ValueError("Select at most one product for each purchase need")
-        if len(set(references)) != len(references):
-            raise ValueError("Do not select a product more than once for a need")
-        identity_confirmations = {
-            (item.need_id, item.candidate_id) for item in data.selections if item.confirm_identity
-        }
-        resolve = features.basket_jobs.resolve_batch_candidates
-        if identity_confirmations:
-            resolved = await resolve(
-                actor_id,
-                data.job_id,
-                data.start,
-                data.end,
-                references,
-                identity_confirmations=identity_confirmations,
+        try:
+            actor_id = actor()
+            return await select_basket_products_batch(
+                basket,
+                features.basket_jobs,
+                start=data.start,
+                end=data.end,
+                job_id=data.job_id,
+                selections=data.selections,
+                actor_id=actor_id,
+                channel="mcp",
             )
-        else:
-            resolved = await resolve(actor_id, data.job_id, data.start, data.end, references)
-        selections = []
-        evidence = {}
-        for item in data.selections:
-            matched_need, candidate, observed_at = resolved[(item.need_id, item.candidate_id)]
-            if (
-                candidate.pack_quantity is None
-                or candidate.pack_unit is None
-                or candidate.pack_metadata_status != "unverified"
-            ):
-                raise ValueError("A selected product has unknown package details.")
-            price = None
-            if candidate.price is not None:
-                try:
-                    price = Decimal(candidate.price)
-                except InvalidOperation:
-                    price = None
-            selections.append(
-                SelectedProduct(
-                    need_id=item.need_id,
-                    product=ProductSnapshot(
-                        provider=candidate.provider,
-                        product_id=candidate.product_id,
-                        name=candidate.name,
-                        brand=candidate.brand,
-                        url=candidate.product_url,
-                        image_url=candidate.media.image_url if candidate.media else None,
-                        pack_quantity=candidate.pack_quantity,
-                        pack_unit=candidate.pack_unit,
-                        price=price,
-                        currency="NOK",
-                        available=candidate.available,
-                        observed_at=observed_at,
-                    ),
-                    packages=item.packages,
-                )
-            )
-            evidence[item.need_id] = matched_need
-        return await asyncio.to_thread(
-            basket.select_batch,
-            data.start,
-            data.end,
-            selections,
-            evidence,
-            channel="mcp",
-        )
+        except KeyError:
+            raise ToolError("Product match job not found") from None
+        except ValueError as exc:
+            raise ToolError(str(exc)) from None
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
     def propose_basket_product(start: date, end: date, selection: SelectedProduct) -> BasketReview:

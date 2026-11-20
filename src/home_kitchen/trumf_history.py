@@ -476,9 +476,7 @@ def build_transaction_receipt_stub(transaction: TrumfTransaction) -> TrumfReceip
         if isinstance(transaction.batch_id, str) and transaction.batch_id.strip()
         else "tx:"
         + hashlib.sha256(
-            f"{transaction.transaksjons_tidspunkt.isoformat()}|{transaction.beskrivelse}|{transaction.belop}".encode(
-                "utf-8"
-            )
+            f"{transaction.transaksjons_tidspunkt.isoformat()}|{transaction.beskrivelse}|{transaction.belop}".encode()
         ).hexdigest()[:24]
     )
     raw: dict[str, Any] = {

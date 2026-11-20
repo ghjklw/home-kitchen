@@ -5,10 +5,11 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from hashlib import sha256
 
-from cryptography.fernet import Fernet
 from sqlalchemy import Column, DateTime, Integer, MetaData, Table, Text, delete, insert, select
 from sqlalchemy.dialects.postgresql import insert as conflict_insert
 from sqlalchemy.engine import Engine
+
+from home_kitchen.crypto import FernetCipher, build_multi_fernet
 
 metadata = MetaData()
 lifecycles = Table(
@@ -34,9 +35,11 @@ states = Table(
 
 
 class OdaRepository:
-    def __init__(self, engine: Engine, cipher: Fernet):
+    def __init__(self, engine: Engine, cipher: FernetCipher | str):
         self.engine = engine
-        self.cipher = cipher
+        self.cipher: FernetCipher = (
+            build_multi_fernet(cipher) if isinstance(cipher, str) else cipher
+        )
 
     def encrypt(self, value: dict) -> str:
         return self.cipher.encrypt(json.dumps(value).encode()).decode()

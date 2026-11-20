@@ -4,13 +4,15 @@ import json
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import InvalidToken
 from key_value.aio._utils.managed_entry import ManagedEntry
 from key_value.aio.stores.base import BaseStore
 from sqlalchemy import Column, DateTime, MetaData, Table, Text, delete, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import Engine
 from starlette.concurrency import run_in_threadpool
+
+from home_kitchen.crypto import FernetCipher, build_multi_fernet
 
 oauth_records = Table(
     "kitchen_mcp_oauth",
@@ -40,10 +42,14 @@ class PostgresOAuthStore(BaseStore):
     MAX_CLIENTS = 1000
     MAX_CLIENT_RECORD_BYTES = 16 * 1024
 
-    def __init__(self, engine: Engine, encryption_key: str):
+    def __init__(self, engine: Engine, encryption_key: str | FernetCipher):
         super().__init__(stable_api=True)
         self.engine = engine
-        self.fernet = Fernet(encryption_key.encode())
+        self.fernet: FernetCipher = (
+            build_multi_fernet(encryption_key)
+            if isinstance(encryption_key, str)
+            else encryption_key
+        )
 
     async def _get_managed_entry(self, *, collection: str, key: str) -> ManagedEntry | None:
         def read():

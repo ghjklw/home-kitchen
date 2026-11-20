@@ -191,7 +191,10 @@ def test_alembic_migration_0027_structure_and_head():
 
     config = Config(str(Path(__file__).parents[1] / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ["0027_multi_account_connectors"]
+    heads = script.get_heads()
+    assert len(heads) == 1
+    revisions = {rev.revision for rev in script.walk_revisions()}
+    assert "0027_multi_account_connectors" in revisions
 
 
 def test_downgrade_sql_keeps_at_most_one_row_per_household_provider(sqlite_engine):

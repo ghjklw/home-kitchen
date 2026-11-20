@@ -5,17 +5,23 @@ import base64
 import binascii
 from datetime import date
 from decimal import Decimal, InvalidOperation
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, Field
 
 from home_kitchen.basket import BasketReview, ProductSnapshot, SelectedProduct
 from home_kitchen.basket.jobs import BasketMatchJob
 from home_kitchen.basket.matching import BasketMatchResult
 from home_kitchen.basket.repository import BasketService
-from home_kitchen.catalogue.identity import MapIngredientInput, UnmappedIngredient
+from home_kitchen.catalogue.identity import (
+    AliasCorrectionInput,
+    IdentityCorrectionEvent,
+    MapIngredientInput,
+    UnmappedIngredient,
+)
 from home_kitchen.catalogue.models import FoodCatalogueItem
 from home_kitchen.catalogue.overview_models import ProductOverview, ProductPreferencesUpdate
 from home_kitchen.catalogue.sku_models import RetailerProductOption, RetailerProductSnapshot
@@ -617,3 +623,43 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
             locale=data.locale,
             context=data.context,
         )
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
+    def list_mapping_corrections(
+        kind: Literal["product", "unit"] | None = None,
+        alias: str | None = None,
+        limit: int = 50,
+    ) -> list[IdentityCorrectionEvent]:
+        """List audited product and unit alias mapping corrections for this household."""
+        return features.catalogue_identities.list_correction_events(
+            kind=kind,
+            alias=alias,
+            household_id=features.household_id,
+            limit=limit,
+        )
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True})
+    def correct_identity_mapping(data: AliasCorrectionInput) -> dict[str, Any]:
+        """Submit a reviewed canonical product or unit alias mapping correction."""
+        if not data.reviewed:
+            raise ToolError(
+                "Explicit review confirmation (reviewed=true) is required to save a mapping correction."
+            )
+        actor = history_context.get().actor_id or "mcp"
+        try:
+            event = features.catalogue_identities.correct_alias(
+                data.kind,
+                data.locale,
+                data.context,
+                data.alias,
+                data.identity_id,
+                actor_id=actor,
+                household_id=features.household_id,
+                channel="mcp",
+            )
+        except ValueError as exc:
+            raise ToolError(str(exc)) from None
+        return {
+            "status": "updated" if event is not None else "unchanged",
+            "event": event.model_dump(mode="json") if event is not None else None,
+        }

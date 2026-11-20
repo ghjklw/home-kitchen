@@ -1,11 +1,17 @@
 """Persistence operations for canonical identities and contextual aliases."""
 
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import bindparam, text
+from sqlalchemy import bindparam, inspect, text
 from sqlalchemy.engine import Engine
 
-from home_kitchen.catalogue.identity import CanonicalProduct, CanonicalUnit, normalize_identity_text
+from home_kitchen.catalogue.identity import (
+    CanonicalProduct,
+    CanonicalUnit,
+    IdentityCorrectionEvent,
+    normalize_identity_text,
+)
 
 
 class PostgresIdentityRepository:
@@ -85,11 +91,43 @@ class PostgresIdentityRepository:
             return row is not None
 
     def correct_alias(
-        self, kind: str, locale: str, context: str, alias: str, identity_id: UUID
-    ) -> None:
+        self,
+        kind: str,
+        locale: str,
+        context: str,
+        alias: str,
+        identity_id: UUID,
+        *,
+        actor_id: str = "system",
+        household_id: UUID | None = None,
+        channel: str = "api",
+        source_type: str = "reviewed_correction",
+    ) -> IdentityCorrectionEvent | None:
         table, fk = self._table(kind)
+        normalized = normalize_identity_text(alias)
         with self.engine.begin() as connection:
             self._require_identity(connection, kind, identity_id)
+            existing = (
+                connection.execute(
+                    text(
+                        f"SELECT {fk} AS identity_id, reviewed FROM {table} "
+                        "WHERE locale=:locale AND context=:context AND normalized_alias=:normalized "
+                        "LIMIT 1"
+                    ),
+                    {"locale": locale, "context": context, "normalized": normalized},
+                )
+                .mappings()
+                .first()
+            )
+            previous_identity_id = (
+                UUID(str(existing["identity_id"]))
+                if existing is not None and existing["identity_id"] is not None
+                else None
+            )
+            previous_reviewed = bool(existing["reviewed"]) if existing is not None else None
+            if previous_identity_id == identity_id and previous_reviewed is True:
+                return None
+
             connection.execute(
                 text(
                     f"DELETE FROM {table} WHERE locale=:locale AND context=:context AND normalized_alias=:normalized"
@@ -97,7 +135,7 @@ class PostgresIdentityRepository:
                 {
                     "locale": locale,
                     "context": context,
-                    "normalized": normalize_identity_text(alias),
+                    "normalized": normalized,
                 },
             )
             connection.execute(
@@ -106,11 +144,86 @@ class PostgresIdentityRepository:
                 {
                     "locale": locale,
                     "context": context,
-                    "normalized": normalize_identity_text(alias),
+                    "normalized": normalized,
                     "alias": alias,
                     "identity_id": identity_id,
                 },
             )
+            now = datetime.now(UTC)
+            event = IdentityCorrectionEvent(
+                id=uuid4(),
+                occurred_at=now,
+                household_id=household_id,
+                actor_id=actor_id,
+                channel=channel,  # ty: ignore[invalid-argument-type]
+                kind=kind,  # ty: ignore[invalid-argument-type]
+                locale=locale,
+                context=context,
+                normalized_alias=normalized,
+                alias=alias,
+                previous_identity_id=previous_identity_id,
+                new_identity_id=identity_id,
+                previous_reviewed=previous_reviewed,
+                new_reviewed=True,
+                source_type=source_type,  # ty: ignore[invalid-argument-type]
+            )
+            if inspect(connection).has_table("kitchen_identity_correction_events"):
+                connection.execute(
+                    text(
+                        """INSERT INTO kitchen_identity_correction_events
+                        (id, occurred_at, household_id, actor_id, channel, kind, locale, context,
+                         normalized_alias, alias, previous_identity_id, new_identity_id,
+                         previous_reviewed, new_reviewed, source_type)
+                        VALUES
+                        (:id, :occurred_at, :household_id, :actor_id, :channel, :kind, :locale, :context,
+                         :normalized_alias, :alias, :previous_identity_id, :new_identity_id,
+                         :previous_reviewed, :new_reviewed, :source_type)"""
+                    ),
+                    event.model_dump(),
+                )
+            return event
+
+    def list_correction_events(
+        self,
+        *,
+        kind: str | None = None,
+        alias: str | None = None,
+        household_id: UUID | None = None,
+        limit: int = 50,
+    ) -> list[IdentityCorrectionEvent]:
+        if not 1 <= limit <= 200:
+            raise ValueError("limit must be between 1 and 200")
+        with self.engine.connect() as connection:
+            if not inspect(connection).has_table("kitchen_identity_correction_events"):
+                return []
+            clauses: list[str] = []
+            params: dict[str, object] = {"limit": limit}
+            if kind is not None:
+                self._table(kind)
+                clauses.append("kind = :kind")
+                params["kind"] = kind
+            if alias is not None and alias.strip():
+                clauses.append("normalized_alias = :normalized_alias")
+                params["normalized_alias"] = normalize_identity_text(alias)
+            if household_id is not None:
+                clauses.append("household_id = :household_id")
+                params["household_id"] = household_id
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            rows = (
+                connection.execute(
+                    text(
+                        "SELECT id, occurred_at, household_id, actor_id, channel, kind, locale, context, "
+                        "normalized_alias, alias, previous_identity_id, new_identity_id, "
+                        "previous_reviewed, new_reviewed, source_type "
+                        f"FROM kitchen_identity_correction_events {where} "
+                        "ORDER BY occurred_at DESC, id DESC LIMIT :limit"
+                    ),
+                    params,
+                )
+                .mappings()
+                .all()
+            )
+            return [IdentityCorrectionEvent.model_validate(dict(r)) for r in rows]
 
     @staticmethod
     def _require_identity(connection, kind: str, identity_id: UUID) -> None:

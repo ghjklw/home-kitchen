@@ -22,6 +22,7 @@ from home_kitchen.catalogue.identity import (
     AliasResolution,
     CanonicalProduct,
     CanonicalUnit,
+    IdentityCorrectionEvent,
     MapIngredientInput,
     ProductIdentityCreate,
     UnitIdentityCreate,
@@ -752,6 +753,21 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
     def create_canonical_unit(data: UnitIdentityCreate) -> CanonicalUnit:
         return features.catalogue_identities.create_unit(data.canonical_name)
 
+    @router.get("/catalogue/aliases/corrections")
+    def list_canonical_alias_corrections(
+        kind: str | None = Query(default=None),
+        alias: str | None = Query(default=None, max_length=200),
+        limit: int = Query(default=50, ge=1, le=200),
+    ) -> list[IdentityCorrectionEvent]:
+        if kind is not None and kind not in {"product", "unit"}:
+            raise HTTPException(404, "Unknown identity kind")
+        return features.catalogue_identities.list_correction_events(
+            kind=kind,
+            alias=alias,
+            household_id=features.household_id,
+            limit=limit,
+        )
+
     @router.get("/catalogue/aliases/{kind}")
     def resolve_canonical_alias(
         kind: str,
@@ -773,12 +789,25 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
         return Response(status_code=201)
 
     @router.put("/catalogue/aliases/{kind}/{identity_id}/review")
-    def correct_canonical_alias(kind: str, identity_id: UUID, data: AliasInput) -> Response:
+    def correct_canonical_alias(
+        kind: str, identity_id: UUID, data: AliasInput, request: Request
+    ) -> Response:
         if kind not in {"product", "unit"}:
             raise HTTPException(404, "Unknown identity kind")
-        features.catalogue_identities.correct_alias(
-            kind, data.locale, data.context, data.alias, identity_id
-        )
+        actor = getattr(request.state, "actor_id", None) or "api"
+        try:
+            features.catalogue_identities.correct_alias(
+                kind,
+                data.locale,
+                data.context,
+                data.alias,
+                identity_id,
+                actor_id=actor,
+                household_id=features.household_id,
+                channel="api",
+            )
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from None
         return Response(status_code=204)
 
     @router.get("/catalogue/overview")

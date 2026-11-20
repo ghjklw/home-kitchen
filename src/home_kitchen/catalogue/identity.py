@@ -1,11 +1,12 @@
 """Canonical product and unit identities, separate from source evidence."""
 
 import re
+from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field
 
 from home_kitchen.models import NonBlank
 
@@ -25,6 +26,35 @@ class AliasInput(BaseModel):
     alias: NonBlank
     locale: NonBlank
     context: str = ""
+
+
+class AliasCorrectionInput(BaseModel):
+    kind: Literal["product", "unit"]
+    identity_id: UUID
+    alias: NonBlank
+    locale: NonBlank = "nb"
+    context: str = "recipe"
+    reviewed: bool = False
+
+
+class IdentityCorrectionEvent(BaseModel):
+    id: UUID
+    occurred_at: AwareDatetime | datetime
+    household_id: UUID | None = None
+    actor_id: str
+    channel: Literal["app", "api", "mcp", "system"] = "api"
+    kind: Literal["product", "unit"]
+    locale: str
+    context: str
+    normalized_alias: str
+    alias: str
+    previous_identity_id: UUID | None = None
+    new_identity_id: UUID
+    previous_reviewed: bool | None = None
+    new_reviewed: bool = True
+    source_type: Literal["reviewed_correction", "automatic_suggestion", "imported_alias"] = (
+        "reviewed_correction"
+    )
 
 
 class ProductIdentityCreate(BaseModel):

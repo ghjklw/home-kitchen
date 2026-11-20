@@ -193,7 +193,9 @@ async def test_application_use_case_validates_inputs_and_maps_snapshot():
     jobs, basket, _, _, _, _ = _harness()
     job_id = _seed_job(
         jobs,
-        candidate_1=_candidate(need_suffix=1, identity_status="compatible", price="invalid-decimal"),
+        candidate_1=_candidate(
+            need_suffix=1, identity_status="compatible", price="invalid-decimal"
+        ),
     )
 
     with pytest.raises(ValueError, match="authenticated actor"):
@@ -203,7 +205,9 @@ async def test_application_use_case_validates_inputs_and_maps_snapshot():
             start=START,
             end=END,
             job_id=job_id,
-            selections=[BatchSelectionInput(need_id=NEED_ID_1, candidate_id="oda:milk-1", packages=1)],
+            selections=[
+                BatchSelectionInput(need_id=NEED_ID_1, candidate_id="oda:milk-1", packages=1)
+            ],
             actor_id="   ",
             channel="api",
         )
@@ -215,7 +219,9 @@ async def test_application_use_case_validates_inputs_and_maps_snapshot():
             start=END,
             end=START,
             job_id=job_id,
-            selections=[BatchSelectionInput(need_id=NEED_ID_1, candidate_id="oda:milk-1", packages=1)],
+            selections=[
+                BatchSelectionInput(need_id=NEED_ID_1, candidate_id="oda:milk-1", packages=1)
+            ],
             actor_id=ACTOR,
             channel="api",
         )
@@ -404,12 +410,12 @@ async def test_rest_and_mcp_parity_rejects_unverified_identity_and_invalid_input
     try:
         async with Client(mcp) as mcp_client:
             with pytest.raises(ToolError, match="identity is unverified"):
-                await mcp_client.call_tool(
-                    "select_basket_products", {"data": unconfirmed_payload}
-                )
+                await mcp_client.call_tool("select_basket_products", {"data": unconfirmed_payload})
             with pytest.raises(ToolError, match="end date must be on or after start date"):
                 await mcp_client.call_tool("select_basket_products", {"data": bad_range_payload})
-            with pytest.raises(ToolError, match="Select at most one product for each purchase need"):
+            with pytest.raises(
+                ToolError, match="Select at most one product for each purchase need"
+            ):
                 await mcp_client.call_tool(
                     "select_basket_products", {"data": duplicate_need_payload}
                 )
@@ -509,9 +515,7 @@ async def test_rest_and_mcp_parity_require_authenticated_actor():
         "start": str(START),
         "end": str(END),
         "job_id": job_id,
-        "selections": [
-            {"need_id": str(NEED_ID_1), "candidate_id": "oda:milk-1", "packages": 1}
-        ],
+        "selections": [{"need_id": str(NEED_ID_1), "candidate_id": "oda:milk-1", "packages": 1}],
     }
 
     with TestClient(app) as rest_client:

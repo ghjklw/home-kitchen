@@ -6,6 +6,7 @@ from datetime import date
 from typing import Any
 from uuid import UUID, uuid4
 
+import httpx
 from pydantic_ai import Agent
 
 from home_kitchen.basket.jobs import BasketMatchJobs
@@ -24,10 +25,19 @@ from home_kitchen.connector_store import ConnectorStore, resolve_connector_ciphe
 from home_kitchen.context import history_context
 from home_kitchen.cookidoo_recipes import CookidooCollectionProvider
 from home_kitchen.history import HistoryRepository
+from home_kitchen.home_assistant import (
+    DEFAULT_HOME_ASSISTANT_TODO_ENTITY,
+    HOME_ASSISTANT_NOT_CONFIGURED_ERROR,
+    HomeAssistantNotConfiguredError,
+    HomeAssistantTodoClient,
+    HomeAssistantTodoExportResult,
+    format_store_trip_export_item,
+)
 from home_kitchen.integrations import (
     AIIntegration,
     CookidooIntegration,
     CoopIntegration,
+    HomeAssistantIntegration,
     IntegrationRegistry,
     KassalIntegration,
     OdaIntegration,
@@ -141,8 +151,13 @@ class KitchenFeatures:
                 TrumfIntegration(self.connector_store, self.household_id),
                 CookidooIntegration(self.connector_store, self.household_id),
                 KassalIntegration(self.connector_store, self.household_id, settings=settings),
+                HomeAssistantIntegration(
+                    self.connector_store, self.household_id, settings=settings
+                ),
             ]
         )
+        self.home_assistant_transport: httpx.BaseTransport | None = None
+        self.home_assistant_client: HomeAssistantTodoClient | None = None
         self.connector_auth = ConnectorAuthService(
             store=self.connector_store,
             integrations=self.integrations,
@@ -295,3 +310,71 @@ class KitchenFeatures:
             evidence_context="\n".join(item.model_dump_json() for item in evidence),
         )
         return result.model_copy(update={"evidence_ids": [item.evidence_id for item in evidence]})
+
+    def _resolve_home_assistant_client(self) -> HomeAssistantTodoClient:
+        if self.home_assistant_client is not None:
+            return self.home_assistant_client
+
+        creds: dict[str, Any] | None = None
+        try:
+            creds = self.connector_store.get_credentials(self.household_id, "home_assistant")
+        except RuntimeError as exc:
+            raise HomeAssistantNotConfiguredError(str(exc)) from exc
+
+        token = ""
+        base_url = ""
+        entity_id = ""
+        if isinstance(creds, dict):
+            raw_token = creds.get("api_key") or creds.get("token")
+            if isinstance(raw_token, str):
+                token = raw_token.strip()
+            raw_url = creds.get("base_url")
+            if isinstance(raw_url, str):
+                base_url = raw_url.strip().rstrip("/")
+            raw_entity = creds.get("entity_id")
+            if isinstance(raw_entity, str):
+                entity_id = raw_entity.strip()
+
+        if not token and self.settings.home_assistant_token is not None:
+            token = self.settings.home_assistant_token.get_secret_value().strip()
+        if not base_url and self.settings.home_assistant_url is not None:
+            base_url = str(self.settings.home_assistant_url).strip().rstrip("/")
+        if not entity_id and self.settings.home_assistant_todo_entity is not None:
+            entity_id = self.settings.home_assistant_todo_entity.strip()
+        if not entity_id:
+            entity_id = DEFAULT_HOME_ASSISTANT_TODO_ENTITY
+
+        if not base_url or not token:
+            raise HomeAssistantNotConfiguredError(HOME_ASSISTANT_NOT_CONFIGURED_ERROR)
+
+        return HomeAssistantTodoClient(
+            base_url=base_url,
+            token=token,
+            entity_id=entity_id,
+            transport=self.home_assistant_transport,
+        )
+
+    def export_store_trip_to_home_assistant(
+        self, start: date, end: date, *, reviewed: bool = False
+    ) -> HomeAssistantTodoExportResult:
+        """One-way export of unchecked remaining StoreTrip items to Home Assistant."""
+        if not reviewed:
+            raise ValueError(
+                "Explicit confirmation (reviewed=True) is required to export to Home Assistant"
+            )
+        if end < start:
+            raise ValueError("end date must be on or after start date")
+
+        client = self._resolve_home_assistant_client()
+        trip = self.store_trip.review(start, end)
+        items: list[str] = []
+        for line in trip.lines:
+            if line.checked or line.to_buy_quantity <= 0:
+                continue
+            remaining = line.to_buy_quantity - line.checked_quantity
+            if remaining <= 0:
+                continue
+            items.append(format_store_trip_export_item(line.name, remaining, line.unit))
+
+        result = client.export_remaining_items(items)
+        return HomeAssistantTodoExportResult.model_validate(result)

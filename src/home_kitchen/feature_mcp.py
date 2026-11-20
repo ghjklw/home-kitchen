@@ -28,6 +28,7 @@ from home_kitchen.catalogue.sku_models import RetailerProductOption, RetailerPro
 from home_kitchen.context import history_context
 from home_kitchen.features import KitchenFeatures
 from home_kitchen.history import HistoryEntry, HistoryEntryCreate, RetrievedEvidence
+from home_kitchen.home_assistant import HomeAssistantError, HomeAssistantTodoExportResult
 from home_kitchen.integrations import IntegrationInfo
 from home_kitchen.inventory import InventoryItem, InventoryItemCreate, PurchasePlan
 from home_kitchen.models import MealCreate, Recipe
@@ -334,6 +335,38 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
     def check_store_trip_item(start: date, end: date, need_id: UUID, checked: bool) -> StoreTrip:
         """Record picking progress. This never asserts payment or alters home stock."""
         return features.store_trip.check(start, end, need_id, checked)
+
+    @mcp.tool(
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        }
+    )
+    async def export_store_trip_to_home_assistant(
+        start: date, end: date, reviewed: bool = False
+    ) -> HomeAssistantTodoExportResult:
+        """One-way export of unchecked remaining store-trip items to Home Assistant To-Do.
+
+        Kitchen remains canonical; existing active Home Assistant items are skipped to
+        avoid duplicates. Requires explicit reviewed=True confirmation from the user.
+        """
+        if not reviewed:
+            raise ToolError(
+                "Explicit confirmation (reviewed=true) is required to export remaining store-trip items to Home Assistant."
+            )
+        if end < start:
+            raise ToolError("end date must be on or after start date")
+        try:
+            return await asyncio.to_thread(
+                features.export_store_trip_to_home_assistant,
+                start,
+                end,
+                reviewed=reviewed,
+            )
+        except (HomeAssistantError, ValueError) as exc:
+            raise ToolError(str(exc)) from None
 
     @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
     def find_foods(query: str, limit: int = 10) -> list[FoodCatalogueItem]:

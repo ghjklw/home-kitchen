@@ -469,3 +469,42 @@ class KassalIntegration(StoredConnectorIntegration):
                 }
             )
         return info
+
+
+class HomeAssistantIntegration(StoredConnectorIntegration):
+    def __init__(
+        self,
+        store: ConnectorStore | None = None,
+        household_id: UUID | None = None,
+        settings: Settings | None = None,
+    ):
+        super().__init__(
+            provider_id="home_assistant",
+            name="Home Assistant",
+            supported_auth_modes=["api_key"],
+            capabilities=["todo_export"],
+            detail="Valgfri enveiseksport av gjenværende handlelistepunkter til Home Assistant to-do. Kitchen forblir fasit.",
+            store=store,
+            household_id=household_id,
+            default_expiry_prompt="Tilgangstokenet for Home Assistant er ugyldig eller utløpt.",
+        )
+        self.settings = settings
+
+    def describe(self, actor_id: str | None) -> IntegrationInfo:
+        info = super().describe(actor_id)
+        if (
+            info.status == "not_configured"
+            and self.settings is not None
+            and self.settings.home_assistant_url is not None
+            and self.settings.home_assistant_token is not None
+            and bool(self.settings.home_assistant_token.get_secret_value().strip())
+        ):
+            return info.model_copy(
+                update={
+                    "status": "configured",
+                    "token_status": "configured",
+                    "auth_mode": "api_key",
+                    "auth_type": "api_key",
+                }
+            )
+        return info

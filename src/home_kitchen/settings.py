@@ -115,6 +115,9 @@ class Settings(BaseSettings):
     oda_encryption_key: SecretStr | None = None
     connector_encryption_key: SecretStr | None = None
     kassal_api_key: SecretStr | None = None
+    home_assistant_url: HttpUrl | None = None
+    home_assistant_token: SecretStr | None = None
+    home_assistant_todo_entity: str | None = None
 
     @property
     def ai_configured(self) -> bool:
@@ -231,6 +234,16 @@ class Settings(BaseSettings):
             raise ValueError("anthropic_api_key must not be blank")
         if self.kassal_api_key is not None and not self.kassal_api_key.get_secret_value().strip():
             raise ValueError("kassal_api_key must not be blank")
+        if (
+            self.home_assistant_token is not None
+            and not self.home_assistant_token.get_secret_value().strip()
+        ):
+            raise ValueError("home_assistant_token must not be blank")
+        if self.home_assistant_todo_entity is not None:
+            cleaned_entity = self.home_assistant_todo_entity.strip()
+            if not cleaned_entity:
+                raise ValueError("home_assistant_todo_entity must not be blank")
+            self.home_assistant_todo_entity = cleaned_entity
         if self.anthropic_workload_identity:
             if self.anthropic_api_key is not None:
                 raise ValueError(

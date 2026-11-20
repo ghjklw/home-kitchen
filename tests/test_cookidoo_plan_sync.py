@@ -13,6 +13,13 @@ from fastapi.testclient import TestClient
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 from sqlalchemy import insert, select
+from test_cookidoo_recipes import (
+    _offline_app,
+    _save_cookidoo_connection,
+    cipher,  # noqa: F401
+    connector_store,  # noqa: F401
+    sqlite_engine,  # noqa: F401
+)
 
 from home_kitchen.basket.repository import BasketService
 from home_kitchen.context import HistoryContext, history_context
@@ -23,13 +30,6 @@ from home_kitchen.models import RecipeSource
 from home_kitchen.recipes.collections import source_links
 from home_kitchen.settings import Household
 from home_kitchen.store import meals, recipes
-from test_cookidoo_recipes import (
-    _offline_app,
-    _save_cookidoo_connection,
-    cipher,  # noqa: F401
-    connector_store,  # noqa: F401
-    sqlite_engine,  # noqa: F401
-)
 
 
 @pytest.mark.asyncio

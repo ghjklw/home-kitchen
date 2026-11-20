@@ -172,6 +172,34 @@ test("formatFrequencySummary formats known and unknown purchase intervals withou
   });
   assert.equal(unknown.known, false);
   assert.match(unknown.label, /Ukjent frekvens/);
+  assert.equal(unknown.details, "ukjent");
+
+  const everyFive = overviewView.formatFrequencySummary({
+    status: "known",
+    frequency_display: "every 5 days",
+    average_interval_days: 5,
+    sample_size: 4,
+    date_range_days: 15,
+  });
+  assert.equal(everyFive.label, "hver 5 dager");
+
+  const everyOne = overviewView.formatFrequencySummary({
+    status: "known",
+    frequency_display: "every 1 day",
+    average_interval_days: 1,
+    sample_size: 3,
+    date_range_days: 2,
+  });
+  assert.equal(everyOne.label, "hver dag");
+
+  const everyDecimal = overviewView.formatFrequencySummary({
+    status: "known",
+    frequency_display: "every 3.5 days",
+    average_interval_days: 3.5,
+    sample_size: 3,
+    date_range_days: 7,
+  });
+  assert.equal(everyDecimal.label, "hver 3,5 dager");
 
   const known = overviewView.formatFrequencySummary({
     status: "known",
@@ -784,4 +812,42 @@ test("renderProductOverview renders merge controls and calls POST /catalogue/pro
   assert.deepEqual(mergeCall.body, { source_product_id: "prod-dup" });
   assert.match(notifications[0], /slått sammen inn i «gulrot»/);
   assert.equal(container.querySelectorAll(".product-overview-card").length, 1);
+});
+
+test("renderProductCard translates unknown and every X days badges to Bokmål", () => {
+  const unknownCard = overviewView.renderProductCard({
+    id: "prod-unknown-1",
+    canonical_name: "salt",
+    display_name: "salt",
+    aliases: [{ alias: "salt", locale: "unknown", reviewed: false }],
+    stock: {
+      in_stock: true,
+      total_quantity: "2",
+      unit: "unknown",
+      items: [{ name: "salt", quantity: "2", unit: "unknown" }],
+    },
+    purchase_frequency: { status: "unknown", frequency_display: "unknown", sample_size: 0 },
+    preferred_oda_skus: [],
+    excluded_oda_skus: [],
+  });
+  assert.equal(unknownCard.querySelector(".locale-badge").textContent, "UKJENT");
+  assert.equal(unknownCard.querySelector(".stock-badge").textContent, "På lager: 2 ukjent");
+  assert.equal(unknownCard.querySelector(".frequency-details").textContent, "ukjent");
+
+  const knownCard = overviewView.renderProductCard({
+    id: "prod-known-1",
+    canonical_name: "milk",
+    display_name: "melk",
+    aliases: [{ alias: "melk", locale: "nb", reviewed: true }],
+    stock: { in_stock: false, total_quantity: "0", unit: null, items: [] },
+    purchase_frequency: {
+      status: "known",
+      frequency_display: "every 2.5 days",
+      sample_size: 3,
+      date_range_days: 5,
+    },
+    preferred_oda_skus: [],
+    excluded_oda_skus: [],
+  });
+  assert.equal(knownCard.querySelector(".frequency-badge").textContent, "hver 2,5 dager");
 });

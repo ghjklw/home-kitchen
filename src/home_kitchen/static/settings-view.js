@@ -55,6 +55,56 @@
     };
   }
 
+  function integrationDisplayName(integration) {
+    const id = integration?.id;
+    const rawName = String(integration?.name || "").trim();
+    if (id === "anthropic" && (!rawName || rawName === "Recipe assistant")) {
+      return "Oppskriftsassistent";
+    }
+    return rawName || String(id || "");
+  }
+
+  function integrationDisplayDetail(integration, odaState = null) {
+    const id = integration?.id;
+    const rawDetail =
+      id === "oda" && odaState
+        ? String(odaState.detail || integration?.detail || "").trim()
+        : String(integration?.detail || "").trim();
+
+    if (id === "oda") {
+      if (rawDetail === "Connected") return "Tilkoblet";
+      if (rawDetail === "Not connected") return "Ikke tilkoblet";
+      if (
+        rawDetail ===
+        "Personal recipes and shopping require your Oda consent. Checkout and payment stay at Oda."
+      ) {
+        return "Personlige oppskrifter og handel krever samtykket ditt hos Oda. Kasse og betaling skjer hos Oda.";
+      }
+      if (rawDetail.startsWith("Configure the public URL (HTTP loopback")) {
+        return "Konfigurer offentlig URL (HTTP loopback er tillatt i lokal utvikling) og Oda-krypteringsnøkkel for å koble til";
+      }
+      if (rawDetail.startsWith("Configure the public HTTPS URL")) {
+        return "Konfigurer offentlig HTTPS-URL og Oda-krypteringsnøkkel for å koble til";
+      }
+      return rawDetail || "Ingen tilkoblingsdetaljer for Oda er tilgjengelige.";
+    }
+
+    if (id === "anthropic") {
+      if (
+        rawDetail ===
+        "Configured by the operator. Federation is preferred where supported; configuration does not prove a successful model call."
+      ) {
+        return "Konfigurert av operatør. Føderering foretrekkes der det støttes; konfigurasjon beviser ikke et vellykket modellkall.";
+      }
+    }
+
+    if (id === "home_assistant" && rawDetail.includes("Kitchen forblir fasit.")) {
+      return rawDetail.replace("Kitchen forblir fasit.", "Kjøkken forblir fasit.");
+    }
+
+    return rawDetail || "Ingen tilkoblingsdetaljer er tilgjengelige.";
+  }
+
   function integrationStatusLabel(status) {
     return (
       {
@@ -248,12 +298,27 @@
     };
   }
 
+  function buildHomeAssistantConnectPayload(baseUrl, apiKey, entityId = "todo.shopping_list") {
+    const trimmedUrl = String(baseUrl || "").trim().replace(/\/+$/, "");
+    const trimmedKey = String(apiKey || "").trim();
+    const trimmedEntity = String(entityId ?? "").trim();
+    if (!trimmedUrl || !trimmedKey) return null;
+    return {
+      auth_mode: "api_key",
+      base_url: trimmedUrl,
+      api_key: trimmedKey,
+      entity_id: trimmedEntity || "todo.shopping_list",
+    };
+  }
+
   root.KitchenSettingsView = {
     DEFAULT_SHOPPING_CATEGORY_ORDER,
     moveShoppingCategory,
     normalizeShoppingCategoryOrder,
     createShoppingCategoryRow,
     editShoppingCategoryRow,
+    integrationDisplayName,
+    integrationDisplayDetail,
     integrationStatusLabel,
     integrationAuthLabel,
     accountDisplayName,
@@ -268,6 +333,7 @@
     buildTrumfSessionCookie,
     buildTrumfConnectPayload,
     buildKassalConnectPayload,
+    buildHomeAssistantConnectPayload,
   };
   if (typeof module !== "undefined" && module.exports)
     module.exports = root.KitchenSettingsView;

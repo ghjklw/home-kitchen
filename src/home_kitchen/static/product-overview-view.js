@@ -1,6 +1,18 @@
 (function (root) {
   "use strict";
 
+  function formatUnitLabel(unit) {
+    const raw = String(unit || "").trim();
+    if (!raw) return "";
+    return raw.toLowerCase() === "unknown" ? "ukjent" : raw;
+  }
+
+  function formatLocaleBadge(locale) {
+    const raw = String(locale || "nb").trim();
+    if (!raw || raw.toLowerCase() === "unknown") return "UKJENT";
+    return raw.toUpperCase();
+  }
+
   function formatStockSummary(stock) {
     if (!stock || !stock.in_stock || Number(stock.total_quantity) <= 0) {
       return {
@@ -11,7 +23,8 @@
         unit: stock?.unit || "",
       };
     }
-    const unitStr = stock.unit ? " " + stock.unit : "";
+    const unitLabel = formatUnitLabel(stock.unit);
+    const unitStr = unitLabel ? " " + unitLabel : "";
     return {
       inStock: true,
       label: `På lager: ${stock.total_quantity}${unitStr}`,
@@ -21,12 +34,37 @@
     };
   }
 
+  function formatFrequencyDisplay(display, averageIntervalDays = null) {
+    const raw = String(display || "").trim();
+    if (raw) {
+      if (raw.toLowerCase() === "unknown") return "ukjent";
+      const match = /^every\s+(\d+(?:[.,]\d+)?)\s+days?$/i.exec(raw);
+      if (match) {
+        const numVal = Number(match[1].replace(",", "."));
+        const numText = match[1].replace(".", ",");
+        return numVal === 1 ? "hver dag" : `hver ${numText} dager`;
+      }
+      return raw;
+    }
+    if (averageIntervalDays != null && !Number.isNaN(Number(averageIntervalDays))) {
+      const numVal = Number(averageIntervalDays);
+      const numText = String(averageIntervalDays).replace(".", ",");
+      return numVal === 1 ? "ca. hver dag" : `ca. hver ${numText} dager`;
+    }
+    return "ukjent";
+  }
+
   function formatFrequencySummary(frequency) {
     if (!frequency || frequency.status !== "known") {
+      const rawDisplay = String(frequency?.frequency_display || "").trim();
+      const details =
+        !rawDisplay || rawDisplay.toLowerCase() === "unknown"
+          ? "ukjent"
+          : formatFrequencyDisplay(rawDisplay, frequency?.average_interval_days);
       return {
         known: false,
         label: "Ukjent frekvens (ikke nok kjøpshistorikk)",
-        details: frequency?.frequency_display || "ukjent",
+        details,
         sampleSize: frequency?.sample_size || 0,
       };
     }
@@ -35,7 +73,7 @@
     const detailParts = [sample, days].filter(Boolean).join(" ");
     return {
       known: true,
-      label: frequency.frequency_display || `ca. hver ${frequency.average_interval_days} dager`,
+      label: formatFrequencyDisplay(frequency.frequency_display, frequency.average_interval_days),
       details: detailParts,
       sampleSize: frequency.sample_size || 0,
     };
@@ -203,7 +241,7 @@
 
           const locBadge = document.createElement("span");
           locBadge.className = "badge locale-badge";
-          locBadge.textContent = (aliasObj.locale || "nb").toUpperCase();
+          locBadge.textContent = formatLocaleBadge(aliasObj.locale);
           row.append(locBadge);
 
           const namesSpan = document.createElement("span");
@@ -259,7 +297,7 @@
 
             const locBadge = document.createElement("span");
             locBadge.className = "badge locale-badge";
-            locBadge.textContent = loc.toUpperCase();
+            locBadge.textContent = formatLocaleBadge(loc);
             row.append(locBadge);
 
             const namesSpan = document.createElement("span");
@@ -359,7 +397,8 @@
         stockItemsList.className = "stock-items-list";
         currentProduct.stock.items.forEach((item) => {
           const li = document.createElement("li");
-          let txt = `${item.name}: ${item.quantity} ${item.unit}`;
+          const itemUnit = formatUnitLabel(item.unit);
+          let txt = `${item.name}: ${item.quantity}${itemUnit ? " " + itemUnit : ""}`;
           if (item.note) txt += ` (${item.note})`;
           li.textContent = txt;
           stockItemsList.append(li);
@@ -1311,7 +1350,10 @@
   }
 
   root.KitchenProductOverviewView = {
+    formatUnitLabel,
+    formatLocaleBadge,
     formatStockSummary,
+    formatFrequencyDisplay,
     formatFrequencySummary,
     formatProvenanceCounts,
     formatProviderLabel,

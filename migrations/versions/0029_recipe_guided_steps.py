@@ -1,15 +1,15 @@
 """Add guided_steps JSONB column to recipes for Thermomix TM6 step metadata.
 
-Revision ID: 0030_recipe_guided_steps
-Revises: 0029_plan_proposal_edits
+Revision ID: 0029_recipe_guided_steps
+Revises: 0028_identity_correction_audit
 """
 
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision = "0030_recipe_guided_steps"
-down_revision = "0029_plan_proposal_edits"
+revision = "0029_recipe_guided_steps"
+down_revision = "0028_identity_correction_audit"
 branch_labels = None
 depends_on = None
 

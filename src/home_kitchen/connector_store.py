@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, MultiFernet
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import (
     JSON,
@@ -31,6 +31,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 
+from home_kitchen.crypto import FernetCipher, build_multi_fernet
 from home_kitchen.settings import Settings
 
 DEFAULT_ACCOUNT_ID = "default"
@@ -82,16 +83,16 @@ def _normalize_account_label(account_label: str | None) -> str | None:
     return cleaned or None
 
 
-def resolve_connector_cipher(settings: Settings) -> Fernet | None:
+def resolve_connector_cipher(settings: Settings) -> FernetCipher | None:
     """Resolve encryption cipher from connector or Oda key, or deterministic local_dev key."""
     key = settings.connector_encryption_key or settings.oda_encryption_key
     if key is not None:
-        return Fernet(key.get_secret_value().encode("utf-8"))
+        return build_multi_fernet(key.get_secret_value())
     if settings.local_dev:
         deterministic_dev_key = base64.urlsafe_b64encode(
             hashlib.sha256(b"kitchen-local-dev-connector-key-seed").digest()
         )
-        return Fernet(deterministic_dev_key)
+        return MultiFernet([Fernet(deterministic_dev_key)])
     return None
 
 
@@ -179,11 +180,13 @@ class ConnectorStatus(BaseModel):
 
 
 class ConnectorStore:
-    def __init__(self, engine: Engine, cipher: Fernet | None):
+    def __init__(self, engine: Engine, cipher: FernetCipher | str | None):
         self.engine = engine
-        self.cipher = cipher
+        self.cipher: FernetCipher | None = (
+            build_multi_fernet(cipher) if isinstance(cipher, str) else cipher
+        )
 
-    def _require_cipher(self) -> Fernet:
+    def _require_cipher(self) -> FernetCipher:
         if self.cipher is None:
             raise RuntimeError(
                 "Krypteringsnøkkel for tilkoblinger er ikke konfigurert "
@@ -198,6 +201,33 @@ class ConnectorStore:
     def decrypt(self, encrypted_payload: str) -> dict[str, Any]:
         cipher = self._require_cipher()
         return json.loads(cipher.decrypt(encrypted_payload.encode("utf-8")).decode("utf-8"))
+
+    def rotate_encrypted_credentials(self, household_id: UUID | None = None) -> int:
+        """Re-encrypt stored connector credentials using the active primary key."""
+        cipher = self._require_cipher()
+        query = select(
+            connector_credentials.c.id,
+            connector_credentials.c.encrypted_credentials,
+        )
+        if household_id is not None:
+            query = query.where(connector_credentials.c.household_id == household_id)
+
+        rotated_count = 0
+        with self.engine.begin() as conn:
+            rows = conn.execute(query).all()
+            for row in rows:
+                token = str(row.encrypted_credentials).encode("utf-8")
+                if isinstance(cipher, MultiFernet):
+                    rotated_token = cipher.rotate(token).decode("utf-8")
+                else:
+                    rotated_token = cipher.encrypt(cipher.decrypt(token)).decode("utf-8")
+                conn.execute(
+                    update(connector_credentials)
+                    .where(connector_credentials.c.id == row.id)
+                    .values(encrypted_credentials=rotated_token)
+                )
+                rotated_count += 1
+        return rotated_count
 
     def resolve_account_id(
         self,

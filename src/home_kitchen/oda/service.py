@@ -10,11 +10,12 @@ from hashlib import sha256
 from urllib.parse import urlencode
 
 import httpx
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import InvalidToken
 from fastmcp import Client
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
 from sqlalchemy.engine import Engine
 
+from home_kitchen.crypto import build_multi_fernet
 from home_kitchen.settings import Settings
 
 from .models import OdaSearchResponse
@@ -92,7 +93,9 @@ class OdaService:
         self.http = http_client or httpx.Client(timeout=20, follow_redirects=False)
         self._owns_http = http_client is None
         self.repository = (
-            OdaRepository(engine, Fernet(settings.oda_encryption_key.get_secret_value().encode()))
+            OdaRepository(
+                engine, build_multi_fernet(settings.oda_encryption_key.get_secret_value())
+            )
             if settings.oda_encryption_key is not None
             else None
         )

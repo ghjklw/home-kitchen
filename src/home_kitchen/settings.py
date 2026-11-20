@@ -6,7 +6,6 @@ from typing import Annotated
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from cryptography.fernet import Fernet
 from pydantic import (
     AliasChoices,
     BaseModel,
@@ -21,6 +20,8 @@ from pydantic import (
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
+
+from home_kitchen.crypto import build_multi_fernet, split_fernet_keys
 
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 DEFAULT_SHOPPING_CATEGORY_ORDER = (
@@ -186,14 +187,20 @@ class Settings(BaseSettings):
         ):
             raise ValueError("mcp_signing_key must contain at least 32 bytes")
         try:
-            Fernet(secrets[2].encode())
+            build_multi_fernet(secrets[2])
         except (ValueError, TypeError):
             raise ValueError("mcp_encryption_key must be a valid Fernet key") from None
-        if self.oda_encryption_key and self.oda_encryption_key.get_secret_value() in secrets:
+        mcp_keys = set(split_fernet_keys(secrets[2]))
+        if self.oda_encryption_key and (
+            self.oda_encryption_key.get_secret_value() in secrets
+            or bool(mcp_keys & set(split_fernet_keys(self.oda_encryption_key.get_secret_value())))
+        ):
             raise ValueError("MCP OAuth keys must be independent from Oda encryption")
-        if (
-            self.connector_encryption_key
-            and self.connector_encryption_key.get_secret_value() in secrets
+        if self.connector_encryption_key and (
+            self.connector_encryption_key.get_secret_value() in secrets
+            or bool(
+                mcp_keys & set(split_fernet_keys(self.connector_encryption_key.get_secret_value()))
+            )
         ):
             raise ValueError("MCP OAuth keys must be independent from connector encryption")
         if not self.mcp_allowed_redirect_uris:
@@ -279,12 +286,12 @@ class Settings(BaseSettings):
             )
         if self.oda_encryption_key is not None:
             try:
-                Fernet(self.oda_encryption_key.get_secret_value().encode())
+                build_multi_fernet(self.oda_encryption_key.get_secret_value())
             except (ValueError, TypeError):
                 raise ValueError("oda_encryption_key must be a valid Fernet key") from None
         if self.connector_encryption_key is not None:
             try:
-                Fernet(self.connector_encryption_key.get_secret_value().encode())
+                build_multi_fernet(self.connector_encryption_key.get_secret_value())
             except (ValueError, TypeError):
                 raise ValueError("connector_encryption_key must be a valid Fernet key") from None
         try:

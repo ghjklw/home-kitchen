@@ -1,11 +1,13 @@
-from datetime import date, timedelta
+from datetime import date, time, timedelta
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
 from pydantic_ai.models.test import TestModel
 
 from home_kitchen.ai import draft_recipe, recipe_agent
-from home_kitchen.models import Recipe, RecipeCreate
+from home_kitchen.features import KitchenFeatures
+from home_kitchen.models import Meal, MealEntry, Recipe, RecipeCreate
 from home_kitchen.recipes.models import EditableRecipeDraft
 from home_kitchen.recommendations import PlanDraft, build_planner, recommend_plan
 from home_kitchen.service import KitchenService
@@ -125,3 +127,175 @@ async def test_recommendation_requires_catalog_and_valid_day_count():
         await recommend_plan(agent, Household(), [], date(2026, 3, 2))
     with pytest.raises(ValueError, match="between 1 and 14"):
         await recommend_plan(agent, Household(), [recipe()], date(2026, 3, 2), days=15)
+
+
+@pytest.mark.asyncio
+async def test_recommendation_supports_additions_and_explicit_meal_id_edits_separately():
+    soup = recipe()
+    pasta = Recipe(
+        id=uuid4(),
+        title="Tomato pasta",
+        servings=2,
+        ingredients=[{"name": "pasta", "quantity": 200, "unit": "g"}],
+        instructions=["Boil pasta"],
+    )
+    start = date(2026, 3, 2)
+    existing = Meal(
+        id=uuid4(),
+        date=start,
+        recipe_id=soup.id,
+        servings=2,
+        label="Middag",
+        scheduled_time=time(17, 30),
+    )
+    agent = build_planner(
+        Settings(local_dev=True),
+        TestModel(
+            custom_output_args={
+                "meal_entries": [
+                    # Edit existing meal on 2026-03-02
+                    {
+                        "meal_id": str(existing.id),
+                        "date": start.isoformat(),
+                        "recipe_id": str(pasta.id),
+                        "servings": 4,
+                        "label": "Middag",
+                    },
+                    # Addition sharing the exact same date and repeating pasta twice distinctly
+                    {
+                        "meal_id": None,
+                        "date": start.isoformat(),
+                        "recipe_id": str(pasta.id),
+                        "servings": 2,
+                        "label": "Lunsj",
+                    },
+                    {
+                        "meal_id": None,
+                        "date": (start + timedelta(days=1)).isoformat(),
+                        "recipe_id": str(pasta.id),
+                        "servings": 3,
+                    },
+                ],
+                "notes": ["Behold to pasta-dager etter ønske"],
+            }
+        ),
+    )
+    draft = await recommend_plan(
+        agent,
+        Household(),
+        [soup, pasta],
+        start,
+        days=7,
+        existing_meals=[existing],
+    )
+    assert len(draft.meal_entries) == 3
+    assert len(draft.additions) == 2
+    assert len(draft.edits) == 1
+    assert draft.edits[0].meal_id == existing.id
+    assert draft.edits[0].recipe_id == pasta.id
+    assert all(entry.meal_id is None for entry in draft.additions)
+    assert [entry.date for entry in draft.additions] == [start, start + timedelta(days=1)]
+    assert draft.existing_meals[str(existing.id)] == existing
+
+
+@pytest.mark.asyncio
+async def test_recommendation_rejects_unknown_or_duplicate_meal_id_edits():
+    item = recipe()
+    start = date(2026, 3, 2)
+    existing = Meal(id=uuid4(), date=start, recipe_id=item.id, servings=2)
+    unknown_agent = build_planner(
+        Settings(local_dev=True),
+        TestModel(
+            custom_output_args={
+                "meal_entries": [
+                    {
+                        "meal_id": str(uuid4()),
+                        "date": start.isoformat(),
+                        "recipe_id": str(item.id),
+                        "servings": 2,
+                    }
+                ]
+            }
+        ),
+    )
+    with pytest.raises(ValueError, match="unknown existing meal ID"):
+        await recommend_plan(
+            unknown_agent, Household(), [item], start, days=7, existing_meals=[existing]
+        )
+
+    duplicate_agent = build_planner(
+        Settings(local_dev=True),
+        TestModel(
+            custom_output_args={
+                "meal_entries": [
+                    {
+                        "meal_id": str(existing.id),
+                        "date": start.isoformat(),
+                        "recipe_id": str(item.id),
+                        "servings": 2,
+                    },
+                    {
+                        "meal_id": str(existing.id),
+                        "date": start.isoformat(),
+                        "recipe_id": str(item.id),
+                        "servings": 4,
+                    },
+                ]
+            }
+        ),
+    )
+    with pytest.raises(ValueError, match="duplicate edits"):
+        await recommend_plan(
+            duplicate_agent, Household(), [item], start, days=7, existing_meals=[existing]
+        )
+
+
+@pytest.mark.asyncio
+async def test_recommend_week_passes_existing_meals_without_mutating(monkeypatch):
+    item = recipe()
+    start = date(2026, 3, 2)
+    existing = Meal(id=uuid4(), date=start, recipe_id=item.id, servings=2, label="Middag")
+    fake_store = MagicMock()
+    fake_store.engine = None
+    fake_store.ensure_setting.return_value = str(uuid4())
+    fake_kitchen = MagicMock(spec=KitchenService)
+    fake_kitchen.store = fake_store
+    fake_kitchen.household_id = uuid4()
+    fake_kitchen.settings = Settings(local_dev=True)
+    fake_kitchen.identities = MagicMock()
+    fake_kitchen.list_recipes.return_value = [item]
+    fake_kitchen.list_meals.return_value = [existing]
+
+    features = KitchenFeatures(fake_kitchen, Settings(local_dev=True), Household)
+    features.evidence = MagicMock(return_value=[])  # type: ignore[method-assign]
+    test_agent = build_planner(
+        Settings(local_dev=True),
+        TestModel(
+            custom_output_args={
+                "meal_entries": [
+                    {
+                        "meal_id": str(existing.id),
+                        "date": start.isoformat(),
+                        "recipe_id": str(item.id),
+                        "servings": 5,
+                    },
+                    {
+                        "meal_id": None,
+                        "date": start.isoformat(),
+                        "recipe_id": str(item.id),
+                        "servings": 2,
+                    },
+                ]
+            }
+        ),
+    )
+    monkeypatch.setattr("home_kitchen.features.build_planner", lambda _settings: test_agent)
+
+    draft = await features.recommend_week(start, days=7)
+    fake_kitchen.list_meals.assert_called_once_with(start, start + timedelta(days=6))
+    assert len(draft.additions) == 1
+    assert len(draft.edits) == 1
+    assert isinstance(draft.edits[0], MealEntry)
+    assert draft.existing_meals[str(existing.id)] == existing
+    fake_kitchen.plan_meal.assert_not_called()
+    fake_kitchen.update_meal.assert_not_called()

@@ -554,6 +554,19 @@ class Meal(MealCreate):
     id: UUID
 
 
+class MealEntry(MealCreate):
+    """Flexible meal plan entry: addition when meal_id is None, edit when meal_id is set."""
+
+    meal_id: UUID | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_meal_create(cls, value: Any) -> Any:
+        if isinstance(value, MealCreate) and not isinstance(value, MealEntry):
+            return value.model_dump()
+        return value
+
+
 class PlannedMealRecipe(BaseModel):
     """Cooking quantities for one meal, alongside its unchanged source recipe."""
 

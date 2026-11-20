@@ -37,6 +37,85 @@ def test_plan_proposal_is_atomic_explicit_and_additive(test_database_url):
         assert len(client.get("/api/meals", params=period).json()) == 4
 
 
+def test_plan_proposal_api_supports_additions_and_explicit_edits_with_rollback(test_database_url):
+    with make_client(test_database_url) as client:
+        recipe = client.post("/api/recipes", json=recipe_payload()).json()
+        existing = client.post(
+            "/api/meals",
+            json={
+                "date": "2026-12-10",
+                "label": "Middag",
+                "recipe_id": recipe["id"],
+                "servings": 2,
+            },
+        ).json()
+        entries = [
+            {
+                "meal_id": existing["id"],
+                "date": "2026-12-10",
+                "label": "Middag",
+                "recipe_id": recipe["id"],
+                "servings": 6,
+            },
+            {
+                "meal_id": None,
+                "date": "2026-12-10",
+                "label": "Lunsj",
+                "recipe_id": recipe["id"],
+                "servings": 2,
+            },
+        ]
+        proposal = client.post("/api/meal-plan-proposals", json={"meal_entries": entries})
+        assert proposal.status_code == 201
+        body = proposal.json()
+        assert len(body["additions"]) == 1
+        assert len(body["edits"]) == 1
+        assert body["edits"][0]["meal_id"] == existing["id"]
+        assert body["existing_meals"][existing["id"]]["servings"] == 2
+
+        confirm = client.post(
+            f"/api/meal-plan-proposals/{body['id']}/confirm", json={"reviewed": True}
+        )
+        assert confirm.status_code == 200
+        meals = client.get("/api/meals", params={"start": "2026-12-10", "end": "2026-12-10"}).json()
+        assert len(meals) == 2
+        assert next(m for m in meals if m["id"] == existing["id"])["servings"] == 6
+
+        # If target meal is deleted before confirm, confirm fails with 409 and rolls back addition
+        stale_proposal = client.post(
+            "/api/meal-plan-proposals",
+            json={
+                "meal_entries": [
+                    {
+                        "meal_id": None,
+                        "date": "2026-12-11",
+                        "label": "Middag",
+                        "recipe_id": recipe["id"],
+                        "servings": 3,
+                    },
+                    {
+                        "meal_id": existing["id"],
+                        "date": "2026-12-10",
+                        "label": "Middag",
+                        "recipe_id": recipe["id"],
+                        "servings": 8,
+                    },
+                ]
+            },
+        )
+        assert stale_proposal.status_code == 201
+        assert client.delete(f"/api/meals/{existing['id']}").status_code == 200
+        failed_confirm = client.post(
+            f"/api/meal-plan-proposals/{stale_proposal.json()['id']}/confirm",
+            json={"reviewed": True},
+        )
+        assert failed_confirm.status_code == 409
+        assert (
+            client.get("/api/meals", params={"start": "2026-12-11", "end": "2026-12-11"}).json()
+            == []
+        )
+
+
 def test_background_job_rest_passes_actor_and_exact_retry_scope(test_database_url):
     app = create_app(Settings(local_dev=True, database_url=test_database_url))
     value = BasketMatchJob(job_id="job", start=date(2026, 12, 1), end=date(2026, 12, 7), needs=[])

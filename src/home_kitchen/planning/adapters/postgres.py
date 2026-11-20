@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from sqlalchemy import Column, DateTime, Integer, MetaData, Table, Text, Uuid, select
+from sqlalchemy import Column, DateTime, Integer, MetaData, Table, Text, Uuid, select, text
 from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.engine import Connection
 
@@ -35,6 +35,8 @@ _proposals = Table(
     Column("actor_id", Text, nullable=False),
     Column("meals", JSONB, nullable=False),
     Column("recipe_fingerprints", JSONB, nullable=False),
+    Column("meal_fingerprints", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("target_meals", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("expires_at", DateTime(timezone=True), nullable=False),
     Column("status", Text, nullable=False),
@@ -59,6 +61,8 @@ class PostgresProposalRepository(ProposalRepository):
                     actor_id=record.actor_id,
                     meals=record.meals,
                     recipe_fingerprints=record.recipe_fingerprints,
+                    meal_fingerprints=record.meal_fingerprints,
+                    target_meals=record.target_meals,
                     created_at=record.created_at,
                     expires_at=record.expires_at,
                     status=record.status,
@@ -136,6 +140,17 @@ class PostgresMealWriter(MealWriter):
     def __init__(self, connection: Connection):
         self.connection = connection
 
+    def get_meals(self, meal_ids: list[UUID], *, lock: bool = False) -> dict[UUID, Meal]:
+        result: dict[UUID, Meal] = {}
+        for meal_id in sorted(set(meal_ids), key=str):
+            statement = select(meals).where(meals.c.id == meal_id)
+            if lock:
+                statement = statement.with_for_update()
+            row = self.connection.execute(statement).mappings().first()
+            if row is not None:
+                result[meal_id] = Meal.model_validate(dict(row))
+        return result
+
     def insert_meal(self, meal: Meal) -> bool:
         inserted = self.connection.execute(
             insert(meals)
@@ -144,6 +159,14 @@ class PostgresMealWriter(MealWriter):
             .returning(meals.c.id)
         ).scalar_one_or_none()
         return inserted is not None
+
+    def update_meal(self, meal: Meal) -> bool:
+        values = entity_values(meal)
+        values.pop("id")
+        updated = self.connection.execute(
+            meals.update().where(meals.c.id == meal.id).values(**values).returning(meals.c.id)
+        ).scalar_one_or_none()
+        return updated is not None
 
 
 class PostgresHistoryRecorder(HistoryRecorder):

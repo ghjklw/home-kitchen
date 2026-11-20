@@ -161,7 +161,7 @@
       subtitle.className = "muted product-canonical-subtitle";
       let nameDesc = `Kanonisk: ${currentProduct.canonical_name}`;
       if (currentProduct.variant) {
-        nameDesc += ` · Varian: ${currentProduct.variant}`;
+        nameDesc += ` · Variant: ${currentProduct.variant}`;
       }
       subtitle.textContent = nameDesc;
       header.append(subtitle);

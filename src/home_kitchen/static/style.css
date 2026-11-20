@@ -2338,7 +2338,7 @@ button.link {
 }
 @media (max-width: 650px) {
   .sidebar nav {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
   .sidebar nav button {
     font-size: 11px;

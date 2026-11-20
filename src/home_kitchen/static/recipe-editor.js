@@ -247,8 +247,8 @@
     if (isAdaptedDraft)
       return { draft: { ...current, source: "ai" }, prompt };
     const completeIngredients = ingredients.map((item) => {
-      if (!item.quantity || !item.unit)
-        throw new Error("Fyll ut mengde og enhet for alle ingrediensene før du ber om en endring i en lagret oppskrift.");
+      if (item.quantity != null && !item.unit)
+        throw new Error("Oppgi enhet for alle ingredienser med mengde før du ber om en endring i en lagret oppskrift.");
       return item;
     });
     return {

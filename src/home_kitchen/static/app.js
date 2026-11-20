@@ -5250,7 +5250,7 @@ function basketProduct(product, packages, alternatives = false) {
   if (imageUrl) {
     const image = el("img", null, "product-image");
     image.src = imageUrl;
-    image.alt = product.name + " product photo";
+    image.alt = product.name + " produktbilde";
     image.loading = "lazy";
     image.decoding = "async";
     image.referrerPolicy = "no-referrer";
@@ -5471,7 +5471,7 @@ function odaSearchResultCard(product, need) {
   if (imageUrls.length) {
     imageUrls.forEach((imageUrl, index) => {
       const image = recipeImage(
-        { title: product.name || "Oda product", image_url: imageUrl },
+        { title: product.name || "Oda-produkt", image_url: imageUrl },
         "product-image",
       );
       if (image) {
@@ -5494,7 +5494,7 @@ function odaSearchResultCard(product, need) {
   }
   const details = add(
     el("div", null, "product-details"),
-    el("h3", product.name || "Oda product"),
+    el("h3", product.name || "Oda-produkt"),
   );
   if (product.brand) add(details, el("p", product.brand, "muted"));
   if (product.description) add(details, el("p", product.description));
@@ -5718,18 +5718,18 @@ function odaCartProposalRequest(basket) {
     invalidSelections,
     issue:
       additions.length > 10 || queries.size > 10
-        ? "Review at most 10 distinct product types at a time."
+        ? "Se over høyst 10 ulike produkttyper om gangen."
         : !queries.size
-          ? "Each selected Oda product needs a shopping-need name for a fresh provider check."
+          ? "Hvert valgt Oda-produkt trenger et varenavn for å kunne kontrolleres på nytt."
           : invalidSelections
-            ? "One or more saved product choices do not have a usable Oda product ID or package count. Review those choices first."
+            ? "Ett eller flere lagrede produktvalg mangler gyldig Oda-produkt-ID eller antall pakker. Se over disse valgene først."
             : "",
   };
 }
 function proposalProductDetails(product) {
   const details = add(
     el("div", null, "product-details proposal-product"),
-    el("h3", product.name || "Oda product"),
+    el("h3", product.name || "Oda-produkt"),
   );
   if (product.brand) add(details, el("p", product.brand, "muted"));
   if (product.description) add(details, el("p", product.description));
@@ -5738,7 +5738,7 @@ function proposalProductDetails(product) {
   const imageUrl = safeImageUrl(product.image_url || savedMedia.image_url);
   if (imageUrl) {
     const image = recipeImage(
-      { title: product.name || "Oda product", image_url: imageUrl },
+      { title: product.name || "Oda-produkt", image_url: imageUrl },
       "product-image",
     );
     if (image) {
@@ -5797,7 +5797,7 @@ function selectedMappingDetails(productId) {
         details.push(
           "Du oppga " +
             selection.packages +
-            " packages for " +
+            (Number(selection.packages) === 1 ? " pakke for " : " pakker for ") +
             (need.name || "dette behovet") +
             " · " +
             selection.product.pack_quantity +
@@ -5886,9 +5886,9 @@ function renderOdaProposal(proposal, request) {
         "Pakker lagt til: " +
           addition.quantity +
           " · Antall i Oda-handlekurven: " +
-          (addition.current_quantity ?? "unknown") +
+          (addition.current_quantity ?? "ukjent") +
           " → " +
-          (addition.after_quantity ?? "unknown"),
+          (addition.after_quantity ?? "ukjent"),
         "proposal-quantity",
       ),
     );
@@ -6022,7 +6022,7 @@ async function confirmOdaCartProposal(proposal, request) {
     el("h2", "Bekrefter varer i Oda-handlekurven"),
     el(
       "p",
-      "Waiting for Oda. Do not close this dialog or retry the confirmation.",
+      "Venter på Oda … Ikke lukk denne dialogen eller prøv å bekrefte på nytt.",
       "callout",
     ),
   );
@@ -6044,7 +6044,7 @@ async function confirmOdaCartProposal(proposal, request) {
       if (failures.length) {
         cleanupFailed = true;
         detail =
-          "Oda accepted the additions, but Kitchen could not clear every saved product choice. Remove any remaining choices from review before another Oda cart update.";
+          "Oda godtok tilleggene, men Kjøkken klarte ikke å fjerne alle lagrede produktvalg. Fjern gjenværende valg fra gjennomgangen før en ny oppdatering av Oda-handlekurven.";
       }
     }
   } catch (error) {
@@ -6072,11 +6072,11 @@ async function createOdaCartProposal(request, trigger) {
     });
     if (!proposal || typeof proposal !== "object")
       throw new Error(
-        "Oda returned an unreadable cart proposal. No additions were confirmed.",
+        "Oda returnerte et uleselig forslag til handlekurven. Ingen varer ble bekreftet.",
       );
     renderOdaProposal(proposal, request);
   } catch (error) {
-    notify(error.message + " No cart additions were confirmed.", true);
+    notify(error.message + " Ingen varer ble bekreftet lagt i handlekurven.", true);
   } finally {
     state.cartProposalLoading = false;
     if (trigger?.isConnected) {
@@ -6242,9 +6242,9 @@ function renderBasketMatchCandidate(candidate, need) {
   add(more, el("summary", "Detaljer"));
   if (candidate.description) add(more, el("p", candidate.description, "muted"));
   if (candidate.pack_description)
-    add(more, el("p", "Pack details from Oda: " + candidate.pack_description + " · unverified", "muted"));
+    add(more, el("p", "Pakkedetaljer fra Oda: " + candidate.pack_description + " · ubekreftet", "muted"));
   else if (media.pack_description)
-    add(more, el("p", "Pack details from Oda: " + media.pack_description + " · unverified", "muted"));
+    add(more, el("p", "Pakkedetaljer fra Oda: " + media.pack_description + " · ubekreftet", "muted"));
   if (candidate.available === true) add(more, el("p", "Oda oppgir at varen er tilgjengelig.", "muted"));
   else if (candidate.available === false) add(more, el("p", "Oda oppgir at varen ikke er tilgjengelig.", "muted"));
   else add(more, el("p", "Tilgjengeligheten er ikke bekreftet i dette søket.", "muted"));
@@ -6277,9 +6277,9 @@ function chooseMatchedCandidate(candidate, need) {
     el("p", "Dette lagrer produktvalget bare for handlekurvgjennomgangen. Det legger ingenting i Oda-handlekurven. Pakningsdetaljene fra Oda er ikke verifisert; kontroller dem før du lagrer.", "callout"),
     el("h3", candidate.name),
     candidate.brand ? el("p", candidate.brand, "muted") : null,
-    candidate.pack_description ? el("p", "Oda pack description: " + candidate.pack_description, "muted") : null,
+    candidate.pack_description ? el("p", "Pakkebeskrivelse fra Oda: " + candidate.pack_description, "muted") : null,
     hasRecommendation
-      ? el("p", "Suggested count: " + recommendedPackages + " packs for " + recommendedFulfillment + " " + need.unit + ". Review or change the values below.", "muted")
+      ? el("p", "Foreslått antall: " + recommendedPackages + (Number(recommendedPackages) === 1 ? " pakke for " : " pakker for ") + recommendedFulfillment + " " + need.unit + ". Se over eller endre verdiene nedenfor.", "muted")
       : el("p", "Det finnes ikke et pålitelig antall per pakke. Oppgi mengden per pakke i " + need.unit + " og velg antall pakker.", "muted"),
   );
   const form = el("form");

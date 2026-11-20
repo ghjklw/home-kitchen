@@ -342,7 +342,7 @@ test("AI revision preserves the private cookbook photo and selected image credit
   assert.deepEqual(payload.draft.image_attribution, imageAttribution);
 });
 
-test("AI revision sends complete saved recipes and requires explicit quantities and units", () => {
+test("AI revision sends complete saved recipes including unquantified ingredients, and requires unit when quantity is set", () => {
   const values = {
     title: "Bread", servings: 2,
     ingredients: [{ name: "flour", quantity: "1,25", unit: "kg", source_indices: [1] }],
@@ -359,9 +359,26 @@ test("AI revision sends complete saved recipes and requires explicit quantities 
     },
     prompt: "halve it",
   });
+  const unquantifiedPayload = buildRevisionRequest(
+    {
+      ...values,
+      ingredients: [
+        { name: "flour", quantity: "1,25", unit: "kg", source_indices: [1] },
+        { name: "salt", quantity: "", unit: "", source_unit_expression: "klype" },
+        { name: "persille", quantity: null, unit: "håndfull", source_unit_expression: "håndfull" },
+      ],
+    },
+    { isEditing: true, source: "manual" },
+    "juster krydder",
+  );
+  assert.deepEqual(unquantifiedPayload.recipe.ingredients, [
+    { name: "flour", quantity: "1.25", unit: "kg", category: "Other", source_indices: [1] },
+    { name: "salt", quantity: null, unit: null, category: "Other", source_indices: [], source_unit_expression: "klype" },
+    { name: "persille", quantity: null, unit: "håndfull", category: "Other", source_indices: [], source_unit_expression: "håndfull" },
+  ]);
   assert.throws(
-    () => buildRevisionRequest({ ...values, ingredients: [{ name: "flour", quantity: "", unit: "kg" }] }, { isEditing: true, source: "manual" }, "revise"),
-    /Fyll ut mengde og enhet/,
+    () => buildRevisionRequest({ ...values, ingredients: [{ name: "flour", quantity: "1", unit: "" }] }, { isEditing: true, source: "manual" }, "revise"),
+    /Oppgi enhet for alle ingredienser med mengde/,
   );
 });
 

@@ -465,3 +465,59 @@ test("renderProductOverview queries /catalogue/overview with search filter and r
   assert.ok(searchInput);
   assert.equal(searchInput.getAttribute("aria-label"), "Søk etter råvare");
 });
+
+test("renderCuratedFoodsSection browses Matvaretabellen and loads linked products without faking activity", async () => {
+  const container = new MockNode("div");
+  const calls = [];
+
+  const mockApi = async (path, method = "GET") => {
+    calls.push(`${method} ${path}`);
+    if (path.startsWith("/catalogue/foods?")) {
+      return [
+        {
+          id: "11111111-1111-1111-1111-111111111111",
+          source_item_id: "01.001",
+          source_name: "Melk, hel, 3,5 % fett",
+          display_name: "Helmelk",
+          category: "Dairy",
+          default_unit: "l",
+        },
+      ];
+    }
+    if (path === "/catalogue/foods/11111111-1111-1111-1111-111111111111/products") {
+      return [
+        {
+          id: "22222222-2222-2222-2222-222222222222",
+          provider: "oda",
+          product_id: "oda-1",
+          preferred: false,
+          snapshot: { name: "Tine Helmelk 1L" },
+        },
+      ];
+    }
+    if (path === "/catalogue/products/22222222-2222-2222-2222-222222222222/preferred") {
+      return {};
+    }
+    throw new Error(`Unexpected API call: ${method} ${path}`);
+  };
+
+  const section = overviewView.renderCuratedFoodsSection(container, {
+    api: mockApi,
+    notify: () => {},
+  });
+  await section.loadFoods("melk");
+
+  assert.ok(calls.includes("GET /catalogue/foods?q=melk&limit=37"));
+  assert.match(container.textContent, /Helmelk/);
+  assert.match(container.textContent, /Kilde: Melk, hel, 3,5 % fett/);
+  assert.match(container.textContent, /01\.001/);
+
+  const optsBtn = container.querySelector(".curated-food-card").querySelector("button");
+  assert.ok(optsBtn);
+  await optsBtn.click();
+  await new Promise((r) => setTimeout(r, 10));
+  assert.ok(
+    calls.includes("GET /catalogue/foods/11111111-1111-1111-1111-111111111111/products"),
+  );
+  assert.match(container.textContent, /Tine Helmelk 1L/);
+});

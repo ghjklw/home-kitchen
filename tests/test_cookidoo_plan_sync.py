@@ -23,7 +23,7 @@ from home_kitchen.models import RecipeSource
 from home_kitchen.recipes.collections import source_links
 from home_kitchen.settings import Household
 from home_kitchen.store import meals, recipes
-from tests.test_cookidoo_recipes import (
+from test_cookidoo_recipes import (
     _offline_app,
     _save_cookidoo_connection,
     cipher,  # noqa: F401

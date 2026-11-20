@@ -3,7 +3,7 @@
 import base64
 import binascii
 import json
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 from uuid import UUID
@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from starlette.concurrency import run_in_threadpool
 
 from home_kitchen.basket import BasketReview, ProductSnapshot, SelectedProduct
-from home_kitchen.basket.jobs import BasketMatchJob
+from home_kitchen.basket.jobs import BackgroundMatchingHealth, BasketMatchJob
 from home_kitchen.basket.matching import BasketMatchResult
 from home_kitchen.basket.repository import BasketService
 from home_kitchen.catalogue.identity import (
@@ -258,6 +258,70 @@ def _extract_credentials(
     return auth_mode, credentials
 
 
+class IntegrationHealthSummary(BaseModel):
+    overall_status: Literal["healthy", "degraded", "attention_needed"]
+    checked_at: datetime
+    integrations: list[IntegrationInfo] = Field(default_factory=list)
+    background_matching: BackgroundMatchingHealth
+    purchase_sync: PurchaseHistoryStatusResponse | None = None
+    actionable_issues: list[str] = Field(default_factory=list)
+
+
+def build_integration_health_summary(
+    features: KitchenFeatures, actor_id: str
+) -> IntegrationHealthSummary:
+    """Aggregate secret-free connection, token, purchase sync, and matching freshness health."""
+    integrations = features.integrations.describe(actor_id)
+    issues: list[str] = []
+    for item in integrations:
+        if item.status == "expired" or item.token_status == "expired":
+            issues.append(
+                item.expiry_prompt
+                or f"{item.name}: Tilkoblingen har utløpt. Forny eller koble til på nytt i Innstillinger."
+            )
+        elif item.last_error:
+            issues.append(f"{item.name}: {item.last_error}")
+
+    jobs = getattr(features, "basket_jobs", None)
+    matching_health = (
+        jobs.health_snapshot(actor_id)
+        if jobs is not None and callable(getattr(jobs, "health_snapshot", None))
+        else BackgroundMatchingHealth()
+    )
+    if matching_health.status in {"failed", "stale"} and matching_health.freshness_note:
+        issues.append(matching_health.freshness_note)
+
+    purchase_sync_svc = getattr(features, "purchase_sync", None)
+    purchase_sync = (
+        purchase_sync_svc.get_status(account_id=actor_id)
+        if purchase_sync_svc is not None
+        and callable(getattr(purchase_sync_svc, "get_status", None))
+        else None
+    )
+    if purchase_sync is not None:
+        for prov, status_info in purchase_sync.providers.items():
+            if status_info.last_sync_error:
+                issues.append(f"Kvitteringssynk ({prov}): {status_info.last_sync_error}")
+
+    overall: Literal["healthy", "degraded", "attention_needed"] = "healthy"
+    if (
+        any(item.status == "expired" or item.token_status == "expired" for item in integrations)
+        or matching_health.status == "failed"
+    ):
+        overall = "attention_needed"
+    elif issues:
+        overall = "degraded"
+
+    return IntegrationHealthSummary(
+        overall_status=overall,
+        checked_at=datetime.now(UTC),
+        integrations=integrations,
+        background_matching=matching_health,
+        purchase_sync=purchase_sync,
+        actionable_issues=issues,
+    )
+
+
 def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRouter:
     router = APIRouter(prefix="/api")
 
@@ -438,6 +502,11 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
     def integrations(request: Request, response: Response) -> list[IntegrationInfo]:
         response.headers["Cache-Control"] = "no-store"
         return features.integrations.describe(authenticated_actor(request))
+
+    @router.get("/integrations/health")
+    def integrations_health(request: Request, response: Response) -> IntegrationHealthSummary:
+        response.headers["Cache-Control"] = "no-store"
+        return build_integration_health_summary(features, authenticated_actor(request))
 
     @router.post("/integrations/{provider_id}/connect")
     @router.put("/integrations/{provider_id}")

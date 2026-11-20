@@ -2,6 +2,8 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const {
+  availabilityStatusLabel,
+  buildAvailableCartProposalRequest,
   formatBasketIssue,
   formatDuration,
   formatNeedQuantity,
@@ -86,4 +88,44 @@ test("KitchenBasketMatchView delegates basket issue formatting", () => {
     formatBasketIssue("Eggs: 1 item still needed"),
     "Eggs: 1 stk. gjenstår",
   );
+});
+
+test("mergeNeedPages discards older server revisions within the same match job", () => {
+  const newer = mergeNeedPages({}, [
+    { need_id: "a", page: 1, match_job_id: "job-1", revision: 2, status: "matched", candidates: [{ id: "new" }] },
+  ], { a: 2 }, { a: 2 });
+  const stale = mergeNeedPages(newer, [
+    { need_id: "a", page: 1, match_job_id: "job-1", revision: 1, status: "matched", candidates: [{ id: "old" }] },
+  ], { a: 2 }, { a: 2 });
+  assert.deepEqual(stale.a[1].candidates, [{ id: "new" }]);
+  assert.equal(stale.a[1].revision, 2);
+});
+
+test("buildAvailableCartProposalRequest keeps valid available items and skips unavailable ones", () => {
+  const basket = {
+    needs: [
+      {
+        need: { id: "n1", name: "Milk" },
+        selections: [{ product: { provider: "oda", product_id: "101", name: "Tine Helmelk" }, packages: 2 }],
+      },
+      {
+        need: { id: "n2", name: "Egg" },
+        selections: [{ product: { provider: "oda", product_id: "202", name: "Prior Egg" }, packages: 1 }],
+      },
+    ],
+  };
+  const report = {
+    items: [
+      { need_id: "n1", product_id: "101", availability_status: "available", search_query: "Tine Helmelk" },
+      { need_id: "n2", product_id: "202", availability_status: "unavailable", search_query: "Prior Egg" },
+    ],
+  };
+  const filtered = buildAvailableCartProposalRequest(basket, report);
+  assert.deepEqual(filtered.additions, [{ product_id: 101, quantity: 2 }]);
+  assert.deepEqual(filtered.queries, ["Tine Helmelk"]);
+  assert.equal(filtered.skippedCount, 1);
+  assert.equal(filtered.availableCount, 1);
+  assert.equal(filtered.issue, "");
+  assert.equal(availabilityStatusLabel("unavailable"), "Ikke tilgjengelig hos Oda");
+  assert.equal(availabilityStatusLabel("available"), "Tilgjengelig hos Oda");
 });

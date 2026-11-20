@@ -552,3 +552,279 @@ test("batch review allows removing a saved product selection", async () => {
   assert.equal(value.requests[0][0], "/basket/selections/need-safe/old-1?start=2026-11-16&end=2026-11-22");
   assert.equal(value.requests[0][1], "DELETE");
 });
+
+test("batch review and need card expose Bokmål query refine controls and retry ignores stale responses", async () => {
+  const matchView = require("../src/home_kitchen/static/basket-match-view.js");
+  const resolvers = [];
+  const requests = [];
+  const safeNeed = { id: "need-safe", name: "Yoghurt", quantity: "2", unit: "beger" };
+  const state = {
+    oda: { connected: true },
+    view: "shopping",
+    shoppingPanel: "oda",
+    basket: { needs: [{ need: safeNeed, selections: [] }] },
+    basketMatchPlanKey: matchView.planKey("2026-11-16", "2026-11-22", [safeNeed]),
+    basketMatchPlanEpoch: 1,
+    basketMatchNeedVersions: { [safeNeed.id]: 0 },
+    basketMatchPages: {
+      [safeNeed.id]: { 1: { match_job_id: "job-1", status: "matched", search_query: "Yoghurt", candidates: [] } },
+    },
+    basketMatchCurrentPage: { [safeNeed.id]: 1 },
+    basketMatchBusy: {},
+    basketMatchErrors: {},
+    basketMatchObservedAt: {},
+    basketMatchQueries: {},
+    basketMatchJobs: {},
+    basketMatchLatestJobId: "job-1",
+    basketBatchReviewJobId: "job-1",
+    basketBatchChoices: {},
+    basketBatchSaving: false,
+    basketBatchSaveError: "",
+    basketBatchNeedsRefresh: false,
+    basketBatchNeedsCorrection: false,
+    basketMatchStartSequence: 0,
+  };
+  const modal = { open: false, dataset: {}, close() { this.open = false; } };
+  const document = { activeElement: null };
+  const context = {
+    state,
+    navigator: { onLine: true },
+    window: {
+      KitchenBasketMatchView: matchView,
+      KitchenShoppingView: {
+        formatQuantityForDisplay: String,
+        formatQuantityForAccessibility: String,
+        displayUnit: (...args) => shoppingView.displayUnit(...args),
+      },
+    },
+    formatUiNeedQuantity: (need) => `${need.quantity} ${need.unit}`,
+    currentBasketMatchNeeds: () => [safeNeed],
+    currentBasketMatchDates: () => ({ start: "2026-11-16", end: "2026-11-22" }),
+    openDialog: () => {
+      modal.open = true;
+      modal.dataset = {};
+      modal.root = new Node("dialog-content");
+      modal.root.ownerDocument = document;
+      return modal.root;
+    },
+    $(selector) {
+      if (selector === "#modal") return modal;
+      if (selector === "#modal-content") return modal.root;
+      throw new Error(`Unexpected selector ${selector}`);
+    },
+    document,
+    el: (tag, text = "", className = "") => {
+      const node = new Node(tag, text, className);
+      node.ownerDocument = document;
+      return node;
+    },
+    add: (parent, ...children) => { children.filter(Boolean).forEach((child) => parent.append(child)); return parent; },
+    button: (text, action, className = "") => {
+      const node = new Node("button", text, className);
+      node.action = action;
+      node.ownerDocument = document;
+      return node;
+    },
+    basketProduct: (product, packages) => new Node("article", `${product.name} ${packages || ""}`),
+    safeImageUrl: () => null,
+    recipeImage: (recipe, className) => new Node("img", recipe.title, className),
+    officialOdaProductUrl: () => null,
+    formatUiQuantity: String,
+    formatUiCount: String,
+    dateLabel: () => "Nov 16, 2026",
+    notify: () => {},
+    render: () => {},
+    api: (path, method, body) => new Promise((resolve) => {
+      requests.push({ path, method, body });
+      resolvers.push(resolve);
+    }),
+  };
+  vm.runInNewContext([
+    "isCurrentBasketMatchRecord",
+    "basketBatchRecommendation",
+    "basketBatchIdentityStatus",
+    "basketBatchSelectableCandidate",
+    "clearStaleBasketBatchIdentityConfirmations",
+    "basketBatchSkipReason",
+    "toggleBasketBatchChoice",
+    "renderBasketMatchCandidate",
+    "applyBasketMatchSnapshot",
+    "scheduleBasketMatchPoll",
+    "retryBasketMatchNeed",
+    "openBasketBatchReview",
+    "renderBasketMatchNeed",
+  ].map(functionSource).join("\n"), context);
+
+  context.openBasketBatchReview();
+  const refineInput = modal.root.find((node) => node.tagName === "input");
+  const refineButton = modal.root.find((node) => node.tagName === "button" && node.textContent === "Søk på nytt");
+  assert.ok(refineInput);
+  assert.ok(refineButton);
+  assert.equal(refineInput.attributes["aria-label"], "Tilpass søkeord for Yoghurt");
+
+  const firstCall = context.retryBasketMatchNeed(safeNeed.id, "Første søk", { inModal: true });
+  const secondCall = context.retryBasketMatchNeed(safeNeed.id, "Andre søk", { inModal: true });
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].path, "/basket/match-jobs/job-1/needs/need-safe/retry");
+  assert.equal(requests[1].body.query, "Andre søk");
+
+  // Resolve newer request first
+  resolvers[1]({
+    job_id: "job-1",
+    status: "complete",
+    observed_at: "2026-11-20T12:00:00Z",
+    needs: [{
+      need_id: safeNeed.id,
+      page: 1,
+      status: "matched",
+      search_query: "Andre søk",
+      revision: 2,
+      candidates: [{ id: "oda:new", name: "Nytt treff", available: true }],
+    }],
+  });
+  await secondCall;
+  assert.equal(state.basketMatchPages[safeNeed.id][1].candidates[0].id, "oda:new");
+
+  // Late response from firstCall must be ignored
+  resolvers[0]({
+    job_id: "job-1",
+    status: "complete",
+    observed_at: "2026-11-20T11:59:00Z",
+    needs: [{
+      need_id: safeNeed.id,
+      page: 1,
+      status: "matched",
+      search_query: "Første søk",
+      revision: 1,
+      candidates: [{ id: "oda:old", name: "Gammelt treff", available: true }],
+    }],
+  });
+  await firstCall;
+  assert.equal(state.basketMatchPages[safeNeed.id][1].candidates[0].id, "oda:new");
+  assert.equal(state.basketMatchQueries[safeNeed.id], "Andre søk");
+});
+
+test("createOdaCartProposal refreshes availability first, surfaces unavailable items, and keeps valid ones", async () => {
+  const matchView = require("../src/home_kitchen/static/basket-match-view.js");
+  const requests = [];
+  const needA = { id: "need-a", name: "Melk", quantity: "1", unit: "l" };
+  const needB = { id: "need-b", name: "Egg", quantity: "6", unit: "stk" };
+  const state = {
+    oda: { connected: true },
+    cartProposalLoading: false,
+    basketAvailabilityReport: null,
+    basketMatchQueries: {},
+    basket: {
+      needs: [
+        {
+          need: needA,
+          selections: [{ product: { provider: "oda", product_id: "101", name: "Tine Helmelk", price: "29.90" }, packages: 1 }],
+        },
+        {
+          need: needB,
+          selections: [{ product: { provider: "oda", product_id: "202", name: "Prior Egg", price: "49.90" }, packages: 1 }],
+        },
+      ],
+    },
+  };
+  const modal = { open: false, dataset: {}, close() { this.open = false; } };
+  const document = { activeElement: null };
+  let proposalRendered = null;
+  const context = {
+    state,
+    window: { KitchenBasketMatchView: matchView },
+    currentBasketMatchDates: () => ({ start: "2026-11-16", end: "2026-11-22" }),
+    range: () => "?start=2026-11-16&end=2026-11-22",
+    formatUiCount: String,
+    el: (tag, text = "", className = "") => new Node(tag, text, className),
+    add: (parent, ...children) => { children.filter(Boolean).forEach((child) => parent.append(child)); return parent; },
+    button: (text, action, className = "") => { const node = new Node("button", text, className); node.action = action; return node; },
+    openDialog: () => {
+      modal.open = true;
+      modal.dataset = {};
+      modal.root = new Node("dialog-content");
+      modal.root.ownerDocument = document;
+      return modal.root;
+    },
+    $(selector) {
+      if (selector === "#modal") return modal;
+      if (selector === "#modal-content") return modal.root;
+      throw new Error(`Unexpected selector ${selector}`);
+    },
+    render: () => {},
+    notify: () => {},
+    renderOdaProposal: (proposal, req) => { proposalRendered = { proposal, req }; },
+    api: async (path, method, body) => {
+      requests.push({ path, method, body });
+      if (path === "/basket/availability-refresh") {
+        return {
+          checked_at: "2026-11-20T12:00:00Z",
+          all_available: false,
+          items: [
+            {
+              need_id: "need-a",
+              need_name: "Melk",
+              product_id: "101",
+              product_name: "Tine Helmelk",
+              packages: 1,
+              available: true,
+              availability_status: "available",
+              availability_description: "Oda oppgir at varen er tilgjengelig.",
+              previous_price: "29.90",
+              current_price: "29.90",
+              price_changed: false,
+              search_query: "Tine Helmelk",
+            },
+            {
+              need_id: "need-b",
+              need_name: "Egg",
+              product_id: "202",
+              product_name: "Prior Egg",
+              packages: 1,
+              available: false,
+              availability_status: "unavailable",
+              availability_description: "Oda oppgir at varen ikke er tilgjengelig.",
+              previous_price: "49.90",
+              current_price: "49.90",
+              price_changed: false,
+              search_query: "Prior Egg",
+            },
+          ],
+          unavailable_items: [{ need_id: "need-b", product_id: "202", product_name: "Prior Egg", availability_status: "unavailable" }],
+          changed_items: [{ need_id: "need-b", product_id: "202" }],
+        };
+      }
+      if (path === "/oda/cart/proposals") {
+        return { proposal_id: "prop-1", status: "pending", additions: [] };
+      }
+      return {};
+    },
+  };
+  vm.runInNewContext([
+    "collectSelectedAvailabilityItems",
+    "submitOdaCartProposal",
+    "renderBasketAvailabilityReview",
+    "createOdaCartProposal",
+  ].map(functionSource).join("\n"), context);
+
+  await context.createOdaCartProposal({
+    queries: ["Tine Helmelk", "Prior Egg"],
+    additions: [{ product_id: 101, quantity: 1 }, { product_id: 202, quantity: 1 }],
+  });
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].path, "/basket/availability-refresh");
+  assert.equal(modal.open, true);
+  assert.match(modal.root.text, /Prior Egg/u);
+  assert.match(modal.root.text, /Ikke tilgjengelig hos Oda/u);
+  assert.match(modal.root.text, /1 valgte varer er bekreftet tilgjengelige hos Oda og beholdes/u);
+
+  const proceed = modal.root.find((node) =>
+    node.tagName === "button" && node.textContent.includes("Fortsett til Oda-handlekurven med 1 tilgjengelige varer"),
+  );
+  assert.ok(proceed);
+  await proceed.action();
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].path, "/oda/cart/proposals");
+  assert.deepEqual(JSON.parse(JSON.stringify(requests[1].body.additions)), [{ product_id: 101, quantity: 1 }]);
+  assert.ok(proposalRendered);
+});

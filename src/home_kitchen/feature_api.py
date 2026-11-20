@@ -9,7 +9,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, field_validator
 from starlette.concurrency import run_in_threadpool
 
 from home_kitchen.basket import BasketReview, SelectedProduct
@@ -18,8 +18,12 @@ from home_kitchen.basket.application import (
     BatchSelectionValidationError,
     select_basket_products_batch,
 )
-from home_kitchen.basket.jobs import BackgroundMatchingHealth, BasketMatchJob
-from home_kitchen.basket.matching import BasketMatchResult
+from home_kitchen.basket.jobs import (
+    BackgroundMatchingHealth,
+    BasketAvailabilityRefreshResult,
+    BasketMatchJob,
+)
+from home_kitchen.basket.matching import AvailabilityTarget, BasketMatchResult
 from home_kitchen.basket.repository import BasketService
 from home_kitchen.catalogue.identity import (
     AliasInput,
@@ -59,6 +63,7 @@ from home_kitchen.home_assistant import (
 from home_kitchen.integrations import IntegrationInfo
 from home_kitchen.inventory import InventoryItem, InventoryItemCreate, PurchasePlan
 from home_kitchen.models import MealCreate, Recipe
+from home_kitchen.oda import OdaError
 from home_kitchen.planning_proposals import ProposalConflict, ProposalRead
 from home_kitchen.purchase_sync import (
     PurchaseHistoryStatusResponse,
@@ -142,6 +147,59 @@ class MatchJobRequest(BaseModel):
     size: int = Field(default=5, ge=1, le=5)
     force_refresh: bool = False
     need_ids: list[UUID] | None = Field(default=None, min_length=1, max_length=100)
+    query_overrides: dict[UUID, str] | None = None
+
+    @field_validator("query_overrides")
+    @classmethod
+    def validate_query_overrides(cls, value: dict[UUID, str] | None) -> dict[UUID, str] | None:
+        if value is None:
+            return None
+        if len(value) > 100:
+            raise ValueError("Provide at most 100 search query overrides")
+        cleaned: dict[UUID, str] = {}
+        for need_id, raw in value.items():
+            text = " ".join(raw.split())
+            if not text or len(text) > 200:
+                raise ValueError("Search query must contain 1 to 200 characters")
+            cleaned[need_id] = text
+        return cleaned
+
+
+class NeedMatchRetryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str | None = Field(default=None, max_length=200)
+    page: int = Field(default=1, ge=1, le=50)
+    size: int = Field(default=5, ge=1, le=5)
+    force_refresh: bool = True
+
+    @field_validator("query")
+    @classmethod
+    def validate_query(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = " ".join(value.split())
+        if not cleaned:
+            raise ValueError("Search query cannot be blank")
+        return cleaned
+
+
+class AvailabilityRefreshItemInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    need_id: UUID
+    candidate_id: str | None = Field(default=None, min_length=1, max_length=200)
+    product_id: str | None = Field(default=None, min_length=1, max_length=200)
+    query: str | None = Field(default=None, max_length=200)
+
+
+class BasketAvailabilityRefreshRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    start: date
+    end: date
+    job_id: str | None = Field(default=None, min_length=1, max_length=64)
+    items: list[AvailabilityRefreshItemInput] | None = Field(default=None, max_length=100)
 
 
 class MealPlanProposalCreate(BaseModel):
@@ -492,7 +550,30 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
         data: MatchJobRequest, request: Request, response: Response
     ) -> BasketMatchJob:
         response.headers["Cache-Control"] = "no-store"
-        return await features.basket_jobs.start(authenticated_actor(request), **data.model_dump())
+        kwargs = data.model_dump()
+        if kwargs.get("query_overrides") is None:
+            kwargs.pop("query_overrides", None)
+        return await features.basket_jobs.start(authenticated_actor(request), **kwargs)
+
+    @router.post("/basket/match-jobs/{job_id}/needs/{need_id}/retry", status_code=202)
+    async def retry_match_job_need(
+        job_id: str,
+        need_id: UUID,
+        request: Request,
+        response: Response,
+        data: NeedMatchRetryRequest | None = None,
+    ) -> BasketMatchJob:
+        response.headers["Cache-Control"] = "no-store"
+        payload = data or NeedMatchRetryRequest()
+        return await features.basket_jobs.retry_need(
+            authenticated_actor(request),
+            job_id,
+            need_id,
+            query=payload.query,
+            page=payload.page,
+            size=payload.size,
+            force_refresh=payload.force_refresh,
+        )
 
     @router.get("/basket/match-jobs/{job_id}")
     async def get_match_job(job_id: str, request: Request, response: Response) -> BasketMatchJob:
@@ -1212,6 +1293,81 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
             raise HTTPException(422, str(exc)) from None
         except KeyError:
             raise HTTPException(404, "Product match job not found") from None
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+
+    @router.post("/basket/availability-refresh")
+    async def refresh_basket_availability(
+        data: BasketAvailabilityRefreshRequest,
+        request: Request,
+        response: Response,
+    ) -> BasketAvailabilityRefreshResult:
+        actor = authenticated_actor(request)
+        response.headers["Cache-Control"] = "no-store"
+        if data.end < data.start:
+            raise HTTPException(422, "end date must be on or after start date")
+        try:
+            if data.job_id is not None:
+                references = [
+                    (item.need_id, item.candidate_id)
+                    for item in (data.items or [])
+                    if item.candidate_id
+                ]
+                if not references:
+                    raise HTTPException(
+                        422, "Select at least one candidate to refresh availability"
+                    )
+                return await features.basket_jobs.refresh_candidate_availability(
+                    actor, data.job_id, data.start, data.end, references
+                )
+
+            review = await run_in_threadpool(basket.review, data.start, data.end)
+            requested_items = data.items or []
+            requested_pairs = {
+                (item.need_id, item.product_id)
+                for item in requested_items
+                if item.product_id is not None
+            }
+            requested_needs = {item.need_id for item in requested_items if item.product_id is None}
+            query_by_pair = {
+                (item.need_id, item.product_id): item.query
+                for item in requested_items
+                if item.product_id is not None and item.query
+            }
+            query_by_need = {item.need_id: item.query for item in requested_items if item.query}
+            targets: list[AvailabilityTarget] = []
+            for entry in review.needs:
+                for selection in entry.selections:
+                    product = selection.product
+                    if product.provider != "oda":
+                        continue
+                    if requested_items and (
+                        (entry.need.id, product.product_id) not in requested_pairs
+                        and entry.need.id not in requested_needs
+                    ):
+                        continue
+                    targets.append(
+                        AvailabilityTarget(
+                            need_id=entry.need.id,
+                            need_name=entry.need.name,
+                            provider=product.provider,
+                            product_id=product.product_id,
+                            product_name=product.name,
+                            packages=selection.packages,
+                            previous_available=product.available,
+                            previous_price=str(product.price)
+                            if product.price is not None
+                            else None,
+                            search_query=query_by_pair.get((entry.need.id, product.product_id))
+                            or query_by_need.get(entry.need.id)
+                            or product.name,
+                        )
+                    )
+            return await features.basket_jobs.refresh_targets_availability(actor, targets)
+        except KeyError:
+            raise HTTPException(404, "Product match job not found") from None
+        except OdaError as exc:
+            raise HTTPException(exc.status_code, exc.detail) from None
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from None
 

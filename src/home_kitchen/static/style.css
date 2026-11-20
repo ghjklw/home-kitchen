@@ -667,6 +667,17 @@ h3 {
 .basket-match-need > p {
   margin-bottom: 8px;
 }
+.basket-match-refine {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: 8px 0 10px;
+}
+.basket-match-refine-input {
+  flex: 1 1 180px;
+  min-width: 0;
+}
 .basket-match-candidates {
   display: grid;
   gap: 12px;

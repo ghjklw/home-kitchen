@@ -13,7 +13,7 @@ from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Hashable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from decimal import ROUND_CEILING, Decimal, localcontext
+from decimal import ROUND_CEILING, Decimal, InvalidOperation, localcontext
 from typing import Literal, Protocol
 from uuid import UUID
 
@@ -729,6 +729,9 @@ class NeedMatchResult(BaseModel):
     approximate: bool = False
     provenance: str | None = None
     source_url: HttpUrl | None = None
+    search_query: str | None = None
+    revision: int = 0
+    observed_at: datetime | None = None
 
 
 class BasketMatchResult(BaseModel):
@@ -736,6 +739,31 @@ class BasketMatchResult(BaseModel):
     end: date
     needs: list[NeedMatchResult]
     skipped_need_count: int = 0
+
+
+@dataclass(frozen=True)
+class AvailabilityTarget:
+    need_id: UUID
+    need_name: str
+    provider: str
+    product_id: str
+    product_name: str
+    packages: int = 1
+    previous_available: bool | None = None
+    previous_price: str | None = None
+    search_query: str | None = None
+
+
+@dataclass(frozen=True)
+class AvailabilityCheckOutcome:
+    target: AvailabilityTarget
+    available: bool | None
+    availability_status: Literal["available", "unavailable", "unknown"]
+    availability_description: str | None = None
+    current_price: str | None = None
+    price_changed: bool = False
+    fresh_product: ProviderProduct | None = None
+    checked_query: str | None = None
 
 
 class SearchProvider(Protocol):
@@ -1092,6 +1120,7 @@ class BasketMatchingService:
         force_refresh: bool = False,
         progress: Callable[[NeedMatchResult], Awaitable[None]] | None = None,
         plan: PurchasePlan | None = None,
+        query_overrides: dict[UUID, str] | None = None,
     ) -> BasketMatchResult:
         if end < start:
             raise ValueError("end date must be on or after start date")
@@ -1102,6 +1131,16 @@ class BasketMatchingService:
         purchase_lines = plan.purchase_lines
         bounded_lines = purchase_lines[:MAX_NEEDS]
         skipped_count = max(0, len(purchase_lines) - len(bounded_lines))
+
+        def _effective_query(line) -> str:
+            if query_overrides and line.id in query_overrides:
+                cleaned = " ".join(query_overrides[line.id].split())
+                if cleaned:
+                    return cleaned
+            return line.name
+
+        effective_queries = [_effective_query(line) for line in bounded_lines]
+        normalized_queries = [" ".join(query.casefold().split()) for query in effective_queries]
         results = [
             NeedMatchResult(
                 need_id=line.id,
@@ -1115,8 +1154,9 @@ class BasketMatchingService:
                 approximate=line.approximate,
                 provenance=line.provenance,
                 source_url=line.source_url,
+                search_query=effective_queries[index],
             )
-            for line in bounded_lines
+            for index, line in enumerate(bounded_lines)
         ]
         if not bounded_lines:
             return BasketMatchResult(start=start, end=end, needs=[], skipped_need_count=0)
@@ -1245,6 +1285,7 @@ class BasketMatchingService:
                     *(enrich(candidate, current_index) for candidate in candidates)
                 )
                 results[current_index].status = "matched" if candidates else "no_results"
+                results[current_index].observed_at = self.clock()
                 if group.has_more:
                     results[
                         current_index
@@ -1260,15 +1301,15 @@ class BasketMatchingService:
             await asyncio.gather(
                 *(
                     match_need(index, outcome)
-                    for index, line in enumerate(bounded_lines)
-                    if " ".join(line.name.casefold().split()) == query
+                    for index, normalized in enumerate(normalized_queries)
+                    if normalized == query
                 )
             )
 
         try:
             await self._search(
                 actor_id,
-                [line.name for line in bounded_lines],
+                effective_queries,
                 page,
                 size,
                 force_refresh,
@@ -1289,3 +1330,141 @@ class BasketMatchingService:
             needs=results,
             skipped_need_count=skipped_count,
         )
+
+    @staticmethod
+    def _prices_differ(previous: str | None, current: str | None) -> bool:
+        if previous is None or current is None:
+            return False
+        prev_text = previous.strip()
+        curr_text = current.strip()
+        if not prev_text or not curr_text:
+            return False
+        try:
+            return Decimal(prev_text) != Decimal(curr_text)
+        except InvalidOperation:
+            return prev_text != curr_text
+
+    async def check_products_availability(
+        self,
+        actor_id: str,
+        targets: list[AvailabilityTarget],
+    ) -> list[AvailabilityCheckOutcome]:
+        """Verify live provider availability for selected products without using cached searches."""
+        if not targets:
+            return []
+        context = await self._context(actor_id)
+        if context is None:
+            raise ValueError("Connect your product provider before checking product availability")
+
+        batch_size = max(1, min(10, int(getattr(self.provider, "max_queries", 10))))
+
+        async def run_queries(
+            queries: list[str],
+        ) -> tuple[dict[tuple[str, str], ProviderProduct], set[str]]:
+            unique_queries = list(
+                dict.fromkeys(
+                    " ".join(query.split()) for query in queries if query and query.strip()
+                )
+            )
+            found: dict[tuple[str, str], ProviderProduct] = {}
+            failed_queries: set[str] = set()
+
+            async def run_batch(batch: list[str]) -> None:
+                try:
+                    async with self._search_semaphore:
+                        groups = await asyncio.wait_for(
+                            self.provider.search_products(actor_id, batch, 1, 20),
+                            timeout=SEARCH_TIMEOUT_SECONDS,
+                        )
+                    for group in groups:
+                        for product in group.products:
+                            found[(product.provider, product.product_id)] = product
+                except Exception:
+                    for query in batch:
+                        failed_queries.add(" ".join(query.casefold().split()))
+
+            await asyncio.gather(
+                *(
+                    run_batch(unique_queries[offset : offset + batch_size])
+                    for offset in range(0, len(unique_queries), batch_size)
+                )
+            )
+            return found, failed_queries
+
+        primary_queries = [
+            (target.product_name or target.search_query or target.need_name).strip()
+            for target in targets
+        ]
+        found_products, failed_primary = await run_queries(primary_queries)
+
+        fallback_queries: list[str] = []
+        for target, primary in zip(targets, primary_queries, strict=True):
+            if (target.provider, target.product_id) in found_products:
+                continue
+            for candidate_query in (target.search_query, target.need_name):
+                if candidate_query and candidate_query.strip():
+                    cleaned = " ".join(candidate_query.split())
+                    if cleaned.casefold() != primary.casefold():
+                        fallback_queries.append(cleaned)
+                        break
+
+        failed_fallback: set[str] = set()
+        if fallback_queries:
+            extra_products, failed_fallback = await run_queries(fallback_queries)
+            found_products.update(extra_products)
+
+        if await self._context(actor_id) != context:
+            raise ValueError("Provider connection changed during availability check")
+
+        outcomes: list[AvailabilityCheckOutcome] = []
+        for target, primary in zip(targets, primary_queries, strict=True):
+            fresh = found_products.get((target.provider, target.product_id))
+            if fresh is None:
+                norm_primary = " ".join(primary.casefold().split())
+                search_errored = norm_primary in failed_primary or (
+                    target.search_query
+                    and " ".join(target.search_query.casefold().split()) in failed_fallback
+                )
+                description = (
+                    "Kunne ikke hente oppdatert tilgjengelighet fra Oda akkurat nå."
+                    if search_errored
+                    else "Produktet ble ikke funnet i ferskt søk hos Oda."
+                )
+                outcomes.append(
+                    AvailabilityCheckOutcome(
+                        target=target,
+                        available=None,
+                        availability_status="unknown",
+                        availability_description=description,
+                        current_price=target.previous_price,
+                        price_changed=False,
+                        fresh_product=None,
+                        checked_query=primary,
+                    )
+                )
+                continue
+
+            avail = fresh.available
+            status: Literal["available", "unavailable", "unknown"] = (
+                "available" if avail is True else "unavailable" if avail is False else "unknown"
+            )
+            description = (
+                "Oda oppgir at varen er tilgjengelig."
+                if avail is True
+                else "Oda oppgir at varen ikke er tilgjengelig."
+                if avail is False
+                else "Oda oppga ikke tilgjengelighet i det ferske søket."
+            )
+            outcomes.append(
+                AvailabilityCheckOutcome(
+                    target=target,
+                    available=avail,
+                    availability_status=status,
+                    availability_description=description,
+                    current_price=fresh.price,
+                    price_changed=self._prices_differ(target.previous_price, fresh.price),
+                    fresh_product=fresh,
+                    checked_query=primary,
+                )
+            )
+        return outcomes

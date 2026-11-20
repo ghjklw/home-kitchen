@@ -11,6 +11,9 @@ const {
   RECIPE_TYPE_LABELS,
   PREP_CATEGORY_LABELS,
   RECIPE_SOURCE_LABELS,
+  SOURCE_LANGUAGES,
+  SOURCE_LANGUAGE_LABELS,
+  normalizeSourceLanguage,
   formatRecipeBadge,
   formatRecipeSourceBadge,
   isPositiveQuantity,
@@ -1047,4 +1050,100 @@ test("DOM: renderRecipes and viewRecipe render source badges and source filter c
   harness.context.viewRecipe(recipes[4]);
   assert.equal(harness.dialogRoot.querySelector(".recipe-badge-source").textContent, "Fra ditt kjøkken");
   assert.equal(harness.dialogRoot.querySelector(".recipe-badge-meta"), null);
+});
+
+test("SOURCE_LANGUAGES, normalizeSourceLanguage, revision snapshot, and buildRevisionRequest handle source_language", () => {
+  for (const code of ["nb", "en", "fr", "es", "de", "it", "sv", "da", "und"]) {
+    assert.equal(SOURCE_LANGUAGES.includes(code), true, `Expected ${code} in SOURCE_LANGUAGES`);
+    assert.ok(SOURCE_LANGUAGE_LABELS[code], `Expected label for ${code}`);
+  }
+  assert.equal(normalizeSourceLanguage("  FR "), "fr");
+  assert.equal(normalizeSourceLanguage("   "), null);
+  assert.equal(normalizeSourceLanguage(null), null);
+
+  const base = {
+    title: "Suppe",
+    servings: "2",
+    source_language: "nb",
+    ingredients: [{ name: "gulrot", quantity: "2", unit: "stk" }],
+    instructions: "Kok",
+  };
+  assert.notEqual(
+    recipeRevisionSnapshot(base),
+    recipeRevisionSnapshot({ ...base, source_language: "en" }),
+  );
+  const req = buildRevisionRequest(base, { isEditing: true, source: "manual" }, "gjør den raskere");
+  assert.equal(req.recipe.source_language, "nb");
+
+  const draftReq = buildRevisionRequest(
+    { ...base, source_language: "  EN " },
+    { isEditing: false, source: "ai" },
+    "oversett",
+  );
+  assert.equal(draftReq.draft.source_language, "en");
+});
+
+test("DOM: recipeForm exposes Kildespråk selector, supports custom codes, and saves corrected source_language", async () => {
+  const harness = buildRecipeUiHarness();
+  harness.context.recipeForm({
+    id: "rec-lang",
+    title: "Soupe à l'oignon",
+    servings: 4,
+    source_language: "fr",
+    ingredients: [{ name: "oignon", quantity: "4", unit: "stk" }],
+    instructions: ["Kutt løk"],
+  }, "imported");
+
+  const metaRow = harness.dialogRoot.querySelector(".recipe-metadata-row");
+  assert.ok(metaRow, "recipe-metadata-row should be rendered");
+  const langSelect = metaRow.findAll((n) => n.name === "source_language")[0];
+  const customInput = metaRow.findAll((n) => n.name === "source_language_custom")[0];
+  assert.ok(langSelect, "source_language select should be rendered");
+  assert.ok(customInput, "source_language_custom input should be rendered");
+  assert.equal(langSelect.value, "fr");
+  assert.equal(customInput.parentNode.hidden, true);
+
+  // User corrects source_language from fr to nb and submits
+  langSelect.value = "nb";
+  langSelect.dispatchEvent("change");
+  await harness.submitForm();
+
+  const putCall = harness.apiCalls.find((c) => c.path === "/recipes/rec-lang" && c.method === "PUT");
+  assert.ok(putCall);
+  assert.equal(putCall.body.source_language, "nb");
+
+  // Switching to custom language code reveals custom input and validates non-empty code
+  langSelect.value = "__custom__";
+  langSelect.dispatchEvent("change");
+  assert.equal(customInput.parentNode.hidden, false);
+  customInput.value = "   ";
+  await assert.rejects(() => harness.submitForm(), /Oppgi en språkkode for kildespråket/);
+
+  customInput.value = " nn ";
+  await harness.submitForm();
+  const customPut = harness.apiCalls.filter((c) => c.path === "/recipes/rec-lang" && c.method === "PUT").at(-1);
+  assert.equal(customPut.body.source_language, "nn");
+});
+
+test("DOM: recipeForm pre-populates unknown draft source_language in custom field", async () => {
+  const harness = buildRecipeUiHarness();
+  harness.context.recipeForm({
+    title: "Bacalhau",
+    servings: 2,
+    source_language: "pt",
+    ingredients: [{ name: "torsk", quantity: "400", unit: "g" }],
+    instructions: ["Stek"],
+  }, "ai");
+
+  const metaRow = harness.dialogRoot.querySelector(".recipe-metadata-row");
+  const langSelect = metaRow.findAll((n) => n.name === "source_language")[0];
+  const customInput = metaRow.findAll((n) => n.name === "source_language_custom")[0];
+  assert.equal(langSelect.value, "__custom__");
+  assert.equal(customInput.parentNode.hidden, false);
+  assert.equal(customInput.value, "pt");
+
+  await harness.submitForm();
+  const postCall = harness.apiCalls.find((c) => c.path === "/recipes" && c.method === "POST");
+  assert.ok(postCall);
+  assert.equal(postCall.body.source_language, "pt");
 });

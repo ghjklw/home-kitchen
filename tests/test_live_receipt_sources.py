@@ -170,6 +170,28 @@ def test_trumf_http_source_fetches_transactions_and_raises_on_redirect():
     assert len(txs) == 1
     assert txs[0].batch_id == "b-1"
 
+    null_batch_payload = json.dumps(
+        {
+            "transactionsData": [
+                {
+                    "batchId": None,
+                    "transaksjonsTidspunkt": "2026-11-07T15:48:41.000Z",
+                    "beskrivelse": "KIWI Kjørbo",
+                    "belop": "2062.93",
+                    "harKvittering": True,
+                }
+            ]
+        }
+    )
+    null_source = TrumfHttpSource(
+        "session=abc",
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, text=null_batch_payload)),
+    )
+    adapter = TrumfPurchaseHistoryAdapter(null_source, account_id="u1")
+    page = adapter.fetch_page("u1", None)
+    assert len(page.records) == 1
+    assert page.records[0].external_id.startswith("tx:")
+
     expired_source = TrumfHttpSource(
         "session=expired",
         transport=httpx.MockTransport(

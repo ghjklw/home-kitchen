@@ -1,60 +1,126 @@
-name: Publish release image
+name: Promote release image
 
+# Promote an immutable UAT-verified main image digest to production without rebuilding.
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Production release tag to promote (e.g. v0.2.0)'
+        required: true
+        type: string
+      source_sha:
+        description: 'Exact 40-character Git commit SHA from main verified in UAT'
+        required: true
+        type: string
+      source_digest:
+        description: 'Immutable GHCR image digest built by Publish image and verified in UAT (sha256:...)'
+        required: true
+        type: string
+      uat_health_verified:
+        description: 'UAT readiness, health check, and /api/version verified on the candidate digest'
+        required: true
+        type: boolean
+        default: false
+      uat_migrations_verified:
+        description: 'UAT Alembic migrations and backward/recovery compatibility verified'
+        required: true
+        type: boolean
+        default: false
+      uat_backup_recovery_verified:
+        description: 'Backup and restore recovery test verified against persistent storage'
+        required: true
+        type: boolean
+        default: false
+      uat_consumer_verified:
+        description: 'UAT household/consumer behavior verified on isolated UAT'
+        required: true
+        type: boolean
+        default: false
+      uat_evidence_ref:
+        description: 'Reference to UAT evidence (issue comment URL, UAT run, or test summary)'
+        required: true
+        type: string
+      confirm_production_promotion:
+        description: 'Type PROMOTE TO PRODUCTION to explicitly confirm production cutover'
+        required: true
+        type: string
+        default: ''
 
 permissions:
   contents: read
-  packages: write
 
 concurrency:
-  group: kitchen-release-${{ github.event.release.tag_name }}
+  group: kitchen-release-${{ github.event.inputs.release_tag || github.run_id }}
   cancel-in-progress: false
 
 jobs:
-  publish:
-    if: github.repository == 'ghjklw/home-kitchen' && github.event.release.prerelease == false
+  verify:
+    if: github.repository == 'ghjklw/home-kitchen' && github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      packages: read
+    outputs:
+      source_sha: ${{ steps.verify.outputs.source_sha }}
+      source_digest: ${{ steps.verify.outputs.source_digest }}
+      release_tag: ${{ steps.verify.outputs.release_tag }}
+      source_build_tag: ${{ steps.verify.outputs.source_build_tag }}
+      publish_run_id: ${{ steps.verify.outputs.publish_run_id }}
+      publish_run_attempt: ${{ steps.verify.outputs.publish_run_attempt }}
+      uat_evidence_ref: ${{ steps.verify.outputs.uat_evidence_ref }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.release.tag_name }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Require a successful main CI run for the released commit
-        id: source
+      - name: Verify UAT candidate digest, main CI/publish lineage, and promotion gates
+        id: verify
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
-        run: |
-          set -euo pipefail
-          sha=$(git rev-parse HEAD)
-          git fetch origin main --quiet
-          git merge-base --is-ancestor "$sha" origin/main
-          runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$sha&status=completed" --jq '[.workflow_runs[] | select(.conclusion == "success" and .head_branch == "main")] | length')
-          test "$runs" -gt 0
-          [[ "$TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+          GHCR_TOKEN: ${{ github.token }}
+          INPUT_RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+          INPUT_SOURCE_SHA: ${{ github.event.inputs.source_sha }}
+          INPUT_SOURCE_DIGEST: ${{ github.event.inputs.source_digest }}
+          INPUT_UAT_HEALTH_VERIFIED: ${{ github.event.inputs.uat_health_verified }}
+          INPUT_UAT_MIGRATIONS_VERIFIED: ${{ github.event.inputs.uat_migrations_verified }}
+          INPUT_UAT_BACKUP_RECOVERY_VERIFIED: ${{ github.event.inputs.uat_backup_recovery_verified }}
+          INPUT_UAT_CONSUMER_VERIFIED: ${{ github.event.inputs.uat_consumer_verified }}
+          INPUT_UAT_EVIDENCE_REF: ${{ github.event.inputs.uat_evidence_ref }}
+          INPUT_CONFIRM_PRODUCTION_PROMOTION: ${{ github.event.inputs.confirm_production_promotion }}
+        run: python3 .github/scripts/release_promotion.py verify
+
+  promote:
+    if: github.repository == 'ghjklw/home-kitchen' && github.event_name == 'workflow_dispatch'
+    needs: [verify]
+    environment: production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+          persist-credentials: false
+      - name: Promote exact immutable image digest to production tags
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_RELEASE_TAG: ${{ needs.verify.outputs.release_tag }}
+          INPUT_SOURCE_SHA: ${{ needs.verify.outputs.source_sha }}
+          INPUT_SOURCE_DIGEST: ${{ needs.verify.outputs.source_digest }}
+          INPUT_UAT_HEALTH_VERIFIED: ${{ github.event.inputs.uat_health_verified }}
+          INPUT_UAT_MIGRATIONS_VERIFIED: ${{ github.event.inputs.uat_migrations_verified }}
+          INPUT_UAT_BACKUP_RECOVERY_VERIFIED: ${{ github.event.inputs.uat_backup_recovery_verified }}
+          INPUT_UAT_CONSUMER_VERIFIED: ${{ github.event.inputs.uat_consumer_verified }}
+          INPUT_UAT_EVIDENCE_REF: ${{ needs.verify.outputs.uat_evidence_ref }}
+          INPUT_CONFIRM_PRODUCTION_PROMOTION: ${{ github.event.inputs.confirm_production_promotion }}
+          PUBLISH_RUN_ID: ${{ needs.verify.outputs.publish_run_id }}
+          PUBLISH_RUN_ATTEMPT: ${{ needs.verify.outputs.publish_run_attempt }}
+        run: python3 .github/scripts/release_promotion.py promote
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          context: .
-          push: true
-          build-args: APP_VERSION=${{ github.event.release.tag_name }}
-          tags: |
-            ghcr.io/ghjklw/home-kitchen:${{ github.event.release.tag_name }}
-            ghcr.io/ghjklw/home-kitchen:release-${{ github.event.release.tag_name }}
-            ghcr.io/ghjklw/home-kitchen:latest
-            ghcr.io/ghjklw/home-kitchen:release-sha-${{ steps.source.outputs.sha }}
-          provenance: mode=max
-          labels: |
-            org.opencontainers.image.source=https://github.com/ghjklw/home-kitchen
-            org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
-            org.opencontainers.image.version=${{ github.event.release.tag_name }}
+          name: release-promotion-metadata
+          path: promotion-metadata.json
+          retention-days: 90

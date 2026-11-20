@@ -12,13 +12,14 @@ import asyncio
 import html
 import logging
 import re
-from datetime import UTC, datetime
-from typing import Any
+from datetime import UTC, date, datetime, timedelta
+from typing import Any, Literal
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 import httpx
 from fastapi import HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy import insert, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -27,6 +28,7 @@ from home_kitchen.connector_store import ConnectorStore, connector_credentials
 from home_kitchen.history import HistoryEntryCreate, HistoryRepository
 from home_kitchen.imports import ImportedDraft
 from home_kitchen.models import (
+    GuidedCookingStep,
     Recipe,
     RecipeSource,
     SourceIngredient,
@@ -220,6 +222,409 @@ def _format_instruction_item(item: Any) -> str | None:
     return None
 
 
+def _raw_instruction_html(item: Any) -> str:
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        return str(
+            item.get("formattedText")
+            or item.get("text")
+            or item.get("description")
+            or item.get("instruction")
+            or ""
+        )
+    return ""
+
+
+_ISO_STEP_DURATION_RE = re.compile(
+    r"^PT(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+)S)?$",
+    re.IGNORECASE,
+)
+_STEP_DURATION_PART_RE = re.compile(
+    r"(\d+(?:[.,]\d+)?)\s*(h|hr|hrs|hour|hours|t|time|timer|min|mins|minute|minutes|m|sec|secs|second|seconds|sek|s)\b",
+    re.IGNORECASE,
+)
+_STEP_TEMP_RE = re.compile(
+    r"\b(Varoma|\d+(?:[.,]\d+)?\s*°?\s*C)\b",
+    re.IGNORECASE,
+)
+_STEP_SPEED_RE = re.compile(
+    r"\b(?:speed|vitesse|hastighet|stufe|velocidad|velocità)\s*(Spoon|\d+(?:[.,]\d+)?|Turbo|Dough|knead(?:ing)?)\b",
+    re.IGNORECASE,
+)
+
+
+def _parse_step_time_seconds(val: Any) -> int | None:
+    if val is None or isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float)):
+        sec = int(round(val))
+        return sec if sec >= 0 else None
+    if isinstance(val, dict):
+        inner = val.get("value") if val.get("value") is not None else val.get("amount")
+        if inner is None:
+            return None
+        unit = str(val.get("unit") or val.get("unitNotation") or "s").strip().lower()
+        try:
+            num = float(inner)
+        except (TypeError, ValueError):
+            return _parse_step_time_seconds(inner)
+        if unit in {"m", "min", "mins", "minute", "minutes"}:
+            return max(0, int(round(num * 60)))
+        if unit in {"h", "hr", "hrs", "hour", "hours", "t", "time", "timer"}:
+            return max(0, int(round(num * 3600)))
+        return max(0, int(round(num)))
+    if isinstance(val, str):
+        stripped = val.strip()
+        if not stripped:
+            return None
+        iso_match = _ISO_STEP_DURATION_RE.fullmatch(stripped)
+        if iso_match:
+            hours = int(iso_match.group("hours") or 0)
+            minutes = int(iso_match.group("minutes") or 0)
+            seconds = int(iso_match.group("seconds") or 0)
+            return hours * 3600 + minutes * 60 + seconds
+        if re.fullmatch(r"\d+(?:\.\d+)?", stripped):
+            return max(0, int(round(float(stripped))))
+        parts = _STEP_DURATION_PART_RE.findall(stripped)
+        if parts:
+            total = 0.0
+            for raw_num, unit in parts:
+                num = float(raw_num.replace(",", "."))
+                u = unit.lower()
+                if u in {"h", "hr", "hrs", "hour", "hours", "t", "time", "timer"}:
+                    total += num * 3600
+                elif u in {"min", "mins", "minute", "minutes", "m"}:
+                    total += num * 60
+                else:
+                    total += num
+            return max(0, int(round(total)))
+    return None
+
+
+def _parse_step_temperature(val: Any) -> str | None:
+    if val is None or isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float)):
+        num = int(val) if float(val).is_integer() else val
+        return f"{num}°C" if num > 0 else None
+    if isinstance(val, dict):
+        inner = val.get("value") if val.get("value") is not None else val.get("temperature")
+        unit = str(val.get("unit") or val.get("unitNotation") or "°C").strip()
+        if isinstance(inner, str):
+            return _parse_step_temperature(inner)
+        if isinstance(inner, (int, float)) and not isinstance(inner, bool):
+            num = int(inner) if float(inner).is_integer() else inner
+            return f"{num}{unit}" if num > 0 else None
+        return None
+    if isinstance(val, str):
+        cleaned = _strip_html(val)
+        if not cleaned:
+            return None
+        if cleaned.lower() == "varoma":
+            return "Varoma"
+        match = re.fullmatch(r"(\d+(?:[.,]\d+)?)\s*(?:°?\s*C)?", cleaned, re.IGNORECASE)
+        if match:
+            num_str = match.group(1).replace(",", ".")
+            return f"{num_str}°C"
+        return cleaned[:64]
+    return None
+
+
+def _parse_step_speed(val: Any) -> str | None:
+    if val is None or isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float)):
+        num = int(val) if float(val).is_integer() else val
+        return str(num)
+    if isinstance(val, dict):
+        inner = val.get("value") if val.get("value") is not None else val.get("speed")
+        return _parse_step_speed(inner)
+    if isinstance(val, str):
+        cleaned = _strip_html(val)
+        if not cleaned:
+            return None
+        if "🥄" in cleaned or cleaned.lower() in {"spoon", "rørefunksjon", "soft", "gentle"}:
+            return "Spoon"
+        match = _STEP_SPEED_RE.search(cleaned)
+        if match:
+            return match.group(1).replace(",", ".")
+        return cleaned[:64]
+    return None
+
+
+def _parse_step_direction(
+    val: Any, reverse_flag: Any = None
+) -> Literal["forward", "reverse"] | None:
+    if isinstance(reverse_flag, bool):
+        return "reverse" if reverse_flag else "forward"
+    if isinstance(val, bool):
+        return "reverse" if val else "forward"
+    if isinstance(val, str):
+        low = val.strip().lower()
+        if low in {
+            "reverse",
+            "anticlockwise",
+            "counterclockwise",
+            "counter-clockwise",
+            "anti-clockwise",
+            "left",
+            "revers",
+            "moturs",
+            "↺",
+        }:
+            return "reverse"
+        if low in {"forward", "clockwise", "right", "forover", "medurs", "↻"}:
+            return "forward"
+    return None
+
+
+def _parse_step_accessory(val: Any) -> str | None:
+    if val is None:
+        return None
+    if isinstance(val, str):
+        cleaned = _strip_html(val)
+        return cleaned[:120] or None
+    if isinstance(val, dict):
+        text_val = val.get("name") or val.get("title") or val.get("label") or val.get("type")
+        if text_val:
+            cleaned = _strip_html(str(text_val))
+            return cleaned[:120] or None
+    if isinstance(val, list):
+        parts = [p for p in (_parse_step_accessory(item) for item in val) if p]
+        return ", ".join(dict.fromkeys(parts))[:120] or None
+    return None
+
+
+def _parse_tm6_inline_tokens(raw_html: str) -> dict[str, Any]:
+    """Extract TM6 settings from <nobr>...</nobr> or explicit slash-delimited blocks."""
+    parsed: dict[str, Any] = {}
+    blocks = re.findall(r"<nobr>(.*?)</nobr>", raw_html, flags=re.IGNORECASE | re.DOTALL)
+    if not blocks:
+        plain = _strip_html(raw_html)
+        slash_match = re.search(
+            r"\b\d+\s*(?:sec|sek|min|m|h)\s*/[^.\n]+", plain, flags=re.IGNORECASE
+        )
+        if slash_match:
+            blocks = [slash_match.group(0)]
+    for block in blocks:
+        text_block = _strip_html(block)
+        if not text_block:
+            continue
+        for token in [part.strip() for part in text_block.split("/") if part.strip()]:
+            if "time_seconds" not in parsed:
+                sec = _parse_step_time_seconds(token)
+                if sec is not None:
+                    parsed["time_seconds"] = sec
+                    continue
+            if "temperature" not in parsed and _STEP_TEMP_RE.search(token):
+                temp = _parse_step_temperature(token)
+                if temp is not None:
+                    parsed["temperature"] = temp
+                    continue
+            if "direction" not in parsed:
+                direction = _parse_step_direction(token)
+                if direction is not None:
+                    parsed["direction"] = direction
+                    continue
+                if "↺" in token or re.search(r"\b(?:reverse|revers|moturs)\b", token, re.I):
+                    parsed["direction"] = "reverse"
+            if "speed" not in parsed and (
+                _STEP_SPEED_RE.search(token) or "🥄" in token or token.lower() == "spoon"
+            ):
+                speed = _parse_step_speed(token)
+                if speed is not None:
+                    parsed["speed"] = speed
+                    continue
+    return parsed
+
+
+def _extract_ingredient_refs(
+    step: dict[str, Any], ingredients: list[str]
+) -> tuple[list[str], list[int]]:
+    refs: list[str] = []
+    indices: list[int] = []
+
+    raw_indices = step.get("ingredientIndices")
+    if raw_indices is None:
+        raw_indices = step.get("ingredient_indices")
+    if isinstance(raw_indices, list):
+        for idx in raw_indices:
+            if isinstance(idx, int) and not isinstance(idx, bool) and idx >= 0:
+                if idx not in indices:
+                    indices.append(idx)
+
+    raw_refs = (
+        step.get("ingredientReferences")
+        or step.get("ingredient_references")
+        or step.get("referencedIngredients")
+        or step.get("recipeIngredients")
+        or step.get("ingredients")
+        or []
+    )
+    if isinstance(raw_refs, list):
+        for ref in raw_refs:
+            if isinstance(ref, int) and not isinstance(ref, bool) and ref >= 0:
+                if ref not in indices:
+                    indices.append(ref)
+                if ref < len(ingredients) and ingredients[ref] not in refs:
+                    refs.append(ingredients[ref])
+            elif isinstance(ref, str) and ref.strip():
+                cleaned = _strip_html(ref)
+                if cleaned and cleaned not in refs:
+                    refs.append(cleaned)
+            elif isinstance(ref, dict):
+                idx = ref.get("index")
+                if isinstance(idx, int) and not isinstance(idx, bool) and idx >= 0:
+                    if idx not in indices:
+                        indices.append(idx)
+                formatted = _format_ingredient_item(ref)
+                if formatted and formatted not in refs:
+                    refs.append(formatted)
+
+    annotations = step.get("annotations")
+    if isinstance(annotations, list):
+        for ann in annotations:
+            if not isinstance(ann, dict):
+                continue
+            ann_type = str(ann.get("type") or "").strip().upper()
+            if ann_type == "INGREDIENT":
+                data = ann.get("data") if isinstance(ann.get("data"), dict) else ann
+                idx = data.get("index")
+                if isinstance(idx, int) and not isinstance(idx, bool) and idx >= 0:
+                    if idx not in indices:
+                        indices.append(idx)
+                ing_obj = (
+                    data.get("ingredient") if isinstance(data.get("ingredient"), dict) else data
+                )
+                formatted = _format_ingredient_item(ing_obj) or _format_ingredient_item(
+                    data.get("text") or data.get("name")
+                )
+                if formatted and formatted not in refs:
+                    refs.append(formatted)
+
+    # Resolve missing refs from explicit indices
+    for idx in indices:
+        if idx < len(ingredients) and ingredients[idx] not in refs:
+            refs.append(ingredients[idx])
+
+    # Resolve indices by matching text references against normalized recipe ingredients
+    if refs and ingredients:
+        lowered_ingredients = [ing.casefold() for ing in ingredients]
+        for ref in refs:
+            ref_cf = ref.casefold()
+            for idx, ing_cf in enumerate(lowered_ingredients):
+                if ref_cf == ing_cf or ref_cf in ing_cf or ing_cf in ref_cf:
+                    if idx not in indices:
+                        indices.append(idx)
+                    break
+
+    return refs, indices
+
+
+def _extract_guided_step(
+    item: Any, step_index: int, formatted_text: str, ingredients: list[str]
+) -> GuidedCookingStep | None:
+    raw_html = _raw_instruction_html(item)
+    inline_tokens = _parse_tm6_inline_tokens(raw_html)
+
+    merged_dict: dict[str, Any] = {}
+    if isinstance(item, dict):
+        for nested_key in (
+            "thermomixParameters",
+            "guidedCooking",
+            "deviceSettings",
+            "settings",
+            "parameters",
+        ):
+            nested = item.get(nested_key)
+            if isinstance(nested, dict):
+                merged_dict.update(nested)
+        annotations = item.get("annotations")
+        if isinstance(annotations, list):
+            for ann in annotations:
+                if isinstance(ann, dict) and str(ann.get("type") or "").upper() in {
+                    "TTS",
+                    "GUIDED_COOKING",
+                    "TM_SETTINGS",
+                }:
+                    data = ann.get("data")
+                    if isinstance(data, dict):
+                        merged_dict.update(data)
+        merged_dict.update(item)
+
+    time_seconds = _parse_step_time_seconds(
+        merged_dict.get("timeSeconds")
+        or merged_dict.get("time_seconds")
+        or merged_dict.get("seconds")
+        or merged_dict.get("duration")
+        or merged_dict.get("time")
+    )
+    if time_seconds is None:
+        time_seconds = inline_tokens.get("time_seconds")
+
+    temperature = _parse_step_temperature(merged_dict.get("temperature") or merged_dict.get("temp"))
+    if temperature is None:
+        temperature = inline_tokens.get("temperature")
+
+    speed = _parse_step_speed(merged_dict.get("speed"))
+    if speed is None:
+        speed = inline_tokens.get("speed")
+
+    direction = _parse_step_direction(
+        merged_dict.get("direction") or merged_dict.get("rotation"),
+        reverse_flag=merged_dict.get("reverse")
+        if merged_dict.get("reverse") is not None
+        else merged_dict.get("isReverse"),
+    )
+    if direction is None:
+        direction = inline_tokens.get("direction")
+
+    blade = _parse_step_accessory(merged_dict.get("blade"))
+    accessory = _parse_step_accessory(
+        merged_dict.get("accessory")
+        or merged_dict.get("accessories")
+        or merged_dict.get("utensil")
+        or merged_dict.get("tool")
+        or merged_dict.get("attachment")
+    )
+    mode = _parse_step_accessory(
+        merged_dict.get("mode") or merged_dict.get("cookingMode") or merged_dict.get("program")
+    )
+    ingredient_refs, ingredient_indices = (
+        _extract_ingredient_refs(merged_dict, ingredients) if merged_dict else ([], [])
+    )
+
+    if not any(
+        [
+            time_seconds is not None,
+            temperature is not None,
+            speed is not None,
+            direction is not None,
+            blade is not None,
+            accessory is not None,
+            mode is not None,
+            ingredient_refs,
+            ingredient_indices,
+        ]
+    ):
+        return None
+
+    return GuidedCookingStep(
+        step_index=step_index,
+        text=formatted_text,
+        time_seconds=time_seconds,
+        temperature=temperature,
+        speed=speed,
+        direction=direction,
+        blade=blade,
+        accessory=accessory,
+        mode=mode,
+        ingredient_references=ingredient_refs,
+        ingredient_indices=ingredient_indices,
+    )
+
+
 def normalize_cookidoo_recipe(
     raw: dict[str, Any],
     provider: str = "cookidoo",
@@ -303,11 +708,13 @@ def normalize_cookidoo_recipe(
         or []
     )
     instructions: list[str] = []
+    raw_step_pairs: list[tuple[Any, str]] = []
     if isinstance(raw_instructions, list):
         for item in raw_instructions:
             formatted = _format_instruction_item(item)
             if formatted:
                 instructions.append(formatted)
+                raw_step_pairs.append((item, formatted))
     if not instructions and isinstance(raw.get("recipeStepGroups"), list):
         for group in raw["recipeStepGroups"]:
             if not isinstance(group, dict):
@@ -318,6 +725,13 @@ def normalize_cookidoo_recipe(
                     formatted = _format_instruction_item(step)
                     if formatted:
                         instructions.append(formatted)
+                        raw_step_pairs.append((step, formatted))
+
+    guided_steps: list[GuidedCookingStep] = []
+    for idx, (raw_step, formatted_text) in enumerate(raw_step_pairs):
+        guided = _extract_guided_step(raw_step, idx, formatted_text, ingredients)
+        if guided is not None:
+            guided_steps.append(guided)
 
     badges = list(raw.get("badges") or ["Lagret i Cookidoo"])
 
@@ -387,7 +801,24 @@ def normalize_cookidoo_recipe(
         recipe_type=recipe_type,
         prep_time_minutes=prep_time_minutes,
         prep_category=prep_category,
+        guided_steps=guided_steps,
     )
+
+
+class CookidooMyWeekEntry(BaseModel):
+    """Normalized entry from Cookidoo My Week / calendar."""
+
+    external_entry_id: str | None = None
+    cookidoo_recipe_id: str
+    title: str
+    date: date
+    servings: int = Field(default=4, gt=0)
+    source_url: str
+    image_url: str | None = None
+    label: str | None = None
+    ingredients: list[str] = Field(default_factory=list)
+    instructions: list[str] = Field(default_factory=list)
+    guided_steps: list[GuidedCookingStep] = Field(default_factory=list)
 
 
 class CookidooCollectionProvider:
@@ -514,14 +945,16 @@ class CookidooCollectionProvider:
         if not valid_path:
             raise ValueError("Cookidoo-kildelenken samsvarer ikke med oppskriftens identitet")
 
-    async def _get_json(
+    async def _request_json(
         self,
         client: httpx.AsyncClient,
+        method: str,
         path_or_url: str,
         headers: dict[str, str],
         base_url: str,
         *,
         params: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
         allow_not_found: bool = False,
     ) -> dict[str, Any] | list[Any] | None:
         if path_or_url.startswith(("https://", "http://")):
@@ -541,7 +974,13 @@ class CookidooCollectionProvider:
             full_url = f"{base_url.rstrip('/')}{rel}"
 
         try:
-            response = await client.get(full_url, params=params, headers=headers)
+            response = await client.request(
+                method.upper(),
+                full_url,
+                params=params,
+                json=json_body,
+                headers=headers,
+            )
         except httpx.HTTPError as exc:
             raise CookidooError(
                 status_code=502,
@@ -560,6 +999,8 @@ class CookidooCollectionProvider:
                 status_code=response.status_code,
                 detail=f"Cookidoo API returnerte en feil ({response.status_code}). Vennligst prøv igjen senere.",
             )
+        if response.status_code == 204 or not response.content:
+            return {}
         try:
             return response.json()
         except ValueError:
@@ -570,6 +1011,26 @@ class CookidooCollectionProvider:
                 status_code=502,
                 detail="Cookidoo returnerte et ugyldig svar (forventet JSON).",
             ) from None
+
+    async def _get_json(
+        self,
+        client: httpx.AsyncClient,
+        path_or_url: str,
+        headers: dict[str, str],
+        base_url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        allow_not_found: bool = False,
+    ) -> dict[str, Any] | list[Any] | None:
+        return await self._request_json(
+            client,
+            "GET",
+            path_or_url,
+            headers,
+            base_url,
+            params=params,
+            allow_not_found=allow_not_found,
+        )
 
     async def _fetch_from_api(
         self,
@@ -785,6 +1246,7 @@ class CookidooCollectionProvider:
                 recipe_type=recipe_type,
                 prep_time_minutes=prep_time_minutes,
                 prep_category=prep_category,
+                guided_steps=list(entry.guided_steps or []),
             )
 
         headers, base_url, country, locale = self._build_request_context()
@@ -827,6 +1289,7 @@ class CookidooCollectionProvider:
                                 else entry.prep_time_minutes
                             ),
                             prep_category=detail.prep_category or entry.prep_category,
+                            guided_steps=list(detail.guided_steps or entry.guided_steps or []),
                         )
             raise ValueError("Fant ikke den egne Cookidoo-oppskriften for import")
 
@@ -866,6 +1329,329 @@ class CookidooCollectionProvider:
                 else entry.prep_time_minutes
             ),
             prep_category=detail.prep_category or entry.prep_category,
+            guided_steps=list(detail.guided_steps or entry.guided_steps or []),
+        )
+
+    @staticmethod
+    def _parse_calendar_date(raw_val: Any) -> date | None:
+        if isinstance(raw_val, date) and not isinstance(raw_val, datetime):
+            return raw_val
+        if isinstance(raw_val, datetime):
+            return raw_val.date()
+        if isinstance(raw_val, str):
+            text_val = raw_val.strip()
+            if len(text_val) >= 10:
+                try:
+                    return date.fromisoformat(text_val[:10])
+                except ValueError:
+                    return None
+        return None
+
+    def _normalize_my_week_item(
+        self,
+        item: dict[str, Any],
+        *,
+        fallback_date: date | None,
+        country: str,
+        locale: str,
+    ) -> CookidooMyWeekEntry | None:
+        item_date = (
+            self._parse_calendar_date(
+                item.get("date")
+                or item.get("day")
+                or item.get("dayKey")
+                or item.get("scheduledDate")
+            )
+            or fallback_date
+        )
+        if item_date is None:
+            return None
+
+        nested_recipe = item.get("recipe") if isinstance(item.get("recipe"), dict) else None
+        raw_recipe = dict(nested_recipe) if nested_recipe is not None else dict(item)
+        if nested_recipe is not None:
+            external_entry_id_raw = (
+                item.get("entryId")
+                or item.get("calendarEntryId")
+                or item.get("mealId")
+                or item.get("id")
+            )
+            cookidoo_recipe_id = str(
+                raw_recipe.get("id")
+                or raw_recipe.get("recipeId")
+                or raw_recipe.get("recipe_id")
+                or item.get("recipeId")
+                or item.get("recipe_id")
+                or ""
+            ).strip()
+        else:
+            explicit_recipe_id = (
+                item.get("recipeId") or item.get("recipe_id") or item.get("external_recipe_id")
+            )
+            cookidoo_recipe_id = str(explicit_recipe_id or item.get("id") or "").strip()
+            explicit_entry_id = (
+                item.get("entryId") or item.get("calendarEntryId") or item.get("mealId")
+            )
+            if not explicit_entry_id and explicit_recipe_id and item.get("id"):
+                if str(item["id"]).strip() != cookidoo_recipe_id:
+                    explicit_entry_id = item["id"]
+            external_entry_id_raw = explicit_entry_id
+
+        if not cookidoo_recipe_id:
+            return None
+        raw_recipe["id"] = cookidoo_recipe_id
+        if item.get("servings") is not None and raw_recipe.get("servings") is None:
+            raw_recipe["servings"] = item["servings"]
+        if (item.get("url") or item.get("sourceUrl") or item.get("source_url")) and not (
+            raw_recipe.get("url") or raw_recipe.get("sourceUrl") or raw_recipe.get("source_url")
+        ):
+            raw_recipe["url"] = item.get("url") or item.get("sourceUrl") or item.get("source_url")
+
+        normalized = normalize_cookidoo_recipe(
+            raw_recipe, provider=self.id, country=country, locale=locale
+        )
+        if not normalized.source_url:
+            return None
+
+        external_entry_id = (
+            str(external_entry_id_raw).strip() if external_entry_id_raw is not None else None
+        )
+        if external_entry_id == "":
+            external_entry_id = None
+
+        raw_label = item.get("label") or item.get("mealType") or item.get("slot")
+        label = (
+            str(raw_label).strip()[:80]
+            if isinstance(raw_label, str) and raw_label.strip()
+            else None
+        )
+
+        return CookidooMyWeekEntry(
+            external_entry_id=external_entry_id,
+            cookidoo_recipe_id=cookidoo_recipe_id,
+            title=normalized.title,
+            date=item_date,
+            servings=normalized.servings or 4,
+            source_url=normalized.source_url,
+            image_url=normalized.image_url,
+            label=label,
+            ingredients=normalized.ingredients,
+            instructions=normalized.instructions,
+            guided_steps=normalized.guided_steps,
+        )
+
+    def _extract_my_week_entries(
+        self,
+        payload: dict[str, Any] | list[Any],
+        *,
+        start: date,
+        end: date,
+        country: str,
+        locale: str,
+    ) -> list[CookidooMyWeekEntry]:
+        entries: list[CookidooMyWeekEntry] = []
+
+        def _consume_day(day_obj: dict[str, Any]) -> None:
+            day_date = self._parse_calendar_date(
+                day_obj.get("date")
+                or day_obj.get("id")
+                or day_obj.get("dayKey")
+                or day_obj.get("day")
+            )
+            day_items = (
+                day_obj.get("recipes")
+                or day_obj.get("entries")
+                or day_obj.get("meals")
+                or day_obj.get("items")
+                or []
+            )
+            if not isinstance(day_items, list):
+                return
+            for item in day_items:
+                if not isinstance(item, dict):
+                    continue
+                entry = self._normalize_my_week_item(
+                    item, fallback_date=day_date, country=country, locale=locale
+                )
+                if entry is not None and start <= entry.date <= end:
+                    entries.append(entry)
+
+        if isinstance(payload, list):
+            for item in payload:
+                if isinstance(item, dict):
+                    entry = self._normalize_my_week_item(
+                        item, fallback_date=None, country=country, locale=locale
+                    )
+                    if entry is not None and start <= entry.date <= end:
+                        entries.append(entry)
+            return entries
+
+        if not isinstance(payload, dict):
+            return entries
+
+        if isinstance(payload.get("weeks"), list):
+            for week in payload["weeks"]:
+                if isinstance(week, dict) and isinstance(week.get("days"), list):
+                    for day_obj in week["days"]:
+                        if isinstance(day_obj, dict):
+                            _consume_day(day_obj)
+
+        if isinstance(payload.get("days"), list):
+            for day_obj in payload["days"]:
+                if isinstance(day_obj, dict):
+                    _consume_day(day_obj)
+
+        for list_key in ("entries", "items", "meals", "recipes"):
+            raw_items = payload.get(list_key)
+            if isinstance(raw_items, list):
+                for item in raw_items:
+                    if isinstance(item, dict):
+                        entry = self._normalize_my_week_item(
+                            item, fallback_date=None, country=country, locale=locale
+                        )
+                        if entry is not None and start <= entry.date <= end:
+                            entries.append(entry)
+
+        return entries
+
+    async def get_my_week_plan(
+        self, start: date, end: date | None = None
+    ) -> list[CookidooMyWeekEntry]:
+        """Read scheduled recipes from Cookidoo My Week for [start, end]."""
+        effective_end = end or (start + timedelta(days=6))
+        if effective_end < start:
+            raise ValueError("Sluttdato må være på eller etter startdato.")
+
+        headers, base_url, country, locale = self._build_request_context()
+        params = {
+            "startDate": start.isoformat(),
+            "endDate": effective_end.isoformat(),
+            "date": start.isoformat(),
+        }
+        candidate_paths = [
+            "/planner/en/api/my-week",
+            "/planner/en/api/calendar",
+            f"/planner/en/api/v2/calendar/week/{start.isoformat()}",
+        ]
+        data = await self._fetch_from_api(candidate_paths, params, headers, base_url)
+        return self._extract_my_week_entries(
+            data, start=start, end=effective_end, country=country, locale=locale
+        )
+
+    async def add_to_my_week(
+        self,
+        recipe_id: str,
+        planned_date: date,
+        *,
+        servings: int | None = None,
+        label: str | None = None,
+        entry_id: str | None = None,
+        read_before_write: bool = True,
+    ) -> CookidooMyWeekEntry:
+        """Add a recipe (or explicitly update an identified entry) in Cookidoo My Week."""
+        recipe_id_clean = str(recipe_id or "").strip()
+        if not recipe_id_clean:
+            raise ValueError("Cookidoo oppskrifts-ID mangler.")
+
+        headers, base_url, country, locale = self._build_request_context()
+        domain = _cookidoo_domain_for_country(country)
+
+        if read_before_write:
+            existing = await self.get_my_week_plan(planned_date, planned_date)
+            if entry_id is not None and existing:
+                if not any(item.external_entry_id == entry_id for item in existing):
+                    raise CookidooError(
+                        status_code=409,
+                        detail="Fant ikke den valgte oppføringen i Cookidoo Min uke; forhåndsvis på nytt.",
+                    )
+
+        payload: dict[str, Any] = {
+            "recipeId": recipe_id_clean,
+            "date": planned_date.isoformat(),
+        }
+        if servings is not None:
+            payload["servings"] = servings
+        if label:
+            payload["label"] = label
+        if entry_id is not None:
+            payload["entryId"] = entry_id
+
+        if entry_id is not None:
+            method = "PUT"
+            candidate_paths = [
+                f"/planner/en/api/my-week/{entry_id}",
+                f"/planner/en/api/calendar/{entry_id}",
+            ]
+        else:
+            method = "POST"
+            candidate_paths = [
+                "/planner/en/api/my-week",
+                "/planner/en/api/calendar/recipes",
+                f"/planner/en/api/v2/calendar/day/{planned_date.isoformat()}",
+            ]
+
+        response_data: dict[str, Any] | list[Any] | None = None
+        async with httpx.AsyncClient(transport=self.transport, timeout=15.0) as client:
+            last_error: CookidooError | None = None
+            for path in candidate_paths:
+                try:
+                    response_data = await self._request_json(
+                        client,
+                        method,
+                        path,
+                        headers,
+                        base_url,
+                        json_body=payload,
+                        allow_not_found=True,
+                    )
+                except CookidooError as exc:
+                    if exc.status_code == 401:
+                        raise
+                    if exc.status_code == 502:
+                        last_error = exc
+                        continue
+                    raise
+                if response_data is not None:
+                    break
+            if response_data is None:
+                if last_error is not None:
+                    raise last_error
+                raise CookidooError(
+                    status_code=502,
+                    detail="Cookidoo Min uke-endepunktet svarte ikke.",
+                )
+
+        if isinstance(response_data, dict):
+            parsed = self._normalize_my_week_item(
+                response_data, fallback_date=planned_date, country=country, locale=locale
+            )
+            if parsed is not None:
+                if entry_id is not None and not parsed.external_entry_id:
+                    parsed = parsed.model_copy(update={"external_entry_id": entry_id})
+                return parsed
+
+        returned_entry_id = (
+            str(
+                response_data.get("entryId")
+                or response_data.get("calendarEntryId")
+                or response_data.get("id")
+                or entry_id
+                or ""
+            ).strip()
+            if isinstance(response_data, dict)
+            else entry_id
+        ) or None
+        return CookidooMyWeekEntry(
+            external_entry_id=returned_entry_id,
+            cookidoo_recipe_id=recipe_id_clean,
+            title=str(
+                (response_data.get("title") if isinstance(response_data, dict) else None)
+                or f"Cookidoo ({recipe_id_clean})"
+            ),
+            date=planned_date,
+            servings=servings or 4,
+            source_url=f"https://{domain}/recipes/recipe/{locale}/{recipe_id_clean}",
+            label=label,
         )
 
     @staticmethod
@@ -1193,6 +1979,7 @@ class CookidooRecipeService:
                 recipe_type=inferred_type,
                 prep_time_minutes=inferred_minutes,
                 prep_category=inferred_prep_category,
+                guided_steps=list(entry.guided_steps or []),
             )
             resolve_fn = getattr(self.kitchen, "resolve_recipe_identities", None)
             if callable(resolve_fn):

@@ -386,6 +386,56 @@ function renderRecipeStatsBadges(recipe) {
   });
   return wrap;
 }
+function formatGuidedStepDuration(seconds) {
+  const num = Number(seconds);
+  if (!Number.isFinite(num) || num <= 0) return "";
+  const total = Math.round(num);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const remSeconds = total % 60;
+  const parts = [];
+  if (hours > 0) parts.push(`${hours} t`);
+  if (minutes > 0) parts.push(`${minutes} min`);
+  if (remSeconds > 0 && hours === 0) parts.push(`${remSeconds} sek`);
+  return parts.join(" ") || `${total} sek`;
+}
+function guidedStepBadges(step) {
+  if (!step || typeof step !== "object") return [];
+  const badges = [];
+  const duration = formatGuidedStepDuration(step.time_seconds);
+  if (duration) badges.push({ kind: "time", text: `Tid: ${duration}` });
+  if (step.temperature) badges.push({ kind: "temp", text: `Temp: ${step.temperature}` });
+  if (step.speed) badges.push({ kind: "speed", text: `Hastighet: ${step.speed}` });
+  if (step.reverse === true || step.direction === "reverse") {
+    badges.push({ kind: "direction", text: "Retning: Revers" });
+  } else if (step.direction === "forward" || step.reverse === false) {
+    badges.push({ kind: "direction", text: "Retning: Forover" });
+  }
+  const accessoryText = [step.blade, step.accessory].filter(Boolean).join(", ");
+  if (accessoryText) badges.push({ kind: "accessory", text: `Tilbehør: ${accessoryText}` });
+  if (step.mode) badges.push({ kind: "mode", text: `Modus: ${step.mode}` });
+  return badges;
+}
+function renderInstructionStepNode(stepText, guidedStep) {
+  const badges = guidedStepBadges(guidedStep);
+  const refs = Array.isArray(guidedStep?.ingredient_references)
+    ? guidedStep.ingredient_references.filter(Boolean)
+    : [];
+  if (!badges.length && !refs.length) return el("li", stepText);
+  const item = el("li", null, "guided-step-item");
+  add(item, el("span", stepText, "guided-step-text"));
+  if (badges.length) {
+    const bar = el("div", null, "guided-step-badges");
+    badges.forEach((badge) => {
+      add(bar, el("span", badge.text, `badge guided-step-badge guided-step-${badge.kind}`));
+    });
+    add(item, bar);
+  }
+  if (refs.length) {
+    add(item, el("small", `Ingredienser: ${refs.join(", ")}`, "muted guided-step-ingredients"));
+  }
+  return item;
+}
 function day(offset) {
   const date = new Date(state.week);
   date.setDate(date.getDate() + offset);
@@ -444,6 +494,7 @@ function recipeOriginLabel(value) {
     manual: "en manuelt oppgitt oppskrift",
     ai: "en KI-oppskrift",
     oda: "en Oda-oppskrift",
+    cookidoo: "en Cookidoo-oppskrift",
   })[value] || value;
 }
 function ingredientQuantityText(item) {
@@ -1398,6 +1449,9 @@ function renderWeek(main) {
       "Oversikt over ukens måltider for husholdningen.",
       [
         button("Foreslå måltider", suggestWeek),
+        typeof openCookidooPlanSync === "function"
+          ? button("Synkroniser med Cookidoo", openCookidooPlanSync)
+          : null,
         button("Planlegg et måltid", () => mealForm(iso(state.selectedDate)), "primary"),
       ],
     ),
@@ -1706,6 +1760,226 @@ function mealForm(date = iso(state.selectedDate), recipeId, existingMeal = null)
     notify(existingMeal ? "Måltidet er oppdatert." : "Måltidet er lagt til i planen.");
   });
   add(root, form);
+}
+function openCookidooPlanSync() {
+  const root = openDialog("Synkroniser ukeplan med Cookidoo");
+  const cookidooConnected =
+    (state.integrations || []).find((item) => item.id === "cookidoo")?.status === "connected";
+  if (!cookidooConnected) {
+    add(
+      root,
+      el(
+        "p",
+        "Koble til Cookidoo under Innstillinger for å hente eller sende måltidsplaner mellom Kjøkken og Min uke.",
+        "callout",
+      ),
+      connectionSettingsButton("Åpne Cookidoo-innstillinger"),
+    );
+    return;
+  }
+
+  add(
+    root,
+    el(
+      "p",
+      "Les eksisterende oppføringer i Cookidoo Min uke og Kjøkken før du bekrefter. Nye tillegg og eksplisitte endringer vises hver for seg. Delt dato alene er aldri en konflikt.",
+      "muted",
+    ),
+  );
+
+  const controls = el("div", null, "cookidoo-sync-controls");
+  const directionField = field("Retning", "select", "cookidoo_to_kitchen");
+  [
+    ["cookidoo_to_kitchen", "Hent fra Cookidoo Min uke til Kjøkken"],
+    ["kitchen_to_cookidoo", "Send fra Kjøkken til Cookidoo Min uke"],
+  ].forEach(([val, labelText]) => {
+    const opt = el("option", labelText);
+    opt.value = val;
+    add(directionField.input, opt);
+  });
+
+  const datesWrap = el("div", null, "cookidoo-sync-dates");
+  const startField = field("Fra dato", "date", iso(day(0)));
+  const endField = field("Til dato", "date", iso(day(6)));
+  add(datesWrap, startField.wrap, endField.wrap);
+
+  const status = el("p", "Velg retning og periode, og hent en forhåndsvisning.", "muted");
+  status.setAttribute("role", "status");
+  const previewHost = el("div", null, "cookidoo-sync-preview");
+  const selectedIds = new Set();
+  const editTargets = new Map();
+  let currentPreview = null;
+
+  const previewButton = button("Hent forhåndsvisning", () => loadPreview(), "primary");
+  const confirmButton = button("Bekreft og synkroniser valgte", () => applyConfirm(), "primary");
+  confirmButton.hidden = true;
+  confirmButton.disabled = true;
+
+  function updateConfirmButton() {
+    confirmButton.hidden = !currentPreview || currentPreview.status === "applied";
+    confirmButton.disabled =
+      !currentPreview || currentPreview.status !== "ready" || selectedIds.size === 0;
+    confirmButton.textContent = `Bekreft og synkroniser valgte (${selectedIds.size})`;
+  }
+
+  function renderPreview(preview) {
+    currentPreview = window.KitchenCookidooPlanSync.normalizePreview(preview);
+    selectedIds.clear();
+    window.KitchenCookidooPlanSync.selectableIds(currentPreview).forEach((id) => selectedIds.add(id));
+    previewHost.replaceChildren();
+
+    status.textContent = currentPreview.summary;
+
+    const renderSection = (heading, items, isEdit) => {
+      if (!items.length) return;
+      const section = el("section", null, "cookidoo-sync-section");
+      add(section, el("h3", `${heading} (${items.length})`));
+      items.forEach((item) => {
+        const card = el("article", null, "cookidoo-sync-card");
+        const choice = el("label", null, "collection-choice");
+        const box = el("input");
+        box.type = "checkbox";
+        box.checked = selectedIds.has(item.item_id);
+        box.disabled = item.status !== "pending";
+        box.setAttribute("aria-label", `Velg ${item.title} (${item.date})`);
+        box.addEventListener("change", () => {
+          if (box.checked) selectedIds.add(item.item_id);
+          else selectedIds.delete(item.item_id);
+          updateConfirmButton();
+        });
+        add(choice, box, el("strong", `${item.date} · ${item.title} (${formatServings(item.servings)})`));
+        add(card, choice);
+        if (isEdit) {
+          add(card, el("p", window.KitchenCookidooPlanSync.formatEditSummary(item), "muted"));
+        }
+        const note = window.KitchenCookidooPlanSync.itemContextNote(item);
+        if (note) add(card, el("p", note, "muted"));
+
+        const editSourceKey =
+          currentPreview.direction === "cookidoo_to_kitchen"
+            ? item.external_entry_id || `${item.cookidoo_recipe_id}@${item.date}`
+            : item.kitchen_meal_id;
+        const targetPool =
+          currentPreview.direction === "cookidoo_to_kitchen"
+            ? currentPreview.existing_kitchen_meals
+            : currentPreview.existing_my_week_entries.filter((e) => Boolean(e.external_entry_id));
+        if (currentPreview.status === "ready" && editSourceKey && targetPool.length) {
+          const targetSelect = el("select");
+          targetSelect.setAttribute("aria-label", `Oppdater eksisterende måltid for ${item.title}`);
+          const addOpt = el("option", "Legg til som nytt måltid (anbefalt)");
+          addOpt.value = "";
+          add(targetSelect, addOpt);
+          targetPool.forEach((candidate) => {
+            const cid =
+              currentPreview.direction === "cookidoo_to_kitchen"
+                ? candidate.meal_id
+                : candidate.external_entry_id;
+            const opt = el(
+              "option",
+              `Oppdater: ${candidate.date} · ${candidate.title}`,
+            );
+            opt.value = cid;
+            add(targetSelect, opt);
+          });
+          const currentTarget = isEdit
+            ? (currentPreview.direction === "cookidoo_to_kitchen"
+                ? item.kitchen_meal_id
+                : item.external_entry_id) || ""
+            : "";
+          targetSelect.value = currentTarget;
+          targetSelect.addEventListener("change", () => {
+            if (targetSelect.value) {
+              editTargets.set(
+                editSourceKey,
+                currentPreview.direction === "cookidoo_to_kitchen"
+                  ? { source_key: editSourceKey, target_meal_id: targetSelect.value }
+                  : { source_key: editSourceKey, target_external_entry_id: targetSelect.value },
+              );
+            } else {
+              editTargets.delete(editSourceKey);
+            }
+            loadPreview(true);
+          });
+          add(card, targetSelect);
+        }
+
+        if (item.source_url) {
+          const link = el("a", "Åpne i Cookidoo", "source-link");
+          link.href = item.source_url;
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+          add(card, link);
+        }
+        add(section, card);
+      });
+      add(previewHost, section);
+    };
+
+    renderSection("Nye tillegg", currentPreview.additions, false);
+    renderSection("Planlagte endringer", currentPreview.edits, true);
+
+    if (currentPreview.skipped.length) {
+      const skippedSection = el("section", null, "cookidoo-sync-section");
+      add(skippedSection, el("h3", `Utelatte oppskrifter (${currentPreview.skipped.length})`));
+      currentPreview.skipped.forEach((entry) => {
+        const card = el("div", null, "cookidoo-sync-card");
+        add(card, el("strong", `${entry.date} · ${entry.title}`), el("p", entry.reason, "muted"));
+        add(skippedSection, card);
+      });
+      add(previewHost, skippedSection);
+    }
+
+    if (!currentPreview.additions.length && !currentPreview.edits.length && !currentPreview.skipped.length) {
+      add(previewHost, el("p", "Ingen oppføringer funnet for denne perioden.", "muted"));
+    }
+    updateConfirmButton();
+  }
+
+  async function loadPreview(preserveEdits = false) {
+    if (!preserveEdits) editTargets.clear();
+    previewButton.disabled = true;
+    confirmButton.disabled = true;
+    status.textContent = "Leser Cookidoo Min uke og Kjøkken …";
+    try {
+      const req = window.KitchenCookidooPlanSync.buildPreviewRequest({
+        direction: directionField.input.value,
+        start: startField.input.value,
+        end: endField.input.value,
+        edits: [...editTargets.values()],
+      });
+      const res = await api(req.path, "POST", req.body);
+      renderPreview(res);
+    } catch (error) {
+      status.textContent = error.message;
+    } finally {
+      previewButton.disabled = false;
+    }
+  }
+
+  async function applyConfirm() {
+    if (!currentPreview) return;
+    confirmButton.disabled = true;
+    status.textContent = "Lagrer valgte endringer …";
+    try {
+      const req = window.KitchenCookidooPlanSync.buildConfirmRequest(currentPreview, [...selectedIds]);
+      const res = await api(req.path, "POST", req.body);
+      renderPreview(res);
+      const [mealsData, recipesData] = await Promise.all([
+        api("/meals" + range()),
+        api("/recipes?include_stats=true"),
+      ]);
+      state.meals = mealsData;
+      state.recipes = recipesData;
+      await refreshView();
+      notify("Synkroniseringen med Cookidoo er fullført.");
+    } catch (error) {
+      status.textContent = error.message;
+      updateConfirmButton();
+    }
+  }
+
+  add(controls, directionField.wrap, datesWrap, add(el("div", null, "actions"), previewButton, confirmButton));
+  add(root, controls, status, previewHost);
 }
 function renderRecipes(main) {
   add(
@@ -2422,6 +2696,7 @@ function recipeForm(draft = {}, source = "manual") {
       provenance: draft.provenance || null,
       photo_source: draft.photo_source || null,
       image_attribution: draft.image_attribution || null,
+      guided_steps: Array.isArray(draft.guided_steps) ? draft.guided_steps : [],
     };
     await api(
       isEditing ? "/recipes/" + encodeURIComponent(draft.id) : "/recipes",
@@ -2509,6 +2784,7 @@ function recipeForm(draft = {}, source = "manual") {
           (response) => {
             if (!response?.adapted)
               throw new Error("KI-en ga ikke et redigerbart utkast. Oppskriften din er uendret.");
+            const keepAsIndependentDraft = source === "cookidoo";
             const revisedDraft = isEditing
               ? {
                   recipe_type: draft.recipe_type ?? null,
@@ -2520,7 +2796,16 @@ function recipeForm(draft = {}, source = "manual") {
                     revisionValues.source_language ||
                     draft.source_language ||
                     null,
-                  id: draft.id,
+                  ...(keepAsIndependentDraft
+                    ? {
+                        source: "ai",
+                        provenance: {
+                          kind: "ai_adaptation",
+                          original_source: "cookidoo",
+                          source_url: draft.source_url || null,
+                        },
+                      }
+                    : { id: draft.id }),
                 }
               : {
                   ...response.adapted,
@@ -2540,7 +2825,7 @@ function recipeForm(draft = {}, source = "manual") {
               revisedDraft.ingredients = identityReview.ingredients;
               revisedDraft.identity_roundtrip_warning = identityReview.identityReviewRequired;
             }
-            recipeForm(revisedDraft, isEditing ? source : "ai");
+            recipeForm(revisedDraft, isEditing && !keepAsIndependentDraft ? source : "ai");
           },
         );
         if (!applied && revise.isConnected && $("#modal").open)
@@ -2723,10 +3008,15 @@ function viewRecipe(recipe) {
   }
   renderIngredientsList(recipe.ingredients);
 
+  const guidedMap = new Map(
+    (Array.isArray(recipe.guided_steps) ? recipe.guided_steps : []).map((s) => [s.step_index, s]),
+  );
   const steps = el("ol");
   function renderInstructionsList(items) {
     steps.replaceChildren();
-    (items || []).forEach((step) => add(steps, el("li", step)));
+    (items || []).forEach((step, idx) =>
+      add(steps, renderInstructionStepNode(step, guidedMap.get(idx))),
+    );
   }
   renderInstructionsList(recipe.instructions);
   add(body, ingredients, el("h3", "Fremgangsmåte"), steps);
@@ -3907,8 +4197,18 @@ function plannedMealView(view) {
       add(body, link);
     }
   }
+  const guidedMap = new Map(
+    (Array.isArray(recipe.guided_steps) ? recipe.guided_steps : []).map((s) => [s.step_index, s]),
+  );
   const steps = el("ol");
-  recipe.instructions.forEach((step) => add(steps, el("li", step)));
+  recipe.instructions.forEach((step, idx) =>
+    add(
+      steps,
+      typeof renderInstructionStepNode === "function"
+        ? renderInstructionStepNode(step, guidedMap.get(idx))
+        : el("li", step),
+    ),
+  );
   add(body, ingredients, el("h3", "Fremgangsmåte"), steps);
   const shareIngredients = button("Del ingrediensene", async () => {
     const text = window.KitchenPlannedCooking.formatPlannedIngredientList(

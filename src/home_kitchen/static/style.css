@@ -2444,6 +2444,53 @@ button.link {
 .product-price {
   font-weight: 700;
 }
+.guided-step-item {
+  display: grid;
+  gap: 6px;
+}
+.guided-step-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.badge.guided-step-badge {
+  background: #edf0e6;
+  color: var(--green);
+  border: 1px solid var(--line);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.badge.guided-step-direction {
+  background: #f4efe4;
+}
+.guided-step-ingredients {
+  display: block;
+}
+.cookidoo-sync-controls {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.cookidoo-sync-dates {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.cookidoo-sync-section {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+}
+.cookidoo-sync-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: var(--card);
+  display: grid;
+  gap: 4px;
+}
 @media (max-width: 650px) {
   .sidebar nav {
     grid-template-columns: repeat(4, minmax(0, 1fr));

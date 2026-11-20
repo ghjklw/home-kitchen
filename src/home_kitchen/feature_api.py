@@ -56,6 +56,12 @@ from home_kitchen.connector_auth import (
     TrumfOTPStartResponse,
     TrumfOTPVerifyRequest,
 )
+from home_kitchen.cookidoo_plan_sync import (
+    CookidooPlanSyncConfirmRequest,
+    CookidooPlanSyncPreview,
+    CookidooPlanSyncPreviewRequest,
+)
+from home_kitchen.cookidoo_recipes import CookidooMyWeekEntry
 from home_kitchen.features import KitchenFeatures
 from home_kitchen.history import HistoryEntry, HistoryEntryCreate, RetrievedEvidence
 from home_kitchen.home_assistant import (
@@ -1408,6 +1414,47 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
             raise HTTPException(exc.status_code, exc.detail) from None
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from None
+
+    @router.get("/cookidoo/my-week")
+    async def get_cookidoo_my_week(
+        start: date,
+        request: Request,
+        response: Response,
+        end: date | None = None,
+    ) -> list[CookidooMyWeekEntry]:
+        authenticated_actor(request)
+        response.headers["Cache-Control"] = "no-store"
+        return await features.cookidoo_plan_sync.provider.get_my_week_plan(start, end)
+
+    @router.post("/cookidoo/plan-sync/preview")
+    async def preview_cookidoo_plan_sync(
+        data: CookidooPlanSyncPreviewRequest,
+        request: Request,
+        response: Response,
+    ) -> CookidooPlanSyncPreview:
+        response.headers["Cache-Control"] = "no-store"
+        return await features.cookidoo_plan_sync.preview(authenticated_actor(request), data)
+
+    @router.get("/cookidoo/plan-sync/{preview_id}")
+    def get_cookidoo_plan_sync_preview(
+        preview_id: UUID,
+        request: Request,
+        response: Response,
+    ) -> CookidooPlanSyncPreview:
+        response.headers["Cache-Control"] = "no-store"
+        return features.cookidoo_plan_sync.get_preview(authenticated_actor(request), preview_id)
+
+    @router.post("/cookidoo/plan-sync/{preview_id}/confirm")
+    async def confirm_cookidoo_plan_sync(
+        preview_id: UUID,
+        data: CookidooPlanSyncConfirmRequest,
+        request: Request,
+        response: Response,
+    ) -> CookidooPlanSyncPreview:
+        response.headers["Cache-Control"] = "no-store"
+        return await features.cookidoo_plan_sync.confirm(
+            authenticated_actor(request), preview_id, data
+        )
 
     @router.delete("/basket/selections/{need_id}/{product_id}")
     def remove_selection(need_id: UUID, product_id: str, start: date, end: date) -> BasketReview:

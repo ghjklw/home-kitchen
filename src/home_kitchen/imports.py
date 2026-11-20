@@ -7,11 +7,16 @@ from html.parser import HTMLParser
 from urllib.parse import urlparse
 
 import httpx
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl
 from recipe_scrapers import scrape_html
 from starlette.concurrency import run_in_threadpool
 
-from home_kitchen.models import PrepCategory, RecipeType, infer_recipe_metadata
+from home_kitchen.models import (
+    GuidedCookingStep,
+    PrepCategory,
+    RecipeType,
+    infer_recipe_metadata,
+)
 
 ODA_HOSTS = {"oda.com", "www.oda.com"}
 ALLOWED_HOSTS = {"matprat.no", "www.matprat.no", "marmiton.org", "www.marmiton.org", *ODA_HOSTS}
@@ -36,6 +41,7 @@ class ImportedDraft(BaseModel):
     recipe_type: RecipeType | None = None
     prep_time_minutes: int | None = None
     prep_category: PrepCategory | None = None
+    guided_steps: list[GuidedCookingStep] = Field(default_factory=list)
 
 
 def validate_url(url: str) -> None:

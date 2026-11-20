@@ -649,12 +649,153 @@
     });
 
     const initialLoad = loadProducts("");
+    const curatedHost = document.createElement("div");
+    curatedHost.className = "curated-catalogue-host";
+    renderCuratedFoodsSection(curatedHost, { api, notify });
+    wrapper.append(curatedHost);
     container.append(wrapper);
 
     return {
       reload: () => loadProducts(searchInput.value),
       ready: initialLoad,
     };
+  }
+
+  function renderCuratedFoodsSection(container, { api, notify }) {
+    const details = document.createElement("details");
+    details.className = "panel curated-foods-panel";
+
+    const summary = document.createElement("summary");
+    summary.textContent = "Matvaretabellen – referansekatalog";
+    details.append(summary);
+
+    const body = document.createElement("div");
+    body.className = "stack curated-foods-body";
+
+    const note = document.createElement("p");
+    note.className = "muted";
+    note.textContent =
+      "Referansedata fra Matvaretabellen 2026. Visning eller kobling her oppretter ikke lagerbeholdning eller kjøpshistorikk.";
+    body.append(note);
+
+    const searchInput = document.createElement("input");
+    searchInput.type = "search";
+    searchInput.placeholder = "Søk i Matvaretabellen …";
+    searchInput.setAttribute("aria-label", "Søk i Matvaretabellen");
+    body.append(searchInput);
+
+    const listEl = document.createElement("div");
+    listEl.className = "stack curated-foods-list";
+    body.append(listEl);
+
+    let loadedOnce = false;
+    async function loadFoods(q) {
+      try {
+        const params = new URLSearchParams({ q: (q || "").trim(), limit: "37" });
+        const foods = await api(`/catalogue/foods?${params.toString()}`);
+        listEl.replaceChildren();
+        if (!Array.isArray(foods) || foods.length === 0) {
+          const empty = document.createElement("p");
+          empty.className = "muted";
+          empty.textContent = "Ingen matvarer funnet i Matvaretabellen.";
+          listEl.append(empty);
+          return;
+        }
+        foods.forEach((food) => {
+          const card = document.createElement("article");
+          card.className = "curated-food-card";
+          const title = document.createElement("strong");
+          title.textContent = food.display_name || food.source_name;
+          card.append(title);
+
+          const meta = document.createElement("p");
+          meta.className = "muted";
+          const parts = [
+            food.source_name && food.source_name !== food.display_name
+              ? `Kilde: ${food.source_name}`
+              : null,
+            `ID: ${food.source_item_id}`,
+            food.category,
+            food.default_unit ? `Standard enhet: ${food.default_unit}` : null,
+          ].filter(Boolean);
+          meta.textContent = parts.join(" · ");
+          card.append(meta);
+
+          const optionsHost = document.createElement("div");
+          optionsHost.className = "stack curated-food-options";
+
+          const loadOptsBtn = document.createElement("button");
+          loadOptsBtn.type = "button";
+          loadOptsBtn.className = "quiet small";
+          loadOptsBtn.textContent = "Vis produktkoblinger";
+          loadOptsBtn.addEventListener("click", async () => {
+            loadOptsBtn.disabled = true;
+            try {
+              const opts = await api(`/catalogue/foods/${encodeURIComponent(food.id)}/products`);
+              optionsHost.replaceChildren();
+              if (!Array.isArray(opts) || opts.length === 0) {
+                const none = document.createElement("p");
+                none.className = "muted";
+                none.textContent = "Ingen koblede butikkprodukter ennå.";
+                optionsHost.append(none);
+              } else {
+                const ul = document.createElement("ul");
+                ul.className = "stack";
+                opts.forEach((opt) => {
+                  const li = document.createElement("li");
+                  const label = document.createElement("span");
+                  label.textContent = `${opt.snapshot?.name || opt.product_id} (${opt.provider})${opt.preferred ? " ★ Foretrukket" : ""}`;
+                  const toggleBtn = document.createElement("button");
+                  toggleBtn.type = "button";
+                  toggleBtn.className = "quiet small";
+                  toggleBtn.textContent = opt.preferred ? "Fjern foretrukket" : "Velg som foretrukket";
+                  toggleBtn.addEventListener("click", async () => {
+                    await api(
+                      `/catalogue/products/${encodeURIComponent(opt.id)}/preferred`,
+                      opt.preferred ? "DELETE" : "PUT",
+                    );
+                    if (notify) notify("Produktpreferanse oppdatert.");
+                    loadOptsBtn.click();
+                  });
+                  li.append(label, " ", toggleBtn);
+                  ul.append(li);
+                });
+                optionsHost.append(ul);
+              }
+            } catch (err) {
+              if (notify) notify(err.message || "Kunne ikke hente produktkoblinger.");
+            } finally {
+              loadOptsBtn.disabled = false;
+            }
+          });
+
+          card.append(loadOptsBtn, optionsHost);
+          listEl.append(card);
+        });
+      } catch (err) {
+        listEl.replaceChildren();
+        const errP = document.createElement("p");
+        errP.className = "callout error";
+        errP.textContent = `Kunne ikke hente Matvaretabellen: ${err.message || "Ukjent feil"}`;
+        listEl.append(errP);
+      }
+    }
+
+    details.addEventListener("toggle", () => {
+      if (details.open && !loadedOnce) {
+        loadedOnce = true;
+        loadFoods(searchInput.value);
+      }
+    });
+    let timer = null;
+    searchInput.addEventListener("input", (e) => {
+      clearTimeout(timer);
+      timer = setTimeout(() => loadFoods(e.target.value), 200);
+    });
+
+    details.append(body);
+    container.append(details);
+    return { loadFoods, details };
   }
 
   root.KitchenProductOverviewView = {
@@ -669,6 +810,7 @@
     buildPreferencesPayload,
     renderProductCard,
     renderProductOverview,
+    renderCuratedFoodsSection,
   };
 
   if (typeof module !== "undefined" && module.exports) {

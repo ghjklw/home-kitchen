@@ -23,7 +23,9 @@ const state = {
   basketMatchBusy: {},
   basketMatchErrors: {},
   basketMatchObservedAt: {},
+  basketMatchQueries: {},
   basketMatchJobs: {},
+  basketMatchLatestJobId: null,
   basketBatchReviewJobId: null,
   basketBatchChoices: {},
   basketBatchSaving: false,
@@ -36,6 +38,7 @@ const state = {
   basketMatchGlobalRefreshing: false,
   basketMatchConnected: null,
   basketMatchSkippedNeedCount: 0,
+  basketAvailabilityReport: null,
   odaManualSearchOpen: {},
   cartProposalLoading: false,
   cartConfirming: false,
@@ -918,7 +921,9 @@ function resetBasketMatching() {
   state.basketMatchBusy = {};
   state.basketMatchErrors = {};
   state.basketMatchObservedAt = {};
+  state.basketMatchQueries = {};
   state.basketMatchJobs = {};
+  state.basketMatchLatestJobId = null;
   state.basketBatchReviewJobId = null;
   state.basketBatchChoices = {};
   state.basketBatchSaving = false;
@@ -929,6 +934,7 @@ function resetBasketMatching() {
   state.basketMatchGlobalError = "";
   state.basketMatchGlobalRefreshing = false;
   state.basketMatchSkippedNeedCount = 0;
+  state.basketAvailabilityReport = null;
 }
 function currentBasketMatchDates() {
   return { start: iso(day(0)), end: iso(day(6)) };
@@ -980,14 +986,24 @@ function ensureBasketMatches() {
 function applyBasketMatchSnapshot(job, record) {
   if (!isCurrentBasketMatchRecord(record)) return;
   state.basketMatchSkippedNeedCount = job.skipped_need_count || 0;
+  const allNeeds = currentBasketMatchNeeds();
+  if (
+    record.page === 1 &&
+    record.needIds.length === allNeeds.length &&
+    allNeeds.length > 0 &&
+    (job.job_id || record.jobId)
+  ) {
+    state.basketMatchLatestJobId = job.job_id || record.jobId;
+  }
   if (
     job.status === "complete" &&
     record.page === 1 &&
-    record.needIds.length === currentBasketMatchNeeds().length &&
+    (record.needIds.length === allNeeds.length ||
+      (job.job_id || record.jobId) === state.basketBatchReviewJobId) &&
     record.needIds.every(
       (id) => record.needVersions[id] === state.basketMatchNeedVersions[id],
     ) &&
-    currentBasketMatchNeeds().length > 0
+    allNeeds.length > 0
   ) {
     state.basketBatchReviewJobId = job.job_id || record.jobId;
     state.basketBatchNeedsRefresh = false;
@@ -1006,10 +1022,18 @@ function applyBasketMatchSnapshot(job, record) {
   (job.needs || []).forEach((need) => {
     const id = String(need.need_id);
     if (record.needVersions[id] !== state.basketMatchNeedVersions[id]) return;
-    if (job.status === "complete" && ["matched", "no_results"].includes(need.status) &&
-        typeof job.observed_at === "string" && !Number.isNaN(new Date(job.observed_at).valueOf())) {
+    if (need.search_query && state.basketMatchQueries && !state.basketMatchQueries[id]) {
+      state.basketMatchQueries[id] = need.search_query;
+    }
+    const observed = need.observed_at || job.observed_at;
+    if (
+      (job.status === "complete" || Boolean(need.observed_at)) &&
+      ["matched", "no_results"].includes(need.status) &&
+      typeof observed === "string" &&
+      !Number.isNaN(new Date(observed).valueOf())
+    ) {
       state.basketMatchObservedAt[id] ||= {};
-      state.basketMatchObservedAt[id][need.page || 1] = job.observed_at;
+      state.basketMatchObservedAt[id][need.page || 1] = observed;
     }
     const terminal = !["pending", "searching"].includes(need.status);
     if (terminal) {
@@ -1021,7 +1045,6 @@ function applyBasketMatchSnapshot(job, record) {
     }
   });
   if (job.status === "failed" && job.detail) {
-    const allNeeds = currentBasketMatchNeeds();
     if (record.needIds.length === allNeeds.length)
       state.basketMatchGlobalError = job.detail;
   }
@@ -1065,6 +1088,9 @@ async function pollBasketMatchJob(record, version) {
     if (["queued", "running"].includes(job.status)) scheduleBasketMatchPoll(record);
     else delete state.basketMatchJobs[record.key];
     render();
+    if ($("#modal")?.open && $("#modal")?.dataset?.kind === "basket-batch-review") {
+      openBasketBatchReview();
+    }
   } catch (error) {
     if (
       version !== record.pollVersion ||
@@ -1081,6 +1107,134 @@ async function pollBasketMatchJob(record, version) {
       state.basketMatchGlobalError = error.message;
     delete state.basketMatchJobs[record.key];
     render();
+    if ($("#modal")?.open && $("#modal")?.dataset?.kind === "basket-batch-review") {
+      openBasketBatchReview();
+    }
+  }
+}
+async function retryBasketMatchNeed(
+  needId,
+  query,
+  { page = 1, forceRefresh = true, inModal = false } = {},
+) {
+  const id = String(needId);
+  const needs = currentBasketMatchNeeds();
+  const need = needs.find((item) => String(item.id) === id);
+  if (!state.oda?.connected || !need) return;
+  const trimmedQuery = String(query ?? "").trim();
+  if (!trimmedQuery) {
+    state.basketMatchErrors[id] = "Skriv inn et søkeord før du søker på nytt.";
+    render();
+    if (inModal && $("#modal")?.open && $("#modal")?.dataset?.kind === "basket-batch-review") {
+      openBasketBatchReview();
+    }
+    return;
+  }
+  state.basketMatchQueries ||= {};
+  state.basketMatchQueries[id] = trimmedQuery;
+  const currentResult = state.basketMatchPages[id]?.[1] || state.basketMatchPages[id]?.[page];
+  const jobId =
+    state.basketBatchReviewJobId ||
+    state.basketMatchLatestJobId ||
+    currentResult?.match_job_id ||
+    null;
+  const { start, end } = currentBasketMatchDates();
+  const planEpoch = state.basketMatchPlanEpoch;
+  const planKey = state.basketMatchPlanKey;
+  const nextVersion = (state.basketMatchNeedVersions[id] || 0) + 1;
+  state.basketMatchNeedVersions[id] = nextVersion;
+  state.basketMatchBusy[id] = { page, query: trimmedQuery };
+  delete state.basketMatchErrors[id];
+  if (inModal && state.basketBatchChoices?.[id]) {
+    delete state.basketBatchChoices[id];
+  }
+  render();
+  if (inModal && $("#modal")?.open && $("#modal")?.dataset?.kind === "basket-batch-review") {
+    openBasketBatchReview();
+  }
+  if (!jobId) {
+    await startBasketMatchJob({
+      needIds: [id],
+      page,
+      forceRefresh,
+      queryOverrides: { [id]: trimmedQuery },
+    });
+    return;
+  }
+  try {
+    const job = await api(
+      "/basket/match-jobs/" +
+        encodeURIComponent(jobId) +
+        "/needs/" +
+        encodeURIComponent(id) +
+        "/retry",
+      "POST",
+      {
+        query: trimmedQuery,
+        page,
+        size: 5,
+        force_refresh: forceRefresh,
+      },
+    );
+    if (
+      planEpoch !== state.basketMatchPlanEpoch ||
+      planKey !== state.basketMatchPlanKey ||
+      state.basketMatchNeedVersions[id] !== nextVersion
+    ) {
+      return;
+    }
+    const existingRecord = state.basketMatchJobs[job.job_id];
+    const record = existingRecord || {
+      key: job.job_id,
+      jobId: job.job_id,
+      planEpoch,
+      planKey,
+      start,
+      end,
+      needIds: [id],
+      needVersions: { [id]: nextVersion },
+      page,
+      status: job.status,
+      pollVersion: 0,
+      timer: null,
+    };
+    record.status = job.status;
+    record.needVersions[id] = nextVersion;
+    if (!record.needIds.includes(id)) record.needIds.push(id);
+    state.basketMatchJobs[record.key] = record;
+    applyBasketMatchSnapshot(job, record);
+    if (["queued", "running"].includes(job.status)) scheduleBasketMatchPoll(record);
+    else delete state.basketMatchJobs[record.key];
+  } catch (error) {
+    if (
+      planEpoch !== state.basketMatchPlanEpoch ||
+      planKey !== state.basketMatchPlanKey ||
+      state.basketMatchNeedVersions[id] !== nextVersion
+    ) {
+      return;
+    }
+    if (error.status === 404) {
+      await startBasketMatchJob({
+        needIds: [id],
+        page,
+        forceRefresh,
+        queryOverrides: { [id]: trimmedQuery },
+      });
+      return;
+    }
+    delete state.basketMatchBusy[id];
+    state.basketMatchErrors[id] = error.message;
+  } finally {
+    if (
+      planEpoch === state.basketMatchPlanEpoch &&
+      planKey === state.basketMatchPlanKey &&
+      state.basketMatchNeedVersions[id] === nextVersion
+    ) {
+      render();
+      if ($("#modal")?.open && $("#modal")?.dataset?.kind === "basket-batch-review") {
+        openBasketBatchReview();
+      }
+    }
   }
 }
 async function startBasketMatchJob({
@@ -1089,6 +1243,7 @@ async function startBasketMatchJob({
   forceRefresh = false,
   initial = false,
   renderAfter = true,
+  queryOverrides = null,
 } = {}) {
   const { start, end } = currentBasketMatchDates();
   const needs = currentBasketMatchNeeds();
@@ -1141,6 +1296,9 @@ async function startBasketMatchJob({
       size: 5,
       force_refresh: forceRefresh,
       ...(needIds ? { need_ids: targetIds } : {}),
+      ...(queryOverrides && Object.keys(queryOverrides).length
+        ? { query_overrides: queryOverrides }
+        : {}),
     };
     const job = await api("/basket/match-jobs", "POST", request);
     if (!isCurrentBasketMatchRecord(record)) {
@@ -4383,6 +4541,22 @@ function basketBatchSkipReason(need, result) {
 }
 function openBasketBatchReview(targetNeedId = null) {
   clearStaleBasketBatchIdentityConfirmations();
+  const previousModal = $("#modal");
+  const previousContent = previousModal?.open ? $("#modal-content") : null;
+  const activeElement = document.activeElement;
+  const focusKey =
+    previousModal?.open &&
+    previousModal?.dataset?.kind === "basket-batch-review" &&
+    previousContent?.contains?.(activeElement)
+      ? activeElement?.dataset?.focusKey
+      : null;
+  let selectionRange = null;
+  if (focusKey) {
+    try {
+      if (typeof activeElement.selectionStart === "number")
+        selectionRange = [activeElement.selectionStart, activeElement.selectionEnd];
+    } catch {}
+  }
   const root = openDialog("Se over produktforslag");
   $("#modal").dataset.kind = "basket-batch-review";
   const choices = Object.values(state.basketBatchChoices);
@@ -4409,20 +4583,66 @@ function openBasketBatchReview(targetNeedId = null) {
   const list = el("div", null, "basket-batch-needs");
   let targetSection = null;
   needs.forEach((need) => {
-    const result = state.basketMatchPages[String(need.id)]?.[1];
+    const id = String(need.id);
+    const result = state.basketMatchPages[id]?.[1];
+    const busy = state.basketMatchBusy?.[id];
+    const needError = state.basketMatchErrors?.[id];
     const entry = (state.basket?.needs || []).find(
-      (value) => String(value.need?.id) === String(need.id),
+      (value) => String(value.need?.id) === id,
     );
     const saved = entry?.selections || [];
-    const staged = state.basketBatchChoices[String(need.id)];
+    const staged = state.basketBatchChoices[id];
     const section = add(
       el("section", null, "basket-batch-need"),
       el("h3", need.name),
       el("p", formatUiNeedQuantity(need) + " å dekke", "muted"),
     );
-    section.dataset.needId = String(need.id);
-    if (targetNeedId && String(need.id) === String(targetNeedId)) {
+    section.dataset.needId = id;
+    if (targetNeedId && id === String(targetNeedId)) {
       targetSection = section;
+    }
+    const currentQuery = state.basketMatchQueries?.[id] ?? result?.search_query ?? need.name;
+    const refineForm = el("form", null, "basket-match-refine");
+    const refineInput = el("input", null, "basket-match-refine-input");
+    refineInput.type = "search";
+    refineInput.value = currentQuery;
+    refineInput.maxLength = 200;
+    refineInput.placeholder = "Tilpass søkeord hos Oda …";
+    refineInput.setAttribute("aria-label", "Tilpass søkeord for " + need.name);
+    refineInput.dataset ||= {};
+    refineInput.dataset.focusKey = "basket-batch-refine:" + id;
+    refineInput.disabled = Boolean(busy) || state.basketBatchSaving || !state.oda?.connected;
+    refineInput.addEventListener?.("input", () => {
+      state.basketMatchQueries ||= {};
+      state.basketMatchQueries[id] = refineInput.value;
+    });
+    const runRefine = () => {
+      if (typeof retryBasketMatchNeed === "function") {
+        void retryBasketMatchNeed(id, refineInput.value, { page: 1, inModal: true });
+      } else {
+        void startBasketMatchJob({ needIds: [id], forceRefresh: true, page: 1 });
+      }
+    };
+    const refineButton = button(
+      busy ? "Søker …" : "Søk på nytt",
+      runRefine,
+      "quiet small",
+    );
+    refineButton.disabled = Boolean(busy) || state.basketBatchSaving || !state.oda?.connected;
+    refineForm.addEventListener?.("submit", (event) => {
+      event.preventDefault();
+      runRefine();
+    });
+    add(refineForm, refineInput, refineButton);
+    add(section, refineForm);
+    if (busy) {
+      add(section, el("p", "Søker hos Oda …", "muted"));
+    } else if (needError) {
+      const errorNode = el("p", needError, "form-error");
+      errorNode.setAttribute("role", "alert");
+      add(section, errorNode);
+    } else if (result?.search_query && result.search_query !== need.name) {
+      add(section, el("p", "Søkt med: «" + result.search_query + "»", "muted"));
     }
     if (saved.length) {
       const current = el("details", null, "basket-batch-existing");
@@ -4590,6 +4810,17 @@ function openBasketBatchReview(targetNeedId = null) {
   );
   apply.disabled = !activeChoices.length || state.basketBatchSaving || state.basketBatchNeedsRefresh || state.basketBatchNeedsCorrection;
   add(root, apply);
+  if (!targetSection && focusKey && typeof root.querySelectorAll === "function") {
+    const replacement = [...root.querySelectorAll("[data-focus-key]")].find(
+      (node) => node.dataset.focusKey === focusKey,
+    );
+    replacement?.focus?.({ preventScroll: true });
+    if (replacement && selectionRange) {
+      try {
+        replacement.setSelectionRange?.(...selectionRange);
+      } catch {}
+    }
+  }
 }
 function renderBasketBatchReview(main) {
   clearStaleBasketBatchIdentityConfirmations();
@@ -5708,7 +5939,8 @@ function odaCartProposalRequest(basket) {
       }
       current.quantity += quantity;
       byProduct.set(key, current);
-      if (need.name) queries.add(need.name);
+      const query = product.name || need.name;
+      if (query) queries.add(query);
     });
   });
   const additions = [...byProduct.values()];
@@ -6058,23 +6290,227 @@ async function confirmOdaCartProposal(proposal, request) {
   }
   renderProposalOutcome(proposal, status, detail, cleanupFailed);
 }
+function collectSelectedAvailabilityItems(basket) {
+  const items = [];
+  (basket?.needs || []).forEach((entry) => {
+    const need = entry.need || {};
+    (entry.selections || []).forEach((selection) => {
+      const product = selection.product || {};
+      if (product.provider !== "oda" || !product.product_id) return;
+      const query =
+        state.basketMatchQueries?.[String(need.id)] ||
+        product.name ||
+        need.name ||
+        "";
+      items.push({
+        need_id: need.id,
+        product_id: String(product.product_id),
+        ...(query ? { query } : {}),
+      });
+    });
+  });
+  return items;
+}
+async function submitOdaCartProposal(request) {
+  const proposal = await api("/oda/cart/proposals", "POST", {
+    queries: request.queries,
+    additions: request.additions,
+  });
+  if (!proposal || typeof proposal !== "object")
+    throw new Error(
+      "Oda returnerte et uleselig forslag til handlekurven. Ingen varer ble bekreftet.",
+    );
+  renderOdaProposal(proposal, request);
+}
+function renderBasketAvailabilityReview(availability, fallbackRequest = null) {
+  const root = openDialog("Kontrollert tilgjengelighet før gjennomgang");
+  $("#modal").dataset.kind = "basket-availability-review";
+  const items = Array.isArray(availability?.items) ? availability.items : [];
+  const unavailable = items.filter((item) => item.availability_status !== "available");
+  const available = items.filter((item) => item.availability_status === "available");
+  const changedAvailable = available.filter(
+    (item) =>
+      item.price_changed ||
+      (item.previous_available !== null &&
+        item.previous_available !== undefined &&
+        item.available !== item.previous_available),
+  );
+
+  if (unavailable.length) {
+    add(
+      root,
+      el(
+        "p",
+        formatUiCount(unavailable.length) +
+          " valgte varer er utsolgt eller kunne ikke bekreftes tilgjengelig hos Oda nå. De andre gyldige varene beholdes.",
+        "callout offline",
+      ),
+    );
+    const list = el("div", null, "availability-issues-list");
+    unavailable.forEach((item) => {
+      const card = el("section", null, "basket-batch-need availability-issue-card");
+      add(
+        card,
+        el("h3", item.product_name || "Oda-produkt"),
+        el("p", "Til behov: " + (item.need_name || "Handlebehov"), "muted"),
+        el(
+          "p",
+          window.KitchenBasketMatchView.availabilityStatusLabel(item.availability_status) +
+            (item.availability_description ? " · " + item.availability_description : ""),
+          "form-error",
+        ),
+      );
+      const actions = el("div", null, "actions");
+      add(
+        actions,
+        button(
+          "Fjern fra gjennomgangen",
+          async () => {
+            try {
+              await api(
+                "/basket/selections/" +
+                  encodeURIComponent(item.need_id) +
+                  "/" +
+                  encodeURIComponent(item.product_id) +
+                  range(),
+                "DELETE",
+              );
+              state.cartProposalHandled = false;
+              const remaining = items.filter(
+                (entry) =>
+                  !(
+                    String(entry.need_id) === String(item.need_id) &&
+                    String(entry.product_id) === String(item.product_id)
+                  ),
+              );
+              state.basketAvailabilityReport = {
+                ...availability,
+                items: remaining,
+                unavailable_items: remaining.filter((entry) => entry.availability_status !== "available"),
+                changed_items: remaining.filter((entry) => entry.price_changed),
+                all_available: remaining.every((entry) => entry.availability_status === "available"),
+              };
+              if (typeof refreshView === "function") await refreshView();
+              renderBasketAvailabilityReview(state.basketAvailabilityReport, fallbackRequest);
+            } catch (error) {
+              notify(error.message, true);
+            }
+          },
+          "quiet small",
+        ),
+        button(
+          "Endre søk for varen",
+          () => {
+            $("#modal").close();
+            if (typeof openBasketBatchReview === "function") {
+              openBasketBatchReview(item.need_id);
+            }
+          },
+          "quiet small",
+        ),
+      );
+      add(card, actions);
+      list.append(card);
+    });
+    add(root, list);
+  }
+
+  if (changedAvailable.length) {
+    const changedPanel = add(
+      el("section", null, "callout"),
+      el("strong", "Pris- eller statusendring hos Oda"),
+    );
+    const ul = el("ul");
+    changedAvailable.forEach((item) => {
+      const priceText = item.price_changed
+        ? " · Pris endret fra " +
+          (item.previous_price ?? "ukjent") +
+          " til " +
+          (item.current_price ?? "ukjent") +
+          " NOK"
+        : "";
+      add(ul, el("li", (item.product_name || item.need_name) + priceText));
+    });
+    add(changedPanel, ul);
+    add(root, changedPanel);
+  }
+
+  if (available.length) {
+    add(
+      root,
+      el(
+        "p",
+        formatUiCount(available.length) +
+          " valgte varer er bekreftet tilgjengelige hos Oda og beholdes.",
+        "muted",
+      ),
+    );
+  }
+
+  const filtered = window.KitchenBasketMatchView.buildAvailableCartProposalRequest(
+    state.basket,
+    availability,
+  );
+  const effectiveRequest =
+    filtered.additions.length && !filtered.issue
+      ? filtered
+      : !unavailable.length && fallbackRequest
+        ? fallbackRequest
+        : null;
+
+  const footer = el("div", null, "actions");
+  add(footer, button("Avbryt", () => $("#modal").close(), "quiet"));
+  if (effectiveRequest && available.length) {
+    const proceed = button(
+      unavailable.length
+        ? "Fortsett til Oda-handlekurven med " + formatUiCount(available.length) + " tilgjengelige varer"
+        : "Fortsett til Oda-handlekurven",
+      async () => {
+        if (state.cartProposalLoading) return;
+        state.cartProposalLoading = true;
+        proceed.disabled = true;
+        try {
+          await submitOdaCartProposal(effectiveRequest);
+        } catch (error) {
+          notify(error.message + " Ingen varer ble bekreftet lagt i handlekurven.", true);
+        } finally {
+          state.cartProposalLoading = false;
+          if (proceed.isConnected) proceed.disabled = false;
+        }
+      },
+      "primary",
+    );
+    add(footer, proceed);
+  } else if (filtered.issue && unavailable.length) {
+    add(root, el("p", filtered.issue, "muted"));
+  }
+  add(root, footer);
+}
 async function createOdaCartProposal(request, trigger) {
   if (state.cartProposalLoading) return;
   state.cartProposalLoading = true;
   if (trigger) {
     trigger.disabled = true;
-    trigger.textContent = "Kontrollerer Oda-handlekurven …";
+    trigger.textContent = "Kontrollerer tilgjengelighet hos Oda …";
   }
   try {
-    const proposal = await api("/oda/cart/proposals", "POST", {
-      queries: request.queries,
-      additions: request.additions,
+    const { start, end } = currentBasketMatchDates();
+    const refreshItems = collectSelectedAvailabilityItems(state.basket);
+    const availability = await api("/basket/availability-refresh", "POST", {
+      start,
+      end,
+      ...(refreshItems.length ? { items: refreshItems } : {}),
     });
-    if (!proposal || typeof proposal !== "object")
-      throw new Error(
-        "Oda returnerte et uleselig forslag til handlekurven. Ingen varer ble bekreftet.",
-      );
-    renderOdaProposal(proposal, request);
+    state.basketAvailabilityReport = availability;
+    if (
+      availability &&
+      (availability.unavailable_items?.length || availability.changed_items?.length)
+    ) {
+      render();
+      renderBasketAvailabilityReview(availability, request);
+      return;
+    }
+    await submitOdaCartProposal(request);
   } catch (error) {
     notify(error.message + " Ingen varer ble bekreftet lagt i handlekurven.", true);
   } finally {
@@ -6175,11 +6611,55 @@ function renderBasketMatchNeed(need) {
       add(panel, alternatives);
     }
   }
+  const currentQuery = state.basketMatchQueries?.[id] ?? result?.search_query ?? need.name;
+  const refineForm = el("form", null, "basket-match-refine");
+  const refineInput = el("input", null, "basket-match-refine-input");
+  refineInput.type = "search";
+  refineInput.value = currentQuery;
+  refineInput.maxLength = 200;
+  refineInput.placeholder = "Tilpass søkeord hos Oda …";
+  refineInput.setAttribute("aria-label", "Tilpass søkeord for " + need.name);
+  refineInput.dataset ||= {};
+  refineInput.dataset.focusKey = "basket-match-refine:" + id;
+  refineInput.disabled = Boolean(busy) || !state.oda?.connected;
+  refineInput.addEventListener?.("input", () => {
+    state.basketMatchQueries ||= {};
+    state.basketMatchQueries[id] = refineInput.value;
+  });
+  const runRefine = () => {
+    if (typeof retryBasketMatchNeed === "function") {
+      void retryBasketMatchNeed(id, refineInput.value, { page: 1 });
+    } else {
+      void startBasketMatchJob({ needIds: [id], forceRefresh: true, page: 1 });
+    }
+  };
+  const refineButton = button(
+    busy ? "Søker …" : "Søk på nytt",
+    runRefine,
+    "quiet small",
+  );
+  refineButton.disabled = Boolean(busy) || !state.oda?.connected;
+  refineForm.addEventListener?.("submit", (event) => {
+    event.preventDefault();
+    runRefine();
+  });
+  add(refineForm, refineInput, refineButton);
+  add(panel, refineForm);
+
+  if (result?.search_query && result.search_query !== need.name && !busy) {
+    add(panel, el("p", "Søkt med: «" + result.search_query + "»", "muted"));
+  }
   const actions = el("div", null, "actions basket-match-actions");
   if (error || ["search_failed", "search_unavailable"].includes(result?.status)) {
     const retry = button(
       busy ? "Søker …" : "Prøv varetreffet på nytt",
-      () => void startBasketMatchJob({ needIds: [id], forceRefresh: true, page: 1 }),
+      () => {
+        if (typeof retryBasketMatchNeed === "function") {
+          void retryBasketMatchNeed(id, refineInput.value || need.name, { page: 1 });
+        } else {
+          void startBasketMatchJob({ needIds: [id], forceRefresh: true, page: 1 });
+        }
+      },
       "quiet small",
     );
     retry.disabled = Boolean(busy) || !state.oda?.connected;
@@ -7054,6 +7534,38 @@ function renderBasket(main) {
       if (selection.product) {
         const selected = el("div", null, "selected-product");
         add(selected, basketProduct(selection.product, selection.packages));
+        const availabilityEntry = (state.basketAvailabilityReport?.items || []).find(
+          (item) =>
+            String(item.need_id) === String(need.id) &&
+            String(item.product_id) === String(selection.product.product_id),
+        );
+        if (availabilityEntry && availabilityEntry.availability_status !== "available") {
+          const warning = el(
+            "p",
+            window.KitchenBasketMatchView.availabilityStatusLabel(
+              availabilityEntry.availability_status,
+            ) +
+              (availabilityEntry.availability_description
+                ? " · " + availabilityEntry.availability_description
+                : ""),
+            "form-error",
+          );
+          warning.setAttribute("role", "alert");
+          add(selected, warning);
+        } else if (availabilityEntry?.price_changed) {
+          add(
+            selected,
+            el(
+              "p",
+              "Oppdatert pris hos Oda: " +
+                availabilityEntry.current_price +
+                " NOK (tidligere " +
+                availabilityEntry.previous_price +
+                " NOK)",
+              "callout",
+            ),
+          );
+        }
         add(
           selected,
           button(

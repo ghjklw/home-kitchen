@@ -535,3 +535,593 @@ async def test_background_matching_invalidates_prior_matches_on_force_refresh_an
     owned_job.fingerprint = old_version_fingerprint
     new_job = await jobs.start("alice", START, END)
     assert new_job.job_id != first.job_id
+
+
+async def test_per_item_refine_and_retry_updates_only_target_need():
+    class RefineMatching:
+        def __init__(self):
+            self.calls = []
+
+        async def find_products(
+            self,
+            actor,
+            start,
+            end,
+            *,
+            page,
+            size,
+            force_refresh,
+            progress,
+            plan,
+            query_overrides=None,
+        ):
+            self.calls.append((actor, [line.id for line in plan.purchase_lines], query_overrides))
+            needs = []
+            for line in plan.purchase_lines:
+                query = (query_overrides or {}).get(line.id, line.name)
+                candidate = BasketCandidate(
+                    id=f"oda:{line.id.int}:{query}",
+                    provider="oda",
+                    product_id=f"{line.id.int}-{query}",
+                    name=f"Result for {query}",
+                    description="1 item",
+                    pack_quantity=Decimal(1),
+                    pack_unit="item",
+                    pack_metadata_status="unverified",
+                    match_query=query,
+                    match_reason="Search result",
+                    identity_status="compatible",
+                    available=True,
+                )
+                need = NeedMatchResult(
+                    need_id=line.id,
+                    name=line.name,
+                    quantity=line.to_buy_quantity,
+                    unit=line.unit,
+                    page=page,
+                    has_more=False,
+                    candidates=[candidate],
+                    status="matched",
+                    search_query=query,
+                )
+                await progress(need)
+                needs.append(need)
+            return BasketMatchResult(start=start, end=end, needs=needs)
+
+    inventory = Inventory()
+    matching = RefineMatching()
+    jobs = BasketMatchJobs(matching, inventory, {"alice": 1}.get)
+    try:
+        initial = await jobs.start("alice", START, END)
+        settled_initial = await settled(jobs, "alice", initial.job_id)
+        assert settled_initial.status == "complete"
+        assert settled_initial.needs[0].search_query == "Need 1"
+        assert settled_initial.needs[1].search_query == "Need 2"
+
+        retried = await jobs.retry_need(
+            "alice",
+            initial.job_id,
+            UUID(int=2),
+            query="  Tine   helmelk  ",
+        )
+        assert retried.job_id == initial.job_id
+        assert retried.status == "running"
+        assert retried.needs[0].status == "matched"
+        assert retried.needs[0].candidates[0].name == "Result for Need 1"
+        assert retried.needs[1].status == "searching"
+        assert retried.needs[1].search_query == "Tine helmelk"
+        assert retried.needs[1].revision == 1
+
+        final = await settled(jobs, "alice", initial.job_id)
+        assert final.status == "complete"
+        assert final.needs[0].revision == 0
+        assert final.needs[0].candidates[0].name == "Result for Need 1"
+        assert final.needs[1].revision == 1
+        assert final.needs[1].search_query == "Tine helmelk"
+        assert final.needs[1].candidates[0].name == "Result for Tine helmelk"
+    finally:
+        await jobs.close()
+
+
+async def test_stale_retry_response_cannot_overwrite_newer_revision():
+    first_release = asyncio.Event()
+    second_release = asyncio.Event()
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+
+    class OutOfOrderMatching:
+        async def find_products(
+            self,
+            actor,
+            start,
+            end,
+            *,
+            page,
+            size,
+            force_refresh,
+            progress,
+            plan,
+            query_overrides=None,
+        ):
+            line = plan.purchase_lines[0]
+            query = (query_overrides or {}).get(line.id, line.name)
+            if query == "old-query":
+                first_started.set()
+                try:
+                    await first_release.wait()
+                except asyncio.CancelledError:
+                    # Simulate a provider/adapter ignoring cancellation briefly or returning late
+                    raise
+            elif query == "new-query":
+                second_started.set()
+                await second_release.wait()
+            needs = [
+                NeedMatchResult(
+                    need_id=item.id,
+                    name=item.name,
+                    quantity=item.to_buy_quantity,
+                    unit=item.unit,
+                    page=page,
+                    has_more=False,
+                    candidates=[
+                        BasketCandidate(
+                            id=f"oda:{query}",
+                            provider="oda",
+                            product_id=query,
+                            name=f"Product {query}",
+                            description="1 item",
+                            match_query=query,
+                            match_reason="Search result",
+                            available=True,
+                        )
+                    ],
+                    status="matched",
+                    search_query=(query_overrides or {}).get(item.id, item.name),
+                )
+                for item in plan.purchase_lines
+            ]
+            return BasketMatchResult(start=start, end=end, needs=needs)
+
+    inventory = Inventory()
+    jobs = BasketMatchJobs(OutOfOrderMatching(), inventory, {"alice": 1}.get)
+    try:
+        initial = await jobs.start("alice", START, END)
+        await settled(jobs, "alice", initial.job_id)
+
+        # Start revision 1 (slow)
+        await jobs.retry_need("alice", initial.job_id, UUID(int=1), query="old-query")
+        await asyncio.wait_for(first_started.wait(), 1)
+
+        # Start revision 2 (supersedes revision 1)
+        await jobs.retry_need("alice", initial.job_id, UUID(int=1), query="new-query")
+        await asyncio.wait_for(second_started.wait(), 1)
+        second_release.set()
+        after_second = await settled(jobs, "alice", initial.job_id)
+        assert after_second.needs[0].revision == 2
+        assert after_second.needs[0].search_query == "new-query"
+        assert after_second.needs[0].candidates[0].product_id == "new-query"
+
+        # Now release old-query; even if uncancelled, revision guard keeps new-query
+        first_release.set()
+        await asyncio.sleep(0)
+        final = await jobs.get("alice", initial.job_id)
+        assert final.needs[0].revision == 2
+        assert final.needs[0].search_query == "new-query"
+        assert final.needs[0].candidates[0].product_id == "new-query"
+    finally:
+        await jobs.close()
+
+
+async def test_main_job_completion_cannot_overwrite_need_superseded_by_retry():
+    need1_done = asyncio.Event()
+    release_main = asyncio.Event()
+
+    class MainAndRetryMatching:
+        async def find_products(
+            self,
+            actor,
+            start,
+            end,
+            *,
+            page,
+            size,
+            force_refresh,
+            progress,
+            plan,
+            query_overrides=None,
+        ):
+            if len(plan.purchase_lines) == 2:
+                first_line = plan.purchase_lines[0]
+                first_result = NeedMatchResult(
+                    need_id=first_line.id,
+                    name=first_line.name,
+                    quantity=first_line.to_buy_quantity,
+                    unit=first_line.unit,
+                    page=page,
+                    has_more=False,
+                    candidates=[
+                        BasketCandidate(
+                            id="oda:initial-1",
+                            provider="oda",
+                            product_id="initial-1",
+                            name="Initial Need 1",
+                            description="1 item",
+                            match_query=first_line.name,
+                            match_reason="Initial",
+                            available=True,
+                        )
+                    ],
+                    status="matched",
+                    search_query=first_line.name,
+                )
+                await progress(first_result)
+                need1_done.set()
+                await release_main.wait()
+                second_line = plan.purchase_lines[1]
+                second_result = NeedMatchResult(
+                    need_id=second_line.id,
+                    name=second_line.name,
+                    quantity=second_line.to_buy_quantity,
+                    unit=second_line.unit,
+                    page=page,
+                    has_more=False,
+                    candidates=[],
+                    status="no_results",
+                    search_query=second_line.name,
+                )
+                return BasketMatchResult(start=start, end=end, needs=[first_result, second_result])
+            target = plan.purchase_lines[0]
+            query = (query_overrides or {}).get(target.id, target.name)
+            return BasketMatchResult(
+                start=start,
+                end=end,
+                needs=[
+                    NeedMatchResult(
+                        need_id=target.id,
+                        name=target.name,
+                        quantity=target.to_buy_quantity,
+                        unit=target.unit,
+                        page=page,
+                        has_more=False,
+                        candidates=[
+                            BasketCandidate(
+                                id="oda:refined-1",
+                                provider="oda",
+                                product_id="refined-1",
+                                name="Refined Need 1",
+                                description="1 item",
+                                match_query=query,
+                                match_reason="Refined",
+                                available=True,
+                            )
+                        ],
+                        status="matched",
+                        search_query=query,
+                    )
+                ],
+            )
+
+    jobs = BasketMatchJobs(MainAndRetryMatching(), Inventory(), {"alice": 1}.get)
+    try:
+        job = await jobs.start("alice", START, END)
+        await asyncio.wait_for(need1_done.wait(), 1)
+
+        await jobs.retry_need("alice", job.job_id, UUID(int=1), query="Refined query")
+        # Wait briefly so retry finishes while main is still blocked
+        await asyncio.sleep(0.05)
+        mid = await jobs.get("alice", job.job_id)
+        assert mid.status == "running"
+        assert mid.needs[0].revision == 1
+        assert mid.needs[0].candidates[0].product_id == "refined-1"
+
+        release_main.set()
+        final = await settled(jobs, "alice", job.job_id)
+        assert final.status == "complete"
+        assert final.needs[0].revision == 1
+        assert final.needs[0].search_query == "Refined query"
+        assert final.needs[0].candidates[0].product_id == "refined-1"
+        assert final.needs[1].status == "no_results"
+    finally:
+        await jobs.close()
+
+
+async def test_slow_or_failing_item_does_not_block_other_items_in_job():
+    from home_kitchen.basket.matching import (
+        BasketMatchingService,
+        ProviderProduct,
+        ProviderSearchGroup,
+    )
+
+    need2_gate = asyncio.Event()
+
+    class MixedProvider:
+        max_queries = 1
+
+        async def search_products(self, actor_id, queries, page, size):
+            query = queries[0]
+            if query == "Need 2":
+                await need2_gate.wait()
+                raise TimeoutError("Need 2 timed out")
+            return [
+                ProviderSearchGroup(
+                    query=query,
+                    has_more=False,
+                    products=[
+                        ProviderProduct(
+                            provider="oda",
+                            product_id="101",
+                            name="Fast Need 1",
+                            description="1 item",
+                            price="19.90",
+                            available=True,
+                        )
+                    ],
+                )
+            ]
+
+    matching = BasketMatchingService(Inventory(), MixedProvider())
+    jobs = BasketMatchJobs(matching, Inventory(), {"alice": 1}.get)
+    try:
+        started = await jobs.start("alice", START, END)
+
+        async def wait_for_need1():
+            while True:
+                snap = await jobs.get("alice", started.job_id)
+                if snap.needs[0].status == "matched":
+                    return snap
+                await asyncio.sleep(0.01)
+
+        partial = await asyncio.wait_for(wait_for_need1(), 2)
+        assert partial.status == "running"
+        assert partial.needs[0].status == "matched"
+        assert partial.needs[1].status == "pending"
+
+        need2_gate.set()
+        final = await settled(jobs, "alice", started.job_id)
+        assert final.status == "complete"
+        assert final.needs[0].status == "matched"
+        assert final.needs[1].status == "search_failed"
+    finally:
+        await jobs.close()
+
+
+async def test_refresh_candidate_availability_updates_snapshot_and_blocks_unavailable_commit():
+    from home_kitchen.basket.matching import (
+        BasketMatchingService,
+        ProviderProduct,
+        ProviderSearchGroup,
+    )
+
+    class AvailabilityProvider:
+        def __init__(self):
+            self.available_1 = True
+            self.available_2 = True
+            self.price_1 = "25.00"
+
+        async def search_products(self, actor_id, queries, page, size):
+            return [
+                ProviderSearchGroup(
+                    query=query,
+                    has_more=False,
+                    products=[
+                        ProviderProduct(
+                            provider="oda",
+                            product_id="101",
+                            name="Product 1",
+                            description="1 item",
+                            price=self.price_1,
+                            available=self.available_1,
+                        ),
+                        ProviderProduct(
+                            provider="oda",
+                            product_id="202",
+                            name="Product 2",
+                            description="1 item",
+                            price="30.00",
+                            available=self.available_2,
+                        ),
+                    ],
+                )
+                for query in queries
+            ]
+
+    provider = AvailabilityProvider()
+    matching = BasketMatchingService(Inventory(), provider)
+    jobs = BasketMatchJobs(matching, Inventory(), {"alice": 1}.get)
+    try:
+        job = await jobs.start("alice", START, END)
+        final = await settled(jobs, "alice", job.job_id)
+        # Seed distinct candidate IDs per need
+        owned = jobs._jobs[final.job_id]
+        owned.value.needs[0].candidates = [
+            BasketCandidate(
+                id="oda:101",
+                provider="oda",
+                product_id="101",
+                name="Product 1",
+                description="1 item",
+                price="25.00",
+                pack_quantity=Decimal(1),
+                pack_unit="item",
+                pack_metadata_status="unverified",
+                match_query="Need 1",
+                match_reason="Search",
+                identity_status="compatible",
+                available=True,
+            )
+        ]
+        owned.value.needs[1].candidates = [
+            BasketCandidate(
+                id="oda:202",
+                provider="oda",
+                product_id="202",
+                name="Product 2",
+                description="1 item",
+                price="30.00",
+                pack_quantity=Decimal(1),
+                pack_unit="item",
+                pack_metadata_status="unverified",
+                match_query="Need 2",
+                match_reason="Search",
+                identity_status="compatible",
+                available=True,
+            )
+        ]
+
+        # Product 2 goes out of stock and Product 1 changes price
+        provider.available_2 = False
+        provider.price_1 = "29.90"
+        refreshed = await jobs.refresh_candidate_availability(
+            "alice",
+            final.job_id,
+            START,
+            END,
+            [(UUID(int=1), "oda:101"), (UUID(int=2), "oda:202")],
+        )
+        assert refreshed.all_available is False
+        assert [item.product_id for item in refreshed.unavailable_items] == ["202"]
+        assert [item.product_id for item in refreshed.changed_items] == ["101", "202"]
+        assert refreshed.items[0].price_changed is True
+        assert refreshed.items[0].current_price == "29.90"
+
+        # Committing the out-of-stock item is blocked, while the valid item can still be resolved
+        with pytest.raises(ValueError, match="unavailable"):
+            await jobs.resolve_batch_candidates(
+                "alice", final.job_id, START, END, [(UUID(int=2), "oda:202")]
+            )
+        valid_resolved = await jobs.resolve_batch_candidates(
+            "alice", final.job_id, START, END, [(UUID(int=1), "oda:101")]
+        )
+        assert valid_resolved[(UUID(int=1), "oda:101")][1].price == "29.90"
+    finally:
+        await jobs.close()
+
+
+async def test_retry_and_availability_refresh_api_endpoints():
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI, Request
+    from httpx import ASGITransport, AsyncClient
+
+    from home_kitchen.basket.matching import (
+        BasketMatchingService,
+        ProviderProduct,
+        ProviderSearchGroup,
+    )
+    from home_kitchen.basket.models import (
+        BasketNeedStatus,
+        BasketReview,
+        ProductSnapshot,
+        PurchaseNeed,
+        SelectedProduct,
+    )
+    from home_kitchen.feature_api import feature_router
+
+    class LiveProvider:
+        def __init__(self):
+            self.available = False
+
+        async def search_products(self, actor_id, queries, page, size):
+            return [
+                ProviderSearchGroup(
+                    query=q,
+                    has_more=False,
+                    products=[
+                        ProviderProduct(
+                            provider="oda",
+                            product_id="555",
+                            name=f"Oda {q}",
+                            description="1 item",
+                            price="39.90",
+                            available=self.available,
+                        )
+                    ],
+                )
+                for q in queries
+            ]
+
+    provider = LiveProvider()
+    inventory = Inventory()
+    matching = BasketMatchingService(inventory, provider)
+    jobs = BasketMatchJobs(matching, inventory, {"alice": 1}.get)
+    saved_review = BasketReview(
+        needs=[
+            BasketNeedStatus(
+                need=PurchaseNeed(id=UUID(int=1), name="Need 1", quantity=Decimal(2), unit="item"),
+                selections=[
+                    SelectedProduct(
+                        need_id=UUID(int=1),
+                        product=ProductSnapshot(
+                            provider="oda",
+                            product_id="555",
+                            name="Oda Need 1",
+                            pack_quantity=Decimal(1),
+                            pack_unit="item",
+                            price=Decimal("35.00"),
+                            available=True,
+                            observed_at=datetime.now(UTC),
+                        ),
+                        packages=2,
+                    )
+                ],
+                allocated_quantity=Decimal(2),
+                remaining_quantity=Decimal(0),
+                overbuy_quantity=Decimal(0),
+                ready=True,
+            )
+        ],
+        total_cost=Decimal("70.00"),
+        price_complete=True,
+        currency="NOK",
+        ready_for_review=True,
+        issues=[],
+    )
+    basket_stub = SimpleNamespace(review=lambda s, e: saved_review)
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def actor(request: Request, call_next):
+        request.state.actor_id = "alice"
+        return await call_next(request)
+
+    app.include_router(feature_router(SimpleNamespace(basket_jobs=jobs), basket_stub))
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            started = await client.post(
+                "/api/basket/match-jobs", json={"start": str(START), "end": str(END)}
+            )
+            assert started.status_code == 202
+            job_id = started.json()["job_id"]
+            await settled(jobs, "alice", job_id)
+
+            bad = await client.post(
+                f"/api/basket/match-jobs/{job_id}/needs/{UUID(int=1)}/retry",
+                json={"query": "   "},
+            )
+            assert bad.status_code == 422
+
+            retried = await client.post(
+                f"/api/basket/match-jobs/{job_id}/needs/{UUID(int=1)}/retry",
+                json={"query": "Havremel"},
+            )
+            assert retried.status_code == 202
+            assert retried.headers["cache-control"] == "no-store"
+            assert retried.json()["needs"][0]["search_query"] == "Havremel"
+            assert retried.json()["needs"][0]["revision"] == 1
+            final = await settled(jobs, "alice", job_id)
+            assert final.needs[0].candidates[0].match_query == "Havremel"
+
+            refreshed = await client.post(
+                "/api/basket/availability-refresh",
+                json={"start": str(START), "end": str(END)},
+            )
+            assert refreshed.status_code == 200
+            assert refreshed.headers["cache-control"] == "no-store"
+            body = refreshed.json()
+            assert body["all_available"] is False
+            assert len(body["unavailable_items"]) == 1
+            assert body["unavailable_items"][0]["product_id"] == "555"
+            assert body["unavailable_items"][0]["availability_status"] == "unavailable"
+            assert len(body["changed_items"]) == 1
+    finally:
+        await jobs.close()

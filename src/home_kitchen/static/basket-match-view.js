@@ -21,6 +21,17 @@
       const page = Number.isInteger(need.page) && need.page > 0 ? need.page : 1;
       const pages = { ...(merged[id] || {}) };
       const previous = pages[page];
+      if (
+        previous &&
+        previous.match_job_id &&
+        need.match_job_id &&
+        previous.match_job_id === need.match_job_id &&
+        Number.isInteger(previous.revision) &&
+        Number.isInteger(need.revision) &&
+        need.revision < previous.revision
+      ) {
+        return;
+      }
       pages[page] = {
         ...need,
         candidates:
@@ -107,7 +118,85 @@
     }
   }
 
+  function availabilityStatusLabel(status) {
+    return ({
+      available: "Tilgjengelig hos Oda",
+      unavailable: "Ikke tilgjengelig hos Oda",
+      unknown: "Tilgjengeligheten kunne ikke bekreftes",
+    })[status] || "Tilgjengeligheten er ukjent";
+  }
+
+  function buildAvailableCartProposalRequest(basket, availabilityReport) {
+    const reportItems = Array.isArray(availabilityReport?.items)
+      ? availabilityReport.items
+      : [];
+    const reportByPair = new Map();
+    const unavailablePairs = new Set();
+    reportItems.forEach((item) => {
+      const key = String(item.need_id) + ":" + String(item.product_id);
+      reportByPair.set(key, item);
+      if (item.availability_status !== "available") {
+        unavailablePairs.add(key);
+      }
+    });
+
+    const byProduct = new Map();
+    const queries = new Set();
+    let skippedCount = 0;
+    let availableCount = 0;
+
+    (basket?.needs || []).forEach((entry) => {
+      const need = entry.need || {};
+      (entry.selections || []).forEach((selection) => {
+        const product = selection.product || {};
+        const productId = Number(product.product_id);
+        const quantity = Number(selection.packages);
+        if (
+          product.provider !== "oda" ||
+          !Number.isSafeInteger(productId) ||
+          productId < 1 ||
+          !Number.isSafeInteger(quantity) ||
+          quantity < 1
+        ) {
+          return;
+        }
+        const pairKey = String(need.id) + ":" + String(product.product_id);
+        if (unavailablePairs.has(pairKey)) {
+          skippedCount += 1;
+          return;
+        }
+        availableCount += 1;
+        const key = String(productId);
+        const current = byProduct.get(key) || {
+          product_id: productId,
+          quantity: 0,
+        };
+        current.quantity += quantity;
+        byProduct.set(key, current);
+        const reported = reportByPair.get(pairKey);
+        const query = reported?.search_query || product.name || need.name;
+        if (query) queries.add(query);
+      });
+    });
+
+    const additions = [...byProduct.values()];
+    return {
+      queries: [...queries],
+      additions,
+      skippedCount,
+      availableCount,
+      issue:
+        additions.length > 10 || queries.size > 10
+          ? "Se over høyst 10 ulike produkttyper om gangen."
+          : !additions.length
+            ? "Ingen tilgjengelige Oda-produkter gjenstår å sende til gjennomgang."
+            : "",
+    };
+  }
+
   root.KitchenBasketMatchView = {
+    availabilityStatusLabel,
+    buildAvailableCartProposalRequest,
     formatBasketIssue: (issue) => root.KitchenShoppingView?.formatBasketIssue?.(issue) ?? issue,
     formatDuration,
     formatNeedQuantity,

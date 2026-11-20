@@ -1,10 +1,11 @@
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID
 
 import pytest
 
 from home_kitchen.basket.matching import (
+    AvailabilityTarget,
     BasketMatchingService,
     OdaSearchAdapter,
     ProviderProduct,
@@ -1427,3 +1428,173 @@ async def test_pack_count_recommends_whole_sku_packages_and_preserves_item_estim
     assert tomato_match.approximate is True
     assert tomato_match.provenance == "recipe-derived estimate"
     assert str(tomato_match.source_url) == "https://example.test/recipe/tomato"
+
+
+@pytest.mark.asyncio
+async def test_query_overrides_refine_targeted_need_without_changing_other_needs():
+    carrot = line("carrot", quantity="1", unit="kg", index=1)
+    milk = line("milk", quantity="1", unit="l", index=2)
+    provider = FakeProvider()
+    service = BasketMatchingService(
+        FakeInventory([carrot, milk]),
+        provider,
+        media_fetcher=lambda _: _media("1 l"),
+    )
+
+    result = await service.find_products(
+        "household-1",
+        date(2026, 11, 16),
+        date(2026, 11, 22),
+        query_overrides={milk.id: "Tine Helmelk 1l"},
+    )
+
+    carrot_match, milk_match = result.needs
+    assert carrot_match.search_query == "carrot"
+    assert carrot_match.candidates[0].match_query == "carrot"
+    assert milk_match.search_query == "Tine Helmelk 1l"
+    assert milk_match.candidates[0].match_query == "Tine Helmelk 1l"
+
+
+@pytest.mark.asyncio
+async def test_slow_or_failing_batch_does_not_block_fast_needs_progress():
+    import asyncio
+
+    carrot = line("carrot", quantity="1", unit="kg", index=1)
+    milk = line("milk", quantity="1", unit="l", index=2)
+    eggs = line("eggs", quantity="6", unit="item", index=3)
+
+    milk_gate = asyncio.Event()
+    progressed: list[tuple[UUID, str]] = []
+
+    class PartialProvider:
+        max_queries = 1
+
+        async def search_products(self, actor_id, queries, page, size):
+            query = queries[0]
+            if query == "milk":
+                await milk_gate.wait()
+                raise TimeoutError("milk timed out")
+            return [
+                ProviderSearchGroup(
+                    query=query,
+                    has_more=False,
+                    products=[
+                        ProviderProduct(
+                            provider="oda",
+                            product_id=f"id-{query}",
+                            name=f"{query} product",
+                            description="1 kg",
+                            price="29.90",
+                            available=True,
+                        )
+                    ],
+                )
+            ]
+
+    async def on_progress(need):
+        progressed.append((need.need_id, need.status))
+        if len(progressed) == 2:
+            milk_gate.set()
+
+    service = BasketMatchingService(
+        FakeInventory([carrot, milk, eggs]),
+        PartialProvider(),
+        media_fetcher=lambda _: _media("1 kg"),
+    )
+    result = await asyncio.wait_for(
+        service.find_products(
+            "household-1",
+            date(2026, 11, 16),
+            date(2026, 11, 22),
+            progress=on_progress,
+        ),
+        timeout=2,
+    )
+
+    assert progressed[:2] == [(carrot.id, "matched"), (eggs.id, "matched")]
+    assert progressed[2] == (milk.id, "search_failed")
+    assert [n.status for n in result.needs] == ["matched", "search_failed", "matched"]
+
+
+@pytest.mark.asyncio
+async def test_check_products_availability_surfaces_unavailable_and_price_changed_items():
+    class LiveProvider:
+        def __init__(self):
+            self.calls = 0
+
+        async def search_products(self, actor_id, queries, page, size):
+            self.calls += 1
+            return [
+                ProviderSearchGroup(
+                    query=q,
+                    has_more=False,
+                    products=[
+                        ProviderProduct(
+                            provider="oda",
+                            product_id="101",
+                            name="Tine Helmelk 1L",
+                            description="1 l",
+                            price="32.50",
+                            available=True,
+                        ),
+                        ProviderProduct(
+                            provider="oda",
+                            product_id="202",
+                            name="Prior Egg 12pk",
+                            description="12 stk",
+                            price="49.90",
+                            available=False,
+                        ),
+                    ],
+                )
+                for q in queries
+            ]
+
+    provider = LiveProvider()
+    service = BasketMatchingService(
+        FakeInventory([]),
+        provider,
+        clock=lambda: datetime(2026, 11, 20, 12, 0, tzinfo=UTC),
+    )
+    targets = [
+        AvailabilityTarget(
+            need_id=UUID(int=1),
+            need_name="Melk",
+            provider="oda",
+            product_id="101",
+            product_name="Tine Helmelk 1L",
+            previous_available=True,
+            previous_price="29.90",
+        ),
+        AvailabilityTarget(
+            need_id=UUID(int=2),
+            need_name="Egg",
+            provider="oda",
+            product_id="202",
+            product_name="Prior Egg 12pk",
+            previous_available=True,
+            previous_price="49.90",
+        ),
+        AvailabilityTarget(
+            need_id=UUID(int=3),
+            need_name="Smør",
+            provider="oda",
+            product_id="303",
+            product_name="Savnet Smør",
+            previous_available=True,
+            previous_price="54.90",
+        ),
+    ]
+
+    outcomes = await service.check_products_availability("household-1", targets)
+    assert len(outcomes) == 3
+    assert outcomes[0].availability_status == "available"
+    assert outcomes[0].price_changed is True
+    assert outcomes[0].current_price == "32.50"
+    assert outcomes[1].availability_status == "unavailable"
+    assert outcomes[1].available is False
+    assert outcomes[2].availability_status == "unknown"
+    assert outcomes[2].available is None
+    # Calling again must bypass cache and query provider freshly.
+    await service.check_products_availability("household-1", targets[:1])
+    assert provider.calls >= 3

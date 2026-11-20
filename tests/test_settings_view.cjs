@@ -3,6 +3,8 @@ const test = require("node:test");
 
 const {
   DEFAULT_SHOPPING_CATEGORY_ORDER,
+  integrationDisplayName,
+  integrationDisplayDetail,
   integrationAuthLabel,
   integrationStatusLabel,
   integrationExpiryNotice,
@@ -18,6 +20,7 @@ const {
   buildTrumfVerifyPayload,
   buildTrumfSessionCookie,
   buildTrumfConnectPayload,
+  buildHomeAssistantConnectPayload,
 } = require("../src/home_kitchen/static/settings-view.js");
 
 test("moves a category without mutating the saved order", () => {
@@ -1189,4 +1192,210 @@ test("Coop modal explains no.coop.members://auth/callback and Trumf modal explai
   assert.doesNotMatch(trumfText, /__Secure-authjs\.session-token\.1 \(valgfritt\)/);
   assert.doesNotMatch(trumfText, /Bekreft med SMS-kode/);
   assert.doesNotMatch(trumfText, /Telefonnummer/);
+});
+
+test("integrationDisplayName and integrationDisplayDetail localize UI labels to Bokmål", () => {
+  assert.equal(
+    integrationDisplayName({ id: "anthropic", name: "Recipe assistant" }),
+    "Oppskriftsassistent",
+  );
+  assert.equal(
+    integrationDisplayDetail(
+      {
+        id: "anthropic",
+        detail:
+          "Configured by the operator. Federation is preferred where supported; configuration does not prove a successful model call.",
+      },
+      null,
+    ),
+    "Konfigurert av operatør. Føderering foretrekkes der det støttes; konfigurasjon beviser ikke et vellykket modellkall.",
+  );
+  assert.equal(
+    integrationDisplayDetail({ id: "oda", detail: "Oda" }, { connected: true, detail: "Connected" }),
+    "Tilkoblet",
+  );
+  assert.equal(
+    integrationDisplayDetail(
+      {
+        id: "home_assistant",
+        detail: "Valgfri enveiseksport til Home Assistant to-do. Kitchen forblir fasit.",
+      },
+      null,
+    ),
+    "Valgfri enveiseksport til Home Assistant to-do. Kjøkken forblir fasit.",
+  );
+});
+
+test("buildHomeAssistantConnectPayload validates URL, API key, and optional entity_id", () => {
+  assert.deepEqual(
+    buildHomeAssistantConnectPayload(" http://homeassistant.local:8123/ ", " ha-secret ", ""),
+    {
+      auth_mode: "api_key",
+      base_url: "http://homeassistant.local:8123",
+      api_key: "ha-secret",
+      entity_id: "todo.shopping_list",
+    },
+  );
+  assert.deepEqual(
+    buildHomeAssistantConnectPayload("https://ha.example.com", "token-2", " todo.handleliste "),
+    {
+      auth_mode: "api_key",
+      base_url: "https://ha.example.com",
+      api_key: "token-2",
+      entity_id: "todo.handleliste",
+    },
+  );
+  assert.equal(buildHomeAssistantConnectPayload("", "ha-secret"), null);
+  assert.equal(buildHomeAssistantConnectPayload("http://ha.local:8123", "  "), null);
+});
+
+test("renderConnectionSettings localizes integration cards and offers Koble til Home Assistant", async () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const appSource = fs.readFileSync(path.join(__dirname, "../src/home_kitchen/static/app.js"), "utf8");
+  const modalCalls = [];
+  const documentMock = {
+    createElement: (tag) => new MockNode(tag),
+  };
+  const windowMock = {
+    KitchenSettingsView: require("../src/home_kitchen/static/settings-view.js"),
+  };
+  const state = {
+    settingsRefreshInFlight: false,
+    oda: { configured: true, connected: true, detail: "Connected" },
+    integrationsError: null,
+    odaStatusError: null,
+    integrations: [
+      {
+        id: "oda",
+        name: "Oda",
+        status: "connected",
+        auth_mode: "delegated_user_pkce",
+        supported_auth_modes: ["delegated_user_pkce"],
+        detail: "Personal recipes and shopping require your Oda consent. Checkout and payment stay at Oda.",
+        accounts: [],
+      },
+      {
+        id: "anthropic",
+        name: "Recipe assistant",
+        status: "configured",
+        auth_mode: "federation",
+        supported_auth_modes: ["federation", "api_key"],
+        detail:
+          "Configured by the operator. Federation is preferred where supported; configuration does not prove a successful model call.",
+        accounts: [],
+      },
+      {
+        id: "home_assistant",
+        name: "Home Assistant",
+        status: "not_configured",
+        auth_mode: null,
+        supported_auth_modes: ["api_key"],
+        detail:
+          "Valgfri enveiseksport av gjenværende handlelistepunkter til Home Assistant to-do. Kjøkken forblir fasit.",
+        accounts: [],
+      },
+    ],
+  };
+
+  const fns = [
+    "el",
+    "add",
+    "button",
+    "disconnectConnector",
+    "disconnectConnectorAccount",
+    "refreshConnectorAccount",
+    "renderConnectionSettings",
+  ];
+  const { renderConnectionSettings } = new Function(
+    "document",
+    "state",
+    "window",
+    "api",
+    "notify",
+    "loadConnectionStatus",
+    "refreshView",
+    "refreshConnectionSettings",
+    "connectOdaAccount",
+    "disconnectOdaAccount",
+    "openConnectorModal",
+    `
+    ${fns.map((f) => extractFunction(appSource, f)).join("\n")}
+    return { renderConnectionSettings };
+    `,
+  )(
+    documentMock,
+    state,
+    windowMock,
+    async () => ({}),
+    () => {},
+    async () => {},
+    async () => {},
+    async () => {},
+    () => {},
+    () => {},
+    (integration, opts) => modalCalls.push({ id: integration.id, opts }),
+  );
+
+  const section = renderConnectionSettings();
+  const cards = section.querySelectorAll(".connection-card");
+  assert.equal(cards.length, 3);
+  assert.match(cards[0].textContent, /Tilkoblet/);
+  assert.doesNotMatch(cards[0].textContent, /\bConnected\b/);
+  assert.match(cards[1].textContent, /Oppskriftsassistent/);
+  assert.match(cards[1].textContent, /Konfigurert av operatør/);
+  assert.doesNotMatch(cards[1].textContent, /Recipe assistant/);
+  assert.match(cards[2].textContent, /Kjøkken forblir fasit\./);
+
+  const haBtn = cards[2].querySelectorAll("button").find((b) => b.textContent === "Koble til Home Assistant");
+  assert.ok(haBtn);
+  await haBtn.click();
+  assert.deepEqual(modalCalls, [{ id: "home_assistant", opts: undefined }]);
+});
+
+test("Home Assistant modal submits URL, API-nøkkel, and optional To-do-entitet", async () => {
+  const harness = setupModalHarness(async () => ({ status: "connected" }));
+  harness.openConnectorModal({ id: "home_assistant", name: "Home Assistant" });
+
+  const text = harness.modalContent.textContent;
+  assert.match(text, /URL/);
+  assert.match(text, /API-nøkkel/);
+  assert.match(text, /To-do-entitet/);
+
+  const urlInput = harness.findInput("URL");
+  const keyInput = harness.findInput("API-nøkkel");
+  const entityInput = harness.findInput("To-do-entitet");
+  assert.equal(entityInput.value, "todo.shopping_list");
+  assert.equal(keyInput.getAttribute("type"), "password");
+
+  urlInput.value = "http://homeassistant.local:8123/";
+  keyInput.value = "ha-long-lived-token";
+  entityInput.value = "";
+
+  const form = harness.modalContent.querySelector("form");
+  await form.submit();
+
+  assert.deepEqual(harness.calls[0], {
+    path: "/integrations/home_assistant/connect",
+    method: "POST",
+    body: {
+      auth_mode: "api_key",
+      base_url: "http://homeassistant.local:8123",
+      api_key: "ha-long-lived-token",
+      entity_id: "todo.shopping_list",
+    },
+  });
+});
+
+test("style.css wraps desktop sidebar header and mobile week navigation without 42px clipping", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const css = fs.readFileSync(path.join(__dirname, "../src/home_kitchen/static/style.css"), "utf8");
+
+  assert.match(css, /\.sidebar\s*\{[^}]*overflow-x:\s*hidden/s);
+  assert.match(css, /\.sidebar-header\s*\{[^}]*flex-wrap:\s*wrap/s);
+  assert.match(css, /\.brand small\s*\{[^}]*overflow-wrap:\s*anywhere/s);
+  assert.doesNotMatch(css, /\.period-toolbar\s*\{[^}]*42px\s+minmax\(0,\s*1fr\)\s+42px/s);
+  assert.match(css, /\.period-toolbar\s*\{[^}]*flex-wrap:\s*wrap/s);
+  assert.match(css, /\.period-toolbar\s*>\s*button\s*\{[^}]*white-space:\s*nowrap/s);
 });

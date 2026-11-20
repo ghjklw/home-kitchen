@@ -7893,6 +7893,82 @@ function openConnectorModal(integration, options = {}) {
     add(step, form);
     add(container, step);
 
+  } else if (integration.id === "home_assistant") {
+    add(
+      container,
+      el(
+        "p",
+        "Koble til Home Assistant for valgfri enveiseksport av gjenværende handlelistepunkter til to-do. Kjøkken forblir fasit.",
+        "muted",
+      ),
+      accountLabelField.wrap,
+    );
+
+    const step = el("div", null, "connector-step connector-home-assistant stack");
+    const form = el("form", null, "stack");
+    form.autocomplete = "off";
+    const urlField = field(
+      "URL",
+      "url",
+      "",
+      "F.eks. http://homeassistant.local:8123",
+    );
+    urlField.input.placeholder = "http://homeassistant.local:8123";
+    const apiKeyField = field(
+      "API-nøkkel",
+      "password",
+      "",
+      "Langvarig tilgangstoken fra brukerprofilen din i Home Assistant.",
+    );
+    apiKeyField.input.placeholder = "Lim inn langvarig tilgangstoken";
+    const entityField = field(
+      "To-do-entitet",
+      "text",
+      "todo.shopping_list",
+      "Valgfritt. Standard er todo.shopping_list.",
+    );
+    entityField.input.placeholder = "todo.shopping_list";
+    add(form, urlField.wrap, apiKeyField.wrap, entityField.wrap);
+
+    formSubmit(form, "Lagre og koble til", async () => {
+      const urlVal = urlField.input.value.trim();
+      const keyVal = apiKeyField.input.value.trim();
+      const entityVal = entityField.input.value.trim();
+      if (!urlVal) {
+        throw new Error("Vennligst oppgi URL for Home Assistant.");
+      }
+      if (!keyVal) {
+        throw new Error("Vennligst oppgi API-nøkkel for Home Assistant.");
+      }
+      let basePayload = null;
+      if (typeof window.KitchenSettingsView?.buildHomeAssistantConnectPayload === "function") {
+        basePayload = window.KitchenSettingsView.buildHomeAssistantConnectPayload(
+          urlVal,
+          keyVal,
+          entityVal,
+        );
+      } else {
+        basePayload = {
+          auth_mode: "api_key",
+          base_url: urlVal.replace(/\/+$/, ""),
+          api_key: keyVal,
+          entity_id: entityVal || "todo.shopping_list",
+        };
+      }
+      if (!basePayload) {
+        throw new Error("Vennligst oppgi URL og API-nøkkel for Home Assistant.");
+      }
+      const payload = { ...basePayload, ...accountMetaPayload() };
+      await api(`/integrations/${integration.id}/connect`, "POST", payload);
+      const modal = $("#modal");
+      if (modal && modal.open) modal.close();
+      await loadConnectionStatus();
+      await refreshView();
+      notify(`${integration.name || integration.id} er tilkoblet.`);
+    });
+    add(step, form);
+    add(container, step);
+
   } else {
     add(container, accountLabelField.wrap);
     const form = el("form", null, "stack");
@@ -8526,11 +8602,24 @@ function renderConnectionSettings() {
           ? "configured"
           : "not_configured"
       : integration.status;
+    const displayName =
+      typeof window.KitchenSettingsView?.integrationDisplayName === "function"
+        ? window.KitchenSettingsView.integrationDisplayName(integration)
+        : integration.name || integration.id;
+    const displayDetail =
+      typeof window.KitchenSettingsView?.integrationDisplayDetail === "function"
+        ? window.KitchenSettingsView.integrationDisplayDetail(
+            integration,
+            integration.id === "oda" ? state.oda : null,
+          )
+        : integration.id === "oda" && state.oda
+          ? state.oda?.detail || integration.detail || "Ingen tilkoblingsdetaljer for Oda er tilgjengelige."
+          : integration.detail || "Ingen tilkoblingsdetaljer er tilgjengelige.";
     const row = add(
       el("article", null, "connection-card"),
       add(
         el("div", null, "connection-card-heading"),
-        el("h3", integration.name || integration.id),
+        el("h3", displayName),
         el(
           "span",
           window.KitchenSettingsView.integrationStatusLabel(status),
@@ -8549,13 +8638,7 @@ function renderConnectionSettings() {
       : "Støttede metoder: " + (supportedMethods || "Ikke oppgitt");
     add(
       row,
-      el(
-        "p",
-        integration.id === "oda" && state.oda
-          ? state.oda?.detail || integration.detail || "Ingen tilkoblingsdetaljer for Oda er tilgjengelige."
-          : integration.detail || "Ingen tilkoblingsdetaljer er tilgjengelige.",
-        "muted",
-      ),
+      el("p", displayDetail, "muted"),
       el(
         "p",
         authentication,
@@ -8602,7 +8685,7 @@ function renderConnectionSettings() {
         add(actions, setup);
       }
       add(row, actions);
-    } else if (["rema1000", "coop", "trumf", "cookidoo", "kassal"].includes(integration.id)) {
+    } else if (["rema1000", "coop", "trumf", "cookidoo", "kassal", "home_assistant"].includes(integration.id)) {
       const multiAccountProvider = ["rema1000", "coop", "trumf"].includes(integration.id);
       const accounts = Array.isArray(integration.accounts) ? integration.accounts : [];
       if (accounts.length > 0 && multiAccountProvider) {
@@ -8759,7 +8842,11 @@ function renderConnectionSettings() {
         } else {
           add(
             actions,
-            button("Koble til", () => openConnectorModal(integration), "primary"),
+            button(
+              integration.id === "home_assistant" ? "Koble til Home Assistant" : "Koble til",
+              () => openConnectorModal(integration),
+              "primary",
+            ),
           );
         }
         add(row, actions);

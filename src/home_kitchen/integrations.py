@@ -483,7 +483,7 @@ class HomeAssistantIntegration(StoredConnectorIntegration):
             name="Home Assistant",
             supported_auth_modes=["api_key"],
             capabilities=["todo_export"],
-            detail="Valgfri enveiseksport av gjenværende handlelistepunkter til Home Assistant to-do. Kitchen forblir fasit.",
+            detail="Valgfri enveiseksport av gjenværende handlelistepunkter til Home Assistant to-do. Kjøkken forblir fasit.",
             store=store,
             household_id=household_id,
             default_expiry_prompt="Tilgangstokenet for Home Assistant er ugyldig eller utløpt.",

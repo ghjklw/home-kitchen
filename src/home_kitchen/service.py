@@ -26,6 +26,7 @@ from .models import (
     RecipeCreate,
     RecipeSource,
     RecipeTranslation,
+    RecipeTranslationUpdate,
     RecipeType,
     RegularItem,
     ShoppingItem,
@@ -627,6 +628,32 @@ class KitchenService:
             ingredients=payload.ingredients,
             provider=payload.provider,
             model=payload.model,
+            created_at=datetime.now(UTC),
+            is_stale=False,
+        )
+        self.store.save_recipe_translation(translation)
+        return translation
+
+    def update_recipe_translation(
+        self, recipe_id: UUID, target_locale: str, data: RecipeTranslationUpdate
+    ) -> RecipeTranslation:
+        """Save a manual edit to a recipe translation without modifying the original recipe."""
+        recipe = self.get_recipe(recipe_id)
+        normalized_locale = target_locale.strip().casefold()
+        if not normalized_locale:
+            raise ValueError("Target locale must not be blank")
+        current_version = compute_recipe_version(recipe)
+        existing = self.store.get_recipe_translation(recipe_id, normalized_locale, current_version)
+        translation = RecipeTranslation(
+            id=existing.id if existing is not None else uuid4(),
+            recipe_id=recipe_id,
+            target_locale=normalized_locale,
+            recipe_version=current_version,
+            title=data.title,
+            instructions=data.instructions,
+            ingredients=data.ingredients,
+            provider="manual",
+            model="manual",
             created_at=datetime.now(UTC),
             is_stale=False,
         )

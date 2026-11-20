@@ -479,6 +479,14 @@ class RecipeTranslationRequest(BaseModel):
     force: bool = False
 
 
+class RecipeTranslationUpdate(BaseModel):
+    """Manual edit payload for a saved recipe translation."""
+
+    title: NonBlank
+    ingredients: list[Ingredient] = Field(min_length=1)
+    instructions: list[NonBlank] = Field(min_length=1)
+
+
 class MealCreate(BaseModel):
     date: date
     recipe_id: UUID

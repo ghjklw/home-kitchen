@@ -62,10 +62,14 @@ from home_kitchen.recipes import (
 )
 from home_kitchen.recipes.collections import CollectionService, OdaCollectionProvider
 from home_kitchen.recipes.discovery import (
+    DiscoveryContext,
     MarmitonDiscoveryProvider,
     MatpratDiscoveryProvider,
     OdaDiscoveryProvider,
     RecipeDiscoveryRegistry,
+    RecipeDiscoveryRequest,
+    RecipeDiscoveryResponse,
+    build_discovery_context,
 )
 from home_kitchen.recipes.images import RecipeImageService
 from home_kitchen.recipes.models import EditableRecipeDraft
@@ -234,7 +238,23 @@ class KitchenFeatures:
                 OdaDiscoveryProvider(self.oda),
                 MarmitonDiscoveryProvider(),
                 MatpratDiscoveryProvider(),
-            ]
+            ],
+            context_provider=self.discovery_context,
+        )
+
+    @staticmethod
+    def _history_snippet(entry: Any) -> EvidenceSnippet:
+        return EvidenceSnippet(
+            evidence_id=str(entry.id),
+            text=json.dumps(
+                {
+                    "kind": entry.kind,
+                    "message": entry.message[:1000],
+                    "structured": json.dumps(entry.structured, ensure_ascii=False)[:1000],
+                    "recorded_at": entry.occurred_at.isoformat(),
+                },
+                ensure_ascii=False,
+            ),
         )
 
     def evidence(self, query: str) -> list[EvidenceSnippet]:
@@ -245,21 +265,7 @@ class KitchenFeatures:
         )
         matched = self.history.search(query[:1000], limit=8) if query.strip() else []
         entries = {entry.id: entry for entry in [*recent, *matched]}
-        evidence = [
-            EvidenceSnippet(
-                evidence_id=str(entry.id),
-                text=json.dumps(
-                    {
-                        "kind": entry.kind,
-                        "message": entry.message[:1000],
-                        "structured": json.dumps(entry.structured, ensure_ascii=False)[:1000],
-                        "recorded_at": entry.occurred_at.isoformat(),
-                    },
-                    ensure_ascii=False,
-                ),
-            )
-            for entry in list(entries.values())[:12]
-        ]
+        evidence = [self._history_snippet(entry) for entry in list(entries.values())[:12]]
         # Current counts complement historical feedback; they are explicit user
         # observations, never proof of freshness or automatic consumption.
         stock = [item for item in self.inventory.list() if item.quantity > 0]
@@ -378,3 +384,22 @@ class KitchenFeatures:
 
         result = client.export_remaining_items(items)
         return HomeAssistantTodoExportResult.model_validate(result)
+
+    def discovery_context(self, query: str = "") -> DiscoveryContext:
+        evidence = list(self.evidence(query or "recipe feedback preferences rating"))
+        if getattr(self.history, "engine", None) is not None:
+            recent_feedback = self.history.search(
+                "", limit=8, kinds=["preference", "feedback", "recipe_rating"]
+            )
+            seen_ids = {item.evidence_id for item in evidence}
+            for entry in recent_feedback:
+                entry_id = str(entry.id)
+                if entry_id not in seen_ids:
+                    seen_ids.add(entry_id)
+                    evidence.append(self._history_snippet(entry))
+        return build_discovery_context(self.household(), evidence)
+
+    async def discover_recipes(
+        self, request: RecipeDiscoveryRequest, *, actor_id: str | None = None
+    ) -> RecipeDiscoveryResponse:
+        return await self.recipe_discovery.search(request, actor_id=actor_id)

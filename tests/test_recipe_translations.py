@@ -408,6 +408,68 @@ async def test_rest_api_recipe_translation_endpoints():
         == 404
     )
 
+    # PUT manual translation edit updates saved translation without modifying original recipe
+    put_res = client.put(
+        f"/api/recipes/{recipe.id}/translations/en",
+        json={
+            "title": "Blueberry Pie (Edited)",
+            "ingredients": [{"name": "blueberries", "quantity": "400", "unit": "g"}],
+            "instructions": ["Bake the pie until golden brown."],
+        },
+    )
+    assert put_res.status_code == 200
+    edited = put_res.json()
+    assert edited["title"] == "Blueberry Pie (Edited)"
+    assert edited["ingredients"][0]["name"] == "blueberries"
+    assert edited["instructions"] == ["Bake the pie until golden brown."]
+    assert edited["provider"] == "manual"
+    assert edited["model"] == "manual"
+    assert edited["is_stale"] is False
+
+    # GET reflects the manually edited translation
+    get_edited = client.get(f"/api/recipes/{recipe.id}/translations/en")
+    assert get_edited.status_code == 200
+    assert get_edited.json()["title"] == "Blueberry Pie (Edited)"
+
+    # Original recipe remains completely unchanged
+    orig = client.get(f"/api/recipes/{recipe.id}").json()
+    assert orig["title"] == "Blåbærpai"
+    assert orig["ingredients"][0]["name"] == "blåbær"
+    assert orig["instructions"] == ["Stek paien gyllen."]
+
+    # PUT also works to create a manual translation for a new locale without AI
+    put_fr = client.put(
+        f"/api/recipes/{recipe.id}/translations/fr",
+        json={
+            "title": "Tarte aux myrtilles",
+            "ingredients": [{"name": "myrtilles", "quantity": "400", "unit": "g"}],
+            "instructions": ["Cuire la tarte jusqu'à ce qu'elle soit dorée."],
+        },
+    )
+    assert put_fr.status_code == 200
+    assert put_fr.json()["target_locale"] == "fr"
+    assert put_fr.json()["provider"] == "manual"
+
+    # PUT for missing recipe returns 404; invalid payload returns 422
+    assert (
+        client.put(
+            f"/api/recipes/{missing_id}/translations/en",
+            json={
+                "title": "Missing",
+                "ingredients": [{"name": "flour", "quantity": "100", "unit": "g"}],
+                "instructions": ["Mix."],
+            },
+        ).status_code
+        == 404
+    )
+    assert (
+        client.put(
+            f"/api/recipes/{recipe.id}/translations/en",
+            json={"title": "   ", "ingredients": [], "instructions": []},
+        ).status_code
+        == 422
+    )
+
 
 @pytest.mark.asyncio
 async def test_fastmcp_translation_tools():

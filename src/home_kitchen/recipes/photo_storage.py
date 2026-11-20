@@ -16,7 +16,7 @@ from pydantic_ai import Agent
 from sqlalchemy import Column, DateTime, Integer, LargeBinary, Table, Text, Uuid, exists, select
 from sqlalchemy.engine import Engine
 
-from home_kitchen.models import PhotoSource
+from home_kitchen.models import NonBlank, PhotoSource
 from home_kitchen.recipes.models import EditableRecipeDraft, RecipeContext
 from home_kitchen.recipes.photos import (
     PhotoExtraction,
@@ -73,6 +73,7 @@ class StoredPhoto(ValidatedPhoto):
 class PhotoAcquisition(BaseModel):
     photo_source: PhotoSource
     draft: EditableRecipeDraft | None = None
+    source_language: NonBlank | None = None
     uncertainties: list[str] = Field(default_factory=list)
     status: Literal["draft_ready", "extraction_failed"]
 
@@ -277,6 +278,7 @@ class PhotoRecipeService:
             return PhotoAcquisition(
                 photo_source=stored.photo_source,
                 draft=draft,
+                source_language=draft.source_language,
                 uncertainties=extraction.uncertainties,
                 status="draft_ready",
             )

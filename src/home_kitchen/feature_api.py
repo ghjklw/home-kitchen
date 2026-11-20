@@ -10,7 +10,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr
 from starlette.concurrency import run_in_threadpool
 
 from home_kitchen.basket import BasketReview, ProductSnapshot, SelectedProduct
@@ -45,6 +45,13 @@ from home_kitchen.connector_auth import (
 )
 from home_kitchen.features import KitchenFeatures
 from home_kitchen.history import HistoryEntry, HistoryEntryCreate, RetrievedEvidence
+from home_kitchen.home_assistant import (
+    DEFAULT_HOME_ASSISTANT_TODO_ENTITY,
+    HomeAssistantAuthError,
+    HomeAssistantError,
+    HomeAssistantNotConfiguredError,
+    HomeAssistantTodoExportResult,
+)
 from home_kitchen.integrations import IntegrationInfo
 from home_kitchen.inventory import InventoryItem, InventoryItemCreate, PurchasePlan
 from home_kitchen.models import MealCreate, Recipe
@@ -150,6 +157,12 @@ class TripCheck(BaseModel):
     checked: bool
 
 
+class StoreTripHomeAssistantExportRequest(BaseModel):
+    start: date
+    end: date
+    reviewed: bool = False
+
+
 class AutoMapIngredientsInput(BaseModel):
     recipe_id: UUID | None = None
     batch_size: int = Field(default=30, ge=1, le=100)
@@ -173,6 +186,8 @@ class ConnectorConnectRequest(BaseModel):
     token: SecretStr | None = None
     cookie: SecretStr | None = None
     api_key: SecretStr | None = None
+    base_url: HttpUrl | None = None
+    entity_id: str | None = None
     username: str | None = None
     password: SecretStr | None = None
     raw_payload: SecretStr | None = None
@@ -185,7 +200,7 @@ class ConnectorConnectRequest(BaseModel):
 def _extract_credentials(
     provider_id: str, data: ConnectorConnectRequest
 ) -> tuple[str, dict[str, str]]:
-    if provider_id not in {"rema1000", "coop", "trumf", "cookidoo", "kassal"}:
+    if provider_id not in {"rema1000", "coop", "trumf", "cookidoo", "kassal", "home_assistant"}:
         raise HTTPException(404, f"Ukjent leverandør: {provider_id}")
 
     auth_mode = data.auth_mode
@@ -197,6 +212,20 @@ def _extract_credentials(
             raise HTTPException(422, "Kassal.app krever en gyldig API-nøkkel")
         auth_mode = "api_key"
         credentials["api_key"] = key.get_secret_value().strip()
+
+    elif provider_id == "home_assistant":
+        key = data.api_key or data.token or data.session_token or data.raw_payload
+        if not key or not key.get_secret_value().strip():
+            raise HTTPException(422, "Home Assistant krever et gyldig tilgangstoken")
+        auth_mode = "api_key"
+        credentials["api_key"] = key.get_secret_value().strip()
+        if data.base_url is not None:
+            credentials["base_url"] = str(data.base_url).strip().rstrip("/")
+        if data.entity_id is not None:
+            cleaned_entity = data.entity_id.strip()
+            if not cleaned_entity:
+                raise HTTPException(422, "Home Assistant entity_id kan ikke være tom")
+            credentials["entity_id"] = cleaned_entity
 
     elif provider_id == "rema1000":
         token = data.session_token or data.token or data.raw_payload
@@ -550,6 +579,23 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
                 )
             except RuntimeError as exc:
                 raise HTTPException(503, str(exc)) from None
+        if provider_id == "home_assistant":
+            if not credentials.get("base_url"):
+                settings_url = getattr(
+                    getattr(features, "settings", None), "home_assistant_url", None
+                )
+                if settings_url is None:
+                    raise HTTPException(422, "Home Assistant krever en gyldig base_url")
+                credentials["base_url"] = str(settings_url).strip().rstrip("/")
+            if not credentials.get("entity_id"):
+                settings_entity = getattr(
+                    getattr(features, "settings", None), "home_assistant_todo_entity", None
+                )
+                credentials["entity_id"] = (
+                    settings_entity.strip()
+                    if isinstance(settings_entity, str) and settings_entity.strip()
+                    else DEFAULT_HOME_ASSISTANT_TODO_ENTITY
+                )
         try:
             features.connector_store.save_connection(
                 household_id=features.household_id,
@@ -582,7 +628,7 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
         if provider_id == "oda":
             features.oda.disconnect(actor)
             return Response(status_code=204)
-        if provider_id not in {"rema1000", "coop", "trumf", "cookidoo"}:
+        if provider_id not in {"rema1000", "coop", "trumf", "cookidoo", "kassal", "home_assistant"}:
             raise HTTPException(404, f"Ukjent leverandør: {provider_id}")
         deleted = features.connector_store.delete_account_credentials(
             features.household_id, provider_id, account_id
@@ -606,7 +652,7 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
         if provider_id == "oda":
             features.oda.disconnect(actor)
             return Response(status_code=204)
-        if provider_id not in {"rema1000", "coop", "trumf", "cookidoo"}:
+        if provider_id not in {"rema1000", "coop", "trumf", "cookidoo", "kassal", "home_assistant"}:
             raise HTTPException(404, f"Ukjent leverandør: {provider_id}")
         features.connector_store.delete_connection(
             features.household_id, provider_id, account_id=account_id
@@ -802,6 +848,32 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
     @router.put("/store-trip/items/{need_id}")
     def check_store_item(need_id: UUID, data: TripCheck, start: date, end: date) -> StoreTrip:
         return features.store_trip.check(start, end, need_id, data.checked)
+
+    @router.post("/store-trip/export/home-assistant")
+    def export_store_trip_home_assistant(
+        data: StoreTripHomeAssistantExportRequest,
+        request: Request,
+        response: Response,
+    ) -> HomeAssistantTodoExportResult:
+        authenticated_actor(request)
+        response.headers["Cache-Control"] = "no-store"
+        if not data.reviewed:
+            raise HTTPException(
+                422,
+                "Explicit confirmation (reviewed=True) is required before exporting to Home Assistant",
+            )
+        if data.end < data.start:
+            raise HTTPException(422, "end date must be on or after start date")
+        try:
+            return features.export_store_trip_to_home_assistant(
+                data.start, data.end, reviewed=data.reviewed
+            )
+        except HomeAssistantNotConfiguredError as exc:
+            raise HTTPException(503, str(exc)) from None
+        except HomeAssistantAuthError as exc:
+            raise HTTPException(502, str(exc)) from None
+        except HomeAssistantError as exc:
+            raise HTTPException(502, str(exc)) from None
 
     @router.get("/catalogue/foods")
     def find_foods(

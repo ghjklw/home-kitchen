@@ -260,6 +260,7 @@ def test_photo_and_collection_rest_routes_are_bounded_scoped_and_reviewed(test_d
             "trumf",
             "kassal",
             "cookidoo",
+            "home_assistant",
         }
         body = {"mime_type": "image/png", "data_base64": "%%%bad%%%"}
         assert client.post("/api/recipe-photos", json=body).status_code == 422

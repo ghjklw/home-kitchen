@@ -162,7 +162,28 @@ class KitchenFeatures:
             catalogue_skus=self.catalogue_skus,
             household_id=self.household_id,
         )
-        self.basket_matching = BasketMatchingService(self.inventory, OdaSearchAdapter(self.oda))
+
+        def _sku_preferences(product_id: UUID) -> tuple[list[str], list[str]]:
+            try:
+                pref, exc = self.product_overview.get_preferences(product_id)
+                return ([p.oda_product_id for p in pref], [e.oda_product_id for e in exc])
+            except KeyError:
+                return ([], [])
+
+        def _resolve_product_id(name: str) -> UUID | None:
+            for loc in ("nb", "en", "fr"):
+                for ctx in ("recipe", "receipt", ""):
+                    res = self.catalogue_identities.resolve("product", loc, ctx, name)
+                    if res.status == "resolved" and len(res.candidates) == 1:
+                        return res.candidates[0].id
+            return None
+
+        self.basket_matching = BasketMatchingService(
+            self.inventory,
+            OdaSearchAdapter(self.oda),
+            preferences_provider=_sku_preferences,
+            product_id_resolver=_resolve_product_id,
+        )
         self.basket_jobs = BasketMatchJobs(
             self.basket_matching, self.inventory, self.oda.search_cache_context
         )

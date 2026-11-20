@@ -39,6 +39,7 @@ class InventoryItem(InventoryItemCreate):
 class PurchasePlanLine(BaseModel):
     id: UUID
     name: str
+    canonical_product_id: UUID | None = None
     unit: str
     category: str = "Other"
     required_quantity: StockQuantity

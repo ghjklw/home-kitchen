@@ -955,12 +955,16 @@ class BasketMatchingService:
         media_fetcher: MediaFetcher = fetch_product_media,
         media_cache: _MediaCache | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        preferences_provider: Callable[[UUID], tuple[list[str], list[str]]] | None = None,
+        product_id_resolver: Callable[[str], UUID | None] | None = None,
     ):
         self.inventory = inventory
         self.provider = provider
         self.media_fetcher = media_fetcher
         self.media_cache = media_cache or _MediaCache()
         self.clock = clock
+        self.preferences_provider = preferences_provider
+        self.product_id_resolver = product_id_resolver
         self._search_cache: OrderedDict[tuple, tuple[datetime, ProviderSearchGroup]] = OrderedDict()
         self._inflight: dict[tuple, asyncio.Future] = {}
         self._context_reads: dict[str, asyncio.Task] = {}
@@ -1182,6 +1186,32 @@ class BasketMatchingService:
                         current_index
                     ].detail = "The provider returned no result group for this query."
                     return
+                preferred_ids: list[str] = []
+                excluded_ids: set[str] = set()
+                canon_id = getattr(bounded_lines[current_index], "canonical_product_id", None)
+                if canon_id is None and self.product_id_resolver is not None:
+                    try:
+                        canon_id = self.product_id_resolver(bounded_lines[current_index].name)
+                    except Exception:
+                        canon_id = None
+                if canon_id is not None and self.preferences_provider is not None:
+                    try:
+                        pref_list, excl_list = self.preferences_provider(canon_id)
+                        preferred_ids = list(pref_list)
+                        excluded_ids = set(excl_list)
+                    except Exception:
+                        pass
+
+                filtered_products = [p for p in group.products if p.product_id not in excluded_ids]
+                if preferred_ids:
+                    rank_map = {pid: idx for idx, pid in enumerate(preferred_ids)}
+                    filtered_products.sort(
+                        key=lambda p: (
+                            (0, rank_map[p.product_id]) if p.product_id in rank_map else (1, 0)
+                        )
+                    )
+
+                preferred_rank = {pid: idx + 1 for idx, pid in enumerate(preferred_ids)}
                 candidates = [
                     BasketCandidate(
                         id=f"{product.provider}:{product.product_id}",
@@ -1197,15 +1227,20 @@ class BasketMatchingService:
                         available=product.available,
                         match_query=group.query,
                         match_reason=(
-                            f"{'Identity compatible' if product.identity_status == 'compatible' else 'Identity unverified; explicit confirmation required'}; "
+                            (
+                                f"Foretrukket Oda-vare (rang {preferred_rank[product.product_id]}); "
+                                if product.product_id in preferred_rank
+                                else ""
+                            )
+                            + f"{'Identity compatible' if product.identity_status == 'compatible' else 'Identity unverified; explicit confirmation required'}; "
                             f"returned by {product.provider} product search for the need name "
                             f"'{group.query}'."
                         ),
                         identity_status=product.identity_status,
                     )
-                    for product in group.products[:size]
+                    for product in filtered_products[:size]
                 ]
-                results[current_index].has_more = group.has_more or len(group.products) > size
+                results[current_index].has_more = group.has_more or len(filtered_products) > size
                 results[current_index].candidates = await asyncio.gather(
                     *(enrich(candidate, current_index) for candidate in candidates)
                 )

@@ -39,6 +39,7 @@ from home_kitchen.models import (
     RecipeCreate,
     RecipeTranslation,
     RecipeTranslationRequest,
+    RecipeTranslationUpdate,
     RegularItem,
     ShoppingItem,
     ShoppingItemCreate,
@@ -294,6 +295,17 @@ def create_app(
             if "Configure an AI model" in str(exc):
                 raise HTTPException(503, str(exc)) from exc
             raise HTTPException(400, str(exc)) from exc
+
+    @app.put("/api/recipes/{recipe_id}/translations/{language}")
+    def update_recipe_translation(
+        recipe_id: UUID, language: str, data: RecipeTranslationUpdate
+    ) -> RecipeTranslation:
+        try:
+            return service.update_recipe_translation(recipe_id, language, data)
+        except KeyError:
+            raise HTTPException(404, f"Recipe not found: {recipe_id}") from None
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
 
     @app.get("/api/meals")
     def list_meals(start: date, end: date) -> list[Meal]:

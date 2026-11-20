@@ -1111,7 +1111,7 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
         request: Request, data: RecipeDiscoveryRequest, response: Response
     ) -> RecipeDiscoveryResponse:
         response.headers["Cache-Control"] = "no-store"
-        return await features.recipe_discovery.search(
+        return await features.discover_recipes(
             data, actor_id=getattr(request.state, "actor_id", None)
         )
 

@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from home_kitchen.oda.service import OdaError, OdaService
 from home_kitchen.recipes.discovery import (
     MATPRAT_INDEX,
+    DiscoveryContext,
     MarmitonDiscoveryProvider,
     MatpratDiscoveryProvider,
     OdaDiscoveryProvider,
@@ -17,7 +18,10 @@ from home_kitchen.recipes.discovery import (
     RecipeDiscoveryItem,
     RecipeDiscoveryRegistry,
     RecipeDiscoveryRequest,
+    build_discovery_context,
 )
+from home_kitchen.recipes.models import EvidenceSnippet
+from home_kitchen.settings import Household
 
 
 def test_query_and_source_request_validation():
@@ -324,3 +328,238 @@ def test_oda_service_verifies_readonly_recipe_tool_schema(monkeypatch):
     tool.annotations.readOnlyHint = False
     with pytest.raises(OdaError, match="read-only"):
         asyncio.run(service.search_recipes("actor", "soup"))
+
+
+def test_build_discovery_context_extracts_preferences_likes_and_dislikes():
+    import json
+
+    household = Household(dietary_preferences=["vegetarian", "no peanuts"])
+    evidence = [
+        EvidenceSnippet(
+            evidence_id="rating-like",
+            text=json.dumps(
+                {
+                    "kind": "recipe_rating",
+                    "message": 'Feedback for recipe "Tomato Pasta". Rating: 5/5.',
+                    "structured": json.dumps({"rating": 5}),
+                }
+            ),
+        ),
+        EvidenceSnippet(
+            evidence_id="rating-dislike",
+            text=json.dumps(
+                {
+                    "kind": "recipe_rating",
+                    "message": 'Feedback for recipe "Pork Stew". Would make again: no.',
+                    "structured": json.dumps({"would_make_again": False, "notes": "Too salty"}),
+                }
+            ),
+        ),
+        EvidenceSnippet(
+            evidence_id="pref-avoid",
+            text=json.dumps(
+                {
+                    "kind": "preference",
+                    "message": "Avoid coriander in our meals",
+                    "structured": json.dumps({"ingredient": "coriander", "preference": "avoid"}),
+                }
+            ),
+        ),
+        EvidenceSnippet(
+            evidence_id="inv-ignored",
+            text=json.dumps(
+                {"kind": "current_inventory", "name": "Coriander", "quantity": "1", "unit": "item"}
+            ),
+        ),
+    ]
+
+    context = build_discovery_context(household, evidence)
+    assert context.dietary_preferences == ["vegetarian", "no peanuts"]
+    assert "Tomato Pasta" in context.likes
+    assert "Pork Stew" in context.dislikes
+    assert "coriander" in context.dislikes
+    assert context.evidence_ids == ["rating-like", "rating-dislike", "pref-avoid"]
+
+
+@pytest.mark.asyncio
+async def test_registry_forwards_context_and_ranks_without_altering_attribution():
+    observed_contexts = []
+
+    class ContextAwareProvider:
+        source = "marmiton"
+        timeout_seconds = 1.0
+
+        async def search(self, query, limit, actor_id=None, *, context=None):
+            del query, limit, actor_id
+            observed_contexts.append(context)
+            return ProviderSearch(
+                results=[
+                    RecipeDiscoveryItem(
+                        source="marmiton",
+                        title="Pork Stew with Coriander",
+                        url="https://www.marmiton.org/recettes/recette_pork_1.aspx",
+                        source_attribution="Marmiton",
+                        importable=True,
+                        detail="Original source detail",
+                    ),
+                    RecipeDiscoveryItem(
+                        source="marmiton",
+                        title="Peanut Ramen",
+                        url="https://www.marmiton.org/recettes/recette_peanut_2.aspx",
+                        source_attribution="Marmiton",
+                        importable=True,
+                    ),
+                    RecipeDiscoveryItem(
+                        source="marmiton",
+                        title="Vegetarian Tomato Pasta",
+                        url="https://www.marmiton.org/recettes/recette_pasta_3.aspx",
+                        source_attribution="Marmiton",
+                        importable=True,
+                    ),
+                ]
+            )
+
+    expected_context = DiscoveryContext(
+        dietary_preferences=["vegetarian", "no peanut"],
+        likes=["Tomato Pasta"],
+        dislikes=["coriander", "Pork Stew"],
+        evidence_ids=["ev-1", "ev-2"],
+    )
+    registry = RecipeDiscoveryRegistry(
+        [ContextAwareProvider()],
+        context_provider=lambda query: expected_context,
+    )
+
+    response = await registry.search(RecipeDiscoveryRequest(query="dinner", limit=3))
+
+    assert observed_contexts == [expected_context]
+    assert response.evidence_ids == ["ev-1", "ev-2"]
+    assert [item.title for item in response.results] == [
+        "Vegetarian Tomato Pasta",
+        "Peanut Ramen",
+        "Pork Stew with Coriander",
+    ]
+    # External attribution and source details remain untouched; no fake ratings added.
+    assert all(item.source_attribution == "Marmiton" for item in response.results)
+    assert response.results[2].detail == "Original source detail"
+    assert response.results[0].detail is None
+
+
+def test_api_recipe_discovery_forwards_household_feedback_and_preferences(monkeypatch):
+    import json
+
+    from fastapi.testclient import TestClient
+
+    from home_kitchen.app import create_app
+    from home_kitchen.catalogue.identity import AliasResolution
+    from home_kitchen.service import KitchenService
+    from home_kitchen.settings import Settings
+
+    class _MemoryStore:
+        def __init__(self):
+            self.settings: dict[str, str] = {}
+            self.photo_household_id = None
+            self.engine = None
+
+        def get_setting(self, key: str) -> str | None:
+            return self.settings.get(key)
+
+        def set_setting(self, key: str, value: str) -> None:
+            self.settings[key] = value
+
+        def ensure_setting(self, key: str, value: str) -> str:
+            return self.settings.setdefault(key, value)
+
+    class _MemoryIdentityRepository:
+        def resolve(self, kind: str, locale: str, context: str, alias: str):
+            del kind, locale, context, alias
+            return AliasResolution(status="unmapped", candidates=[])
+
+    store = _MemoryStore()
+    store.set_setting(
+        "household",
+        Household(name="Test Household", dietary_preferences=["vegetarian"]).model_dump_json(),
+    )
+    kitchen = KitchenService(store=store, identity_service=_MemoryIdentityRepository())
+    app = create_app(Settings(local_dev=True), service=kitchen)
+    features = app.state.features
+
+    evidence_calls = []
+
+    def fake_evidence(query):
+        evidence_calls.append(query)
+        return [
+            EvidenceSnippet(
+                evidence_id="fb-1",
+                text=json.dumps(
+                    {
+                        "kind": "recipe_rating",
+                        "message": 'Feedback for recipe "Lentil Soup". Rating: 5/5.',
+                        "structured": json.dumps({"rating": 5}),
+                    }
+                ),
+            ),
+            EvidenceSnippet(
+                evidence_id="pref-1",
+                text=json.dumps(
+                    {
+                        "kind": "preference",
+                        "message": "Avoid cilantro",
+                        "structured": json.dumps({"ingredient": "cilantro", "preference": "avoid"}),
+                    }
+                ),
+            ),
+        ]
+
+    monkeypatch.setattr(features, "evidence", fake_evidence)
+
+    received_contexts = []
+
+    class StubProvider:
+        source = "marmiton"
+        timeout_seconds = 1.0
+
+        async def search(self, query, limit, actor_id=None, *, context=None):
+            del query, limit, actor_id
+            received_contexts.append(context)
+            return ProviderSearch(
+                results=[
+                    RecipeDiscoveryItem(
+                        source="marmiton",
+                        title="Cilantro Soup",
+                        url="https://www.marmiton.org/recettes/recette_cilantro_1.aspx",
+                        source_attribution="Marmiton",
+                        importable=True,
+                    ),
+                    RecipeDiscoveryItem(
+                        source="marmiton",
+                        title="Vegetarian Lentil Soup",
+                        url="https://www.marmiton.org/recettes/recette_lentil_2.aspx",
+                        source_attribution="Marmiton",
+                        importable=True,
+                    ),
+                ]
+            )
+
+    features.recipe_discovery.providers["marmiton"] = StubProvider()
+
+    client = TestClient(app, client=("127.0.0.1", 5000))
+    response = client.post(
+        "/api/recipe-discovery",
+        json={"query": "soup", "sources": ["marmiton"], "limit": 5},
+    )
+
+    assert response.status_code == 200, response.text
+    assert evidence_calls == ["soup"]
+    assert len(received_contexts) == 1
+    ctx = received_contexts[0]
+    assert ctx.dietary_preferences == ["vegetarian"]
+    assert "Lentil Soup" in ctx.likes
+    assert "cilantro" in ctx.dislikes
+    body = response.json()
+    assert body["evidence_ids"] == ["fb-1", "pref-1"]
+    assert [item["title"] for item in body["results"]] == [
+        "Vegetarian Lentil Soup",
+        "Cilantro Soup",
+    ]
+    assert all(item["source_attribution"] == "Marmiton" for item in body["results"])

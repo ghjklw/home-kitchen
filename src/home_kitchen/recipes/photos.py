@@ -13,6 +13,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
 
 from home_kitchen.ai_credentials import anthropic_model
+from home_kitchen.recipes.language import detect_recipe_language
 from home_kitchen.recipes.models import EditableRecipeDraft, RecipeContext
 from home_kitchen.settings import Settings
 
@@ -131,4 +132,6 @@ async def extract_photo(
         not ingredient.source_indices for ingredient in extraction.draft.ingredients
     ):
         raise ValueError("Photo transcription must retain source ingredient words and indices")
-    return extraction
+    detected_language = detect_recipe_language(extraction.draft)
+    draft = extraction.draft.model_copy(update={"source_language": detected_language})
+    return extraction.model_copy(update={"draft": draft})

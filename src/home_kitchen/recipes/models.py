@@ -59,6 +59,7 @@ class EditableRecipeDraft(BaseModel):
     provenance: AdaptationProvenance | None = None
     photo_source: PhotoSource | None = None
     image_attribution: RecipeImageAttribution | None = None
+    source_language: NonBlank | None = None
     recipe_type: RecipeType | None = None
     prep_time_minutes: int | None = Field(default=None, ge=1, le=2880)
     prep_category: PrepCategory | None = None

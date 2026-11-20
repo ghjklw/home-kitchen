@@ -174,3 +174,32 @@ def test_photo_agent_uses_only_explicit_application_authentication(monkeypatch):
     settings = Settings(local_dev=True)
     assert photo_agent(settings).model is model
     assert calls == [settings]
+
+
+async def test_photo_extract_detects_source_language_on_draft():
+    french_output = {
+        "draft": {
+            "title": "Tarte aux pommes maison",
+            "servings": 6,
+            "ingredients": [
+                {"name": "pommes", "quantity": 4, "unit": "item", "source_indices": [0]},
+                {"name": "beurre", "quantity": 50, "unit": "g", "source_indices": [1]},
+                {"name": "sucre", "quantity": 100, "unit": "g", "source_indices": [2]},
+            ],
+            "instructions": [
+                "Préchauffer le four et mélanger les ingrédients avec de la farine.",
+                "Ajouter les pommes et cuire pendant trente minutes.",
+            ],
+            "source_ingredients": [
+                {"index": 0, "text": "4 pommes"},
+                {"index": 1, "text": "50 g de beurre"},
+                {"index": 2, "text": "100 g de sucre"},
+            ],
+        },
+        "uncertainties": [],
+    }
+    model = TestModel(custom_output_args=french_output)
+    agent = photo_agent(Settings(local_dev=True), model=model)
+    photo = validate_photo(image_bytes(), "image/png")
+    result = await extract_photo(photo, RecipeContext(household=Household()), agent=agent)
+    assert result.draft.source_language == "fr"

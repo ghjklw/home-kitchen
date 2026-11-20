@@ -161,12 +161,17 @@
     );
   }
 
+  let translationFieldCounter = 0;
+
   function createLabeledField(labelText, inputType, className) {
     const wrap = document.createElement("label");
     wrap.className = "field";
     const span = document.createElement("span");
     span.textContent = labelText;
     const input = document.createElement(inputType === "textarea" ? "textarea" : "input");
+    const fieldId = `translation-field-${++translationFieldCounter}`;
+    input.id = fieldId;
+    wrap.setAttribute("for", fieldId);
     if (inputType !== "textarea") {
       input.type = inputType;
     }
@@ -469,6 +474,7 @@
 
     function updateControls() {
       translateBtn.textContent = `Oversett til ${formatLanguageName(targetLocale)}`;
+      editBtn.setAttribute("aria-expanded", String(isEditingTranslation));
 
       if (isEditingTranslation) {
         statusIndicator.textContent = `Redigerer oversettelse (${formatLanguageName(targetLocale)})`;
@@ -734,6 +740,13 @@
     editForm.addEventListener("submit", (e) => {
       e.preventDefault();
       handleSaveEdit();
+    });
+    editForm.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && isEditingTranslation) {
+        e.preventDefault();
+        e.stopPropagation?.();
+        cancelEdit();
+      }
     });
 
     // Check if a saved translation already exists in the background

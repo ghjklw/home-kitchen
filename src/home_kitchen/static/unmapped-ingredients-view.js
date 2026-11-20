@@ -339,6 +339,7 @@
 
       const productSelectionInfo = el("p", "", "unmapped-selection-info");
       productSelectionInfo.setAttribute("role", "status");
+      productSelectionInfo.setAttribute("aria-live", "polite");
 
       function updateProductSelectionDisplay() {
         if (selectedProduct) {
@@ -364,6 +365,7 @@
         const searchResults = el("div", null, "unmapped-search-results");
         searchResults.setAttribute("role", "region");
         searchResults.setAttribute("aria-label", "Søkeresultater for råvare");
+        searchResults.setAttribute("aria-live", "polite");
 
         const searchBtn = button("Søk etter råvare", async () => {
           const query = searchInput.value.trim();
@@ -384,17 +386,26 @@
               searchResults.append(el("p", "Fant ingen eksisterende råvare med dette navnet.", "muted"));
             } else {
               const candidateList = el("div", null, "unmapped-candidate-list");
+              const candidateBtns = [];
               res.candidates.forEach((cand) => {
                 const label = cand.canonical_name + (cand.variant ? " (" + cand.variant + ")" : "");
                 const chooseBtn = button(
                   "Velg: " + label,
                   () => {
                     selectedProduct = cand;
+                    candidateBtns.forEach((b) =>
+                      b.setAttribute("aria-pressed", b === chooseBtn ? "true" : "false"),
+                    );
                     updateProductSelectionDisplay();
                   },
                   "quiet unmapped-candidate-btn",
                   "Velg " + label + " som kanonisk råvare",
                 );
+                chooseBtn.setAttribute(
+                  "aria-pressed",
+                  selectedProduct?.id === cand.id ? "true" : "false",
+                );
+                candidateBtns.push(chooseBtn);
                 candidateList.append(chooseBtn);
               });
               searchResults.append(candidateList);
@@ -474,6 +485,7 @@
 
         unitSelectionInfo = el("p", "", "unmapped-selection-info");
         unitSelectionInfo.setAttribute("role", "status");
+        unitSelectionInfo.setAttribute("aria-live", "polite");
 
         if (item.canonical_unit_id) {
           add(unitSection, el("p", "✓ Kanonisk måleenhet er allerede koblet.", "unmapped-already-mapped"));
@@ -487,6 +499,7 @@
           const unitSearchResults = el("div", null, "unmapped-search-results");
           unitSearchResults.setAttribute("role", "region");
           unitSearchResults.setAttribute("aria-label", "Søkeresultater for måleenhet");
+          unitSearchResults.setAttribute("aria-live", "polite");
 
           const unitSearchBtn = button("Søk etter måleenhet", async () => {
             const query = unitSearchInput.value.trim();
@@ -507,16 +520,25 @@
                 unitSearchResults.append(el("p", "Fant ingen eksisterende måleenhet med dette navnet.", "muted"));
               } else {
                 const candidateList = el("div", null, "unmapped-candidate-list");
+                const unitCandidateBtns = [];
                 res.candidates.forEach((cand) => {
                   const chooseBtn = button(
                     "Velg: " + cand.canonical_name,
                     () => {
                       selectedUnit = cand;
+                      unitCandidateBtns.forEach((b) =>
+                        b.setAttribute("aria-pressed", b === chooseBtn ? "true" : "false"),
+                      );
                       updateUnitSelectionDisplay();
                     },
                     "quiet unmapped-candidate-btn",
                     "Velg " + cand.canonical_name + " som kanonisk måleenhet",
                   );
+                  chooseBtn.setAttribute(
+                    "aria-pressed",
+                    selectedUnit?.id === cand.id ? "true" : "false",
+                  );
+                  unitCandidateBtns.push(chooseBtn);
                   candidateList.append(chooseBtn);
                 });
                 unitSearchResults.append(candidateList);

@@ -124,6 +124,7 @@
     // Live status message for screen readers
     const status = doc.createElement("span");
     status.className = "quick-feedback-status";
+    status.setAttribute("role", "status");
     status.setAttribute("aria-live", "polite");
 
     // Error alert

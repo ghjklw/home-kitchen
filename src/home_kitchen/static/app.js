@@ -672,24 +672,72 @@ function selectedDateControls() {
   );
   return row;
 }
+const modalReturnTargets = new WeakMap();
+let suppressModalFocusRestore = false;
+function rememberModalReturnFocus(modal) {
+  if (!modal || modal.open) return;
+  const active = document.activeElement;
+  if (
+    active &&
+    active !== document.body &&
+    !modal.contains?.(active) &&
+    typeof active.focus === "function"
+  ) {
+    modalReturnTargets.set(modal, active);
+  } else {
+    modalReturnTargets.delete(modal);
+  }
+}
+function restoreModalReturnFocus(modal) {
+  if (!modal || suppressModalFocusRestore || modal.open) return;
+  const trigger = modalReturnTargets.get(modal);
+  modalReturnTargets.delete(modal);
+  if (trigger && trigger.isConnected !== false && typeof trigger.focus === "function") {
+    trigger.focus({ preventScroll: true });
+    return;
+  }
+  const focusKey = trigger?.dataset?.focusKey;
+  if (focusKey && typeof document.querySelectorAll === "function") {
+    const replacement = [...document.querySelectorAll("[data-focus-key]")].find(
+      (node) => node.dataset.focusKey === focusKey && node.isConnected !== false,
+    );
+    if (replacement && typeof replacement.focus === "function") {
+      replacement.focus({ preventScroll: true });
+      return;
+    }
+  }
+  const main = $("#main");
+  if (main && typeof main.focus === "function") {
+    main.focus({ preventScroll: true });
+  }
+}
 function openDialog(heading) {
   const modal = $("#modal");
-  if (modal.open) modal.close();
+  rememberModalReturnFocus(modal);
+  if (modal.open) {
+    suppressModalFocusRestore = true;
+    try {
+      modal.close();
+    } finally {
+      suppressModalFocusRestore = false;
+    }
+  }
   modal.dataset.kind = "";
   const root = $("#modal-content");
   root.replaceChildren();
   const titleNode = el("h2", heading);
   titleNode.id = "dialog-title";
   modal.setAttribute("aria-labelledby", "dialog-title");
+  const closeButton = button("×", () => modal.close(), "quiet");
+  closeButton.setAttribute("aria-label", "Lukk dialogvindu");
   add(
     root,
     add(
       el("div", null, "dialog-header"),
       titleNode,
-      button("×", () => modal.close(), "quiet"),
+      closeButton,
     ),
   );
-  root.querySelector("button").ariaLabel = "Lukk dialogvindu";
   modal.showModal();
   return root;
 }
@@ -698,6 +746,9 @@ function field(label, type = "text", value = "", help = "") {
   const input = el(
     type === "textarea" ? "textarea" : type === "select" ? "select" : "input",
   );
+  const id = "field-" + (field.counter = (field.counter || 0) + 1);
+  input.id = id;
+  wrap.setAttribute("for", id);
   if (input.tagName === "INPUT") input.type = type;
   input.value = value ?? "";
   add(wrap, el("span", label), input, help ? el("small", help) : null);
@@ -3016,13 +3067,21 @@ function recipeImageSearchForm(recipe) {
 async function viewRecipePhoto(photoSource) {
   const modal = $("#private-photo-modal");
   const root = $("#private-photo-content");
-  if (modal.open) modal.close();
+  rememberModalReturnFocus(modal);
+  if (modal.open) {
+    suppressModalFocusRestore = true;
+    try {
+      modal.close();
+    } finally {
+      suppressModalFocusRestore = false;
+    }
+  }
   root.replaceChildren();
   const heading = el("h2", "Privat bilde av oppskriftssiden");
   heading.id = "private-photo-title";
   const status = el("p", "Henter originalbildet …", "muted");
   const close = button("Lukk", () => modal.close(), "quiet");
-  close.ariaLabel = "Lukk originalbildet";
+  close.setAttribute("aria-label", "Lukk originalbildet");
   add(root, add(el("div", null, "dialog-header"), heading, close), status);
   let objectUrl = null;
   const release = () => {
@@ -8620,6 +8679,10 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") void refreshTrackedRecipeCollectionJob();
 });
 $("#modal").addEventListener("close", queuePendingShoppingRefresh);
+$("#modal").addEventListener("close", () => restoreModalReturnFocus($("#modal")));
+$("#private-photo-modal")?.addEventListener("close", () =>
+  restoreModalReturnFocus($("#private-photo-modal")),
+);
 async function start() {
   try {
     let rememberedCollectionId = null;

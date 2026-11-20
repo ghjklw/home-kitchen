@@ -153,12 +153,13 @@
       : [];
 
     let currentProduct = { ...product };
+    let prefStatusBox = null;
 
     const card = document.createElement("article");
     card.className = "card product-overview-card";
     card.dataset.productId = currentProduct.id;
 
-    function renderCardContent() {
+    function renderCardContent(prefStatusMessage = "") {
       card.replaceChildren();
 
       // Header: Display name, canonical name & variant
@@ -220,6 +221,10 @@
             confirmBtn.type = "button";
             confirmBtn.className = "quiet small confirm-alias-btn";
             confirmBtn.textContent = "Bekreft";
+            confirmBtn.setAttribute(
+              "aria-label",
+              `Bekreft kallenavn ${aliasObj.alias} (${(aliasObj.locale || "nb").toUpperCase()})`,
+            );
             confirmBtn.addEventListener("click", async () => {
               confirmBtn.disabled = true;
               try {
@@ -316,6 +321,12 @@
           } catch (err) {
             if (notify) notify(err.message || "Kunne ikke lagre kallenavn.");
             addAliasBtn.disabled = false;
+          }
+        });
+        aliasInput.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            addAliasBtn.click();
           }
         });
         addAliasRow.append(aliasInput, localeSelect, addAliasBtn);
@@ -484,7 +495,9 @@
       statusBox.className = "callout quiet preferences-status-box";
       statusBox.setAttribute("role", "status");
       statusBox.setAttribute("aria-live", "polite");
-      statusBox.hidden = true;
+      statusBox.textContent = prefStatusMessage || "";
+      statusBox.hidden = !prefStatusMessage;
+      prefStatusBox = statusBox;
       prefSection.append(statusBox);
 
       // Preferred SKUs list
@@ -961,11 +974,17 @@
           payload,
         );
         currentProduct = updated;
-        renderCardContent();
-        notify(`Oda-preferanser for «${currentProduct.display_name}» er lagret.`);
+        const statusMsg = `Oda-preferanser for «${currentProduct.display_name}» er lagret.`;
+        renderCardContent(statusMsg);
+        notify(statusMsg);
         onUpdated(currentProduct);
       } catch (err) {
-        notify(`Kunne ikke lagre preferanser: ${err.message || "Ukjent feil"}`, true);
+        const errMsg = `Kunne ikke lagre preferanser: ${err.message || "Ukjent feil"}`;
+        if (prefStatusBox) {
+          prefStatusBox.textContent = errMsg;
+          prefStatusBox.hidden = false;
+        }
+        notify(errMsg, true);
       }
     }
 
@@ -1208,11 +1227,17 @@
           loadOptsBtn.type = "button";
           loadOptsBtn.className = "quiet small";
           loadOptsBtn.textContent = "Vis produktkoblinger";
+          loadOptsBtn.setAttribute("aria-expanded", "false");
+          loadOptsBtn.setAttribute(
+            "aria-label",
+            `Vis produktkoblinger for ${food.display_name || food.source_name}`,
+          );
           loadOptsBtn.addEventListener("click", async () => {
             loadOptsBtn.disabled = true;
             try {
               const opts = await api(`/catalogue/foods/${encodeURIComponent(food.id)}/products`);
               optionsHost.replaceChildren();
+              loadOptsBtn.setAttribute("aria-expanded", "true");
               if (!Array.isArray(opts) || opts.length === 0) {
                 const none = document.createElement("p");
                 none.className = "muted";
@@ -1224,11 +1249,17 @@
                 opts.forEach((opt) => {
                   const li = document.createElement("li");
                   const label = document.createElement("span");
-                  label.textContent = `${opt.snapshot?.name || opt.product_id} (${opt.provider})${opt.preferred ? " ★ Foretrukket" : ""}`;
+                  const optName = opt.snapshot?.name || opt.product_id;
+                  label.textContent = `${optName} (${opt.provider})${opt.preferred ? " ★ Foretrukket" : ""}`;
                   const toggleBtn = document.createElement("button");
                   toggleBtn.type = "button";
                   toggleBtn.className = "quiet small";
                   toggleBtn.textContent = opt.preferred ? "Fjern foretrukket" : "Velg som foretrukket";
+                  toggleBtn.setAttribute("aria-pressed", opt.preferred ? "true" : "false");
+                  toggleBtn.setAttribute(
+                    "aria-label",
+                    `${opt.preferred ? "Fjern foretrukket" : "Velg som foretrukket"}: ${optName}`,
+                  );
                   toggleBtn.addEventListener("click", async () => {
                     await api(
                       `/catalogue/products/${encodeURIComponent(opt.id)}/preferred`,
@@ -1256,6 +1287,7 @@
         listEl.replaceChildren();
         const errP = document.createElement("p");
         errP.className = "callout error";
+        errP.setAttribute("role", "alert");
         errP.textContent = `Kunne ikke hente Matvaretabellen: ${err.message || "Ukjent feil"}`;
         listEl.append(errP);
       }

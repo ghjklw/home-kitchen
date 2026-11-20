@@ -149,7 +149,8 @@ class TrumfTransaction(BaseModel):
 
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
-    batch_id: str = Field(
+    batch_id: str | None = Field(
+        default=None,
         validation_alias=AliasChoices("batchId", "batchid", "batch_id"),
         serialization_alias="batchId",
     )
@@ -218,7 +219,8 @@ class TrumfReceipt(BaseModel):
 
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
-    batch_id: str = Field(
+    batch_id: str | None = Field(
+        default=None,
         validation_alias=AliasChoices("batchId", "batchid", "batch_id"),
         serialization_alias="batchId",
     )
@@ -469,8 +471,16 @@ def build_transaction_receipt_stub(transaction: TrumfTransaction) -> TrumfReceip
     This preserves provider transaction evidence while explicitly marking has_receipt=False
     and empty varelinjer, preventing promotion to confirmed kitchen purchases.
     """
+    effective_batch_id = (
+        transaction.batch_id.strip()
+        if isinstance(transaction.batch_id, str) and transaction.batch_id.strip()
+        else "tx:"
+        + hashlib.sha256(
+            f"{transaction.transaksjons_tidspunkt.isoformat()}|{transaction.beskrivelse}|{transaction.belop}".encode()
+        ).hexdigest()[:24]
+    )
     raw: dict[str, Any] = {
-        "batchId": transaction.batch_id,
+        "batchId": effective_batch_id,
         "storeName": transaction.beskrivelse,
         "chain": chain_of(transaction),
         "transaksjonsTidspunkt": transaction.transaksjons_tidspunkt,
@@ -625,7 +635,8 @@ class TrumfHttpSource:
             raise UnsupportedTrumfContract(f"Trumf svarte med HTTP {resp.status_code}")
         txs = parse_transactions(resp.text)
         for tx in txs:
-            self._tx_cache[tx.batch_id] = tx
+            if tx.batch_id:
+                self._tx_cache[tx.batch_id] = tx
         return txs
 
     def get_receipt(self, account_id: str, batch_id: str) -> TrumfReceipt | None:
@@ -712,7 +723,7 @@ class TrumfPurchaseHistoryAdapter:
 
         records: list[ProviderOrderRecord] = []
         for tx in page_transactions:
-            if tx.har_kvittering:
+            if tx.har_kvittering and tx.batch_id:
                 receipt = self.source.get_receipt(account_id, tx.batch_id)
                 if receipt is not None:
                     records.append(to_provider_order_record(receipt))

@@ -1478,7 +1478,7 @@ async def test_cookidoo_ai_adaptation_creates_independent_draft_keeping_native_s
         assert reloaded["guided_steps"][0]["temperature"] == "100°C"
 
 
-def test_alembic_migration_0029_guided_steps_structure_and_single_head():
+def test_alembic_migration_0030_guided_steps_structure_and_single_head():
     import runpy
     from pathlib import Path
     from unittest.mock import patch
@@ -1487,13 +1487,13 @@ def test_alembic_migration_0029_guided_steps_structure_and_single_head():
     from alembic.script import ScriptDirectory
 
     migration_path = (
-        Path(__file__).parents[1] / "migrations" / "versions" / "0029_recipe_guided_steps.py"
+        Path(__file__).parents[1] / "migrations" / "versions" / "0030_recipe_guided_steps.py"
     )
     assert migration_path.exists()
     migration = runpy.run_path(str(migration_path))
-    assert migration["revision"] == "0029_recipe_guided_steps"
+    assert migration["revision"] == "0030_recipe_guided_steps"
     assert len(migration["revision"]) <= 32
-    assert migration["down_revision"] == "0028_identity_correction_audit"
+    assert migration["down_revision"] == "0029_plan_proposal_edits"
 
     with (
         patch.object(migration["op"], "add_column") as mock_add,

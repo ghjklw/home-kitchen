@@ -625,6 +625,14 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
         )
 
     @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
+    def get_integrations_health() -> dict[str, Any]:
+        """Return secret-free health, token freshness, and background matching status."""
+        from home_kitchen.feature_api import build_integration_health_summary
+
+        actor = history_context.get().actor_id or "mcp"
+        return build_integration_health_summary(features, actor).model_dump(mode="json")
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
     def list_mapping_corrections(
         kind: Literal["product", "unit"] | None = None,
         alias: str | None = None,

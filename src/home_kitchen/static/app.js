@@ -218,10 +218,11 @@ function connectionSettingsButton(label = "Administrer tilkoblinger i innstillin
 }
 async function loadConnectionStatus() {
   state.settingsRefreshInFlight = true;
-  const [integrationsResult, odaResult, purchaseHistoryResult] = await Promise.allSettled([
+  const [integrationsResult, odaResult, purchaseHistoryResult, healthResult] = await Promise.allSettled([
     api("/integrations"),
     api("/oda/status"),
     api("/purchase-history/status"),
+    api("/integrations/health"),
   ]);
   const snapshot = window.KitchenSettingsView.connectionStatusSnapshot(
     integrationsResult,
@@ -233,6 +234,8 @@ async function loadConnectionStatus() {
   state.odaStatusError = snapshot.odaStatusError;
   state.purchaseHistoryStatus =
     purchaseHistoryResult.status === "fulfilled" ? purchaseHistoryResult.value : null;
+  state.integrationHealth =
+    healthResult.status === "fulfilled" ? healthResult.value : null;
   state.settingsRefreshInFlight = false;
   return snapshot;
 }
@@ -7372,6 +7375,32 @@ function renderConnectionSettings() {
     ),
     el("p", "Administrer leverandørtilgang her. Hemmeligheter vises aldri i Kjøkken.", "muted"),
   );
+  const health = state.integrationHealth;
+  if (health && Array.isArray(health.actionable_issues) && health.actionable_issues.length > 0) {
+    const healthBox = add(
+      section,
+      el(
+        "div",
+        null,
+        health.overall_status === "attention_needed"
+          ? "callout danger connection-health-summary"
+          : "callout connection-health-summary",
+      ),
+      el("strong", "Varsler for tilkoblinger og ferskhet"),
+    );
+    const list = el("ul", null, "stack");
+    health.actionable_issues.forEach((msg) => add(list, el("li", msg)));
+    add(healthBox, list);
+  } else if (health?.background_matching?.last_completed_at) {
+    add(
+      section,
+      el(
+        "p",
+        `Bakgrunnssøk etter Oda-produkter sist fullført: ${new Date(health.background_matching.last_completed_at).toLocaleString("nb-NO")}.`,
+        "muted connection-health-freshness",
+      ),
+    );
+  }
   const refresh = section.querySelector("button");
   refresh.id = "settings-connection-refresh";
   refresh.dataset.focusKey = "settings-connection-refresh";

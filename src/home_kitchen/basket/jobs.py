@@ -10,7 +10,7 @@ from datetime import UTC, date, datetime
 from typing import Literal
 from uuid import UUID, uuid4
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from home_kitchen.basket.matching import (
@@ -33,6 +33,18 @@ class BasketMatchJob(BasketMatchResult):
     detail: str | None = None
     observed_at: datetime | None = None
     needs: list[NeedMatchResult] = Field(default_factory=list)
+
+
+class BackgroundMatchingHealth(BaseModel):
+    """Freshness and failure summary for background Oda product matching."""
+
+    status: Literal["idle", "running", "healthy", "stale", "failed"] = "idle"
+    active_jobs: int = 0
+    last_completed_at: datetime | None = None
+    last_failed_at: datetime | None = None
+    last_error: str | None = None
+    stale: bool = False
+    freshness_note: str | None = None
 
 
 @dataclass
@@ -325,6 +337,67 @@ class BasketMatchJobs:
                     need.detail = SAFE_ERROR
         finally:
             job.finished = self.clock()
+
+    def health_snapshot(self, actor: str) -> BackgroundMatchingHealth:
+        """Return actor-scoped freshness and failure visibility for background matching."""
+        self._actor(actor)
+        now_mono = self.clock()
+        actor_jobs = [job for job in self._jobs.values() if job.actor == actor]
+        active = sum(1 for job in actor_jobs if job.value.status in {"queued", "running"})
+        completed = [job for job in actor_jobs if job.value.status == "complete"]
+        failed = [job for job in actor_jobs if job.value.status == "failed"]
+
+        latest_complete = max(completed, key=lambda j: j.created) if completed else None
+        latest_failed = max(failed, key=lambda j: j.created) if failed else None
+
+        stale = False
+        if latest_complete is not None and latest_complete.finished is not None:
+            stale = (now_mono - latest_complete.finished) > self.ttl_seconds
+        if (
+            latest_failed is not None
+            and latest_complete is not None
+            and latest_failed.created > latest_complete.created
+        ):
+            stale = True
+
+        if active > 0:
+            status: Literal["idle", "running", "healthy", "stale", "failed"] = "running"
+            note = "Bakgrunnssøk etter Oda-produkter pågår."
+        elif latest_failed is not None and (
+            latest_complete is None or latest_failed.created > latest_complete.created
+        ):
+            status = "failed"
+            note = (
+                "Siste bakgrunnssøk feilet; tidligere produkttreff er ikke bekreftet som gjeldende. "
+                "Oppdater produktsøk for ferske treff."
+            )
+        elif latest_complete is not None and stale:
+            status = "stale"
+            note = (
+                "Tidligere produkttreff er utdaterte og gjenspeiler ikke nødvendigvis "
+                "gjeldende tilgjengelighet hos Oda. Oppdater søket før gjennomgang."
+            )
+        elif latest_complete is not None:
+            status = "healthy"
+            note = None
+        else:
+            status = "idle"
+            note = None
+
+        return BackgroundMatchingHealth(
+            status=status,
+            active_jobs=active,
+            last_completed_at=latest_complete.observed_at if latest_complete else None,
+            last_failed_at=latest_failed.observed_at if latest_failed else None,
+            last_error=(
+                latest_failed.value.detail or SAFE_ERROR
+                if latest_failed is not None
+                and (latest_complete is None or latest_failed.created > latest_complete.created)
+                else None
+            ),
+            stale=stale,
+            freshness_note=note,
+        )
 
     async def close(self) -> None:
         self._closed = True

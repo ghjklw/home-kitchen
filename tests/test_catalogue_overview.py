@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -19,6 +21,8 @@ from fixtures.synthetic_kitchen import (
     SYNTHETIC_TOMATO_TINNED_PRODUCT_ID,
     StaticIdentityRepository,
 )
+from sqlalchemy import create_engine, text
+from sqlalchemy.pool import StaticPool
 
 from home_kitchen.basket.matching import BasketCandidate
 from home_kitchen.catalogue.identity import CanonicalProduct
@@ -26,9 +30,13 @@ from home_kitchen.catalogue.overview_models import (
     ExcludedOdaSkuInput,
     PreferredOdaSkuInput,
     ProductPreferencesUpdate,
+    ProductStockUpdate,
     PurchaseEvidenceRecord,
 )
-from home_kitchen.catalogue.overview_repository import MemoryProductOverviewRepository
+from home_kitchen.catalogue.overview_repository import (
+    MemoryProductOverviewRepository,
+    PostgresProductOverviewRepository,
+)
 from home_kitchen.catalogue.overview_service import (
     ProductOverviewService,
     compute_purchase_frequency,
@@ -36,6 +44,8 @@ from home_kitchen.catalogue.overview_service import (
 from home_kitchen.context import HistoryContext, history_context
 from home_kitchen.feature_api import feature_router
 from home_kitchen.feature_mcp import install_feature_tools
+
+sqlite3.register_adapter(UUID, str)
 
 
 @pytest.fixture
@@ -598,3 +608,638 @@ async def test_mcp_overview_and_preference_tools(
             assert updated_carrot["excluded_oda_skus"][0]["oda_product_id"] == "mcp-carrot-bad"
     finally:
         history_context.reset(token)
+
+
+def test_product_overview_surfaces_distinct_remembered_and_previously_purchased_skus(
+    overview_service: ProductOverviewService,
+    memory_repo: MemoryProductOverviewRepository,
+):
+    """Remembered Oda SKUs and previously purchased store/receipt SKUs stay distinct from preferences and stock."""
+    now = datetime(2026, 11, 18, 12, 0, tzinfo=UTC)
+    pid = SYNTHETIC_CARROT_PRODUCT_ID
+
+    memory_repo.record_remembered_sku(
+        pid,
+        "oda-rem-1",
+        name="Bama Gulrot 1 kg",
+        brand="Bama",
+        price="24.90",
+        last_selected_at=now,
+    )
+    memory_repo.record_previously_purchased_sku(
+        pid,
+        "7032069704999",
+        "rema1000",
+        name="REMA 1000 Gulrøtter 1 kg",
+        store_name="REMA 1000 Vulkan",
+        ean="7032069704999",
+        last_purchased_at=now - timedelta(days=2),
+        provenance="provider_verified",
+    )
+    overview_service.update_preferences(
+        pid,
+        ProductPreferencesUpdate(
+            preferred_oda_skus=["oda-pref-1"],
+            excluded_oda_skus=["oda-excl-1"],
+        ),
+    )
+
+    overview = overview_service.get_product_overview(pid)
+    assert [s.oda_product_id for s in overview.preferred_oda_skus] == ["oda-pref-1"]
+    assert [s.oda_product_id for s in overview.excluded_oda_skus] == ["oda-excl-1"]
+    assert [s.oda_product_id for s in overview.remembered_oda_skus] == ["oda-rem-1"]
+    assert [s.sku_id for s in overview.previously_purchased_skus] == ["7032069704999"]
+    assert overview.previously_purchased_skus[0].provider == "rema1000"
+    # Neither remembered nor purchased SKUs ever invent kitchen stock
+    assert overview.stock.in_stock is False
+    assert overview.stock.total_quantity == Decimal(0)
+
+
+def test_update_stock_via_service_and_rest_api(
+    overview_service: ProductOverviewService,
+):
+    """PUT /api/catalogue/products/{id}/stock creates and updates stock directly on a product."""
+
+    class DummyFeatures:
+        def __init__(self, svc):
+            self.product_overview = svc
+
+    app = FastAPI()
+    app.include_router(feature_router(DummyFeatures(overview_service), None))
+
+    carrot_id = str(SYNTHETIC_CARROT_PRODUCT_ID)
+    with TestClient(app) as client:
+        create_res = client.put(
+            f"/api/catalogue/products/{carrot_id}/stock",
+            json={"quantity": "2.5", "unit": "kg", "note": "Skuffen"},
+        )
+        assert create_res.status_code == 200
+        created = create_res.json()
+        assert created["stock"]["in_stock"] is True
+        assert Decimal(str(created["stock"]["total_quantity"])) == Decimal("2500")
+        assert created["stock"]["unit"] == "g"
+        assert created["stock"]["items"][0]["note"] == "Skuffen"
+
+        update_res = client.put(
+            f"/api/catalogue/products/{carrot_id}/stock",
+            json={"quantity": "4", "unit": "stk", "note": "Oppdatert"},
+        )
+        assert update_res.status_code == 200
+        updated = update_res.json()
+        assert Decimal(str(updated["stock"]["total_quantity"])) == Decimal("4")
+        assert updated["stock"]["unit"] == "stk"
+
+        missing_res = client.put(
+            f"/api/catalogue/products/{uuid4()}/stock",
+            json={"quantity": "1", "unit": "stk"},
+        )
+        assert missing_res.status_code == 404
+
+
+def test_merge_products_via_service_rest_and_mcp(
+    overview_service: ProductOverviewService,
+    memory_repo: MemoryProductOverviewRepository,
+):
+    """Merging duplicate canonical products moves aliases, stock, preferences, SKUs, and removes source."""
+    source_id = uuid4()
+    target_id = SYNTHETIC_CARROT_PRODUCT_ID
+    memory_repo.add_product(CanonicalProduct(id=source_id, canonical_name="gulrøtter", variant=""))
+    memory_repo.add_alias(source_id, "gulrøtter", locale="nb", context="recipe", reviewed=True)
+    memory_repo.add_alias(source_id, "gulrot", locale="nb", context="recipe", reviewed=True)
+    memory_repo.add_stock_item(source_id, "gulrøtter", Decimal("3"), "stk")
+    memory_repo.record_remembered_sku(source_id, "oda-src-rem", name="Kilde Gulrot")
+    memory_repo.record_previously_purchased_sku(
+        source_id, "700001", "coop", name="Coop Gulrot", provenance="provider_verified"
+    )
+    overview_service.update_preferences(
+        target_id,
+        ProductPreferencesUpdate(
+            preferred_oda_skus=["oda-target-1", "oda-conflict"],
+            excluded_oda_skus=[],
+        ),
+    )
+    overview_service.update_preferences(
+        source_id,
+        ProductPreferencesUpdate(
+            preferred_oda_skus=["oda-src-pref", "oda-target-1"],
+            excluded_oda_skus=["oda-conflict"],
+        ),
+    )
+
+    class DummyFeatures:
+        def __init__(self, svc):
+            self.product_overview = svc
+
+    app = FastAPI()
+    app.include_router(feature_router(DummyFeatures(overview_service), None))
+
+    with TestClient(app) as client:
+        # Self-merge rejected
+        assert (
+            client.post(
+                f"/api/catalogue/products/{target_id}/merge",
+                json={"source_product_id": str(target_id)},
+            ).status_code
+            == 422
+        )
+
+        merge_res = client.post(
+            f"/api/catalogue/products/{target_id}/merge",
+            json={"source_product_id": str(source_id)},
+        )
+        assert merge_res.status_code == 200
+        merged = merge_res.json()
+        assert merged["id"] == str(target_id)
+        assert any(a["alias"] == "gulrøtter" for a in merged["aliases"])
+        assert merged["stock"]["in_stock"] is True
+        assert Decimal(str(merged["stock"]["total_quantity"])) == Decimal("3")
+        # Exclusion from source wins over target preference on oda-conflict
+        assert [p["oda_product_id"] for p in merged["preferred_oda_skus"]] == [
+            "oda-target-1",
+            "oda-src-pref",
+        ]
+        assert [p["rank"] for p in merged["preferred_oda_skus"]] == [1, 2]
+        assert [e["oda_product_id"] for e in merged["excluded_oda_skus"]] == ["oda-conflict"]
+        assert any(r["oda_product_id"] == "oda-src-rem" for r in merged["remembered_oda_skus"])
+        assert any(p["sku_id"] == "700001" for p in merged["previously_purchased_skus"])
+
+        # Source product is removed
+        assert client.get(f"/api/catalogue/overview/{source_id}").status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_mcp_stock_and_merge_tools(
+    overview_service: ProductOverviewService,
+    memory_repo: MemoryProductOverviewRepository,
+):
+    """Test MCP tools set_catalogue_product_stock and merge_canonical_products."""
+    dup_id = uuid4()
+    memory_repo.add_product(CanonicalProduct(id=dup_id, canonical_name="gulrot dup", variant=""))
+    memory_repo.add_alias(dup_id, "gulrot-dup", locale="nb", context="recipe", reviewed=False)
+
+    class DummyFeatures:
+        def __init__(self, svc):
+            self.product_overview = svc
+
+    mcp = FastMCP("test-catalogue-merge")
+    install_feature_tools(mcp, DummyFeatures(overview_service), None)
+
+    token = history_context.set(HistoryContext(actor_id="mcp-actor", channel="mcp"))
+    try:
+        async with Client(mcp) as client:
+            tools = {t.name: t for t in await client.list_tools()}
+            assert "set_catalogue_product_stock" in tools
+            assert "merge_canonical_products" in tools
+
+            stock_res = await client.call_tool(
+                "set_catalogue_product_stock",
+                {
+                    "product_id": str(dup_id),
+                    "quantity": "2",
+                    "unit": "stk",
+                    "note": "Kjøleskap",
+                },
+            )
+            stock_data = stock_res.structured_content.get("result", stock_res.structured_content)
+            assert stock_data["stock"]["in_stock"] is True
+
+            merge_res = await client.call_tool(
+                "merge_canonical_products",
+                {
+                    "target_product_id": str(SYNTHETIC_CARROT_PRODUCT_ID),
+                    "source_product_id": str(dup_id),
+                },
+            )
+            merged = merge_res.structured_content.get("result", merge_res.structured_content)
+            assert merged["id"] == str(SYNTHETIC_CARROT_PRODUCT_ID)
+            assert any(a["alias"] == "gulrot-dup" for a in merged["aliases"])
+            assert merged["stock"]["in_stock"] is True
+    finally:
+        history_context.reset(token)
+
+
+@pytest.fixture
+def overview_sqlite_engine():
+    engine = create_engine(
+        "sqlite://",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """CREATE TABLE kitchen_canonical_products (
+                    id TEXT PRIMARY KEY,
+                    canonical_name TEXT NOT NULL,
+                    variant TEXT NOT NULL DEFAULT '',
+                    UNIQUE(canonical_name, variant)
+                )"""
+            )
+        )
+        conn.execute(
+            text(
+                """CREATE TABLE kitchen_product_aliases (
+                    locale TEXT NOT NULL,
+                    context TEXT NOT NULL DEFAULT '',
+                    normalized_alias TEXT NOT NULL,
+                    alias TEXT NOT NULL,
+                    product_id TEXT NOT NULL,
+                    reviewed BOOLEAN NOT NULL DEFAULT 0,
+                    PRIMARY KEY (locale, context, normalized_alias, product_id)
+                )"""
+            )
+        )
+        conn.execute(
+            text(
+                """CREATE TABLE kitchen_canonical_product_oda_preferences (
+                    household_id TEXT NOT NULL,
+                    product_id TEXT NOT NULL,
+                    oda_product_id TEXT NOT NULL,
+                    preference_order INTEGER NOT NULL,
+                    payload TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (household_id, product_id, oda_product_id)
+                )"""
+            )
+        )
+        conn.execute(
+            text(
+                """CREATE TABLE kitchen_canonical_product_oda_exclusions (
+                    household_id TEXT NOT NULL,
+                    product_id TEXT NOT NULL,
+                    oda_product_id TEXT NOT NULL,
+                    reason TEXT NOT NULL DEFAULT '',
+                    payload TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (household_id, product_id, oda_product_id)
+                )"""
+            )
+        )
+        conn.execute(
+            text(
+                """CREATE TABLE kitchen_inventory (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    normalized_name TEXT NOT NULL,
+                    unit TEXT NOT NULL,
+                    normalized_unit TEXT NOT NULL,
+                    quantity NUMERIC NOT NULL,
+                    category TEXT NOT NULL DEFAULT 'Other',
+                    note TEXT,
+                    UNIQUE(normalized_name, normalized_unit)
+                )"""
+            )
+        )
+        conn.execute(
+            text(
+                """CREATE TABLE recipes (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    servings INTEGER NOT NULL,
+                    ingredients TEXT NOT NULL,
+                    instructions TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'manual'
+                )"""
+            )
+        )
+        conn.execute(
+            text(
+                """CREATE TABLE kitchen_basket_selections (
+                    id TEXT PRIMARY KEY,
+                    week_start TEXT NOT NULL,
+                    week_end TEXT NOT NULL,
+                    need_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    product_id TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )"""
+            )
+        )
+        conn.execute(
+            text(
+                """CREATE TABLE kitchen_food_catalogue (
+                    id TEXT PRIMARY KEY,
+                    source TEXT NOT NULL,
+                    source_item_id TEXT NOT NULL,
+                    source_name TEXT NOT NULL,
+                    display_name TEXT NOT NULL
+                )"""
+            )
+        )
+        conn.execute(
+            text(
+                """CREATE TABLE kitchen_catalogue_sku_options (
+                    id TEXT PRIMARY KEY,
+                    household_id TEXT NOT NULL,
+                    food_catalogue_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    product_id TEXT NOT NULL,
+                    current_snapshot_id TEXT
+                )"""
+            )
+        )
+        conn.execute(
+            text(
+                """CREATE TABLE kitchen_catalogue_sku_snapshots (
+                    id TEXT PRIMARY KEY,
+                    household_id TEXT NOT NULL,
+                    option_id TEXT NOT NULL,
+                    snapshot TEXT NOT NULL,
+                    snapshot_ref TEXT,
+                    observed_at TEXT NOT NULL,
+                    evidence_status TEXT NOT NULL
+                )"""
+            )
+        )
+        conn.execute(
+            text(
+                """CREATE TABLE kitchen_catalogue_sku_selections (
+                    id TEXT PRIMARY KEY,
+                    household_id TEXT NOT NULL,
+                    option_id TEXT NOT NULL,
+                    snapshot_id TEXT NOT NULL,
+                    actor_id TEXT NOT NULL,
+                    selected_at TEXT NOT NULL
+                )"""
+            )
+        )
+        conn.execute(
+            text(
+                """CREATE TABLE kitchen_catalogue_sku_purchases (
+                    id TEXT PRIMARY KEY,
+                    household_id TEXT NOT NULL,
+                    option_id TEXT NOT NULL,
+                    snapshot_id TEXT NOT NULL,
+                    evidence_kind TEXT NOT NULL,
+                    evidence_ref TEXT NOT NULL,
+                    purchased_at TEXT NOT NULL,
+                    quantity NUMERIC,
+                    quantity_unit TEXT,
+                    actor_id TEXT NOT NULL
+                )"""
+            )
+        )
+        conn.execute(
+            text(
+                """CREATE TABLE kitchen_history (
+                    id TEXT PRIMARY KEY,
+                    occurred_at TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    structured TEXT NOT NULL,
+                    actor_id TEXT
+                )"""
+            )
+        )
+        conn.execute(
+            text(
+                """CREATE TABLE provider_order_sources (
+                    id TEXT PRIMARY KEY,
+                    provider TEXT NOT NULL,
+                    account_id TEXT NOT NULL DEFAULT 'default',
+                    external_id TEXT,
+                    revision_id TEXT,
+                    payload TEXT NOT NULL,
+                    observed_at TEXT NOT NULL
+                )"""
+            )
+        )
+    yield engine
+    engine.dispose()
+
+
+def test_postgres_repository_remembered_vs_purchased_skus_stock_edit_and_atomic_merge(
+    overview_sqlite_engine,
+):
+    """DB-backed test for distinct remembered/purchased SKUs, stock upsert, and atomic merge."""
+    hid = UUID("00000000-0000-0000-0000-000000000001")
+    target_id = uuid4()
+    source_id = uuid4()
+    recipe_id = uuid4()
+    now = datetime(2026, 11, 18, 10, 0, tzinfo=UTC)
+
+    with overview_sqlite_engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO kitchen_canonical_products (id, canonical_name, variant) "
+                "VALUES (:t, 'carrot', ''), (:s, 'gulrøtter', '')"
+            ),
+            {"t": target_id, "s": source_id},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO kitchen_product_aliases (locale, context, normalized_alias, alias, product_id, reviewed) "
+                "VALUES ('nb', 'recipe', 'gulrot', 'gulrot', :t, 0), "
+                "('nb', 'recipe', 'gulrot', 'gulrot', :s, 1), "
+                "('nb', 'recipe', 'gulrøtter', 'gulrøtter', :s, 1)"
+            ),
+            {"t": target_id, "s": source_id},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO recipes (id, title, servings, ingredients, instructions) "
+                "VALUES (:rid, 'Gulrotsuppe', 4, :ings, '[]')"
+            ),
+            {
+                "rid": recipe_id,
+                "ings": json.dumps(
+                    [
+                        {
+                            "name": "gulrøtter",
+                            "quantity": 3,
+                            "unit": "stk",
+                            "canonical_product_id": str(source_id),
+                        }
+                    ]
+                ),
+            },
+        )
+        conn.execute(
+            text(
+                "INSERT INTO kitchen_basket_selections (id, week_start, week_end, need_id, provider, product_id, payload, updated_at) "
+                "VALUES (:id, '2026-11-16', '2026-11-22', :nid, 'oda', 'oda-rem-99', :payload, :ts)"
+            ),
+            {
+                "id": uuid4(),
+                "nid": uuid4(),
+                "payload": json.dumps(
+                    {
+                        "need_id": str(uuid4()),
+                        "product": {
+                            "provider": "oda",
+                            "product_id": "oda-rem-99",
+                            "name": "Bama Gulrot 1 kg",
+                            "brand": "Bama",
+                            "price": "22.90",
+                            "pack_quantity": "1",
+                            "pack_unit": "kg",
+                            "observed_at": now.isoformat(),
+                        },
+                        "packages": 1,
+                    }
+                ),
+                "ts": now.isoformat(),
+            },
+        )
+        # Confirmed Rema 1000 receipt & delivered Oda order vs pending Oda order
+        conn.execute(
+            text(
+                "INSERT INTO provider_order_sources (id, provider, account_id, external_id, revision_id, payload, observed_at) "
+                "VALUES (:id1, 'rema1000', 'malo', 'rema-1', 'r1', :p1, :ts1), "
+                "(:id2, 'oda', 'malo', 'oda-delivered', 'r1', :p2, :ts2), "
+                "(:id3, 'oda', 'malo', 'oda-pending', 'r1', :p3, :ts3)"
+            ),
+            {
+                "id1": uuid4(),
+                "p1": json.dumps(
+                    {
+                        "receiptId": "rema-1",
+                        "storeName": "REMA 1000 Vulkan",
+                        "timestamp": (now - timedelta(days=5)).isoformat(),
+                        "hasReceipt": True,
+                        "lines": [
+                            {
+                                "name": "Gulrøtter 1 kg",
+                                "ean": "7032069704555",
+                                "quantity": 1,
+                                "unit": "kg",
+                                "canonical_product_id": str(source_id),
+                            }
+                        ],
+                    }
+                ),
+                "ts1": (now - timedelta(days=5)).isoformat(),
+                "id2": uuid4(),
+                "p2": json.dumps(
+                    {
+                        "order": {
+                            "orderNumber": "ODA-100",
+                            "deliveryDate": "2026-11-10",
+                            "products": [
+                                {
+                                    "product": {
+                                        "id": 55501,
+                                        "name": "Norsk Gulrot 750 g",
+                                        "unitName": "kg",
+                                    },
+                                    "quantity": 1,
+                                }
+                            ],
+                        },
+                        "tracking": {"status": "delivered"},
+                    }
+                ),
+                "ts2": (now - timedelta(days=8)).isoformat(),
+                "id3": uuid4(),
+                "p3": json.dumps(
+                    {
+                        "order": {
+                            "orderNumber": "ODA-PENDING",
+                            "deliveryDate": "2026-11-20",
+                            "products": [
+                                {
+                                    "product": {
+                                        "id": 55599,
+                                        "name": "Ventende Gulrot",
+                                        "unitName": "kg",
+                                    },
+                                    "quantity": 1,
+                                }
+                            ],
+                        },
+                        "tracking": {"status": "picking"},
+                    }
+                ),
+                "ts3": now.isoformat(),
+            },
+        )
+        conn.execute(
+            text(
+                "INSERT INTO kitchen_inventory (id, name, normalized_name, unit, normalized_unit, quantity, category, note) "
+                "VALUES (:id1, 'gulrot', 'gulrot', 'stk', 'stk', 2, 'Produce', 'Fra mål'), "
+                "(:id2, 'gulrot_extra', 'gulrot_extra', 'stk', 'stk', 3, 'Produce', 'Fra kilde')"
+            ),
+            {"id1": uuid4(), "id2": uuid4()},
+        )
+        # Add alias for gulrot_extra on source so source stock matches it
+        conn.execute(
+            text(
+                "INSERT INTO kitchen_product_aliases (locale, context, normalized_alias, alias, product_id, reviewed) "
+                "VALUES ('nb', 'recipe', 'gulrot_extra', 'gulrot_extra', :s, 0)"
+            ),
+            {"s": source_id},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO kitchen_history (id, occurred_at, channel, kind, message, structured, actor_id) "
+                "VALUES (:hid1, :ts, 'app', 'purchase', 'Bought gulrøtter', :st, 'malo')"
+            ),
+            {
+                "hid1": uuid4(),
+                "ts": (now - timedelta(days=1)).isoformat(),
+                "st": json.dumps(
+                    {
+                        "need": {"name": "gulrøtter", "unit": "stk"},
+                        "canonical_product_id": str(source_id),
+                        "actual_quantity": 2,
+                        "actual_unit": "stk",
+                    }
+                ),
+            },
+        )
+
+    repo = PostgresProductOverviewRepository(overview_sqlite_engine)
+    service = ProductOverviewService(repository=repo, household_id=hid)
+
+    # Check remembered vs purchased before merge on target
+    target_before = service.get_product_overview(target_id)
+    assert [r.oda_product_id for r in target_before.remembered_oda_skus] == ["oda-rem-99"]
+    purchased_ids = {p.sku_id for p in target_before.previously_purchased_skus}
+    assert "55501" in purchased_ids  # delivered Oda order
+    assert "55599" not in purchased_ids  # pending/picking order NOT treated as purchased!
+    assert target_before.purchase_frequency.counts_by_provenance.uncertain == 1
+
+    # Stock edit via service
+    service.update_stock(
+        target_id, ProductStockUpdate(quantity=Decimal("5"), unit="stk", note="Ny")
+    )
+    target_after_stock = service.get_product_overview(target_id)
+    assert target_after_stock.stock.in_stock is True
+    assert target_after_stock.stock.total_quantity == Decimal("5")
+
+    # Merge source into target
+    merged = service.merge_products(target_id, source_id, actor_id="malo")
+    assert merged.id == target_id
+    # Reviewed=True from source won conflict on 'gulrot', and 'gulrøtter' moved over
+    alias_by_name = {a.alias: a for a in merged.aliases}
+    assert alias_by_name["gulrot"].reviewed is True
+    assert "gulrøtter" in alias_by_name
+    # Combined stock from target (5) + source (3) = 8
+    assert merged.stock.total_quantity == Decimal("8")
+    # Rema 1000 receipt SKU (previously mapped to source_id) now shows on target!
+    merged_purchased_ids = {p.sku_id for p in merged.previously_purchased_skus}
+    assert {"55501", "7032069704555"} <= merged_purchased_ids
+
+    # Verify recipe ingredient & provider_order_sources & kitchen_history were repointed, and source deleted
+    with overview_sqlite_engine.connect() as conn:
+        assert (
+            conn.execute(
+                text("SELECT COUNT(*) FROM kitchen_canonical_products WHERE id = :id"),
+                {"id": source_id},
+            ).scalar_one()
+            == 0
+        )
+        ings = json.loads(
+            conn.execute(
+                text("SELECT ingredients FROM recipes WHERE id = :id"), {"id": recipe_id}
+            ).scalar_one()
+        )
+        assert ings[0]["canonical_product_id"] == str(target_id)
+        hist_st = json.loads(
+            conn.execute(
+                text("SELECT structured FROM kitchen_history WHERE kind = 'purchase'")
+            ).scalar_one()
+        )
+        assert hist_st["canonical_product_id"] == str(target_id)

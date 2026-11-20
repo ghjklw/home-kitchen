@@ -559,3 +559,229 @@ test("renderProductCard shows alias certainty and confirms unreviewed aliases vi
   assert.deepEqual(calls[0].body, { alias: "carotte", locale: "fr", context: "recipe" });
   assert.equal(card.querySelector(".confirm-alias-btn"), null);
 });
+
+test("renderProductCard supports inline stock create and update via PUT /stock", async () => {
+  const calls = [];
+  const notifications = [];
+
+  const initialProduct = {
+    id: "prod-stock-1",
+    canonical_name: "carrot",
+    display_name: "gulrot",
+    stock: {
+      in_stock: false,
+      total_quantity: "0",
+      unit: null,
+      items: [],
+      provenance: "kitchen_inventory",
+    },
+    purchase_frequency: { status: "unknown", frequency_display: "unknown" },
+    preferred_oda_skus: [],
+    excluded_oda_skus: [],
+    remembered_oda_skus: [],
+    previously_purchased_skus: [],
+  };
+
+  const updatedProduct = {
+    ...initialProduct,
+    stock: {
+      in_stock: true,
+      total_quantity: "3",
+      unit: "kg",
+      items: [
+        {
+          inventory_id: "inv-1",
+          name: "gulrot",
+          quantity: "3",
+          unit: "kg",
+          category: "Other",
+          note: "Kjøleskap",
+          provenance: "kitchen_inventory",
+        },
+      ],
+      provenance: "kitchen_inventory",
+    },
+  };
+
+  const mockApi = async (path, method, body) => {
+    calls.push({ path, method, body });
+    return updatedProduct;
+  };
+
+  const card = overviewView.renderProductCard(initialProduct, {
+    api: mockApi,
+    notify: (msg) => notifications.push(msg),
+  });
+
+  const stockForm = card.querySelector(".stock-edit-form");
+  assert.ok(stockForm);
+  stockForm.querySelector(".stock-qty-input").value = "3";
+  stockForm.querySelector(".stock-unit-input").value = "kg";
+  stockForm.querySelector(".stock-note-input").value = "Kjøleskap";
+  await stockForm.submit();
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].method, "PUT");
+  assert.equal(calls[0].path, "/catalogue/products/prod-stock-1/stock");
+  assert.equal(calls[0].body.quantity, "3");
+  assert.equal(calls[0].body.unit, "kg");
+  assert.equal(calls[0].body.note, "Kjøleskap");
+
+  assert.equal(card.querySelector(".stock-badge").textContent, "På lager: 3 kg");
+  assert.match(card.querySelector(".stock-items-list").textContent, /gulrot: 3 kg \(Kjøleskap\)/);
+  assert.match(notifications[0], /Lagerbeholdning for «gulrot» er lagret/);
+});
+
+test("renderProductCard renders remembered Oda SKUs distinctly from previously purchased SKUs and allows promote/exclude", async () => {
+  const calls = [];
+  const product = {
+    id: "prod-skus-1",
+    canonical_name: "milk",
+    display_name: "melk",
+    stock: { in_stock: false, total_quantity: "0", unit: null, items: [], provenance: "kitchen_inventory" },
+    purchase_frequency: { status: "known", frequency_display: "every 5 days", sample_size: 4, date_range_days: 15 },
+    preferred_oda_skus: [{ oda_product_id: "oda-pref", rank: 1, name: "Tine Helmelk" }],
+    excluded_oda_skus: [{ oda_product_id: "oda-excl", name: "Skummet melk", reason: "Feil fettprosent" }],
+    remembered_oda_skus: [
+      {
+        oda_product_id: "oda-rem-2",
+        provider: "oda",
+        name: "Rørosmeieriet Helmelk 1L",
+        brand: "Rørosmeieriet",
+        price: "32.90",
+        selection_count: 2,
+      },
+    ],
+    previously_purchased_skus: [
+      {
+        sku_id: "7032069704018",
+        provider: "rema1000",
+        name: "REMA 1000 Helmelk 1L",
+        store_name: "REMA 1000 Vulkan",
+        ean: "7032069704018",
+        purchase_count: 3,
+        provenance: "provider_verified",
+      },
+      {
+        sku_id: "oda-hist-9",
+        provider: "oda",
+        name: "Q-Melk Hel 1L",
+        store_name: "Oda",
+        purchase_count: 1,
+        provenance: "provider_verified",
+      },
+    ],
+  };
+
+  const mockApi = async (path, method, body) => {
+    calls.push({ path, method, body });
+    return {
+      ...product,
+      preferred_oda_skus: body.preferred_oda_skus,
+      excluded_oda_skus: body.excluded_oda_skus,
+    };
+  };
+
+  const card = overviewView.renderProductCard(product, { api: mockApi });
+
+  const remContainer = card.querySelector(".remembered-skus-container");
+  assert.ok(remContainer);
+  const remRows = remContainer.querySelectorAll(".remembered-sku-row");
+  assert.equal(remRows.length, 1);
+  assert.match(remRows[0].textContent, /Rørosmeieriet Helmelk 1L/);
+  assert.match(remRows[0].textContent, /Valgt 2 ganger/);
+  assert.match(remRows[0].textContent, /Husket valg/);
+
+  const purContainer = card.querySelector(".purchased-skus-container");
+  assert.ok(purContainer);
+  const purRows = purContainer.querySelectorAll(".purchased-sku-row");
+  assert.equal(purRows.length, 2);
+  assert.match(purRows[0].textContent, /REMA 1000 Vulkan/);
+  assert.match(purRows[0].textContent, /REMA 1000 Helmelk 1L/);
+  assert.match(purRows[0].textContent, /7032069704018/);
+  assert.match(purRows[0].textContent, /Kjøpt 3 ganger/);
+  assert.match(purRows[0].textContent, /Verifisert kvittering/);
+  assert.match(purRows[1].textContent, /Q-Melk Hel 1L/);
+
+  // Promote remembered Oda SKU to preferred
+  const promoteBtn = remContainer.querySelector(".promote-remembered-btn");
+  assert.ok(promoteBtn);
+  await promoteBtn.click();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].method, "PUT");
+  assert.equal(calls[0].path, "/catalogue/products/prod-skus-1/preferences");
+  assert.deepEqual(
+    calls[0].body.preferred_oda_skus.map((s) => s.oda_product_id),
+    ["oda-pref", "oda-rem-2"],
+  );
+});
+
+test("renderProductOverview renders merge controls and calls POST /catalogue/products/{target_id}/merge", async () => {
+  const container = new MockNode("div");
+  const calls = [];
+  const notifications = [];
+  let mergedDone = false;
+
+  const targetProd = {
+    id: "prod-target",
+    canonical_name: "carrot",
+    display_name: "gulrot",
+    aliases: [{ alias: "gulrot", locale: "nb", context: "recipe", reviewed: true }],
+    stock: { in_stock: true, total_quantity: "2", unit: "kg", items: [], provenance: "kitchen_inventory" },
+    purchase_frequency: { status: "unknown", frequency_display: "unknown" },
+    preferred_oda_skus: [],
+    excluded_oda_skus: [],
+    remembered_oda_skus: [],
+    previously_purchased_skus: [],
+  };
+  const dupProd = {
+    id: "prod-dup",
+    canonical_name: "gulrøtter",
+    display_name: "gulrøtter",
+    aliases: [{ alias: "gulrøtter", locale: "nb", context: "recipe", reviewed: true }],
+    stock: { in_stock: false, total_quantity: "0", unit: null, items: [], provenance: "kitchen_inventory" },
+    purchase_frequency: { status: "unknown", frequency_display: "unknown" },
+    preferred_oda_skus: [],
+    excluded_oda_skus: [],
+    remembered_oda_skus: [],
+    previously_purchased_skus: [],
+  };
+
+  const mockApi = async (path, method = "GET", body = null) => {
+    calls.push({ path, method, body });
+    if (method === "GET" && path.startsWith("/catalogue/overview")) {
+      return mergedDone ? [targetProd] : [targetProd, dupProd];
+    }
+    if (method === "POST" && path === "/catalogue/products/prod-target/merge") {
+      mergedDone = true;
+      return targetProd;
+    }
+    throw new Error(`Unexpected call: ${method} ${path}`);
+  };
+
+  const view = overviewView.renderProductOverview(container, {
+    api: mockApi,
+    notify: (msg) => notifications.push(msg),
+    locale: "nb",
+  });
+  await view.ready;
+
+  const cards = container.querySelectorAll(".product-overview-card");
+  assert.equal(cards.length, 2);
+
+  const dupCard = cards[1];
+  const mergeSelect = dupCard.querySelector(".merge-target-select");
+  assert.ok(mergeSelect);
+  mergeSelect.value = "prod-target";
+
+  const mergeForm = dupCard.querySelector(".merge-product-form");
+  await mergeForm.submit();
+  await new Promise((r) => setTimeout(r, 10));
+
+  const mergeCall = calls.find((c) => c.method === "POST");
+  assert.ok(mergeCall);
+  assert.equal(mergeCall.path, "/catalogue/products/prod-target/merge");
+  assert.deepEqual(mergeCall.body, { source_product_id: "prod-dup" });
+  assert.match(notifications[0], /slått sammen inn i «gulrot»/);
+  assert.equal(container.querySelectorAll(".product-overview-card").length, 1);
+});

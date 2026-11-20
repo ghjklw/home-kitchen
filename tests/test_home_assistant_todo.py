@@ -291,7 +291,9 @@ async def test_rest_and_mcp_export_remaining_store_trip_items_idempotently(test_
         )
         assert connect_resp.status_code == 200
 
-        client.post("/api/items", json={"name": "Milk", "quantity": "2", "unit": "l"}).raise_for_status()
+        client.post(
+            "/api/items", json={"name": "Milk", "quantity": "2", "unit": "l"}
+        ).raise_for_status()
         client.post("/api/items", json={"name": "Coffee"}).raise_for_status()
         client.post("/api/items", json={"name": "Bread"}).raise_for_status()
 

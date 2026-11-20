@@ -12,9 +12,7 @@ from pydantic import BaseModel, ConfigDict, HttpUrl, SecretStr
 _LOG = logging.getLogger(__name__)
 
 DEFAULT_HOME_ASSISTANT_TODO_ENTITY = "todo.shopping_list"
-HOME_ASSISTANT_NOT_CONFIGURED_ERROR = (
-    "Home Assistant er ikke konfigurert; legg til URL og tilgangstoken i Innstillinger eller miljøvariabler."
-)
+HOME_ASSISTANT_NOT_CONFIGURED_ERROR = "Home Assistant er ikke konfigurert; legg til URL og tilgangstoken i Innstillinger eller miljøvariabler."
 
 
 class HomeAssistantError(Exception):
@@ -209,9 +207,7 @@ class HomeAssistantTodoClient:
         with self._get_client() as client:
             return self._list_items_with_client(client)
 
-    def export_remaining_items(
-        self, items: list[str], *, dry_run: bool = False
-    ) -> dict[str, Any]:
+    def export_remaining_items(self, items: list[str], *, dry_run: bool = False) -> dict[str, Any]:
         """Export missing items one-way to Home Assistant, skipping existing active items."""
         deduped: list[str] = []
         seen_input: set[str] = set()

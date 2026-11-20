@@ -1422,6 +1422,9 @@ h3 {
   font-size: 13px;
   font-weight: 650;
 }
+.field[hidden] {
+  display: none;
+}
 .field input,
 .field textarea,
 .field select {
@@ -1807,6 +1810,52 @@ button.link {
 }
 .translation-stale-notice {
   margin-top: 6px;
+}
+.translation-edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line, #e2e1d7);
+}
+.translation-edit-form[hidden] {
+  display: none;
+}
+.translation-edit-heading {
+  margin: 0;
+  font-size: 15px;
+}
+.translation-edit-note {
+  margin: 0;
+  font-size: 13px;
+}
+.translation-edit-ingredients {
+  min-width: 0;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--line, #e2e1d7);
+  border-radius: 10px;
+}
+.translation-edit-ingredient-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.translation-edit-ingredient-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 2fr) minmax(80px, 1fr) minmax(80px, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+.translation-edit-ingredient-row .field {
+  margin-bottom: 0;
+}
+.translation-status-message {
+  font-size: 13px;
+}
+.translation-status-message[hidden] {
+  display: none;
 }
 
 /* Product Overview & Preferences */

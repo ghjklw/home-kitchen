@@ -2099,11 +2099,85 @@ function recipeForm(draft = {}, source = "manual") {
     add(prepCategory.input, opt);
   });
   prepCategory.input.value = draft.prep_category || "";
+  const sourceLanguageLabels = window.KitchenRecipeEditor?.SOURCE_LANGUAGE_LABELS || {
+    nb: "Norsk (bokmål)",
+    en: "Engelsk",
+    fr: "Fransk",
+    es: "Spansk",
+    de: "Tysk",
+    it: "Italiensk",
+    sv: "Svensk",
+    da: "Dansk",
+    und: "Ukjent språk",
+  };
+  const sourceLanguageValues =
+    window.KitchenRecipeEditor?.SOURCE_LANGUAGES || Object.keys(sourceLanguageLabels);
+  const initialSourceLang = window.KitchenRecipeEditor?.normalizeSourceLanguage
+    ? window.KitchenRecipeEditor.normalizeSourceLanguage(draft.source_language) || ""
+    : String(draft.source_language ?? "").trim().toLowerCase();
+  const hasKnownSourceLang =
+    !initialSourceLang || sourceLanguageValues.includes(initialSourceLang);
+  const sourceLanguage = field(
+    "Kildespråk",
+    "select",
+    hasKnownSourceLang ? initialSourceLang : "__custom__",
+  );
+  sourceLanguage.input.name = "source_language";
+  const autoLangOpt = el("option", "Oppdag automatisk");
+  autoLangOpt.value = "";
+  add(sourceLanguage.input, autoLangOpt);
+  sourceLanguageValues.forEach((value) => {
+    const label = sourceLanguageLabels[value]
+      ? `${sourceLanguageLabels[value]} (${value})`
+      : value;
+    const opt = el("option", label);
+    opt.value = value;
+    add(sourceLanguage.input, opt);
+  });
+  const customLangOpt = el("option", "Annet språk (språkkode) …");
+  customLangOpt.value = "__custom__";
+  add(sourceLanguage.input, customLangOpt);
+  sourceLanguage.input.value = hasKnownSourceLang ? initialSourceLang : "__custom__";
+
+  const customSourceLanguage = field(
+    "Språkkode (f.eks. pt, nl, ja)",
+    "text",
+    hasKnownSourceLang ? "" : initialSourceLang,
+  );
+  customSourceLanguage.input.name = "source_language_custom";
+  customSourceLanguage.input.maxLength = 20;
+  customSourceLanguage.input.placeholder = "f.eks. nn, pt, pl";
+  customSourceLanguage.wrap.hidden = hasKnownSourceLang;
+
+  function syncCustomSourceLanguageVisibility() {
+    const isCustom = sourceLanguage.input.value === "__custom__";
+    customSourceLanguage.wrap.hidden = !isCustom;
+    if (!isCustom) customSourceLanguage.input.value = "";
+  }
+  sourceLanguage.input.addEventListener("change", syncCustomSourceLanguageVisibility);
+
+  function selectedSourceLanguage() {
+    if (sourceLanguage.input.value === "__custom__") {
+      const custom = customSourceLanguage.input.value.trim().toLowerCase();
+      if (!custom) {
+        customSourceLanguage.input.focus?.();
+        throw new Error(
+          "Oppgi en språkkode for kildespråket, eller velg et språk fra listen.",
+        );
+      }
+      return custom;
+    }
+    const selected = String(sourceLanguage.input.value ?? "").trim().toLowerCase();
+    return selected || null;
+  }
+
   const metadataRow = add(
     el("div", null, "recipe-metadata-row"),
     recipeType.wrap,
     prepTimeMinutes.wrap,
     prepCategory.wrap,
+    sourceLanguage.wrap,
+    customSourceLanguage.wrap,
   );
   if (
     !isEditing &&
@@ -2335,6 +2409,7 @@ function recipeForm(draft = {}, source = "manual") {
       recipe_type: recipeType.input.value || null,
       prep_time_minutes: prepMinutes,
       prep_category: prepCategory.input.value || null,
+      source_language: selectedSourceLanguage(),
       image_url: photo || null,
       ingredients: rows,
       instructions: instructions.input.value
@@ -2391,6 +2466,10 @@ function recipeForm(draft = {}, source = "manual") {
       recipe_type: recipeType.input.value,
       prep_time_minutes: prepTimeMinutes.input.value,
       prep_category: prepCategory.input.value,
+      source_language:
+        sourceLanguage.input.value === "__custom__"
+          ? customSourceLanguage.input.value.trim().toLowerCase()
+          : String(sourceLanguage.input.value ?? "").trim().toLowerCase(),
       prompt: prompt.input.value,
       ingredients: rowControllers.map((row) => ({
         name: row.name.value,
@@ -2436,9 +2515,20 @@ function recipeForm(draft = {}, source = "manual") {
                   prep_time_minutes: draft.prep_time_minutes ?? null,
                   prep_category: draft.prep_category ?? null,
                   ...response.adapted,
+                  source_language:
+                    response.adapted.source_language ||
+                    revisionValues.source_language ||
+                    draft.source_language ||
+                    null,
                   id: draft.id,
                 }
-              : response.adapted;
+              : {
+                  ...response.adapted,
+                  source_language:
+                    response.adapted.source_language ||
+                    revisionValues.source_language ||
+                    null,
+                };
             if (isEditing) {
               const sourceIngredients = revisionValues.ingredients.map((item) =>
                 window.KitchenRecipeEditor.recipeIngredientForSave(item).item,
@@ -2743,6 +2833,7 @@ function removeRecipeImage(recipe) {
           recipe_type: recipe.recipe_type || null,
           prep_time_minutes: recipe.prep_time_minutes ?? null,
           prep_category: recipe.prep_category || null,
+          source_language: recipe.source_language || null,
         });
         state.recipes = state.recipes.map((item) => item.id === recipe.id ? updated : item);
         viewRecipe(updated);
@@ -3049,7 +3140,13 @@ function recipePhotoForm() {
   function showPhotoDraft(result) {
     photoSource = result?.photo_source || photoSource;
     if (result?.status === "draft_ready" && result.draft) {
-      const draft = { ...result.draft, photo_uncertainties: result.uncertainties || [] };
+      const draft = {
+        ...result.draft,
+        ...(result.source_language && !result.draft.source_language
+          ? { source_language: result.source_language }
+          : {}),
+        photo_uncertainties: result.uncertainties || [],
+      };
       recipeForm(draft, "ai");
       return;
     }

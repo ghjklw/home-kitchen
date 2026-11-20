@@ -226,6 +226,7 @@
         : null;
     if (prepMinutes !== null && (!Number.isInteger(prepMinutes) || prepMinutes < 1))
       throw new Error("Tilberedningstid må være et positivt heltall i minutter.");
+    const sourceLanguage = normalizeSourceLanguage(values.source_language);
     const current = {
       title,
       servings,
@@ -237,6 +238,7 @@
         ? values.source_ingredients.map((item) => ({ ...item }))
         : [],
       provenance: values.provenance || null,
+      ...(sourceLanguage ? { source_language: sourceLanguage } : {}),
       ...(values.recipe_type ? { recipe_type: String(values.recipe_type) } : {}),
       ...(prepMinutes !== null ? { prep_time_minutes: prepMinutes } : {}),
       ...(values.prep_category ? { prep_category: String(values.prep_category) } : {}),
@@ -344,6 +346,36 @@
     batch_cooking: "Batch-cooking",
   });
 
+  const SOURCE_LANGUAGES = Object.freeze([
+    "nb",
+    "en",
+    "fr",
+    "es",
+    "de",
+    "it",
+    "sv",
+    "da",
+    "und",
+  ]);
+
+  const SOURCE_LANGUAGE_LABELS = Object.freeze({
+    nb: "Norsk (bokmål)",
+    en: "Engelsk",
+    fr: "Fransk",
+    es: "Spansk",
+    de: "Tysk",
+    it: "Italiensk",
+    sv: "Svensk",
+    da: "Dansk",
+    und: "Ukjent språk",
+  });
+
+  function normalizeSourceLanguage(value) {
+    if (value == null) return null;
+    const normalized = String(value).trim().toLowerCase();
+    return normalized || null;
+  }
+
   const RECIPE_SOURCE_LABELS = Object.freeze({
     cookidoo: "Cookidoo",
     oda: "Oda",
@@ -407,6 +439,7 @@
       title: String(values?.title ?? ""),
       servings: String(values?.servings ?? ""),
       prompt: String(values?.prompt ?? ""),
+      source_language: normalizeSourceLanguage(values?.source_language) || "",
       recipe_type: String(values?.recipe_type ?? ""),
       prep_time_minutes: String(values?.prep_time_minutes ?? ""),
       prep_category: String(values?.prep_category ?? ""),
@@ -432,6 +465,9 @@
     RECIPE_TYPE_LABELS,
     PREP_CATEGORY_LABELS,
     RECIPE_SOURCE_LABELS,
+    SOURCE_LANGUAGES,
+    SOURCE_LANGUAGE_LABELS,
+    normalizeSourceLanguage,
     formatRecipeBadge,
     formatRecipeSourceBadge,
     buildRevisionRequest,

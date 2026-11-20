@@ -66,3 +66,35 @@ test("recipe detail renders a localized source label for imported drafts", () =>
   assert.match(dialog.text, /Tilpasset fra en importert oppskrift\./u);
   assert.doesNotMatch(dialog.text, /Tilpasset fra imported/u);
 });
+
+test("recipe detail renders Bokmål TM6 guided-cooking badges and ingredient references", () => {
+  const context = {
+    el: (tag, text = "", className = "") => new Node(tag, text, className),
+    add: (parent, ...children) => { children.filter(Boolean).forEach((child) => parent.append(child)); return parent; },
+  };
+  vm.runInNewContext(
+    ["formatGuidedStepDuration", "guidedStepBadges", "renderInstructionStepNode"].map(functionSource).join("\n"),
+    context,
+  );
+
+  const li = context.renderInstructionStepNode(
+    "Kok opp 15 min/100°C/revers/hastighet 1.",
+    {
+      step_index: 0,
+      text: "Kok opp 15 min/100°C/revers/hastighet 1.",
+      time_seconds: 900,
+      temperature: "100°C",
+      speed: "1",
+      direction: "reverse",
+      reverse: true,
+      accessory: "Simmering basket",
+      ingredient_references: ["300 g risottoris", "8 dl kraft"],
+    },
+  );
+  assert.match(li.text, /Tid: 15 min/u);
+  assert.match(li.text, /Temp: 100°C/u);
+  assert.match(li.text, /Hastighet: 1/u);
+  assert.match(li.text, /Retning: Revers/u);
+  assert.match(li.text, /Tilbehør: Simmering basket/u);
+  assert.match(li.text, /Ingredienser: 300 g risottoris, 8 dl kraft/u);
+});

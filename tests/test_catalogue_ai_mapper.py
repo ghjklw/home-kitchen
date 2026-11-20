@@ -411,7 +411,8 @@ def _create_import_sqlite_schema(engine) -> None:
                     source_language TEXT NOT NULL DEFAULT 'und',
                     recipe_type TEXT,
                     prep_time_minutes INTEGER,
-                    prep_category TEXT
+                    prep_category TEXT,
+                    guided_steps TEXT NOT NULL DEFAULT '[]'
                 )
                 """
             )

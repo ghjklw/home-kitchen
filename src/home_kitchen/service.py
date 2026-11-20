@@ -186,6 +186,8 @@ class KitchenService:
             values["photo_source"] = (
                 existing.photo_source.model_dump() if existing.photo_source is not None else None
             )
+        if "guided_steps" not in data.model_fields_set:
+            values["guided_steps"] = [step.model_dump() for step in existing.guided_steps]
         values["ingredients"] = self._retain_omitted_ingredient_identity_fields(
             data, existing, values["ingredients"]
         )

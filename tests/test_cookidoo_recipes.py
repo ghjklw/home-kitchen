@@ -27,6 +27,7 @@ from home_kitchen.connector_auth import ConnectorAuthService
 from home_kitchen.connector_store import ConnectorStore
 from home_kitchen.connector_store import metadata as connector_metadata
 from home_kitchen.context import HistoryContext, history_context
+from home_kitchen.cookidoo_plan_sync import CookidooPlanSyncService
 from home_kitchen.cookidoo_recipes import (
     CookidooCollectionProvider,
     CookidooError,
@@ -78,7 +79,23 @@ def sqlite_engine(tmp_path):
                     source_language TEXT NOT NULL DEFAULT 'und',
                     recipe_type TEXT,
                     prep_time_minutes INTEGER,
-                    prep_category TEXT
+                    prep_category TEXT,
+                    guided_steps TEXT NOT NULL DEFAULT '[]'
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE meals (
+                    id TEXT PRIMARY KEY,
+                    position INTEGER,
+                    date TEXT NOT NULL,
+                    label TEXT,
+                    scheduled_time TEXT,
+                    recipe_id TEXT NOT NULL,
+                    servings INTEGER NOT NULL
                 )
                 """
             )
@@ -227,6 +244,13 @@ def _offline_app(
         oda=FakeOda(),
         settings=settings,
         recipe_collections=collection_service,
+        cookidoo_plan_sync=CookidooPlanSyncService(
+            kitchen,
+            history,
+            store,
+            household_id,
+            provider=cookidoo_provider,
+        ),
         # Unused by collection endpoints/tools, present for router/MCP wiring
         recipe_photos=SimpleNamespace(),
         recipe_images=SimpleNamespace(),
@@ -1227,3 +1251,265 @@ def test_cookidoo_auto_tags_and_import_atomic_persists_metadata(connector_store,
         assert row.recipe_type == "bakst"
         assert row.prep_time_minutes == 90
         assert row.prep_category == "batch_cooking"
+
+
+def test_normalize_cookidoo_recipe_preserves_tm6_guided_steps_and_ingredient_refs():
+    entry = normalize_cookidoo_recipe(
+        {
+            "id": "r-tm6-1",
+            "title": "Risotto i Thermomix",
+            "servingSize": {"quantity": {"value": 4}},
+            "recipeIngredientGroups": [
+                {
+                    "recipeIngredients": [
+                        {"quantity": {"value": 1}, "unitNotation": "", "ingredientNotation": "løk"},
+                        {
+                            "quantity": {"value": 300},
+                            "unitNotation": "g",
+                            "ingredientNotation": "risottoris",
+                        },
+                        {
+                            "quantity": {"value": 800},
+                            "unitNotation": "g",
+                            "ingredientNotation": "kraft",
+                        },
+                    ]
+                }
+            ],
+            "recipeStepGroups": [
+                {
+                    "recipeSteps": [
+                        {
+                            "formattedText": "Hakk løk <nobr>5 sek/hastighet 5</nobr>.",
+                            "ingredientReferences": ["løk"],
+                        },
+                        {
+                            "formattedText": "Tilsett ris og kraft, kok <nobr>15 min/100°C/revers/hastighet 1</nobr>.",
+                            "thermomixParameters": {
+                                "timeSeconds": 900,
+                                "temperature": 100,
+                                "speed": "1",
+                                "reverse": True,
+                                "accessory": "Simmering basket",
+                                "mode": "Guided",
+                            },
+                            "annotations": [
+                                {"type": "INGREDIENT", "data": {"index": 1}},
+                                {"type": "INGREDIENT", "data": {"ingredient": {"name": "kraft"}}},
+                            ],
+                        },
+                        {
+                            "formattedText": "Pisk inn smør med sommerfugl <nobr>2 min/Varoma/Spoon</nobr>.",
+                            "blade": "Butterfly whisk",
+                        },
+                    ]
+                }
+            ],
+        },
+        country="no",
+    )
+    assert len(entry.instructions) == 3
+    assert entry.instructions[0] == "Hakk løk 5 sek/hastighet 5."
+    assert len(entry.guided_steps) == 3
+
+    step0 = entry.guided_steps[0]
+    assert step0.step_index == 0
+    assert step0.time_seconds == 5
+    assert step0.speed == "5"
+    assert step0.ingredient_references == ["løk"]
+    assert step0.ingredient_indices == [0]
+
+    step1 = entry.guided_steps[1]
+    assert step1.step_index == 1
+    assert step1.time_seconds == 900
+    assert step1.temperature == "100°C"
+    assert step1.speed == "1"
+    assert step1.direction == "reverse"
+    assert step1.reverse is True
+    assert step1.accessory == "Simmering basket"
+    assert step1.mode == "Guided"
+    assert step1.ingredient_indices == [1, 2]
+    assert "300 g risottoris" in step1.ingredient_references
+    assert "kraft" in step1.ingredient_references
+
+    step2 = entry.guided_steps[2]
+    assert step2.step_index == 2
+    assert step2.time_seconds == 120
+    assert step2.temperature == "Varoma"
+    assert step2.speed == "Spoon"
+    assert step2.blade == "Butterfly whisk"
+
+
+def test_cookidoo_import_persists_guided_steps_and_ai_adaptation_stays_independent(
+    connector_store, sqlite_engine
+):
+    hid = uuid4()
+    _save_cookidoo_connection(connector_store, hid)
+    kitchen = SimpleNamespace(store=SimpleNamespace(engine=sqlite_engine))
+    history = FakeHistory()
+    service = CookidooRecipeService(kitchen, history, connector_store, hid)
+
+    entry = normalize_cookidoo_recipe(
+        {
+            "id": "r-tm6-save",
+            "title": "TM6 Suppe",
+            "ingredients": ["500 g tomat", "1 løk"],
+            "steps": [
+                {
+                    "formattedText": "Kok opp <nobr>10 min/100°C/hastighet 2</nobr>",
+                    "timeSeconds": 600,
+                    "temperature": "100°C",
+                    "speed": "2",
+                    "reverse": True,
+                    "blade": "Kniv",
+                    "ingredientIndices": [0, 1],
+                }
+            ],
+        },
+        country="no",
+    )
+    recipe_id, existed = service.import_recipe_atomic("malo", entry, reviewed=True)
+    assert existed is False
+    with sqlite_engine.connect() as conn:
+        row = conn.execute(select(recipes).where(recipes.c.id == recipe_id)).mappings().one()
+        assert row["source"] == RecipeSource.COOKIDOO
+        assert row["source_url"] == "https://cookidoo.international/recipes/recipe/nb-NO/r-tm6-save"
+        assert row["instructions"] == ["Kok opp 10 min/100°C/hastighet 2"]
+        import json as _json
+
+        stored_steps = (
+            _json.loads(row["guided_steps"])
+            if isinstance(row["guided_steps"], str)
+            else row["guided_steps"]
+        )
+        assert len(stored_steps) == 1
+        assert stored_steps[0]["time_seconds"] == 600
+        assert stored_steps[0]["temperature"] == "100°C"
+        assert stored_steps[0]["speed"] == "2"
+        assert stored_steps[0]["direction"] == "reverse"
+        assert stored_steps[0]["reverse"] is True
+        assert stored_steps[0]["blade"] == "Kniv"
+        assert stored_steps[0]["ingredient_indices"] == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_cookidoo_ai_adaptation_creates_independent_draft_keeping_native_steps(
+    connector_store, sqlite_engine
+):
+    from pydantic_ai.models.test import TestModel
+
+    from home_kitchen.ai import recipe_agent
+    from home_kitchen.models import Recipe
+    from home_kitchen.recipes import RecipeContext, RecipeDraftRequest, create_recipe_providers
+
+    hid = uuid4()
+    _save_cookidoo_connection(connector_store, hid)
+    kitchen = SimpleNamespace(store=SimpleNamespace(engine=sqlite_engine))
+    history = FakeHistory()
+    service = CookidooRecipeService(kitchen, history, connector_store, hid)
+
+    entry = normalize_cookidoo_recipe(
+        {
+            "id": "r-native-1",
+            "title": "Native TM6 Gryte",
+            "ingredients": ["400 g kylling", "2 dl fløte"],
+            "steps": [
+                {
+                    "formattedText": "Kok <nobr>12 min/100°C/revers/hastighet 1</nobr>",
+                    "timeSeconds": 720,
+                    "temperature": "100°C",
+                    "speed": "1",
+                    "reverse": True,
+                }
+            ],
+        },
+        country="no",
+    )
+    recipe_id, _ = service.import_recipe_atomic("malo", entry, reviewed=True)
+    with sqlite_engine.connect() as conn:
+        row = dict(conn.execute(select(recipes).where(recipes.c.id == recipe_id)).mappings().one())
+        import json as _json
+
+        for col in ("ingredients", "instructions", "source_ingredients", "guided_steps"):
+            if isinstance(row[col], str):
+                row[col] = _json.loads(row[col])
+    native_recipe = Recipe.model_validate(row)
+    assert len(native_recipe.guided_steps) == 1
+
+    settings = Settings(local_dev=True)
+    model = TestModel(
+        custom_output_args={
+            "title": "Vegetarisk gryte (KI-tilpasset)",
+            "servings": 4,
+            "ingredients": [
+                {"name": "kikert", "quantity": "400", "unit": "g", "source_indices": [0]},
+                {"name": "havrefløte", "quantity": "2", "unit": "dl", "source_indices": [1]},
+            ],
+            "instructions": ["Kok opp uten Thermomix på komfyr i 12 min."],
+            "source": "ai",
+            "source_url": str(native_recipe.source_url),
+            "source_ingredients": [
+                {"index": 0, "text": "400 g kylling"},
+                {"index": 1, "text": "2 dl fløte"},
+            ],
+            "provenance": {
+                "kind": "ai_adaptation",
+                "original_source": "cookidoo",
+                "source_url": str(native_recipe.source_url),
+            },
+        }
+    )
+    providers = create_recipe_providers(settings, recipe_agent(settings, model))
+    draft = await providers.draft(
+        "ai",
+        RecipeDraftRequest(recipe=native_recipe, prompt="Gjør den vegetarisk"),
+        RecipeContext(household=Household()),
+    )
+    assert draft.adapted is not None
+    assert draft.adapted.source == "ai"
+    assert draft.adapted.provenance is not None
+    assert draft.adapted.provenance.original_source == RecipeSource.COOKIDOO
+    assert str(draft.adapted.provenance.source_url) == str(native_recipe.source_url)
+    # Original Cookidoo recipe in DB remains untouched with native TM6 steps & source_url
+    with sqlite_engine.connect() as conn:
+        reloaded = conn.execute(select(recipes).where(recipes.c.id == recipe_id)).mappings().one()
+        assert reloaded["source"] == RecipeSource.COOKIDOO
+        assert reloaded["title"] == "Native TM6 Gryte"
+        assert reloaded["guided_steps"][0]["temperature"] == "100°C"
+
+
+def test_alembic_migration_0029_guided_steps_structure_and_single_head():
+    import runpy
+    from pathlib import Path
+    from unittest.mock import patch
+
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    migration_path = (
+        Path(__file__).parents[1] / "migrations" / "versions" / "0029_recipe_guided_steps.py"
+    )
+    assert migration_path.exists()
+    migration = runpy.run_path(str(migration_path))
+    assert migration["revision"] == "0029_recipe_guided_steps"
+    assert len(migration["revision"]) <= 32
+    assert migration["down_revision"] == "0028_identity_correction_audit"
+
+    with (
+        patch.object(migration["op"], "add_column") as mock_add,
+        patch.object(migration["op"], "drop_column") as mock_drop,
+    ):
+        migration["upgrade"]()
+        mock_add.assert_called_once()
+        assert mock_add.call_args[0][0] == "recipes"
+        assert mock_add.call_args[0][1].name == "guided_steps"
+
+        migration["downgrade"]()
+        mock_drop.assert_called_once_with("recipes", "guided_steps")
+
+    config = Config(str(Path(__file__).parents[1] / "alembic.ini"))
+    script = ScriptDirectory.from_config(config)
+    heads = script.get_heads()
+    assert len(heads) == 1
+    revisions = {rev.revision for rev in script.walk_revisions()}
+    assert "0029_recipe_guided_steps" in revisions

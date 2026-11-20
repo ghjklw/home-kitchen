@@ -21,6 +21,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from home_kitchen.history import HistoryEntryCreate, HistoryRepository
 from home_kitchen.imports import ImportedDraft, import_recipe, validate_url
 from home_kitchen.models import (
+    GuidedCookingStep,
     Ingredient,
     PrepCategory,
     PurchaseEstimate,
@@ -78,6 +79,7 @@ class CollectionEntry(BaseModel):
     recipe_type: RecipeType | None = None
     prep_time_minutes: int | None = None
     prep_category: PrepCategory | None = None
+    guided_steps: list[GuidedCookingStep] = Field(default_factory=list)
 
 
 class CollectionPage(BaseModel):
@@ -508,6 +510,7 @@ class CollectionService:
                 recipe_type=inferred_type,
                 prep_time_minutes=inferred_minutes,
                 prep_category=inferred_prep_category,
+                guided_steps=list(draft.guided_steps or entry.guided_steps or []),
             )
             resolve_fn = getattr(self.kitchen, "resolve_recipe_identities", None)
             if callable(resolve_fn):
@@ -642,6 +645,7 @@ class CollectionService:
                                     recipe_type=entry.recipe_type,
                                     prep_time_minutes=entry.prep_time_minutes,
                                     prep_category=entry.prep_category,
+                                    guided_steps=list(entry.guided_steps or []),
                                 )
                             else:
                                 extract_entry = getattr(prov, "extract_entry", None)

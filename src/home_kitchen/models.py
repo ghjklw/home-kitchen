@@ -324,6 +324,35 @@ class SourceIngredient(BaseModel):
     text: NonBlank
 
 
+class GuidedCookingStep(BaseModel):
+    """Structured Thermomix / Cookidoo guided-cooking step metadata."""
+
+    step_index: int = Field(ge=0)
+    text: NonBlank
+    time_seconds: int | None = Field(default=None, ge=0)
+    temperature: str | None = Field(default=None, max_length=64)
+    speed: str | None = Field(default=None, max_length=64)
+    direction: Literal["forward", "reverse"] | None = None
+    reverse: bool | None = None
+    blade: str | None = Field(default=None, max_length=120)
+    accessory: str | None = Field(default=None, max_length=120)
+    mode: str | None = Field(default=None, max_length=120)
+    ingredient_references: list[str] = Field(default_factory=list)
+    ingredient_indices: list[SourceIndex] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def normalize_direction(self) -> "GuidedCookingStep":
+        if self.direction == "reverse" and self.reverse is None:
+            self.reverse = True
+        elif self.direction == "forward" and self.reverse is None:
+            self.reverse = False
+        elif self.reverse is True and self.direction is None:
+            self.direction = "reverse"
+        elif self.reverse is False and self.direction is None:
+            self.direction = "forward"
+        return self
+
+
 class AdaptationProvenance(BaseModel):
     """Attribution supplied for review, never certification of source authenticity."""
 
@@ -389,6 +418,7 @@ class RecipeCreate(BaseModel):
     recipe_type: RecipeType | None = None
     prep_time_minutes: int | None = Field(default=None, ge=1, le=2880)
     prep_category: PrepCategory | None = None
+    guided_steps: list[GuidedCookingStep] = Field(default_factory=list)
 
     @field_validator("recipe_type", mode="before")
     @classmethod

@@ -63,6 +63,12 @@ recipes = Table(
     Column("recipe_type", Text),
     Column("prep_time_minutes", Integer),
     Column("prep_category", Text),
+    Column(
+        "guided_steps",
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+    ),
 )
 recipe_translations = Table(
     "kitchen_recipe_translations",
@@ -154,6 +160,7 @@ def entity_values(entity: BaseModel) -> dict:
             "provenance",
             "photo_source",
             "image_attribution",
+            "guided_steps",
         ):
             values[field] = json_values[field]
         values["photo_source_id"] = entity.photo_source.id if entity.photo_source else None

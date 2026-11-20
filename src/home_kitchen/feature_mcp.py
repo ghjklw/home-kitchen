@@ -31,6 +31,13 @@ from home_kitchen.catalogue.overview_models import (
 )
 from home_kitchen.catalogue.sku_models import RetailerProductOption, RetailerProductSnapshot
 from home_kitchen.context import history_context
+from home_kitchen.cookidoo_plan_sync import (
+    CookidooPlanSyncConfirmRequest,
+    CookidooPlanSyncPreviewRequest,
+    SyncDirection,
+    SyncEditTarget,
+)
+from home_kitchen.cookidoo_recipes import CookidooError
 from home_kitchen.features import KitchenFeatures
 from home_kitchen.history import HistoryEntry, HistoryEntryCreate, RetrievedEvidence
 from home_kitchen.home_assistant import HomeAssistantError, HomeAssistantTodoExportResult
@@ -668,6 +675,71 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
             household_id=features.household_id,
             limit=limit,
         )
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
+    async def get_cookidoo_my_week(start: date, end: date | None = None) -> list[dict[str, Any]]:
+        """Read scheduled recipes from the connected Cookidoo My Week calendar without modifying anything."""
+        actor()
+        try:
+            entries = await features.cookidoo_plan_sync.provider.get_my_week_plan(start, end)
+            return [entry.model_dump(mode="json") for entry in entries]
+        except CookidooError as exc:
+            raise ToolError(exc.detail) from None
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
+    async def preview_cookidoo_plan_sync(
+        direction: SyncDirection,
+        start: date,
+        end: date,
+        meal_ids: list[UUID] | None = None,
+        edits: list[SyncEditTarget] | None = None,
+    ) -> dict[str, Any]:
+        """Preview a Cookidoo My Week <-> Kitchen meal plan sync without writing changes.
+
+        Reads Cookidoo My Week before proposing additions. Separates new additions from
+        explicitly identified edits; a shared date alone is never a conflict and repeated
+        recipes remain separate entries.
+        """
+        try:
+            preview = await features.cookidoo_plan_sync.preview(
+                actor(),
+                CookidooPlanSyncPreviewRequest(
+                    direction=direction,
+                    start=start,
+                    end=end,
+                    meal_ids=meal_ids,
+                    edits=edits or [],
+                ),
+            )
+            return preview.model_dump(mode="json")
+        except CookidooError as exc:
+            raise ToolError(exc.detail) from None
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
+    def get_cookidoo_plan_sync_preview(preview_id: UUID) -> dict[str, Any]:
+        """Read this actor's existing Cookidoo plan sync preview."""
+        return features.cookidoo_plan_sync.get_preview(actor(), preview_id).model_dump(mode="json")
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True})
+    async def confirm_cookidoo_plan_sync(
+        preview_id: UUID,
+        reviewed: bool = False,
+        selected_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Apply ONLY the explicitly reviewed Cookidoo plan sync preview items.
+
+        Requires reviewed=true after showing additions and edits to the user. Never
+        silently overwrites existing meals in Kitchen or Cookidoo My Week.
+        """
+        try:
+            result = await features.cookidoo_plan_sync.confirm(
+                actor(),
+                preview_id,
+                CookidooPlanSyncConfirmRequest(reviewed=reviewed, selected_ids=selected_ids),
+            )
+            return result.model_dump(mode="json")
+        except CookidooError as exc:
+            raise ToolError(exc.detail) from None
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True})
     def correct_identity_mapping(data: AliasCorrectionInput) -> dict[str, Any]:

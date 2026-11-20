@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 from home_kitchen.imports import ImportedDraft
 from home_kitchen.models import (
     AdaptationProvenance,
+    GuidedCookingStep,
     NonBlank,
     PhotoSource,
     PrepCategory,
@@ -63,6 +64,7 @@ class EditableRecipeDraft(BaseModel):
     recipe_type: RecipeType | None = None
     prep_time_minutes: int | None = Field(default=None, ge=1, le=2880)
     prep_category: PrepCategory | None = None
+    guided_steps: list[GuidedCookingStep] = Field(default_factory=list)
 
     @field_validator("recipe_type", mode="before")
     @classmethod

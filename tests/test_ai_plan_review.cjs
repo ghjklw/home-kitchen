@@ -83,7 +83,7 @@ test("renders additions and notes without writes until explicit batch apply", as
   assert.deepEqual(ui.calls, [{ endpoint: "/ai/plan", method: "POST", body: { start: "2026-11-16", days: 7 } }]);
   await ui.apply.click();
   assert.deepEqual(ui.calls.slice(1), [
-    { endpoint: "/meal-plan-proposals", method: "POST", body: { meals } },
+    { endpoint: "/meal-plan-proposals", method: "POST", body: { meal_entries: meals } },
     { endpoint: "/meal-plan-proposals/proposal%2F1/confirm", method: "POST", body: { reviewed: true } },
   ]);
   assert.equal(ui.refreshes(), 1);
@@ -102,7 +102,7 @@ test("unchecked additions are excluded and empty selection cannot apply", async 
   ui.checks[1].change(true);
   assert.equal(ui.apply.disabled, false);
   await ui.apply.click();
-  assert.deepEqual(ui.calls[1].body, { meals: [meals[1]] });
+  assert.deepEqual(ui.calls[1].body, { meal_entries: [meals[1]] });
 });
 
 test("missing recipes cannot be selected or submitted", async () => {
@@ -111,7 +111,7 @@ test("missing recipes cannot be selected or submitted", async () => {
   assert.equal(ui.checks[2].checked, false);
   assert.match(ui.root.textContent, /Oppskriften finnes ikke lenger/);
   await ui.apply.click();
-  assert.deepEqual(ui.calls[1].body, { meals });
+  assert.deepEqual(ui.calls[1].body, { meal_entries: meals });
 });
 
 test("proposal creation failure retains review and permits changing selection before retry", async () => {
@@ -126,7 +126,7 @@ test("proposal creation failure retains review and permits changing selection be
   assert.equal(ui.refreshes(), 0);
   ui.checks[0].change(false);
   await ui.apply.click();
-  assert.deepEqual(ui.calls[2].body, { meals: [meals[1]] });
+  assert.deepEqual(ui.calls[2].body, { meal_entries: [meals[1]] });
   assert.equal(ui.calls[3].endpoint, "/meal-plan-proposals/retry/confirm");
 });
 
@@ -214,9 +214,101 @@ test("stale confirmation unlocks selection and creates a new proposal on explici
   ui.checks[0].change(false);
   await ui.apply.click();
   assert.deepEqual(ui.calls.slice(3), [
-    { endpoint: "/meal-plan-proposals", method: "POST", body: { meals: [meals[1]] } },
+    { endpoint: "/meal-plan-proposals", method: "POST", body: { meal_entries: [meals[1]] } },
     { endpoint: "/meal-plan-proposals/proposal-2/confirm", method: "POST", body: { reviewed: true } },
   ]);
   assert.equal(ui.refreshes(), 1);
   assert.ok(ui.apply.disabled);
+});
+
+test("renders additions and explicit edits separately in Bokmål and applies selected changes atomically", async () => {
+  const additionSharedDate = {
+    meal_id: null,
+    date: "2026-11-16",
+    recipe_id: "soup",
+    servings: 2,
+    label: "Lunsj",
+  };
+  const additionRepeatedRecipe = {
+    meal_id: null,
+    date: "2026-11-17",
+    recipe_id: "soup",
+    servings: 3,
+    label: "Middag",
+  };
+  const validEdit = {
+    meal_id: "existing",
+    date: "2026-11-16",
+    recipe_id: "pasta",
+    servings: 4,
+    label: "Middag",
+  };
+  const missingTargetEdit = {
+    meal_id: "missing-meal",
+    date: "2026-11-18",
+    recipe_id: "pasta",
+    servings: 2,
+  };
+  const draft = {
+    meal_entries: [additionSharedDate, additionRepeatedRecipe, validEdit, missingTargetEdit],
+    additions: [additionSharedDate, additionRepeatedRecipe],
+    edits: [validEdit, missingTargetEdit],
+    existing_meals: {
+      existing: {
+        id: "existing",
+        date: "2026-11-16",
+        recipe_id: "soup",
+        servings: 2,
+        label: "Middag",
+      },
+    },
+    notes: ["Delt dato er tillatt"],
+  };
+  const ui = await render({ draft });
+  assert.match(ui.root.textContent, /Nye måltider \(tillegg\)/);
+  assert.match(ui.root.textContent, /Endringer i eksisterende måltider/);
+  assert.match(ui.root.textContent, /Nåværende: Suppe/);
+  assert.match(ui.root.textContent, /Foreslått: Pasta/);
+  assert.match(ui.root.textContent, /Det eksisterende måltidet finnes ikke lenger/);
+  assert.equal(ui.checks.length, 4);
+  assert.equal(ui.checks[0].checked, true);
+  assert.equal(ui.checks[1].checked, true);
+  assert.equal(ui.checks[2].checked, true);
+  assert.equal(ui.checks[3].checked, false);
+  assert.equal(ui.checks[3].disabled, true);
+
+  // Uncheck one repeated addition, keep the other and the valid edit
+  ui.checks[0].change(false);
+  await ui.apply.click();
+  assert.deepEqual(ui.calls[1], {
+    endpoint: "/meal-plan-proposals",
+    method: "POST",
+    body: { meal_entries: [additionRepeatedRecipe, validEdit] },
+  });
+  assert.deepEqual(ui.calls[2], {
+    endpoint: "/meal-plan-proposals/proposal%2F1/confirm",
+    method: "POST",
+    body: { reviewed: true },
+  });
+  assert.match(ui.status.textContent, /De valgte endringene er lagret i ukeplanen/);
+  assert.equal(ui.refreshes(), 1);
+});
+
+test("cancelling review makes no proposal or meal write calls", async () => {
+  const ui = await render({
+    draft: {
+      additions: [{ meal_id: null, date: "2026-11-16", recipe_id: "soup", servings: 2 }],
+      edits: [{ meal_id: "existing", date: "2026-11-16", recipe_id: "pasta", servings: 4 }],
+      existing_meals: {
+        existing: { id: "existing", date: "2026-11-16", recipe_id: "soup", servings: 2 },
+      },
+    },
+  });
+  const cancelBtn = descendants(ui.root).find(
+    (node) => node.tagName === "button" && node.textContent === "Avbryt",
+  );
+  assert.ok(cancelBtn);
+  await cancelBtn.click();
+  assert.equal(ui.calls.length, 1);
+  assert.equal(ui.refreshes(), 0);
 });

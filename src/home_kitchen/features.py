@@ -2,7 +2,7 @@
 
 import json
 from collections.abc import Callable
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -311,9 +311,12 @@ class KitchenFeatures:
         )
 
     async def recommend_week(self, start: date, days: int = 7) -> PlanDraft:
+        if not 1 <= days <= 14:
+            raise ValueError("days must be between 1 and 14")
         recipes = self.kitchen.list_recipes()
         if not recipes:
             raise ValueError("Save a recipe before requesting a meal plan")
+        existing_meals = self.kitchen.list_meals(start, start + timedelta(days=days - 1))
         evidence = self.evidence("meal preferences feedback purchases")
         planner = build_planner(self.settings)
         result = await recommend_plan(
@@ -323,6 +326,7 @@ class KitchenFeatures:
             start,
             days,
             evidence_context="\n".join(item.model_dump_json() for item in evidence),
+            existing_meals=existing_meals,
         )
         return result.model_copy(update={"evidence_ids": [item.evidence_id for item in evidence]})
 

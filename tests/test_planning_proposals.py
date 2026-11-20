@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import text
 
 from home_kitchen.history import HistoryRepository
-from home_kitchen.models import Ingredient, Meal, MealCreate, RecipeCreate
+from home_kitchen.models import Ingredient, Meal, MealCreate, MealEntry, RecipeCreate
 from home_kitchen.planning_proposals import (
     PlanningProposalService,
     ProposalActorMismatch,
@@ -204,3 +204,66 @@ def test_ttl_and_limits_are_service_configuration(setup):
     ):
         with pytest.raises(ValueError):
             PlanningProposalService(kitchen, **arguments)
+
+
+def test_mixed_additions_and_explicit_edits_atomic_apply_and_rollback(setup):
+    kitchen, recipe, service, proposed = setup
+    pasta = kitchen.create_recipe(
+        RecipeCreate(
+            title="Pasta",
+            servings=2,
+            ingredients=[Ingredient(name="Pasta", quantity=200)],
+            instructions=["Boil"],
+        )
+    )
+    target_date = proposed[0].date
+    existing = kitchen.plan_meal(
+        MealCreate(date=target_date, label="Middag", recipe_id=recipe.id, servings=2)
+    )
+    untouched = kitchen.plan_meal(
+        MealCreate(date=target_date, label="Frokost", recipe_id=recipe.id, servings=1)
+    )
+
+    entries = [
+        MealEntry(
+            meal_id=existing.id,
+            date=target_date,
+            label="Middag",
+            recipe_id=pasta.id,
+            servings=4,
+        ),
+        MealEntry(date=target_date, label="Lunsj", recipe_id=pasta.id, servings=2),
+        MealEntry(date=target_date + timedelta(days=1), recipe_id=pasta.id, servings=3),
+    ]
+    proposal = service.create("alice", entries)
+    assert len(proposal.additions) == 2
+    assert len(proposal.edits) == 1
+    assert proposal.edits[0].meal_id == existing.id
+    assert proposal.existing_meals[str(existing.id)] == existing
+
+    applied = service.confirm(proposal.id, "alice", reviewed=True)
+    assert applied.status == "applied"
+    assert len(applied.applied_meal_ids) == 3
+
+    saved = kitchen.list_meals(target_date, target_date + timedelta(days=1))
+    assert len(saved) == 4
+    by_id = {meal.id: meal for meal in saved}
+    assert by_id[existing.id].recipe_id == pasta.id
+    assert by_id[existing.id].servings == 4
+    assert by_id[untouched.id] == untouched
+
+    # Target deleted before confirm -> addition and edit both roll back
+    deleted_target_proposal = service.create(
+        "alice",
+        [
+            MealEntry(date=target_date, label="Ekstra", recipe_id=pasta.id, servings=2),
+            MealEntry(meal_id=existing.id, date=target_date, recipe_id=recipe.id, servings=5),
+        ],
+    )
+    kitchen.delete_meal(existing.id)
+    with pytest.raises(ProposalConflict, match="unavailable"):
+        service.confirm(deleted_target_proposal.id, "alice", reviewed=True)
+    assert service.get(deleted_target_proposal.id, "alice").status == "stale"
+    after_rollback = kitchen.list_meals(target_date, target_date + timedelta(days=1))
+    assert len(after_rollback) == 3
+    assert all(meal.label != "Ekstra" for meal in after_rollback)

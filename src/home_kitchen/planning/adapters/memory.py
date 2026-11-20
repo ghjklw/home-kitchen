@@ -78,8 +78,21 @@ class InMemoryMealWriter(MealWriter):
     def __init__(self, meals: dict[UUID, Meal]):
         self.meals = meals
 
+    def get_meals(self, meal_ids: list[UUID], *, lock: bool = False) -> dict[UUID, Meal]:
+        return {
+            mid: self.meals[mid].model_copy(deep=True)
+            for mid in sorted(set(meal_ids), key=str)
+            if mid in self.meals
+        }
+
     def insert_meal(self, meal: Meal) -> bool:
         if meal.id in self.meals:
+            return False
+        self.meals[meal.id] = meal.model_copy(deep=True)
+        return True
+
+    def update_meal(self, meal: Meal) -> bool:
+        if meal.id not in self.meals:
             return False
         self.meals[meal.id] = meal.model_copy(deep=True)
         return True
@@ -140,13 +153,15 @@ class InMemoryPlanningSession(PlanningSession):
 
     @contextmanager
     def savepoint(self) -> Generator[None]:
-        saved_meals = self._uow.meals.copy()
+        saved_meals = {mid: meal.model_copy(deep=True) for mid, meal in self._uow.meals.items()}
         saved_history = list(self._uow.history_entries)
         try:
             yield
         except Exception:
-            self._uow.meals = saved_meals
-            self._uow.history_entries = saved_history
+            self._uow.meals.clear()
+            self._uow.meals.update(saved_meals)
+            self._uow.history_entries.clear()
+            self._uow.history_entries.extend(saved_history)
             raise
 
 

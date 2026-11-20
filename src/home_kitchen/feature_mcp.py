@@ -43,7 +43,7 @@ from home_kitchen.history import HistoryEntry, HistoryEntryCreate, RetrievedEvid
 from home_kitchen.home_assistant import HomeAssistantError, HomeAssistantTodoExportResult
 from home_kitchen.integrations import IntegrationInfo
 from home_kitchen.inventory import InventoryItem, InventoryItemCreate, PurchasePlan
-from home_kitchen.models import MealCreate, Recipe
+from home_kitchen.models import MealEntry, Recipe
 from home_kitchen.oda.cart import CartProposalRequest
 from home_kitchen.planning_proposals import ProposalRead
 from home_kitchen.purchase_sync import (
@@ -214,25 +214,34 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
         return await features.basket_jobs.get(actor(), job_id)
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
-    def propose_meal_plan(meals: list[MealCreate]) -> ProposalRead:
-        """Prepare a bounded multi-meal proposal with dates, servings and optional labels/times.
+    def propose_meal_plan(
+        meals: list[MealEntry] | None = None,
+        meal_entries: list[MealEntry] | None = None,
+    ) -> ProposalRead:
+        """Prepare a bounded multi-meal proposal of additions (meal_id=null) and explicit edits (meal_id set).
 
-        Show every meal for review; this saves no planned meals and never replaces existing
-        entries. Confirm separately after user approval.
+        Show additions and edits separately for review; this saves no planned meals and only
+        changes existing meals whose meal_id is explicitly targeted. Confirm separately after
+        user approval.
         """
-        return features.plan_proposals.create(actor(), meals)
+        if meals is None and meal_entries is None:
+            raise ValueError("Provide meal_entries or meals")
+        if meals is not None and meal_entries is not None:
+            raise ValueError("Provide either meal_entries or meals, not both")
+        entries = meal_entries if meal_entries is not None else (meals or [])
+        return features.plan_proposals.create(actor(), entries)
 
     @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
     def get_meal_plan_proposal(proposal_id: UUID) -> ProposalRead:
-        """Read this actor's reviewed meal-plan proposal, expiry and conflict status."""
+        """Read this actor's reviewed meal-plan proposal, additions vs edits, expiry and conflict status."""
         return features.plan_proposals.get(proposal_id, actor())
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
     def confirm_meal_plan(proposal_id: UUID, reviewed: bool = False) -> ProposalRead:
-        """Apply all proposed meals atomically ONLY after explicit user review.
+        """Apply all proposed additions and explicit edits atomically ONLY after explicit user review.
 
-        Do not infer reviewed=True from a planning request. Stale sources require a new
-        reviewed proposal; retries reuse applied IDs.
+        Do not infer reviewed=True from a planning request. Stale sources or changed target meals
+        require a new reviewed proposal; retries reuse applied IDs.
         """
         return features.plan_proposals.confirm(proposal_id, actor(), reviewed=reviewed)
 

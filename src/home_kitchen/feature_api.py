@@ -9,7 +9,15 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 from starlette.concurrency import run_in_threadpool
 
 from home_kitchen.basket import BasketReview, SelectedProduct
@@ -73,7 +81,7 @@ from home_kitchen.home_assistant import (
 )
 from home_kitchen.integrations import IntegrationInfo
 from home_kitchen.inventory import InventoryItem, InventoryItemCreate, PurchasePlan
-from home_kitchen.models import MealCreate, Recipe
+from home_kitchen.models import MealEntry, Recipe
 from home_kitchen.oda import OdaError
 from home_kitchen.planning_proposals import ProposalConflict, ProposalRead
 from home_kitchen.purchase_sync import (
@@ -214,7 +222,19 @@ class BasketAvailabilityRefreshRequest(BaseModel):
 
 
 class MealPlanProposalCreate(BaseModel):
-    meals: list[MealCreate] = Field(min_length=1, max_length=90)
+    meal_entries: list[MealEntry] | None = Field(default=None, min_length=1, max_length=90)
+    meals: list[MealEntry] | None = Field(default=None, min_length=1, max_length=90)
+
+    @model_validator(mode="after")
+    def require_entries(self) -> "MealPlanProposalCreate":
+        if self.meal_entries is None and self.meals is None:
+            raise ValueError("Provide meal_entries or meals")
+        if self.meal_entries is not None and self.meals is not None:
+            raise ValueError("Provide either meal_entries or meals, not both")
+        return self
+
+    def entries(self) -> list[MealEntry]:
+        return self.meal_entries if self.meal_entries is not None else (self.meals or [])
 
 
 class ExplicitReview(BaseModel):
@@ -597,7 +617,7 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
     ) -> ProposalRead:
         response.headers["Cache-Control"] = "no-store"
         try:
-            return features.plan_proposals.create(authenticated_actor(request), data.meals)
+            return features.plan_proposals.create(authenticated_actor(request), data.entries())
         except ProposalConflict as exc:
             raise HTTPException(409, str(exc)) from None
 

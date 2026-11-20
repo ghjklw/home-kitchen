@@ -9,6 +9,7 @@ from home_kitchen.planning.domain.exceptions import (
 from home_kitchen.planning.domain.models import ProposalRead, ProposalRecord, ProposalStatus
 from home_kitchen.planning.domain.rules import (
     _fingerprint,
+    fingerprint_meal,
     fingerprint_recipe,
     validate_actor,
     validate_proposal_bounds,
@@ -24,6 +25,7 @@ __all__ = [
     "ProposalRecord",
     "ProposalStatus",
     "_fingerprint",
+    "fingerprint_meal",
     "fingerprint_recipe",
     "validate_actor",
     "validate_proposal_bounds",

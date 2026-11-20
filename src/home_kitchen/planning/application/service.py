@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from home_kitchen.context import history_context
 from home_kitchen.history import HistoryRepository
-from home_kitchen.models import Meal, MealCreate
+from home_kitchen.models import Meal, MealCreate, MealEntry
 from home_kitchen.planning.domain.exceptions import (
     ProposalConflict,
     ProposalExpired,
 )
 from home_kitchen.planning.domain.models import ProposalRead, ProposalRecord, ProposalStatus
 from home_kitchen.planning.domain.rules import (
+    fingerprint_meal,
     fingerprint_recipe,
     validate_actor,
     validate_proposal_bounds,
@@ -61,10 +63,10 @@ class PlanningProposalService:
     _actor = staticmethod(validate_actor)
     _read = staticmethod(ProposalRead.model_validate)
 
-    def create(self, actor_id: str, meals: list[MealCreate]) -> ProposalRead:
-        """Create a new reviewable proposal with recipe state fingerprints."""
+    def create(self, actor_id: str, meals: Sequence[MealEntry | MealCreate]) -> ProposalRead:
+        """Create a new reviewable proposal with recipe and target-meal fingerprints."""
         validate_actor(actor_id)
-        proposed = [MealCreate.model_validate(meal) for meal in meals]
+        proposed = [MealEntry.model_validate(meal) for meal in meals]
         validate_proposal_bounds(
             proposed, max_meals=self.max_meals, max_range_days=self.max_range_days
         )
@@ -78,15 +80,30 @@ class PlanningProposalService:
                     raise ProposalConflict(
                         f"Recipe {recipe_id} is unavailable. Create and review a new proposal."
                     )
+            edit_ids = sorted(
+                {entry.meal_id for entry in proposed if entry.meal_id is not None}, key=str
+            )
+            target_meals = session.meals.get_meals(edit_ids, lock=False) if edit_ids else {}
+            for meal_id in edit_ids:
+                if meal_id not in target_meals:
+                    raise ProposalConflict(
+                        f"Meal {meal_id} is unavailable. Create and review a new proposal."
+                    )
             fingerprints = {
                 str(rid): fingerprint_recipe(recipes[rid])
                 for rid in sorted(recipes.keys(), key=str)
             }
+            meal_fingerprints = {str(mid): fingerprint_meal(target_meals[mid]) for mid in edit_ids}
+            target_snapshots = {
+                str(mid): target_meals[mid].model_dump(mode="json") for mid in edit_ids
+            }
             record = ProposalRecord(
                 id=uuid4(),
                 actor_id=actor_id,
-                meals=[meal.model_dump(mode="json") for meal in proposed],
+                meals=[entry.model_dump(mode="json") for entry in proposed],
                 recipe_fingerprints=fingerprints,
+                meal_fingerprints=meal_fingerprints,
+                target_meals=target_snapshots,
                 created_at=now,
                 expires_at=now + timedelta(seconds=self.ttl_seconds),
                 status="pending",
@@ -126,7 +143,14 @@ class PlanningProposalService:
                 # Savepoint isolates meal writes and history events so that conflicts
                 # roll back cleanly while the outer transaction records the attempt durably.
                 with session.savepoint():
-                    recipe_ids = sorted({meal.recipe_id for meal in proposal.meals}, key=str)
+                    validate_proposal_bounds(
+                        proposal.meal_entries,
+                        max_meals=self.max_meals,
+                        max_range_days=self.max_range_days,
+                    )
+                    recipe_ids = sorted(
+                        {entry.recipe_id for entry in proposal.meal_entries}, key=str
+                    )
                     recipes = session.recipes.get_recipes(recipe_ids, lock=True)
                     for recipe_id in recipe_ids:
                         if recipe_id not in recipes:
@@ -141,26 +165,63 @@ class PlanningProposalService:
                         raise ProposalConflict(
                             "Source recipes changed. Create and review a new proposal."
                         )
+
+                    edit_ids = sorted(
+                        {
+                            entry.meal_id
+                            for entry in proposal.meal_entries
+                            if entry.meal_id is not None
+                        },
+                        key=str,
+                    )
+                    target_meals = session.meals.get_meals(edit_ids, lock=True) if edit_ids else {}
+                    for meal_id in edit_ids:
+                        if meal_id not in target_meals:
+                            raise ProposalConflict(
+                                f"Meal {meal_id} is unavailable. Create and review a new proposal."
+                            )
+                    if proposal.meal_fingerprints:
+                        current_meal_fingerprints = {
+                            str(mid): fingerprint_meal(target_meals[mid]) for mid in edit_ids
+                        }
+                        if current_meal_fingerprints != proposal.meal_fingerprints:
+                            raise ProposalConflict(
+                                "Target meals changed. Create and review a new proposal."
+                            )
+
                     if proposal.expires_at <= datetime.now(UTC):
                         status = "expired"
                         raise ProposalExpired("Proposal expired. Create and review a new proposal.")
 
                     applied: list[Meal] = []
-                    for data in proposal.meals:
-                        meal = Meal(id=uuid4(), **data.model_dump())
-                        if not session.meals.insert_meal(meal):
-                            raise ProposalConflict(
-                                f"Meal ID {meal.id} already exists. Create and review a new proposal."
-                            )
+                    channel = history_context.get().channel if history_context.get() else "api"
+                    for entry in proposal.meal_entries:
+                        payload = entry.model_dump(exclude={"meal_id"})
+                        if entry.meal_id is None:
+                            meal = Meal(id=uuid4(), **payload)
+                            if not session.meals.insert_meal(meal):
+                                raise ProposalConflict(
+                                    f"Meal ID {meal.id} already exists. Create and review a new proposal."
+                                )
+                            action = "add"
+                            history_message = "Applied reviewed meal plan"
+                        else:
+                            meal = Meal(id=entry.meal_id, **payload)
+                            if not session.meals.update_meal(meal):
+                                raise ProposalConflict(
+                                    f"Meal {meal.id} is unavailable. Create and review a new proposal."
+                                )
+                            action = "edit"
+                            history_message = "Applied reviewed meal plan edit"
                         applied.append(meal)
-                        channel = history_context.get().channel if history_context.get() else "api"
                         session.history.record_planning(
                             actor_id=actor_id,
                             channel=channel,
-                            message="Applied reviewed meal plan",
+                            message=history_message,
                             recipe_id=meal.recipe_id,
                             structured={
                                 "proposal_id": str(proposal.id),
+                                "action": action,
                                 "entity_type": "meal",
                                 "entity_id": str(meal.id),
                                 "data": meal.model_dump(mode="json"),

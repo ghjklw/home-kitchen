@@ -521,3 +521,41 @@ test("renderCuratedFoodsSection browses Matvaretabellen and loads linked product
   );
   assert.match(container.textContent, /Tine Helmelk 1L/);
 });
+
+test("renderProductCard shows alias certainty and confirms unreviewed aliases via PUT /review", async () => {
+  const calls = [];
+  const product = {
+    id: "prod-alias-1",
+    canonical_name: "carrot",
+    display_name: "gulrot",
+    aliases: [
+      { alias: "gulrot", locale: "nb", context: "recipe", reviewed: true },
+      { alias: "carotte", locale: "fr", context: "recipe", reviewed: false },
+    ],
+    translations_by_locale: { nb: ["gulrot"], fr: ["carotte"] },
+    stock: { in_stock: false, total_quantity: "0", unit: "", provenance: "kitchen_inventory" },
+    purchase_frequency: { status: "unknown", frequency_display: "unknown" },
+    preferred_oda_skus: [],
+    excluded_oda_skus: [],
+    purchase_evidence_counts: { provider_verified: 0, user_confirmed: 0, uncertain: 0 },
+  };
+
+  const mockApi = async (path, method = "GET", body = null) => {
+    calls.push({ path, method, body });
+    return {};
+  };
+
+  const card = overviewView.renderProductCard(product, { api: mockApi, notify: () => {} });
+  assert.match(card.textContent, /Bekreftet/);
+  assert.match(card.textContent, /Ubekreftet \/ forslag/);
+
+  const confirmBtn = card.querySelector(".confirm-alias-btn");
+  assert.ok(confirmBtn);
+  await confirmBtn.click();
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].method, "PUT");
+  assert.equal(calls[0].path, "/catalogue/aliases/product/prod-alias-1/review");
+  assert.deepEqual(calls[0].body, { alias: "carotte", locale: "fr", context: "recipe" });
+  assert.equal(card.querySelector(".confirm-alias-btn"), null);
+});

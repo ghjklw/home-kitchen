@@ -180,8 +180,59 @@
       const translationsList = document.createElement("div");
       translationsList.className = "translations-by-locale-list";
 
+      const aliases = Array.isArray(currentProduct.aliases) ? currentProduct.aliases : [];
       const locales = Object.keys(currentProduct.translations_by_locale || {});
-      if (locales.length > 0) {
+      if (aliases.length > 0) {
+        aliases.forEach((aliasObj) => {
+          const row = document.createElement("div");
+          row.className = "locale-translation-row alias-review-row";
+
+          const locBadge = document.createElement("span");
+          locBadge.className = "badge locale-badge";
+          locBadge.textContent = (aliasObj.locale || "nb").toUpperCase();
+          row.append(locBadge);
+
+          const namesSpan = document.createElement("span");
+          namesSpan.className = "translation-names";
+          namesSpan.textContent = aliasObj.alias;
+          row.append(namesSpan);
+
+          const statusBadge = document.createElement("span");
+          statusBadge.className = `badge ${aliasObj.reviewed ? "success" : "warning"} alias-status-badge`;
+          statusBadge.textContent = aliasObj.reviewed ? "Bekreftet" : "Ubekreftet / forslag";
+          row.append(statusBadge);
+
+          if (!aliasObj.reviewed && typeof api === "function") {
+            const confirmBtn = document.createElement("button");
+            confirmBtn.type = "button";
+            confirmBtn.className = "quiet small confirm-alias-btn";
+            confirmBtn.textContent = "Bekreft";
+            confirmBtn.addEventListener("click", async () => {
+              confirmBtn.disabled = true;
+              try {
+                await api(
+                  `/catalogue/aliases/product/${encodeURIComponent(currentProduct.id)}/review`,
+                  "PUT",
+                  {
+                    alias: aliasObj.alias,
+                    locale: aliasObj.locale || "nb",
+                    context: aliasObj.context || "",
+                  },
+                );
+                aliasObj.reviewed = true;
+                if (notify) notify("Kallenavn bekreftet.");
+                renderCardContent();
+              } catch (err) {
+                if (notify) notify(err.message || "Kunne ikke bekrefte kallenavn.");
+                confirmBtn.disabled = false;
+              }
+            });
+            row.append(confirmBtn);
+          }
+
+          translationsList.append(row);
+        });
+      } else if (locales.length > 0) {
         locales.forEach((loc) => {
           const names = currentProduct.translations_by_locale[loc];
           if (Array.isArray(names) && names.length > 0) {
@@ -208,6 +259,55 @@
         translationsList.append(noTrans);
       }
       translationsSection.append(translationsList);
+
+      if (typeof api === "function") {
+        const addAliasRow = document.createElement("div");
+        addAliasRow.className = "actions alias-add-row";
+        const aliasInput = document.createElement("input");
+        aliasInput.type = "text";
+        aliasInput.className = "alias-add-input";
+        aliasInput.placeholder = "Nytt kallenavn (f.eks. gulrot) …";
+        aliasInput.setAttribute("aria-label", "Nytt kallenavn");
+        const localeSelect = document.createElement("select");
+        localeSelect.className = "alias-locale-select";
+        localeSelect.setAttribute("aria-label", "Språk for kallenavn");
+        ["nb", "en", "fr"].forEach((loc) => {
+          const opt = document.createElement("option");
+          opt.value = loc;
+          opt.textContent = loc.toUpperCase();
+          localeSelect.append(opt);
+        });
+        const addAliasBtn = document.createElement("button");
+        addAliasBtn.type = "button";
+        addAliasBtn.className = "quiet small alias-add-btn";
+        addAliasBtn.textContent = "Lagre kallenavn";
+        addAliasBtn.addEventListener("click", async () => {
+          const val = aliasInput.value.trim();
+          if (!val) return;
+          addAliasBtn.disabled = true;
+          try {
+            const loc = localeSelect.value || "nb";
+            await api(
+              `/catalogue/aliases/product/${encodeURIComponent(currentProduct.id)}/review`,
+              "PUT",
+              { alias: val, locale: loc, context: "recipe" },
+            );
+            currentProduct.aliases = [
+              ...(currentProduct.aliases || []).filter(
+                (a) => !(a.alias.toLowerCase() === val.toLowerCase() && a.locale === loc),
+              ),
+              { alias: val, locale: loc, context: "recipe", reviewed: true },
+            ];
+            if (notify) notify("Kallenavn lagret og bekreftet.");
+            renderCardContent();
+          } catch (err) {
+            if (notify) notify(err.message || "Kunne ikke lagre kallenavn.");
+            addAliasBtn.disabled = false;
+          }
+        });
+        addAliasRow.append(aliasInput, localeSelect, addAliasBtn);
+        translationsSection.append(addAliasRow);
+      }
       card.append(translationsSection);
 
       // Section: Current Stock (Strictly distinct from purchases!)

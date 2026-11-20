@@ -637,7 +637,8 @@ class TrumfHttpSource:
             raise UnsupportedTrumfContract(f"Trumf svarte med HTTP {resp.status_code}")
         txs = parse_transactions(resp.text)
         for tx in txs:
-            self._tx_cache[tx.batch_id] = tx
+            if tx.batch_id:
+                self._tx_cache[tx.batch_id] = tx
         return txs
 
     def get_receipt(self, account_id: str, batch_id: str) -> TrumfReceipt | None:

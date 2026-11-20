@@ -4,6 +4,7 @@ import asyncio
 import base64
 import binascii
 from datetime import date
+from decimal import Decimal
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
@@ -23,7 +24,11 @@ from home_kitchen.catalogue.identity import (
     UnmappedIngredient,
 )
 from home_kitchen.catalogue.models import FoodCatalogueItem
-from home_kitchen.catalogue.overview_models import ProductOverview, ProductPreferencesUpdate
+from home_kitchen.catalogue.overview_models import (
+    ProductOverview,
+    ProductPreferencesUpdate,
+    ProductStockUpdate,
+)
 from home_kitchen.catalogue.sku_models import RetailerProductOption, RetailerProductSnapshot
 from home_kitchen.context import history_context
 from home_kitchen.features import KitchenFeatures
@@ -423,6 +428,48 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
             ),
             actor_id=actor(),
         )
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False})
+    def set_catalogue_product_stock(
+        product_id: UUID,
+        quantity: Decimal,
+        unit: str = "stk",
+        category: str = "Other",
+        note: str | None = None,
+        locale: str = "nb",
+    ) -> ProductOverview:
+        """Set explicit household kitchen stock count and unit for a canonical product."""
+        actor()
+        try:
+            return features.product_overview.update_stock(
+                product_id,
+                ProductStockUpdate(
+                    quantity=quantity,
+                    unit=unit,
+                    category=category,
+                    note=note,
+                ),
+                locale=locale,
+            )
+        except (KeyError, ValueError) as exc:
+            raise ToolError(str(exc)) from None
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True})
+    def merge_canonical_products(
+        target_product_id: UUID,
+        source_product_id: UUID,
+        locale: str = "nb",
+    ) -> ProductOverview:
+        """Atomically merge duplicate source_product_id into target_product_id without losing aliases, stock, preferences, recipes, or purchase history."""
+        try:
+            return features.product_overview.merge_products(
+                target_product_id,
+                source_product_id,
+                actor_id=actor(),
+                locale=locale,
+            )
+        except (KeyError, ValueError) as exc:
+            raise ToolError(str(exc)) from None
 
     @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
     def review_store_trip_completion(start: date, end: date) -> TripCompletionReview:

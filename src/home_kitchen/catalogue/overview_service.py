@@ -15,11 +15,13 @@ from home_kitchen.catalogue.overview_models import (
     ProductAliasItem,
     ProductOverview,
     ProductPreferencesUpdate,
+    ProductStockUpdate,
     ProvenanceCounts,
     PurchaseEvidenceRecord,
     PurchaseFrequencyOverview,
 )
 from home_kitchen.catalogue.overview_repository import ProductOverviewRepository
+from home_kitchen.units import compatible_units, normalize_unit
 
 if TYPE_CHECKING:
     from home_kitchen.basket.matching import BasketCandidate
@@ -151,6 +153,45 @@ class ProductOverviewService:
         self.catalogue_skus = catalogue_skus
         self.household_id = household_id or DEFAULT_HOUSEHOLD_ID
 
+    def _build_product_overview(
+        self,
+        prod: CanonicalProduct,
+        prod_aliases: list[ProductAliasItem],
+        preferred: list[PreferredOdaSku],
+        excluded: list[ExcludedOdaSku],
+        household_id: UUID,
+        locale: str,
+    ) -> ProductOverview:
+        stock = self.repository.get_stock_for_product(prod, prod_aliases)
+        purchase_evidence = self.repository.get_purchase_evidence_for_product(
+            prod, prod_aliases, preferred, household_id
+        )
+        remembered = self.repository.get_remembered_skus_for_product(
+            prod, prod_aliases, household_id
+        )
+        previously_purchased = self.repository.get_previously_purchased_skus_for_product(
+            prod, prod_aliases, preferred, household_id
+        )
+        freq = compute_purchase_frequency(purchase_evidence)
+        display_name = resolve_display_name(prod, prod_aliases, locale=locale)
+        translations = group_translations_by_locale(prod_aliases)
+
+        return ProductOverview(
+            id=prod.id,
+            canonical_name=prod.canonical_name,
+            variant=prod.variant,
+            display_name=display_name,
+            locale=locale,
+            aliases=prod_aliases,
+            translations_by_locale=translations,
+            preferred_oda_skus=preferred,
+            excluded_oda_skus=excluded,
+            remembered_oda_skus=remembered,
+            previously_purchased_skus=previously_purchased,
+            stock=stock,
+            purchase_frequency=freq,
+        )
+
     def get_overview(
         self,
         household_id: UUID | None = None,
@@ -170,28 +211,8 @@ class ProductOverviewService:
         for prod in products:
             prod_aliases = aliases_map.get(prod.id, [])
             preferred, excluded = prefs_map.get(prod.id, ([], []))
-            stock = self.repository.get_stock_for_product(prod, prod_aliases)
-            purchase_evidence = self.repository.get_purchase_evidence_for_product(
-                prod, prod_aliases, preferred, hid
-            )
-            freq = compute_purchase_frequency(purchase_evidence)
-            display_name = resolve_display_name(prod, prod_aliases, locale=locale)
-            translations = group_translations_by_locale(prod_aliases)
-
             overview_list.append(
-                ProductOverview(
-                    id=prod.id,
-                    canonical_name=prod.canonical_name,
-                    variant=prod.variant,
-                    display_name=display_name,
-                    locale=locale,
-                    aliases=prod_aliases,
-                    translations_by_locale=translations,
-                    preferred_oda_skus=preferred,
-                    excluded_oda_skus=excluded,
-                    stock=stock,
-                    purchase_frequency=freq,
-                )
+                self._build_product_overview(prod, prod_aliases, preferred, excluded, hid, locale)
             )
 
         if query:
@@ -225,27 +246,112 @@ class ProductOverviewService:
         aliases_map = self.repository.get_aliases_for_products([product_id])
         prod_aliases = aliases_map.get(product_id, [])
         preferred, excluded = self.repository.get_preferences(hid, product_id)
-        stock = self.repository.get_stock_for_product(prod, prod_aliases)
-        purchase_evidence = self.repository.get_purchase_evidence_for_product(
-            prod, prod_aliases, preferred, hid
-        )
-        freq = compute_purchase_frequency(purchase_evidence)
-        display_name = resolve_display_name(prod, prod_aliases, locale=locale)
-        translations = group_translations_by_locale(prod_aliases)
+        return self._build_product_overview(prod, prod_aliases, preferred, excluded, hid, locale)
 
-        return ProductOverview(
-            id=prod.id,
-            canonical_name=prod.canonical_name,
-            variant=prod.variant,
-            display_name=display_name,
-            locale=locale,
-            aliases=prod_aliases,
-            translations_by_locale=translations,
-            preferred_oda_skus=preferred,
-            excluded_oda_skus=excluded,
-            stock=stock,
-            purchase_frequency=freq,
+    def update_stock(
+        self,
+        product_id: UUID,
+        stock_update: ProductStockUpdate,
+        household_id: UUID | None = None,
+        locale: str = "nb",
+    ) -> ProductOverview:
+        hid = household_id or self.household_id
+        prod = self.repository.get_product(product_id)
+        if prod is None:
+            raise KeyError(f"Canonical product {product_id} not found")
+
+        aliases_map = self.repository.get_aliases_for_products([product_id])
+        prod_aliases = aliases_map.get(product_id, [])
+
+        if self.inventory is not None:
+            from home_kitchen.inventory import InventoryItemCreate
+
+            existing = self.repository.get_stock_for_product(prod, prod_aliases)
+            target_name = prod.canonical_name
+            target_category = stock_update.category
+            if stock_update.inventory_id is not None:
+                matched_item = next(
+                    (i for i in existing.items if i.inventory_id == stock_update.inventory_id),
+                    None,
+                )
+                if matched_item is not None:
+                    target_name = matched_item.name
+                    if stock_update.category == "Other" and matched_item.category != "Other":
+                        target_category = matched_item.category
+                    if normalize_unit(matched_item.unit) not in compatible_units(stock_update.unit):
+                        self.inventory.remove(stock_update.inventory_id)
+            elif existing.items:
+                target_name = existing.items[0].name
+                if stock_update.category == "Other" and existing.items[0].category != "Other":
+                    target_category = existing.items[0].category
+                if len(existing.items) == 1 and normalize_unit(
+                    existing.items[0].unit
+                ) not in compatible_units(stock_update.unit):
+                    if existing.items[0].inventory_id is not None:
+                        self.inventory.remove(existing.items[0].inventory_id)
+            else:
+                nb_aliases = [
+                    a
+                    for a in prod_aliases
+                    if a.locale.casefold().strip() == "nb" and a.alias.strip()
+                ]
+                if nb_aliases:
+                    nb_aliases.sort(key=lambda a: (not a.reviewed, a.context != "recipe"))
+                    target_name = nb_aliases[0].alias
+                elif prod.variant:
+                    target_name = f"{prod.canonical_name} {prod.variant}"
+
+            self.inventory.upsert(
+                InventoryItemCreate(
+                    name=target_name,
+                    unit=stock_update.unit,
+                    quantity=stock_update.quantity,
+                    category=target_category,
+                    note=stock_update.note,
+                )
+            )
+        else:
+            self.repository.upsert_stock_for_product(prod, prod_aliases, stock_update)
+
+        return self.get_product_overview(product_id, hid, locale=locale)
+
+    def merge_products(
+        self,
+        target_product_id: UUID,
+        source_product_id: UUID,
+        household_id: UUID | None = None,
+        actor_id: str = "",
+        locale: str = "nb",
+    ) -> ProductOverview:
+        hid = household_id or self.household_id
+        target, source = self.repository.merge_products(
+            target_product_id, source_product_id, hid, actor_id=actor_id
         )
+        if self.history is not None:
+            engine = getattr(self.history, "engine", None)
+            if engine is not None and engine.dialect.name == "postgresql":
+                from home_kitchen.context import history_context
+                from home_kitchen.history import HistoryEntryCreate
+
+                self.history.record(
+                    HistoryEntryCreate(
+                        channel=history_context.get().channel,
+                        kind="domain_event",
+                        message=(
+                            f"Merged canonical product {source.canonical_name} "
+                            f"into {target.canonical_name}"
+                        ),
+                        structured={
+                            "action": "canonical_product_merged",
+                            "source_product_id": str(source.id),
+                            "target_product_id": str(target.id),
+                            "source_canonical_name": source.canonical_name,
+                            "target_canonical_name": target.canonical_name,
+                        },
+                    ),
+                    actor_id=actor_id or None,
+                )
+        return self.get_product_overview(target_product_id, hid, locale=locale)
 
     def get_preferences(
         self,

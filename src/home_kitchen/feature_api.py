@@ -33,7 +33,12 @@ from home_kitchen.catalogue.identity import (
     UnmappedIngredient,
 )
 from home_kitchen.catalogue.models import FoodCatalogueItem
-from home_kitchen.catalogue.overview_models import ProductOverview, ProductPreferencesUpdate
+from home_kitchen.catalogue.overview_models import (
+    ProductMergeRequest,
+    ProductOverview,
+    ProductPreferencesUpdate,
+    ProductStockUpdate,
+)
 from home_kitchen.catalogue.sku_models import RetailerProductOption, RetailerProductSnapshot
 from home_kitchen.connector_auth import (
     ConnectorAuthError,
@@ -986,6 +991,39 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
             return features.product_overview.update_preferences(product_id, data, actor_id=actor)
         except KeyError:
             raise HTTPException(404, "Canonical product not found") from None
+
+    @router.put("/catalogue/products/{product_id}/stock")
+    def update_catalogue_product_stock(
+        product_id: UUID,
+        data: ProductStockUpdate,
+        locale: str = Query(default="nb", min_length=2, max_length=20),
+    ) -> ProductOverview:
+        try:
+            return features.product_overview.update_stock(product_id, data, locale=locale)
+        except KeyError:
+            raise HTTPException(404, "Canonical product not found") from None
+        except ValueError as err:
+            raise HTTPException(422, str(err)) from err
+
+    @router.post("/catalogue/products/{target_id}/merge")
+    def merge_catalogue_products(
+        target_id: UUID,
+        data: ProductMergeRequest,
+        request: Request,
+        locale: str = Query(default="nb", min_length=2, max_length=20),
+    ) -> ProductOverview:
+        actor = getattr(request.state, "actor_id", None) or "local"
+        try:
+            return features.product_overview.merge_products(
+                target_id,
+                data.source_product_id,
+                actor_id=actor,
+                locale=locale,
+            )
+        except KeyError as err:
+            raise HTTPException(404, str(err)) from None
+        except ValueError as err:
+            raise HTTPException(422, str(err)) from err
 
     @router.get("/catalogue/unmapped-ingredients")
     @router.get("/catalogue/identities/unmapped")

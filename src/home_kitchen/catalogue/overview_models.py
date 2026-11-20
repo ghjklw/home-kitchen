@@ -7,7 +7,9 @@ from decimal import Decimal
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, StringConstraints, field_validator
+
+from home_kitchen.units import normalize_unit
 
 NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
@@ -71,6 +73,56 @@ class ProductPreferencesUpdate(BaseModel):
 
     preferred_oda_skus: list[PreferredOdaSkuInput | NonBlank] = Field(default_factory=list)
     excluded_oda_skus: list[ExcludedOdaSkuInput | NonBlank] = Field(default_factory=list)
+
+
+class RememberedOdaSku(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    oda_product_id: NonBlank
+    provider: str = "oda"
+    name: str | None = None
+    brand: str | None = None
+    price: str | None = None
+    unit_name: str | None = None
+    url: HttpUrl | None = None
+    image_url: HttpUrl | None = None
+    last_selected_at: datetime | None = None
+    selection_count: int = Field(default=1, ge=1)
+    source: str = "basket_selection"
+
+
+class PreviouslyPurchasedSku(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sku_id: NonBlank
+    provider: NonBlank
+    name: str | None = None
+    store_name: str | None = None
+    ean: str | None = None
+    last_purchased_at: datetime | None = None
+    purchase_count: int = Field(default=1, ge=1)
+    provenance: Literal["provider_verified", "user_confirmed", "uncertain"] = "provider_verified"
+
+
+class ProductMergeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_product_id: UUID
+
+
+class ProductStockUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    quantity: Decimal = Field(ge=0, allow_inf_nan=False)
+    unit: NonBlank = "stk"
+    category: NonBlank = "Other"
+    note: str | None = Field(default=None, max_length=2000)
+    inventory_id: UUID | None = None
+
+    @field_validator("unit")
+    @classmethod
+    def normalized_unit(cls, value: str) -> str:
+        return normalize_unit(value)
 
 
 class StockItemDetail(BaseModel):
@@ -143,5 +195,7 @@ class ProductOverview(BaseModel):
     translations_by_locale: dict[str, list[str]] = Field(default_factory=dict)
     preferred_oda_skus: list[PreferredOdaSku] = Field(default_factory=list)
     excluded_oda_skus: list[ExcludedOdaSku] = Field(default_factory=list)
+    remembered_oda_skus: list[RememberedOdaSku] = Field(default_factory=list)
+    previously_purchased_skus: list[PreviouslyPurchasedSku] = Field(default_factory=list)
     stock: ProductStockOverview
     purchase_frequency: PurchaseFrequencyOverview

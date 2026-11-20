@@ -134,10 +134,23 @@
     };
   }
 
+  function formatProviderLabel(provider) {
+    const norm = String(provider || "").trim().toLowerCase();
+    if (norm === "oda") return "Oda";
+    if (norm === "coop") return "Coop";
+    if (norm === "trumf") return "Trumf";
+    if (norm === "rema1000") return "REMA 1000";
+    return provider || "Butikk";
+  }
+
   function renderProductCard(product, options = {}) {
     const api = options.api;
     const notify = options.notify || (() => {});
     const onUpdated = options.onUpdated || (() => {});
+    const onMerged = options.onMerged || (() => {});
+    const mergeCandidates = Array.isArray(options.mergeCandidates)
+      ? options.mergeCandidates
+      : [];
 
     let currentProduct = { ...product };
 
@@ -341,6 +354,90 @@
           stockItemsList.append(li);
         });
         stockSection.append(stockItemsList);
+      }
+
+      if (typeof api === "function") {
+        const stockEditForm = document.createElement("form");
+        stockEditForm.className = "stock-edit-form";
+
+        const firstStockItem =
+          Array.isArray(currentProduct.stock?.items) && currentProduct.stock.items.length > 0
+            ? currentProduct.stock.items[0]
+            : null;
+
+        const stockQtyInput = document.createElement("input");
+        stockQtyInput.type = "number";
+        stockQtyInput.className = "stock-qty-input";
+        stockQtyInput.setAttribute("min", "0");
+        stockQtyInput.setAttribute("step", "any");
+        stockQtyInput.placeholder = "Mengde";
+        stockQtyInput.setAttribute("aria-label", "Mengde på lager");
+        stockQtyInput.required = true;
+        stockQtyInput.value = firstStockItem
+          ? String(firstStockItem.quantity)
+          : currentProduct.stock?.in_stock
+            ? String(currentProduct.stock.total_quantity)
+            : "";
+
+        const stockUnitInput = document.createElement("input");
+        stockUnitInput.type = "text";
+        stockUnitInput.className = "stock-unit-input";
+        stockUnitInput.placeholder = "Enhet (f.eks. stk, kg, l)";
+        stockUnitInput.setAttribute("aria-label", "Enhet for lagerbeholdning");
+        stockUnitInput.required = true;
+        stockUnitInput.value = firstStockItem?.unit || currentProduct.stock?.unit || "stk";
+
+        const stockNoteInput = document.createElement("input");
+        stockNoteInput.type = "text";
+        stockNoteInput.className = "stock-note-input";
+        stockNoteInput.placeholder = "Notat (valgfritt)";
+        stockNoteInput.setAttribute("aria-label", "Notat for lagerbeholdning");
+        stockNoteInput.value = firstStockItem?.note || "";
+
+        const stockSaveBtn = document.createElement("button");
+        stockSaveBtn.type = "submit";
+        stockSaveBtn.className = "quiet stock-save-btn";
+        stockSaveBtn.textContent = "Lagre beholdning";
+
+        let savingStock = false;
+        async function submitStockUpdate(e) {
+          if (e && typeof e.preventDefault === "function") e.preventDefault();
+          if (savingStock) return;
+          const qtyStr = String(stockQtyInput.value ?? "").trim();
+          const unitStr = String(stockUnitInput.value ?? "").trim() || "stk";
+          const noteStr = String(stockNoteInput.value ?? "").trim();
+          if (!qtyStr || Number.isNaN(Number(qtyStr)) || Number(qtyStr) < 0) return;
+          savingStock = true;
+          stockSaveBtn.disabled = true;
+          try {
+            const updated = await api(
+              `/catalogue/products/${encodeURIComponent(currentProduct.id)}/stock`,
+              "PUT",
+              {
+                quantity: qtyStr,
+                unit: unitStr,
+                category: firstStockItem?.category || "Other",
+                note: noteStr || null,
+                inventory_id: firstStockItem?.inventory_id || null,
+              },
+            );
+            currentProduct = updated;
+            renderCardContent();
+            notify(`Lagerbeholdning for «${currentProduct.display_name}» er lagret.`);
+            onUpdated(currentProduct);
+          } catch (err) {
+            notify(`Kunne ikke lagre lagerbeholdning: ${err.message || "Ukjent feil"}`, true);
+            stockSaveBtn.disabled = false;
+          } finally {
+            savingStock = false;
+          }
+        }
+
+        stockEditForm.addEventListener("submit", submitStockUpdate);
+        stockSaveBtn.addEventListener("click", submitStockUpdate);
+
+        stockEditForm.append(stockQtyInput, stockUnitInput, stockNoteInput, stockSaveBtn);
+        stockSection.append(stockEditForm);
       }
       card.append(stockSection);
 
@@ -582,7 +679,276 @@
       exclSubsection.append(addExclForm);
       prefSection.append(exclSubsection);
 
+      const preferredIds = new Set(preferred.map((s) => s.oda_product_id));
+      const excludedIds = new Set(excluded.map((e) => e.oda_product_id));
+
+      // Remembered Oda SKUs (distinct from preferred & purchased)
+      const remSubsection = document.createElement("div");
+      remSubsection.className = "remembered-skus-container";
+
+      const remTitle = document.createElement("h5");
+      remTitle.textContent = "Huskede Oda-valg";
+      remSubsection.append(remTitle);
+
+      const remNote = document.createElement("p");
+      remNote.className = "muted remembered-skus-note";
+      remNote.textContent =
+        "Tidligere valgte Oda-varer i handlekurv eller katalog (ikke automatisk foretrukket eller bekreftet kjøpt).";
+      remSubsection.append(remNote);
+
+      const rememberedList = document.createElement("ul");
+      rememberedList.className = "remembered-skus-list";
+
+      const remembered = Array.isArray(currentProduct.remembered_oda_skus)
+        ? currentProduct.remembered_oda_skus
+        : [];
+      if (remembered.length === 0) {
+        const emptyRem = document.createElement("p");
+        emptyRem.className = "muted empty-remembered-text";
+        emptyRem.textContent = "Ingen huskede Oda-valg registrert.";
+        rememberedList.append(emptyRem);
+      } else {
+        remembered.forEach((sku) => {
+          const row = document.createElement("li");
+          row.className = "remembered-sku-row";
+          row.dataset.odaId = sku.oda_product_id;
+
+          const remBadge = document.createElement("span");
+          remBadge.className = "badge remembered-badge";
+          remBadge.textContent = "Husket valg";
+          row.append(remBadge);
+
+          const skuInfo = document.createElement("div");
+          skuInfo.className = "sku-info";
+          const skuName = sku.name || sku.oda_product_id;
+          let label = skuName;
+          if (sku.brand) label += ` (${sku.brand})`;
+          if (sku.price) label += ` · ${sku.price} kr`;
+          const selCount = Number(sku.selection_count || 1);
+          label += ` · Valgt ${selCount} ${selCount === 1 ? "gang" : "ganger"}`;
+          skuInfo.textContent = label;
+          row.append(skuInfo);
+
+          const actions = document.createElement("div");
+          actions.className = "actions sku-actions";
+
+          const promoteBtn = document.createElement("button");
+          promoteBtn.type = "button";
+          promoteBtn.className = "quiet small promote-remembered-btn";
+          promoteBtn.textContent = "Gjør foretrukket";
+          promoteBtn.setAttribute("aria-label", `Gjør ${skuName} til foretrukket vare`);
+          promoteBtn.disabled =
+            preferredIds.has(sku.oda_product_id) || excludedIds.has(sku.oda_product_id);
+          promoteBtn.addEventListener("click", () =>
+            handleAddPreferred({
+              oda_product_id: sku.oda_product_id,
+              name: sku.name || null,
+              brand: sku.brand || null,
+              price: sku.price || null,
+              unit_name: sku.unit_name || null,
+            }),
+          );
+          actions.append(promoteBtn);
+
+          const excludeBtn = document.createElement("button");
+          excludeBtn.type = "button";
+          excludeBtn.className = "quiet small exclude-remembered-btn";
+          excludeBtn.textContent = "Ekskluder";
+          excludeBtn.setAttribute("aria-label", `Ekskluder ${skuName}`);
+          excludeBtn.disabled = excludedIds.has(sku.oda_product_id);
+          excludeBtn.addEventListener("click", () =>
+            handleAddExcluded({
+              oda_product_id: sku.oda_product_id,
+              name: sku.name || null,
+              reason: "",
+            }),
+          );
+          actions.append(excludeBtn);
+
+          row.append(actions);
+          rememberedList.append(row);
+        });
+      }
+      remSubsection.append(rememberedList);
+      prefSection.append(remSubsection);
+
+      // Previously Purchased Store/Receipt SKUs (distinct from remembered & preferred)
+      const purSubsection = document.createElement("div");
+      purSubsection.className = "purchased-skus-container";
+
+      const purTitle = document.createElement("h5");
+      purTitle.textContent = "Tidligere kjøpte butikkvarer";
+      purSubsection.append(purTitle);
+
+      const purNote = document.createElement("p");
+      purNote.className = "muted purchased-skus-note";
+      purNote.textContent =
+        "Faktiske varer observert i bekreftede kvitteringer og leverte ordre.";
+      purSubsection.append(purNote);
+
+      const purchasedList = document.createElement("ul");
+      purchasedList.className = "purchased-skus-list";
+
+      const previouslyPurchased = Array.isArray(currentProduct.previously_purchased_skus)
+        ? currentProduct.previously_purchased_skus
+        : [];
+      if (previouslyPurchased.length === 0) {
+        const emptyPur = document.createElement("p");
+        emptyPur.className = "muted empty-purchased-text";
+        emptyPur.textContent = "Ingen tidligere kjøpte varer registrert fra kvitteringer.";
+        purchasedList.append(emptyPur);
+      } else {
+        previouslyPurchased.forEach((sku) => {
+          const row = document.createElement("li");
+          row.className = "purchased-sku-row";
+          row.dataset.provider = sku.provider || "";
+          row.dataset.skuId = sku.sku_id;
+
+          const storeBadge = document.createElement("span");
+          storeBadge.className = "badge store-badge";
+          storeBadge.textContent = sku.store_name || formatProviderLabel(sku.provider);
+          row.append(storeBadge);
+
+          const skuInfo = document.createElement("div");
+          skuInfo.className = "sku-info";
+          const skuName = sku.name || sku.sku_id;
+          let label = skuName;
+          if (sku.ean && sku.ean !== skuName) label += ` · EAN: ${sku.ean}`;
+          else if (sku.sku_id && sku.sku_id !== skuName) label += ` · SKU: ${sku.sku_id}`;
+          const count = Number(sku.purchase_count || 1);
+          label += ` · Kjøpt ${count} ${count === 1 ? "gang" : "ganger"}`;
+          skuInfo.textContent = label;
+          row.append(skuInfo);
+
+          const provBadge = document.createElement("span");
+          provBadge.className = `badge ${sku.provenance === "provider_verified" ? "success" : "warning"} purchase-provenance-badge`;
+          provBadge.textContent =
+            sku.provenance === "provider_verified" ? "Verifisert kvittering" : "Brukerbekreftet";
+          row.append(provBadge);
+
+          if ((sku.provider || "").toLowerCase() === "oda") {
+            const actions = document.createElement("div");
+            actions.className = "actions sku-actions";
+
+            const promoteBtn = document.createElement("button");
+            promoteBtn.type = "button";
+            promoteBtn.className = "quiet small promote-purchased-btn";
+            promoteBtn.textContent = "Gjør foretrukket";
+            promoteBtn.setAttribute("aria-label", `Gjør ${skuName} til foretrukket vare`);
+            promoteBtn.disabled = preferredIds.has(sku.sku_id) || excludedIds.has(sku.sku_id);
+            promoteBtn.addEventListener("click", () =>
+              handleAddPreferred({
+                oda_product_id: sku.sku_id,
+                name: sku.name || null,
+              }),
+            );
+            actions.append(promoteBtn);
+
+            const excludeBtn = document.createElement("button");
+            excludeBtn.type = "button";
+            excludeBtn.className = "quiet small exclude-purchased-btn";
+            excludeBtn.textContent = "Ekskluder";
+            excludeBtn.setAttribute("aria-label", `Ekskluder ${skuName}`);
+            excludeBtn.disabled = excludedIds.has(sku.sku_id);
+            excludeBtn.addEventListener("click", () =>
+              handleAddExcluded({
+                oda_product_id: sku.sku_id,
+                name: sku.name || null,
+                reason: "",
+              }),
+            );
+            actions.append(excludeBtn);
+
+            row.append(actions);
+          }
+
+          purchasedList.append(row);
+        });
+      }
+      purSubsection.append(purchasedList);
+      prefSection.append(purSubsection);
+
       card.append(prefSection);
+
+      // Section: Canonical Product Merge / Reconcile
+      if (typeof api === "function") {
+        const mergeSection = document.createElement("section");
+        mergeSection.className = "product-merge-section";
+        mergeSection.setAttribute("aria-label", "Slå sammen duplikatråvare");
+
+        const mergeHeading = document.createElement("h4");
+        mergeHeading.textContent = "Slå sammen duplikatråvare";
+        mergeSection.append(mergeHeading);
+
+        const mergeDesc = document.createElement("p");
+        mergeDesc.className = "muted merge-description";
+        mergeDesc.textContent =
+          "Flytter kallenavn, lagerbeholdning, Oda-preferanser, oppskriftskoblinger og kjøpshistorikk til valgt målråvare og fjerner denne duplikaten.";
+        mergeSection.append(mergeDesc);
+
+        const candidates = mergeCandidates.filter((p) => p && p.id !== currentProduct.id);
+        const mergeForm = document.createElement("form");
+        mergeForm.className = "merge-product-form";
+
+        const mergeSelect = document.createElement("select");
+        mergeSelect.className = "merge-target-select";
+        mergeSelect.setAttribute("aria-label", "Velg målråvare å slå sammen inn i");
+
+        const placeholderOpt = document.createElement("option");
+        placeholderOpt.value = "";
+        placeholderOpt.textContent =
+          candidates.length > 0
+            ? "Velg målråvare …"
+            : "Ingen andre råvarer tilgjengelig";
+        mergeSelect.append(placeholderOpt);
+
+        candidates.forEach((cand) => {
+          const opt = document.createElement("option");
+          opt.value = cand.id;
+          const variantPart = cand.variant ? ` · ${cand.variant}` : "";
+          opt.textContent = `${cand.display_name || cand.canonical_name} (${cand.canonical_name}${variantPart})`;
+          mergeSelect.append(opt);
+        });
+
+        const mergeBtn = document.createElement("button");
+        mergeBtn.type = "submit";
+        mergeBtn.className = "quiet merge-product-btn";
+        mergeBtn.textContent = "Slå sammen inn i valgt råvare";
+        mergeBtn.disabled = candidates.length === 0;
+
+        let merging = false;
+        async function submitMerge(e) {
+          if (e && typeof e.preventDefault === "function") e.preventDefault();
+          if (merging) return;
+          const targetId = String(mergeSelect.value || "").trim();
+          if (!targetId || targetId === currentProduct.id) return;
+          merging = true;
+          mergeBtn.disabled = true;
+          try {
+            const mergedTarget = await api(
+              `/catalogue/products/${encodeURIComponent(targetId)}/merge`,
+              "POST",
+              { source_product_id: currentProduct.id },
+            );
+            notify(
+              `Råvaren «${currentProduct.display_name}» ble slått sammen inn i «${mergedTarget?.display_name || targetId}».`,
+            );
+            onMerged(mergedTarget, currentProduct.id);
+          } catch (err) {
+            notify(`Kunne ikke slå sammen råvare: ${err.message || "Ukjent feil"}`, true);
+            mergeBtn.disabled = false;
+          } finally {
+            merging = false;
+          }
+        }
+
+        mergeForm.addEventListener("submit", submitMerge);
+        mergeBtn.addEventListener("click", submitMerge);
+
+        mergeForm.append(mergeSelect, mergeBtn);
+        mergeSection.append(mergeForm);
+        card.append(mergeSection);
+      }
     }
 
     async function savePreferences(newPreferred, newExcluded) {
@@ -687,6 +1053,7 @@
     wrapper.append(resultsContainer);
 
     let searchTimeout = null;
+    let allProducts = [];
 
     async function loadProducts(query = "") {
       if (!api) return;
@@ -697,6 +1064,9 @@
           url += `&q=${encodeURIComponent(query.trim())}`;
         }
         const products = await api(url);
+        if (!query.trim() && Array.isArray(products)) {
+          allProducts = products;
+        }
         resultsContainer.replaceChildren();
 
         if (!Array.isArray(products) || products.length === 0) {
@@ -720,12 +1090,22 @@
 
         liveStatus.textContent = `Fant ${products.length} råvarer.`;
 
+        const candidatePool = allProducts.length > 0 ? allProducts : products;
         products.forEach((prod) => {
           const card = renderProductCard(prod, {
             api,
             notify,
+            mergeCandidates: candidatePool.filter((p) => p.id !== prod.id),
             onUpdated: (updatedProd) => {
-              // Optionally refresh list if needed
+              if (updatedProd && updatedProd.id) {
+                allProducts = allProducts.map((p) =>
+                  p.id === updatedProd.id ? updatedProd : p,
+                );
+              }
+            },
+            onMerged: async () => {
+              allProducts = [];
+              await loadProducts(searchInput.value);
             },
           });
           resultsContainer.append(card);
@@ -902,6 +1282,7 @@
     formatStockSummary,
     formatFrequencySummary,
     formatProvenanceCounts,
+    formatProviderLabel,
     reorderPreferredSkus,
     addPreferredSku,
     removePreferredSku,

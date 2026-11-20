@@ -1,5 +1,5 @@
 'use strict';
-const CACHE = 'kitchen-shell-v19';
+const CACHE = 'kitchen-shell-v20';
 const ASSETS = ['/static/index.html', '/static/app.js', '/static/shopping-share.js', '/static/shopping-view.js', '/static/recipe-editor.js', '/static/recipe-photo.js', '/static/recipe-collections.js', '/static/recipe-images.js', '/static/recipe-discovery.js', '/static/planned-cooking.js', '/static/basket-match-view.js', '/static/settings-view.js', '/static/unmapped-ingredients-view.js', '/static/recipe-translations-view.js', '/static/product-overview-view.js', '/static/recipe-feedback-quick.js', '/static/style.css', '/static/icon.svg', '/static/manifest.webmanifest'];
 self.addEventListener('install', event => { event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS))); self.skipWaiting(); });
 self.addEventListener('activate', event => { event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key.startsWith('kitchen-shell-') && key !== CACHE).map(key => caches.delete(key)))).then(() => self.clients.claim())); });

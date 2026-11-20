@@ -4,7 +4,6 @@ import base64
 import binascii
 import json
 from datetime import UTC, date, datetime
-from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 from uuid import UUID
 
@@ -13,7 +12,12 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr
 from starlette.concurrency import run_in_threadpool
 
-from home_kitchen.basket import BasketReview, ProductSnapshot, SelectedProduct
+from home_kitchen.basket import BasketReview, SelectedProduct
+from home_kitchen.basket.application import (
+    BatchSelectionInput,
+    BatchSelectionValidationError,
+    select_basket_products_batch,
+)
 from home_kitchen.basket.jobs import BackgroundMatchingHealth, BasketMatchJob
 from home_kitchen.basket.matching import BasketMatchResult
 from home_kitchen.basket.repository import BasketService
@@ -118,13 +122,8 @@ class BasketSelectionRequest(BaseModel):
     selection: SelectedProduct
 
 
-class BasketBatchSelection(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    need_id: UUID
-    candidate_id: str = Field(min_length=1, max_length=200)
-    packages: int = Field(gt=0, le=99)
-    confirm_identity: bool = False
+class BasketBatchSelection(BatchSelectionInput):
+    pass
 
 
 class BasketBatchSelectionRequest(BaseModel):
@@ -1198,77 +1197,19 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
     ) -> BasketReview:
         actor = authenticated_actor(request)
         response.headers["Cache-Control"] = "no-store"
-        if data.end < data.start:
-            raise HTTPException(422, "end date must be on or after start date")
-        references = [(item.need_id, item.candidate_id) for item in data.selections]
-        if len({need_id for need_id, _ in references}) != len(references):
-            raise HTTPException(422, "Select at most one product for each purchase need")
-        if len(references) > 100:
-            raise HTTPException(422, "Select no more than 100 products to save")
-        if len(set(references)) != len(references):
-            raise HTTPException(422, "Do not select a product more than once for a need")
         try:
-            identity_confirmations = {
-                (item.need_id, item.candidate_id)
-                for item in data.selections
-                if item.confirm_identity
-            }
-            resolve = features.basket_jobs.resolve_batch_candidates
-            if identity_confirmations:
-                resolved = await resolve(
-                    actor,
-                    data.job_id,
-                    data.start,
-                    data.end,
-                    references,
-                    identity_confirmations=identity_confirmations,
-                )
-            else:
-                resolved = await resolve(actor, data.job_id, data.start, data.end, references)
-            selections = []
-            evidence = {}
-            for item in data.selections:
-                matched_need, candidate, observed_at = resolved[(item.need_id, item.candidate_id)]
-                if (
-                    candidate.pack_quantity is None
-                    or candidate.pack_unit is None
-                    or candidate.pack_metadata_status != "unverified"
-                ):
-                    raise ValueError("A selected product has unknown package details.")
-                price = None
-                if candidate.price is not None:
-                    try:
-                        price = Decimal(candidate.price)
-                    except InvalidOperation:
-                        price = None
-                selections.append(
-                    SelectedProduct(
-                        need_id=item.need_id,
-                        product=ProductSnapshot(
-                            provider=candidate.provider,
-                            product_id=candidate.product_id,
-                            name=candidate.name,
-                            brand=candidate.brand,
-                            url=candidate.product_url,
-                            image_url=candidate.media.image_url if candidate.media else None,
-                            pack_quantity=candidate.pack_quantity,
-                            pack_unit=candidate.pack_unit,
-                            price=price,
-                            currency="NOK",
-                            available=candidate.available,
-                            observed_at=observed_at,
-                        ),
-                        packages=item.packages,
-                    )
-                )
-                evidence[item.need_id] = matched_need
-            return await run_in_threadpool(
-                basket.select_batch,
-                data.start,
-                data.end,
-                selections,
-                evidence,
+            return await select_basket_products_batch(
+                basket,
+                features.basket_jobs,
+                start=data.start,
+                end=data.end,
+                job_id=data.job_id,
+                selections=data.selections,
+                actor_id=actor,
+                channel="api",
             )
+        except BatchSelectionValidationError as exc:
+            raise HTTPException(422, str(exc)) from None
         except KeyError:
             raise HTTPException(404, "Product match job not found") from None
         except ValueError as exc:

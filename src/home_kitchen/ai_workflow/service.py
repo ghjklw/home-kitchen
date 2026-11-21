@@ -75,6 +75,8 @@ class AiWorkflowService(AiWorkflowPort):
         return PurchaseHistoryContext()
 
     def evidence(self, query: str) -> list[EvidenceSnippet]:
+        if getattr(self.history, "engine", None) is None:
+            return []
         recent = self.history.search(
             "", limit=8, kinds=["preference", "feedback", "recipe_rating", "purchase"]
         )

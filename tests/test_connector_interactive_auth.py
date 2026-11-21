@@ -3,7 +3,7 @@
 Covers:
 - Guided OIDC PKCE flow for Rema 1000 and Coop (S256 challenge, state pop, redirect_url parsing)
 - Cookidoo Vorwerk/Cidaas OAuth login and no-password-stored invariant
-- Trumf SMS OTP flow (start, verify, replay protection, session expiry)
+- Trumf session cookie validation and rolling renewal
 - Secret redaction across all endpoints and manual connect fallback
 Uses httpx.MockTransport for 100% offline testing with zero live credentials or networks.
 """
@@ -466,135 +466,17 @@ def test_pkce_unsupported_providers_rejected(sqlite_engine, cipher):
     app, _, _, _ = create_test_app(sqlite_engine, cipher)
     client = TestClient(app)
 
-    # Cookidoo, Oda, and Anthropic do not use guided PKCE
+    # Cookidoo, Oda, Anthropic, and Trumf do not use guided PKCE
     assert client.post("/api/integrations/cookidoo/pkce/start").status_code == 400
     assert client.post("/api/integrations/oda/pkce/start").status_code == 400
+    assert client.post("/api/integrations/trumf/pkce/start").status_code == 400
+    assert (
+        client.post(
+            "/api/integrations/trumf/pkce/complete", json={"code": "c1", "state": "s1"}
+        ).status_code
+        == 400
+    )
     assert client.post("/api/integrations/unknown_foo/pkce/start").status_code == 404
-
-
-def test_trumf_pkce_start_callback_and_refresh_flow(sqlite_engine, cipher):
-    captured_requests: list[httpx.Request] = []
-
-    def mock_handler(request: httpx.Request) -> httpx.Response:
-        captured_requests.append(request)
-        if str(request.url) == "https://id.trumf.no/connect/token":
-            body = urllib.parse.parse_qs(request.read().decode())
-            if body.get("grant_type") == ["authorization_code"]:
-                return httpx.Response(
-                    200,
-                    json={
-                        "access_token": "trumf-access-123",
-                        "refresh_token": "trumf-refresh-456",
-                        "expires_in": 3600,
-                        "token_type": "Bearer",
-                    },
-                )
-            if body.get("grant_type") == ["refresh_token"]:
-                return httpx.Response(
-                    200,
-                    json={
-                        "access_token": "trumf-access-rotated-789",
-                        "refresh_token": "trumf-refresh-rotated-012",
-                        "expires_in": 7200,
-                        "token_type": "Bearer",
-                    },
-                )
-        return httpx.Response(404)
-
-    app, auth_service, store, household_id = create_test_app(
-        sqlite_engine, cipher, mock_transport=httpx.MockTransport(mock_handler)
-    )
-    client = TestClient(app, follow_redirects=False)
-
-    # 1. Start Trumf PKCE -> defaults to http://localhost:18099/api/integrations/trumf/pkce/callback
-    start_resp = client.post("/api/integrations/trumf/pkce/start")
-    assert start_resp.status_code == 200
-    start_data = start_resp.json()
-    assert start_data["provider_id"] == "trumf"
-    assert (
-        start_data["redirect_uri"] == "http://localhost:18099/api/integrations/trumf/pkce/callback"
-    )
-    parsed_auth = urllib.parse.urlsplit(start_data["authorize_url"])
-    assert parsed_auth.netloc == "id.trumf.no"
-    assert parsed_auth.path == "/connect/authorize"
-    query = urllib.parse.parse_qs(parsed_auth.query)
-    assert query["client_id"] == ["trumf"]
-    assert query["redirect_uri"] == ["http://localhost:18099/api/integrations/trumf/pkce/callback"]
-    assert query["scope"] == [
-        "openid profile offline_access api.rest http://id.trumf.no/scopes/medlem"
-    ]
-    assert query["code_challenge_method"] == ["S256"]
-
-    # 2. Callback completes PKCE and redirects to /#settings
-    cb_resp = client.get(
-        f"/api/integrations/trumf/pkce/callback?code=trumf-auth-code-1&state={start_data['state']}"
-    )
-    assert cb_resp.status_code == 302
-    assert cb_resp.headers["location"] == "/#settings"
-
-    creds = store.get_credentials(household_id, "trumf")
-    assert creds is not None
-    assert creds["access_token"] == "trumf-access-rotated-789"
-    assert creds["refresh_token"] == "trumf-refresh-rotated-012"
-
-    meta = store.get_connection_metadata(household_id, "trumf")
-    assert meta is not None
-    assert meta.auth_mode == "oauth_pkce"
-    assert meta.expires_at is not None
-
-    # Integrations endpoint exposes oauth_pkce & refresh_available=True without secrets
-    integrations = {item["id"]: item for item in client.get("/api/integrations").json()}
-    trumf_info = integrations["trumf"]
-    assert trumf_info["status"] == "connected"
-    assert trumf_info["auth_mode"] == "oauth_pkce"
-    assert trumf_info["auth_type"] == "oauth_pkce"
-    assert trumf_info["accounts"][0]["refresh_available"] is True
-    assert "trumf-access-123" not in json.dumps(trumf_info)
-    assert "trumf-access-rotated-789" not in json.dumps(trumf_info)
-    assert "trumf-refresh-456" not in json.dumps(trumf_info)
-    assert "trumf-refresh-rotated-012" not in json.dumps(trumf_info)
-
-    # 3. Refresh endpoint uses standard OAuth2 refresh_token grant against id.trumf.no
-    refresh_resp = client.post("/api/integrations/trumf/refresh")
-    assert refresh_resp.status_code == 200
-    refresh_info = refresh_resp.json()
-    assert refresh_info["auth_mode"] == "oauth_pkce"
-    assert refresh_info["accounts"][0]["refresh_available"] is True
-    assert "trumf-access-rotated-789" not in json.dumps(refresh_info)
-
-    updated_creds = store.get_credentials(household_id, "trumf")
-    assert updated_creds is not None
-    assert updated_creds["access_token"] == "trumf-access-rotated-789"
-    assert updated_creds["refresh_token"] == "trumf-refresh-rotated-012"
-
-    # 4. Background refresh_expiring_connections picks up expiring Trumf oauth_pkce account
-    store.save_connection(
-        household_id=household_id,
-        provider_id="trumf",
-        auth_mode="oauth_pkce",
-        credentials={"access_token": "stale", "refresh_token": "trumf-refresh-rotated-012"},
-        expires_at=datetime.now(UTC) + timedelta(seconds=60),
-        actor_id="malo",
-    )
-    refreshed = auth_service.refresh_expiring_connections(margin_seconds=900)
-    assert refreshed == ["trumf"]
-
-    # 5. public_url setting overrides Trumf default redirect_uri cleanly
-    custom_settings = Settings(
-        local_dev=True,
-        public_url="http://localhost:19000",
-        database_url=SecretStr("postgresql+psycopg://user:pwd@localhost/db"),
-    )
-    custom_auth = ConnectorAuthService(
-        store=store,
-        integrations=auth_service.integrations,
-        household_id=household_id,
-        settings=custom_settings,
-    )
-    custom_start = custom_auth.start_pkce("trumf", household_id)
-    assert (
-        custom_start.redirect_uri == "http://localhost:19000/api/integrations/trumf/pkce/callback"
-    )
 
 
 # =============================================================================
@@ -826,134 +708,7 @@ def test_cookidoo_login_validation_errors(sqlite_engine, cipher):
 
 
 # =============================================================================
-# 3. Trumf Interactive Phone / SMS OTP Flow
-# =============================================================================
-
-
-def test_trumf_otp_start_and_verify_flow(sqlite_engine, cipher):
-    otp_requests = []
-
-    def mock_handler(request: httpx.Request) -> httpx.Response:
-        otp_requests.append(request)
-        if request.url.path == "/api/auth/otp/send":
-            return httpx.Response(200, json={"status": "sent"})
-        if request.url.path == "/api/auth/otp/verify":
-            payload = json.loads(request.read().decode())
-            if payload.get("otp") == "654321":
-                resp = httpx.Response(200, json={"session_cookie": "trumf-cookie-val-abc-xyz"})
-                resp.headers["set-cookie"] = "trumf_session=trumf-cookie-val-abc-xyz; Path=/"
-                return resp
-            return httpx.Response(401, json={"error": "invalid_otp"})
-        return httpx.Response(404)
-
-    mock_transport = httpx.MockTransport(mock_handler)
-    app, _, store, household_id = create_test_app(
-        sqlite_engine, cipher, mock_transport=mock_transport
-    )
-    client = TestClient(app)
-
-    # 1. Start OTP request
-    phone_number = "+47 912 34 567"
-    start_resp = client.post(
-        "/api/integrations/trumf/login/start",
-        json={"phone": phone_number},
-    )
-    assert start_resp.status_code == 200
-    start_data = start_resp.json()
-    assert "session_id" in start_data and len(start_data["session_id"]) > 16
-    assert "detail" in start_data
-
-    # Verify request sent to Trumf endpoint
-    assert len(otp_requests) == 1
-    assert otp_requests[0].url.path == "/api/auth/otp/send"
-    assert json.loads(otp_requests[0].read().decode())["phone"] == phone_number
-
-    # 2. Verify with wrong OTP
-    session_id = start_data["session_id"]
-    wrong_resp = client.post(
-        "/api/integrations/trumf/login/verify",
-        json={"session_id": session_id, "otp": "000000"},
-    )
-    assert wrong_resp.status_code == 401
-    assert store.get_credentials(household_id, "trumf") is None
-
-    # Restart session because single-use pop consumed it
-    start_resp2 = client.post(
-        "/api/integrations/trumf/login/start",
-        json={"phone": phone_number},
-    )
-    session_id2 = start_resp2.json()["session_id"]
-
-    # 3. Verify with correct OTP
-    verify_resp = client.post(
-        "/api/integrations/trumf/login/verify",
-        json={"session_id": session_id2, "otp": "654321"},
-    )
-    assert verify_resp.status_code == 200
-    info = verify_resp.json()
-    assert info["id"] == "trumf"
-    assert info["status"] == "connected"
-    assert info["auth_mode"] == "interactive_otp"
-
-    # Redaction check: Cookie value never exposed in response
-    assert "trumf-cookie-val" not in json.dumps(info)
-
-    # Verify encrypted storage in DB
-    creds = store.get_credentials(household_id, "trumf")
-    assert creds is not None
-    assert creds["session_cookie"] == "trumf-cookie-val-abc-xyz"
-    assert creds["phone"] == phone_number
-
-    # Verify expiration (up to 12 months)
-    meta = store.get_connection_metadata(household_id, "trumf")
-    assert meta is not None
-    assert meta.expires_at is not None
-    assert meta.expires_at > datetime.now(UTC) + timedelta(days=300)
-
-
-def test_trumf_otp_replay_and_security(sqlite_engine, cipher):
-    def mock_handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"session_cookie": "trumf-cookie"})
-
-    mock_transport = httpx.MockTransport(mock_handler)
-    app, _, _, _ = create_test_app(sqlite_engine, cipher, mock_transport=mock_transport)
-    client = TestClient(app)
-
-    # Invalid phone
-    assert (
-        client.post("/api/integrations/trumf/login/start", json={"phone": " "}).status_code == 422
-    )
-
-    # Start session
-    start_resp = client.post("/api/integrations/trumf/login/start", json={"phone": "+4712345678"})
-    session_id = start_resp.json()["session_id"]
-
-    # Unknown session_id rejected
-    assert (
-        client.post(
-            "/api/integrations/trumf/login/verify",
-            json={"session_id": "non-existent-session-id", "otp": "1234"},
-        ).status_code
-        == 400
-    )
-
-    # Verify once
-    resp1 = client.post(
-        "/api/integrations/trumf/login/verify",
-        json={"session_id": session_id, "otp": "1234"},
-    )
-    assert resp1.status_code == 200
-
-    # Replay rejected (session consumed)
-    resp2 = client.post(
-        "/api/integrations/trumf/login/verify",
-        json={"session_id": session_id, "otp": "1234"},
-    )
-    assert resp2.status_code == 400
-
-
-# =============================================================================
-# 4. Manual Connect Fallback Intact
+# 3. Manual Connect Fallback Intact
 # =============================================================================
 
 
@@ -1025,13 +780,27 @@ def test_get_integrations_redacts_all_secrets_after_interactive_logins(sqlite_en
                     "expires_in": 3600,
                 },
             )
-        if "/otp/verify" in request.url.path:
-            return httpx.Response(200, json={"session_cookie": "secret-trumf-cookie-333"})
+        if request.url.path == "/api/auth/session":
+            return httpx.Response(200, json={"user": {"name": "Malo"}})
         return httpx.Response(200, json={"status": "ok"})
 
     mock_transport = httpx.MockTransport(mock_handler)
     app, _, _, _ = create_test_app(sqlite_engine, cipher, mock_transport=mock_transport)
     client = TestClient(app)
+
+    # Decommissioned Trumf OTP routes return 404
+    assert (
+        client.post(
+            "/api/integrations/trumf/login/start", json={"phone": "+4712345678"}
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            "/api/integrations/trumf/login/verify", json={"session_id": "s1", "otp": "123456"}
+        ).status_code
+        == 404
+    )
 
     # Connect Rema via PKCE
     s_rema = client.post("/api/integrations/rema1000/pkce/start").json()["state"]
@@ -1043,13 +812,10 @@ def test_get_integrations_redacts_all_secrets_after_interactive_logins(sqlite_en
         json={"email": "chef@test.no", "password": "secret-password-xyz"},
     )
 
-    # Connect Trumf via OTP
-    s_trumf = client.post(
-        "/api/integrations/trumf/login/start", json={"phone": "+4712345678"}
-    ).json()["session_id"]
+    # Connect Trumf via validated session cookie
     client.post(
-        "/api/integrations/trumf/login/verify",
-        json={"session_id": s_trumf, "otp": "123456"},
+        "/api/integrations/trumf/connect",
+        json={"auth_mode": "session_cookie", "session_cookie": "secret-trumf-cookie-333"},
     )
 
     # Query list of all integrations
@@ -1064,7 +830,7 @@ def test_get_integrations_redacts_all_secrets_after_interactive_logins(sqlite_en
     assert status_map["cookidoo"]["status"] == "connected"
     assert status_map["cookidoo"]["auth_mode"] == "oauth_password"
     assert status_map["trumf"]["status"] == "connected"
-    assert status_map["trumf"]["auth_mode"] == "interactive_otp"
+    assert status_map["trumf"]["auth_mode"] == "session_cookie"
 
     # Redaction test on the whole JSON
     raw_json = json.dumps(all_integrations)
@@ -1961,29 +1727,6 @@ def test_trumf_connect_rejects_invalid_or_unrenewable_cookie_without_overwriting
     creds = store.get_credentials(household_id, "trumf")
     assert creds is not None
     assert creds["session_cookie"] == existing_cookie
-
-
-def test_trumf_otp_verify_rejects_empty_cookie_instead_of_fabricating(sqlite_engine, cipher):
-    def mock_handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/auth/otp/send":
-            return httpx.Response(200, json={"status": "sent"})
-        if request.url.path == "/api/auth/otp/verify":
-            return httpx.Response(200, json={"status": "ok"})
-        return httpx.Response(404)
-
-    app, _, store, household_id = create_test_app(
-        sqlite_engine, cipher, mock_transport=httpx.MockTransport(mock_handler)
-    )
-    client = TestClient(app)
-    sid = client.post("/api/integrations/trumf/login/start", json={"phone": "+4790000000"}).json()[
-        "session_id"
-    ]
-    verify_resp = client.post(
-        "/api/integrations/trumf/login/verify",
-        json={"session_id": sid, "otp": "123456"},
-    )
-    assert verify_resp.status_code == 502
-    assert store.get_credentials(household_id, "trumf") is None
 
 
 def test_refresh_expiring_connections_persists_last_error_when_refresh_material_missing(

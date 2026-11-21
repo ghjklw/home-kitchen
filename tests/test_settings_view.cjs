@@ -17,7 +17,6 @@ const {
   odaNeedsReconnect,
   parsePkceCompletionPayload,
   buildCookidooLoginPayload,
-  buildTrumfVerifyPayload,
   buildTrumfSessionCookie,
   buildTrumfConnectPayload,
   buildHomeAssistantConnectPayload,
@@ -231,16 +230,6 @@ test("buildCookidooLoginPayload handles credentials, default country, and whites
   assert.equal(buildCookidooLoginPayload("", "pw"), null);
   assert.equal(buildCookidooLoginPayload("chef@example.com", ""), null);
   assert.equal(buildCookidooLoginPayload(null, null), null);
-});
-
-test("buildTrumfVerifyPayload handles session_id and OTP code", () => {
-  assert.deepEqual(
-    buildTrumfVerifyPayload(" sess-trumf-101 ", " 654321 "),
-    { session_id: "sess-trumf-101", otp: "654321" },
-  );
-  assert.equal(buildTrumfVerifyPayload("", "123456"), null);
-  assert.equal(buildTrumfVerifyPayload("sess-1", ""), null);
-  assert.equal(buildTrumfVerifyPayload(null, null), null);
 });
 
 test("buildTrumfConnectPayload handles cookie and optional expiry date", () => {
@@ -959,7 +948,6 @@ test("settings view helpers format multi-account display names, auth labels, and
   );
   assert.equal(formatAccountExpiry({}), null);
   assert.equal(integrationAuthLabel("oauth_pkce", true), "OAuth-innlogging er lagret (hemmeligheten er skjult)");
-  assert.equal(integrationAuthLabel("interactive_otp", true), "SMS-innlogging er lagret (hemmeligheten er skjult)");
 });
 
 test("renderConnectionSettings renders per-account rows, actions, and add-another-account button", async () => {

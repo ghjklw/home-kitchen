@@ -68,9 +68,6 @@ from home_kitchen.connector_auth import (
     PKCEStartRequest,
     PKCEStartResponse,
     RefreshRequest,
-    TrumfOTPStartRequest,
-    TrumfOTPStartResponse,
-    TrumfOTPVerifyRequest,
 )
 from home_kitchen.cookidoo_plan_sync import (
     CookidooPlanSyncConfirmRequest,
@@ -863,40 +860,6 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
             email=data.email,
             password=data.password.get_secret_value(),
             country=data.country,
-            account_id=data.account_id,
-            account_label=data.account_label,
-            add_account=data.add_account,
-        )
-
-    @router.post("/integrations/trumf/login/start")
-    def trumf_login_start(
-        data: TrumfOTPStartRequest,
-        request: Request,
-        response: Response,
-    ) -> TrumfOTPStartResponse:
-        authenticated_actor(request)
-        response.headers["Cache-Control"] = "no-store"
-        return get_connector_auth().start_trumf_otp(
-            household_id=features.household_id,
-            phone=data.phone,
-            account_id=data.account_id,
-            account_label=data.account_label,
-            add_account=data.add_account,
-        )
-
-    @router.post("/integrations/trumf/login/verify")
-    def trumf_login_verify(
-        data: TrumfOTPVerifyRequest,
-        request: Request,
-        response: Response,
-    ) -> IntegrationInfo:
-        actor = authenticated_actor(request)
-        response.headers["Cache-Control"] = "no-store"
-        return get_connector_auth().verify_trumf_otp(
-            household_id=features.household_id,
-            actor_id=actor,
-            session_id=data.session_id,
-            otp=data.otp,
             account_id=data.account_id,
             account_label=data.account_label,
             add_account=data.add_account,

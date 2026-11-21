@@ -13,7 +13,7 @@ from home_kitchen.connector_ports import ConnectorCredentialReader, OdaStatusPor
 
 _REFRESHABLE_PROVIDERS = frozenset({"rema1000", "coop", "cookidoo", "trumf"})
 _OAUTH_REFRESH_MODES = frozenset({"oauth_pkce", "oauth_password"})
-_TRUMF_REFRESH_MODES = frozenset({"session_cookie", "interactive_otp", "manual_session_cookie"})
+_TRUMF_REFRESH_MODES = frozenset({"session_cookie", "manual_session_cookie"})
 
 
 def _parse_optional_datetime(val: Any) -> datetime | None:
@@ -231,27 +231,28 @@ class StoredConnectorIntegration:
             meta = {}
         account_id = str(getattr(conn_status, "account_id", "default") or "default")
         unreadable_error: str | None = None
-        if self.provider_id == "trumf" and auth_mode in _TRUMF_REFRESH_MODES:
+        if self.provider_id == "trumf":
             can_refresh = False
-            if "has_session_cookie" in meta:
-                can_refresh = bool(meta["has_session_cookie"])
-            elif self.store is not None and self.household_id is not None:
-                get_creds_fn = getattr(self.store, "get_credentials", None)
-                if callable(get_creds_fn):
-                    try:
-                        creds = get_creds_fn(
-                            self.household_id,
-                            self.provider_id,
-                            account_id=account_id,
-                        )
-                    except (InvalidToken, RuntimeError, ValueError):
-                        creds = None
-                        unreadable_error = (
-                            "Lagrede tilkoblingsdetaljer kan ikke leses. Koble til på nytt."
-                        )
-                    if isinstance(creds, dict):
-                        raw_cookie = creds.get("session_cookie") or creds.get("cookie")
-                        can_refresh = isinstance(raw_cookie, str) and bool(raw_cookie.strip())
+            if auth_mode in _TRUMF_REFRESH_MODES:
+                if "has_session_cookie" in meta:
+                    can_refresh = bool(meta["has_session_cookie"])
+                elif self.store is not None and self.household_id is not None:
+                    get_creds_fn = getattr(self.store, "get_credentials", None)
+                    if callable(get_creds_fn):
+                        try:
+                            creds = get_creds_fn(
+                                self.household_id,
+                                self.provider_id,
+                                account_id=account_id,
+                            )
+                        except (InvalidToken, RuntimeError, ValueError):
+                            creds = None
+                            unreadable_error = (
+                                "Lagrede tilkoblingsdetaljer kan ikke leses. Koble til på nytt."
+                            )
+                        if isinstance(creds, dict):
+                            raw_cookie = creds.get("session_cookie") or creds.get("cookie")
+                            can_refresh = isinstance(raw_cookie, str) and bool(raw_cookie.strip())
         else:
             can_refresh = (
                 self.provider_id in _REFRESHABLE_PROVIDERS and auth_mode in _OAUTH_REFRESH_MODES

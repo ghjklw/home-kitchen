@@ -1493,17 +1493,7 @@ class PurchaseHistorySyncService:
         store_auth_mode = self._connected_store_auth_mode(provider, account_id=account_id)
         if provider == "trumf":
             auth_mode = store_auth_mode or "manual_session_cookie"
-            if auth_mode == "oauth_pkce":
-                limitations = (
-                    "Trumf retains at most the last 12 months of purchase history. "
-                    "Authenticated via OAuth PKCE."
-                )
-            elif auth_mode == "interactive_otp":
-                limitations = (
-                    "Trumf retains at most the last 12 months of purchase history. "
-                    "Authenticated via interactive OTP."
-                )
-            elif store_auth_mode is not None:
+            if store_auth_mode is not None:
                 limitations = (
                     "Trumf retains at most the last 12 months of purchase history. "
                     "Authentication uses a browser session cookie."

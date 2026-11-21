@@ -170,7 +170,54 @@ def test_connector_integrations_connected_and_expired_states():
     assert "utløpt" in trumf.expiry_prompt.lower()
 
 
-def test_trumf_oauth_pkce_reports_refresh_available_when_refresh_token_present():
+def test_oauth_pkce_reports_refresh_available_when_refresh_token_present():
+    class MockConnectorStatus:
+        def __init__(self, auth_mode, expires_at, is_expired, metadata=None, account_id="default"):
+            self.auth_mode = auth_mode
+            self.expires_at = expires_at
+            self.is_expired = is_expired
+            self.metadata = metadata or {}
+            self.account_id = account_id
+
+    class MockStore:
+        def __init__(self, statuses, creds):
+            self.statuses = statuses
+            self.creds = creds
+
+        def list_credentials(self, household_id, provider_id):
+            return self.statuses.get(provider_id, [])
+
+        def get_credentials(self, household_id, provider_id, account_id="default"):
+            return self.creds.get((provider_id, account_id))
+
+    future = datetime.now(UTC) + timedelta(days=30)
+    household_id = uuid4()
+    store = MockStore(
+        {
+            "rema1000": [
+                MockConnectorStatus("oauth_pkce", future, False, {"has_refresh_token": True}, "a1"),
+                MockConnectorStatus(
+                    "oauth_pkce", future, False, {"has_refresh_token": False}, "a2"
+                ),
+                MockConnectorStatus("oauth_pkce", future, False, {}, "a3"),
+            ]
+        },
+        {
+            ("rema1000", "a1"): {"access_token": "acc1", "refresh_token": "ref1"},
+            ("rema1000", "a2"): {"access_token": "acc2"},
+            ("rema1000", "a3"): {"access_token": "acc3", "refresh_token": "ref3"},
+        },
+    )
+
+    rema = Rema1000Integration(store, household_id).describe("actor-1")
+    assert rema.status == "connected"
+    assert rema.auth_mode == "oauth_pkce"
+    assert rema.auth_type == "oauth_pkce"
+    assert rema.refresh_available is True
+    assert [a.refresh_available for a in rema.accounts] == [True, False, True]
+
+
+def test_trumf_session_cookie_reports_refresh_available_when_cookie_present():
     class MockConnectorStatus:
         def __init__(self, auth_mode, expires_at, is_expired, metadata=None, account_id="default"):
             self.auth_mode = auth_mode
@@ -195,23 +242,27 @@ def test_trumf_oauth_pkce_reports_refresh_available_when_refresh_token_present()
     store = MockStore(
         {
             "trumf": [
-                MockConnectorStatus("oauth_pkce", future, False, {"has_refresh_token": True}, "a1"),
                 MockConnectorStatus(
-                    "oauth_pkce", future, False, {"has_refresh_token": False}, "a2"
+                    "session_cookie", future, False, {"has_session_cookie": True}, "a1"
                 ),
-                MockConnectorStatus("oauth_pkce", future, False, {}, "a3"),
+                MockConnectorStatus(
+                    "session_cookie", future, False, {"has_session_cookie": False}, "a2"
+                ),
+                MockConnectorStatus("session_cookie", future, False, {}, "a3"),
+                MockConnectorStatus("oauth_pkce", future, False, {"has_refresh_token": True}, "a4"),
             ]
         },
         {
-            ("trumf", "a1"): {"access_token": "acc1", "refresh_token": "ref1"},
-            ("trumf", "a2"): {"access_token": "acc2"},
-            ("trumf", "a3"): {"access_token": "acc3", "refresh_token": "ref3"},
+            ("trumf", "a1"): {"session_cookie": "cookie1"},
+            ("trumf", "a2"): {},
+            ("trumf", "a3"): {"session_cookie": "cookie3"},
+            ("trumf", "a4"): {"access_token": "acc4", "refresh_token": "ref4"},
         },
     )
 
     trumf = TrumfIntegration(store, household_id).describe("actor-1")
     assert trumf.status == "connected"
-    assert trumf.auth_mode == "oauth_pkce"
-    assert trumf.auth_type == "oauth_pkce"
+    assert trumf.auth_mode == "session_cookie"
+    assert trumf.auth_type == "session_cookie"
     assert trumf.refresh_available is True
-    assert [a.refresh_available for a in trumf.accounts] == [True, False, True]
+    assert [a.refresh_available for a in trumf.accounts] == [True, False, True, False]

@@ -1,13 +1,16 @@
-"""Optional one-way Home Assistant To-Do adapter for remaining store-trip items."""
+"""Optional Home Assistant To-Do adapter for store-trip export and quick-capture import."""
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from decimal import Decimal
 from typing import Any
 
 import httpx
-from pydantic import BaseModel, ConfigDict, HttpUrl, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr
+
+from home_kitchen.models import ShoppingItem
 
 _LOG = logging.getLogger(__name__)
 
@@ -36,6 +39,25 @@ class HomeAssistantTodoExportResult(BaseModel):
     skipped_existing: list[str]
     total_requested: int
     entity_id: str
+
+
+class HomeAssistantQuickCaptureImportResult(BaseModel):
+    """Conflict-safe result of previewing or importing Home Assistant To-Do quick captures."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reviewed: bool
+    candidates: list[str]
+    added: list[str]
+    created_items: list[ShoppingItem] = Field(default_factory=list)
+    skipped_existing: list[str]
+    total_active_in_ha: int
+    entity_id: str
+
+
+def normalize_todo_summary(value: str) -> str:
+    """Normalize whitespace and case for case-insensitive to-do deduplication."""
+    return " ".join(value.split()).casefold()
 
 
 def format_store_trip_export_item(name: str, quantity: Decimal, unit: str) -> str:
@@ -117,7 +139,7 @@ def _item_summary(item: dict[str, Any]) -> str | None:
 
 
 class HomeAssistantTodoClient:
-    """One-way HTTP client for Home Assistant To-Do list inspection and item addition."""
+    """HTTP client for Home Assistant To-Do inspection, one-way export, and quick-capture import."""
 
     def __init__(
         self,
@@ -271,4 +293,53 @@ class HomeAssistantTodoClient:
             "skipped_existing": skipped_existing,
             "total_requested": len(deduped),
             "entity_id": self.entity_id,
+        }
+
+    def preview_quick_captures(self, existing_items: Iterable[str] = ()) -> dict[str, Any]:
+        """Read active Home Assistant To-Do items and return deduplicated candidates without side effects."""
+        seen_keys: set[str] = {
+            normalize_todo_summary(raw)
+            for raw in existing_items
+            if isinstance(raw, str) and raw.strip()
+        }
+        ha_items = self.list_items()
+        candidates: list[str] = []
+        skipped_existing: list[str] = []
+        total_active = 0
+
+        for item in ha_items:
+            if not _is_active_todo_item(item):
+                continue
+            summary = _item_summary(item)
+            if summary is None:
+                continue
+            total_active += 1
+            key = normalize_todo_summary(summary)
+            if key in seen_keys:
+                skipped_existing.append(summary)
+                continue
+            seen_keys.add(key)
+            candidates.append(summary)
+
+        return {
+            "reviewed": False,
+            "candidates": candidates,
+            "added": [],
+            "created_items": [],
+            "skipped_existing": skipped_existing,
+            "total_active_in_ha": total_active,
+            "entity_id": self.entity_id,
+        }
+
+    def import_quick_captures(
+        self, existing_items: Iterable[str] = (), *, reviewed: bool = False
+    ) -> dict[str, Any]:
+        """Preview active Home Assistant To-Do candidates, or mark them confirmed for import."""
+        preview = self.preview_quick_captures(existing_items)
+        if not reviewed:
+            return preview
+        return {
+            **preview,
+            "reviewed": True,
+            "added": list(preview["candidates"]),
         }

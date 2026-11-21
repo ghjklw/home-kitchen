@@ -8,6 +8,7 @@ from pydantic_ai import Agent
 from home_kitchen import imports
 from home_kitchen.ai import draft_recipe, recipe_agent
 from home_kitchen.models import RecipeCreate, RecipeSource
+from home_kitchen.recipes.language import detect_recipe_language
 from home_kitchen.recipes.models import (
     AdaptationProvenance,
     DraftIngredient,
@@ -55,6 +56,10 @@ class WebRecipeProvider:
     async def draft(self, request: RecipeDraftRequest, context: RecipeContext) -> RecipeDraft:
         require_input(request, "url")
         imported = await imports.import_recipe(str(request.url))
+        if not imported.source_language:
+            imported = imported.model_copy(
+                update={"source_language": detect_recipe_language(imported)}
+            )
         return RecipeDraft(provider=self.provider_id, imported=imported)
 
 
@@ -88,6 +93,7 @@ class AIRecipeProvider:
             else request.imported
         )
         if imported is not None:
+            detected_language = imported.source_language or detect_recipe_language(imported)
             source = EditableRecipeDraft(
                 title=imported.title,
                 servings=imported.servings,
@@ -98,6 +104,7 @@ class AIRecipeProvider:
                 instructions=imported.instructions,
                 source_url=imported.source_url,
                 image_url=imported.image_url,
+                source_language=detected_language,
                 source_ingredients=[
                     SourceIngredient(index=index, text=text)
                     for index, text in enumerate(imported.ingredients)

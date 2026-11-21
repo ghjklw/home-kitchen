@@ -144,13 +144,25 @@
       : String(account.account_id);
   }
 
-  function formatAccountExpiry(account) {
+  function resolveIntlLocale(locale = "nb") {
+    const raw = String(locale ?? "").trim();
+    const lower = raw.toLowerCase();
+    if (!lower || lower === "nb" || lower === "nb-no" || lower === "und") return "nb-NO";
+    if (lower === "en" || lower === "fr") return lower;
+    return raw;
+  }
+
+  function formatAccountExpiry(account, locale = "nb") {
     const raw = account?.token_expires_at || account?.expires_at;
     if (!raw) return null;
     const date = new Date(raw);
     if (isNaN(date.getTime())) return null;
     try {
-      return date.toLocaleDateString("nb-NO", { year: "numeric", month: "short", day: "numeric" });
+      return date.toLocaleDateString(resolveIntlLocale(locale), {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+      });
     } catch {
       return date.toISOString().slice(0, 10);
     }
@@ -180,6 +192,89 @@
       }
     }
     return null;
+  }
+
+  function providerDisplayName(providerId) {
+    return (
+      {
+        oda: "Oda",
+        rema1000: "Rema 1000",
+        coop: "Coop",
+        trumf: "Trumf",
+        cookidoo: "Cookidoo",
+        kassal: "Kassal.app",
+        home_assistant: "Home Assistant",
+        anthropic: "Oppskriftsassistent",
+      }[String(providerId || "").trim().toLowerCase()] || String(providerId || "").trim()
+    );
+  }
+
+  function formatSyncErrorMessage(rawError) {
+    const text = String(rawError || "").trim();
+    if (!text) return "";
+
+    const truncatedMatch = /^(?:([A-Za-z0-9 .]+?)\s+history scan\s+)?[Tt]runcated at page\s+(\d+)\b(.*)$/.exec(
+      text,
+    );
+    if (truncatedMatch) {
+      const providerPart = truncatedMatch[1] ? ` for ${truncatedMatch[1].trim()}` : "";
+      const pageNum = truncatedMatch[2];
+      const tail = truncatedMatch[3] || "";
+      if (/backfill is incomplete/i.test(tail)) {
+        return `Kvitteringssøk${providerPart} ble avbrutt ved side ${pageNum} (uferdig historikk). Tilgjengelige kvitteringer er lagret, og neste søk starter på side 1.`;
+      }
+      return `Kvitteringssøk${providerPart} ble avbrutt ved side ${pageNum}.`;
+    }
+
+    const dbReadMatch = /^Database read failure\s*:\s*(.+)$/i.exec(text);
+    if (dbReadMatch) {
+      return `Kunne ikke lese fra databasen: ${dbReadMatch[1].trim()}`;
+    }
+
+    const prefixMap = [
+      [/^Session expired(?:\s*[:;-]\s*(.*))?$/i, "Sesjonen har utløpt"],
+      [/^Token expired(?:\s*[:;-]\s*(.*))?$/i, "Tilgangstokenet har utløpt"],
+      [/^(?:Authentication failed|Unauthorized|Invalid credentials)(?:\s*[:;-]\s*(.*))?$/i, "Autentisering feilet"],
+      [/^(?:Connection failed|Network error)(?:\s*[:;-]\s*(.*))?$/i, "Tilkoblingsfeil"],
+      [/^(?:Request timed out|Timeout(?: error)?)(?:\s*[:;-]\s*(.*))?$/i, "Forespørselen fikk tidsavbrudd"],
+      [/^(?:Sync failed|Receipt sync failed)(?:\s*[:;-]\s*(.*))?$/i, "Synkronisering feilet"],
+      [/^Refresh failed(?:\s*[:;-]\s*(.*))?$/i, "Fornying av tilkobling feilet"],
+      [/^Rate limited(?:\s*[:;-]\s*(.*))?$/i, "For mange forespørsler"],
+    ];
+
+    for (const [pattern, localizedPrefix] of prefixMap) {
+      const m = pattern.exec(text);
+      if (m) {
+        const rest = String(m[1] || "").trim();
+        return rest ? `${localizedPrefix}: ${rest}` : localizedPrefix;
+      }
+    }
+
+    return text;
+  }
+
+  function formatIntegrationIssueMessage(rawIssue) {
+    const text = String(rawIssue || "").trim();
+    if (!text) return "";
+
+    const receiptSyncMatch = /^Kvitteringssynk\s*\(([^)]+)\)\s*:\s*(.+)$/i.exec(text);
+    if (receiptSyncMatch) {
+      const providerName = providerDisplayName(receiptSyncMatch[1]);
+      const localizedBody = formatSyncErrorMessage(receiptSyncMatch[2]);
+      return `Kvitteringssynk (${providerName}): ${localizedBody}`;
+    }
+
+    const prefixedMatch = /^([^:]{2,40}):\s+(.+)$/.exec(text);
+    if (prefixedMatch) {
+      const prefix = prefixedMatch[1].trim();
+      const body = prefixedMatch[2].trim();
+      const localizedPrefix =
+        prefix === "Recipe assistant" ? "Oppskriftsassistent" : prefix;
+      const localizedBody = formatSyncErrorMessage(body);
+      return `${localizedPrefix}: ${localizedBody}`;
+    }
+
+    return formatSyncErrorMessage(text);
   }
 
   function normalizeIntegrationResponse(payload) {
@@ -327,6 +422,9 @@
     connectionStatusSnapshot,
     odaNeedsReconnect,
     integrationExpiryNotice,
+    providerDisplayName,
+    formatSyncErrorMessage,
+    formatIntegrationIssueMessage,
     parsePkceCompletionPayload,
     buildCookidooLoginPayload,
     buildTrumfVerifyPayload,

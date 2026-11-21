@@ -504,6 +504,22 @@ def _is_reviewed(repo: Any, kind: str, locale: str, context: str, alias: str) ->
     return False
 
 
+def _add_imported_alias(
+    repo: IdentityRepository, kind: str, locale: str, alias: str, identity_id: UUID
+) -> None:
+    try:
+        repo.add_alias(
+            kind,
+            locale,
+            "",
+            alias,
+            identity_id,
+            source_type="imported_alias",  # ty: ignore[unknown-argument]
+        )
+    except TypeError:
+        repo.add_alias(kind, locale, "", alias, identity_id)
+
+
 def _seed_units_into_repo(
     repo: IdentityRepository, units: tuple[ReferenceUnit, ...]
 ) -> tuple[int, int]:
@@ -517,11 +533,11 @@ def _seed_units_into_repo(
         units_seeded += 1
         for alias in u.bokmal_aliases:
             if not _is_reviewed(repo, "unit", "nb", "", alias):
-                repo.add_alias("unit", "nb", "", alias, created.id)
+                _add_imported_alias(repo, "unit", "nb", alias, created.id)
                 aliases_seeded += 1
         for alias in u.english_aliases:
             if not _is_reviewed(repo, "unit", "en", "", alias):
-                repo.add_alias("unit", "en", "", alias, created.id)
+                _add_imported_alias(repo, "unit", "en", alias, created.id)
                 aliases_seeded += 1
     return units_seeded, aliases_seeded
 
@@ -539,11 +555,11 @@ def _seed_products_into_repo(
         products_seeded += 1
         for alias in p.bokmal_aliases:
             if not _is_reviewed(repo, "product", "nb", "", alias):
-                repo.add_alias("product", "nb", "", alias, created.id)
+                _add_imported_alias(repo, "product", "nb", alias, created.id)
                 aliases_seeded += 1
         for alias in p.english_aliases:
             if not _is_reviewed(repo, "product", "en", "", alias):
-                repo.add_alias("product", "en", "", alias, created.id)
+                _add_imported_alias(repo, "product", "en", alias, created.id)
                 aliases_seeded += 1
     return products_seeded, aliases_seeded
 

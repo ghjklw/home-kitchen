@@ -9,6 +9,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, StringConstraints, field_validator
 
+from home_kitchen.catalogue.identity import AliasSourceType
 from home_kitchen.units import normalize_unit
 
 NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
@@ -21,6 +22,7 @@ class ProductAliasItem(BaseModel):
     locale: NonBlank
     context: str = ""
     reviewed: bool = False
+    source_type: AliasSourceType = "reviewed_correction"
 
 
 class PreferredOdaSku(BaseModel):

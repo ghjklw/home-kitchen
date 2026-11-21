@@ -246,3 +246,37 @@ test("supports a configured category walking order with a stable alphabetical fa
   );
   assert.deepEqual([...groupedByCategory(lines).keys()], ["Bakery", "Dairy", "Pantry", "Produce"]);
 });
+
+test("formats units, decimal separators, and counts for en, fr, and nb household locales while keeping unmapped units verbatim", () => {
+  // English locale
+  assert.equal(formatNeedQuantity("2.345", "dl", false, false, "en"), "2.35 dl");
+  assert.equal(formatNeedQuantity("0.004", "g", false, false, "en"), "<0.01 g");
+  assert.equal(formatNeedQuantity("1", "item", false, false, "en"), "1 pc");
+  assert.equal(formatNeedQuantity("3", "item", false, false, "en"), "3 pcs");
+  assert.equal(formatNeedQuantity("2", "item", true, false, "en"), "2 pieces");
+  assert.equal(formatNeedQuantity("1", "tsp", true, false, "en"), "1 teaspoon");
+  assert.equal(formatNeedQuantity("2", "tbsp", false, false, "en"), "2 tbsp");
+  assert.equal(displayUnit("unmapped-source-unit", false, "2", "en"), "unmapped-source-unit");
+  assert.equal(
+    pickupProgress(1200, 2500, "en").label,
+    `${new Intl.NumberFormat("en").format(1200)} av ${new Intl.NumberFormat("en").format(2500)} varer plukket`,
+  );
+
+  // French locale
+  assert.equal(formatNeedQuantity("2.345", "dl", false, false, "fr"), "2,35 dl");
+  assert.equal(formatNeedQuantity("1", "item", false, false, "fr"), "1 pièce");
+  assert.equal(formatNeedQuantity("3", "item", false, false, "fr"), "3 pièces");
+  assert.equal(formatNeedQuantity("2", "tsp", false, false, "fr"), "2 c. à c.");
+  assert.equal(formatNeedQuantity("1", "tbsp", true, false, "fr"), "1 cuillère à soupe");
+  assert.equal(formatNeedQuantity("2", "dl", true, false, "fr"), "2 décilitres");
+  assert.equal(displayUnit("pincée", false, "2", "fr"), "pincée");
+  assert.equal(
+    pickupProgress(1200, 2500, "fr").label,
+    `${new Intl.NumberFormat("fr").format(1200)} av ${new Intl.NumberFormat("fr").format(2500)} varer plukket`,
+  );
+
+  // Bokmål default when unset or 'nb'
+  assert.equal(formatNeedQuantity("2", "item", false, false, "nb"), "2 stk.");
+  assert.equal(formatNeedQuantity("2", "item", false, false, undefined), "2 stk.");
+  assert.equal(formatNeedQuantity("2", "tsp", false, false, null), "2 ts");
+});

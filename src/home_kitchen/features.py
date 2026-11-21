@@ -11,6 +11,7 @@ from pydantic_ai import Agent
 
 from home_kitchen.basket.jobs import BasketMatchJobs
 from home_kitchen.basket.matching import BasketMatchingService, OdaSearchAdapter
+from home_kitchen.catalogue.identity import IdentityCorrectionCitation, IdentityCorrectionEvent
 from home_kitchen.catalogue.overview_repository import (
     MemoryProductOverviewRepository,
     PostgresProductOverviewRepository,
@@ -25,11 +26,12 @@ from home_kitchen.connector_store import ConnectorStore, resolve_connector_ciphe
 from home_kitchen.context import history_context
 from home_kitchen.cookidoo_plan_sync import CookidooPlanSyncService
 from home_kitchen.cookidoo_recipes import CookidooCollectionProvider
-from home_kitchen.history import HistoryRepository
+from home_kitchen.history import HistoryEntryCreate, HistoryRepository
 from home_kitchen.home_assistant import (
     DEFAULT_HOME_ASSISTANT_TODO_ENTITY,
     HOME_ASSISTANT_NOT_CONFIGURED_ERROR,
     HomeAssistantNotConfiguredError,
+    HomeAssistantQuickCaptureImportResult,
     HomeAssistantTodoClient,
     HomeAssistantTodoExportResult,
     format_store_trip_export_item,
@@ -46,7 +48,7 @@ from home_kitchen.integrations import (
     TrumfIntegration,
 )
 from home_kitchen.inventory import InventoryService
-from home_kitchen.models import RecipeCreate
+from home_kitchen.models import RecipeCreate, ShoppingItem, ShoppingItemCreate
 from home_kitchen.oda import OdaService
 from home_kitchen.oda.cart import OdaCartService
 from home_kitchen.planning import create_planning_proposal_service
@@ -78,6 +80,7 @@ from home_kitchen.recipes.photo_storage import PhotoRecipeService
 from home_kitchen.recommendations import PlanDraft, build_planner, recommend_plan
 from home_kitchen.service import KitchenService
 from home_kitchen.settings import Household, Settings
+from home_kitchen.units import canonicalize_quantity
 
 
 def _build_purchase_adapter(
@@ -193,16 +196,54 @@ class KitchenFeatures:
         def _resolve_product_id(name: str) -> UUID | None:
             for loc in ("nb", "en", "fr"):
                 for ctx in ("recipe", "receipt", ""):
-                    res = self.catalogue_identities.resolve("product", loc, ctx, name)
+                    try:
+                        res = self.catalogue_identities.resolve(
+                            "product", loc, ctx, name, household_id=self.household_id
+                        )
+                    except TypeError:
+                        res = self.catalogue_identities.resolve("product", loc, ctx, name)
                     if res.status == "resolved" and len(res.candidates) == 1:
                         return res.candidates[0].id
             return None
+
+        def _identity_corrections(
+            need_name: str, product_id: UUID | None
+        ) -> list[IdentityCorrectionCitation]:
+            events = self.catalogue_identities.list_correction_events(
+                kind="product",
+                alias=need_name,
+                household_id=self.household_id,
+                limit=10,
+            )
+            citations: list[IdentityCorrectionCitation] = []
+            if isinstance(events, list):
+                for ev in events:
+                    if not isinstance(ev, IdentityCorrectionEvent):
+                        continue
+                    if product_id is not None and ev.new_identity_id != product_id:
+                        continue
+                    citations.append(IdentityCorrectionCitation.from_event(ev))
+            if not citations and product_id is not None:
+                recent_events = self.catalogue_identities.list_correction_events(
+                    kind="product",
+                    household_id=self.household_id,
+                    limit=50,
+                )
+                if isinstance(recent_events, list):
+                    for ev in recent_events:
+                        if (
+                            isinstance(ev, IdentityCorrectionEvent)
+                            and ev.new_identity_id == product_id
+                        ):
+                            citations.append(IdentityCorrectionCitation.from_event(ev))
+            return citations
 
         self.basket_matching = BasketMatchingService(
             self.inventory,
             OdaSearchAdapter(self.oda),
             preferences_provider=_sku_preferences,
             product_id_resolver=_resolve_product_id,
+            identity_corrections_provider=_identity_corrections,
         )
         self.basket_jobs = BasketMatchJobs(
             self.basket_matching, self.inventory, self.oda.search_cache_context
@@ -318,6 +359,15 @@ class KitchenFeatures:
             raise ValueError("Save a recipe before requesting a meal plan")
         existing_meals = self.kitchen.list_meals(start, start + timedelta(days=days - 1))
         evidence = self.evidence("meal preferences feedback purchases")
+        raw_corrections = self.catalogue_identities.list_correction_events(
+            household_id=self.household_id,
+            limit=20,
+        )
+        correction_citations = [
+            IdentityCorrectionCitation.from_event(ev)
+            for ev in (raw_corrections if isinstance(raw_corrections, list) else [])
+            if isinstance(ev, IdentityCorrectionEvent)
+        ]
         planner = build_planner(self.settings)
         result = await recommend_plan(
             planner,
@@ -327,8 +377,14 @@ class KitchenFeatures:
             days,
             evidence_context="\n".join(item.model_dump_json() for item in evidence),
             existing_meals=existing_meals,
+            identity_corrections=correction_citations,
         )
-        return result.model_copy(update={"evidence_ids": [item.evidence_id for item in evidence]})
+        return result.model_copy(
+            update={
+                "evidence_ids": [item.evidence_id for item in evidence],
+                "identity_correction_citations": correction_citations,
+            }
+        )
 
     def _resolve_home_assistant_client(self) -> HomeAssistantTodoClient:
         if self.home_assistant_client is not None:
@@ -397,6 +453,122 @@ class KitchenFeatures:
 
         result = client.export_remaining_items(items)
         return HomeAssistantTodoExportResult.model_validate(result)
+
+    def _collect_existing_kitchen_item_names(
+        self, *, start: date | None = None, end: date | None = None
+    ) -> list[str]:
+        if start is not None or end is not None:
+            effective_start = start if start is not None else end
+            effective_end = end if end is not None else start
+            assert effective_start is not None and effective_end is not None
+            if effective_end < effective_start:
+                raise ValueError("end date must be on or after start date")
+        else:
+            effective_start = date.today()
+            effective_end = effective_start + timedelta(days=6)
+
+        existing: list[str] = []
+        for capture in self.kitchen.list_items():
+            if capture.completed:
+                continue
+            existing.append(capture.name)
+            existing.append(
+                format_store_trip_export_item(capture.name, capture.quantity, capture.unit)
+            )
+            canon_qty, canon_unit = canonicalize_quantity(capture.quantity, capture.unit)
+            existing.append(format_store_trip_export_item(capture.name, canon_qty, canon_unit))
+
+        shopping = self.kitchen.shopping_list(effective_start, effective_end, today=date.today())
+        for line in shopping.lines:
+            existing.append(line.name)
+            existing.append(format_store_trip_export_item(line.name, line.quantity, line.unit))
+            canon_qty, canon_unit = canonicalize_quantity(line.quantity, line.unit)
+            existing.append(format_store_trip_export_item(line.name, canon_qty, canon_unit))
+        for unquantified in shopping.unquantified:
+            existing.append(unquantified.name)
+
+        if getattr(self.store_trip, "engine", None) is not None:
+            trip = self.store_trip.review(effective_start, effective_end)
+            for trip_line in trip.lines:
+                existing.append(trip_line.name)
+                existing.append(
+                    format_store_trip_export_item(
+                        trip_line.name, trip_line.to_buy_quantity, trip_line.unit
+                    )
+                )
+                existing.append(
+                    format_store_trip_export_item(
+                        trip_line.name, trip_line.required_quantity, trip_line.unit
+                    )
+                )
+                remaining = trip_line.to_buy_quantity - trip_line.checked_quantity
+                if remaining > 0:
+                    existing.append(
+                        format_store_trip_export_item(trip_line.name, remaining, trip_line.unit)
+                    )
+
+        return existing
+
+    def preview_home_assistant_quick_captures(
+        self, *, start: date | None = None, end: date | None = None
+    ) -> HomeAssistantQuickCaptureImportResult:
+        """Preview active Home Assistant To-Do items not already in Kitchen, without mutating Kitchen."""
+        existing = self._collect_existing_kitchen_item_names(start=start, end=end)
+        client = self._resolve_home_assistant_client()
+        result = client.preview_quick_captures(existing)
+        return HomeAssistantQuickCaptureImportResult.model_validate(result)
+
+    def import_home_assistant_quick_captures(
+        self,
+        *,
+        reviewed: bool = False,
+        start: date | None = None,
+        end: date | None = None,
+    ) -> HomeAssistantQuickCaptureImportResult:
+        """Explicitly import active Home Assistant To-Do items as additive Kitchen quick captures.
+
+        Without reviewed=True, returns a preview without mutating Kitchen. With reviewed=True,
+        creates additive quick captures without overwriting Kitchen's canonical store-trip or checked state.
+        """
+        existing = self._collect_existing_kitchen_item_names(start=start, end=end)
+        client = self._resolve_home_assistant_client()
+        result = client.import_quick_captures(existing, reviewed=reviewed)
+        if not reviewed:
+            return HomeAssistantQuickCaptureImportResult.model_validate(result)
+
+        created_items: list[ShoppingItem] = []
+        added: list[str] = []
+        for candidate in result["candidates"]:
+            created = self.kitchen.add_item(ShoppingItemCreate(name=candidate))
+            created_items.append(created)
+            added.append(created.name)
+
+        if created_items and getattr(self.history, "engine", None) is not None:
+            self.history.record(
+                HistoryEntryCreate(
+                    channel=history_context.get().channel,
+                    kind="domain_event",
+                    message=(f"Imported {len(created_items)} quick capture(s) from Home Assistant"),
+                    structured={
+                        "action": "home_assistant_quick_capture_import",
+                        "entity_id": result["entity_id"],
+                        "added": added,
+                        "skipped_existing": result["skipped_existing"],
+                        "capture_ids": [str(item.id) for item in created_items],
+                    },
+                ),
+                actor_id=history_context.get().actor_id,
+            )
+
+        return HomeAssistantQuickCaptureImportResult(
+            reviewed=True,
+            candidates=result["candidates"],
+            added=added,
+            created_items=created_items,
+            skipped_existing=result["skipped_existing"],
+            total_active_in_ha=result["total_active_in_ha"],
+            entity_id=result["entity_id"],
+        )
 
     def discovery_context(self, query: str = "") -> DiscoveryContext:
         evidence = list(self.evidence(query or "recipe feedback preferences rating"))

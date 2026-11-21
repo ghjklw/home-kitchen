@@ -34,6 +34,7 @@ from home_kitchen.basket.jobs import (
 from home_kitchen.basket.matching import AvailabilityTarget, BasketMatchResult
 from home_kitchen.basket.repository import BasketService
 from home_kitchen.catalogue.identity import (
+    AliasCorrectionInput,
     AliasInput,
     AliasResolution,
     CanonicalProduct,
@@ -78,6 +79,7 @@ from home_kitchen.home_assistant import (
     HomeAssistantAuthError,
     HomeAssistantError,
     HomeAssistantNotConfiguredError,
+    HomeAssistantQuickCaptureImportResult,
     HomeAssistantTodoExportResult,
 )
 from home_kitchen.integrations import IntegrationInfo
@@ -249,6 +251,17 @@ class TripCheck(BaseModel):
 class StoreTripHomeAssistantExportRequest(BaseModel):
     start: date
     end: date
+    reviewed: bool = False
+
+
+class HomeAssistantQuickCapturePreviewRequest(BaseModel):
+    start: date | None = None
+    end: date | None = None
+
+
+class HomeAssistantQuickCaptureImportRequest(BaseModel):
+    start: date | None = None
+    end: date | None = None
     reviewed: bool = False
 
 
@@ -987,10 +1000,65 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
         except HomeAssistantError as exc:
             raise HTTPException(502, str(exc)) from None
 
+    @router.post("/captures/import/home-assistant/preview")
+    def preview_home_assistant_quick_captures(
+        request: Request,
+        response: Response,
+        data: HomeAssistantQuickCapturePreviewRequest | None = None,
+    ) -> HomeAssistantQuickCaptureImportResult:
+        authenticated_actor(request)
+        response.headers["Cache-Control"] = "no-store"
+        payload = data or HomeAssistantQuickCapturePreviewRequest()
+        if payload.start is not None and payload.end is not None and payload.end < payload.start:
+            raise HTTPException(422, "end date must be on or after start date")
+        try:
+            return features.preview_home_assistant_quick_captures(
+                start=payload.start, end=payload.end
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        except HomeAssistantNotConfiguredError as exc:
+            raise HTTPException(503, str(exc)) from None
+        except HomeAssistantAuthError as exc:
+            raise HTTPException(502, str(exc)) from None
+        except HomeAssistantError as exc:
+            raise HTTPException(502, str(exc)) from None
+
+    @router.post("/captures/import/home-assistant")
+    def import_home_assistant_quick_captures(
+        request: Request,
+        response: Response,
+        data: HomeAssistantQuickCaptureImportRequest | None = None,
+    ) -> HomeAssistantQuickCaptureImportResult:
+        authenticated_actor(request)
+        response.headers["Cache-Control"] = "no-store"
+        payload = data or HomeAssistantQuickCaptureImportRequest()
+        if not payload.reviewed:
+            raise HTTPException(
+                422,
+                "Explicit confirmation (reviewed=True) is required before importing quick captures from Home Assistant",
+            )
+        if payload.start is not None and payload.end is not None and payload.end < payload.start:
+            raise HTTPException(422, "end date must be on or after start date")
+        try:
+            return features.import_home_assistant_quick_captures(
+                reviewed=payload.reviewed, start=payload.start, end=payload.end
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        except HomeAssistantNotConfiguredError as exc:
+            raise HTTPException(503, str(exc)) from None
+        except HomeAssistantAuthError as exc:
+            raise HTTPException(502, str(exc)) from None
+        except HomeAssistantError as exc:
+            raise HTTPException(502, str(exc)) from None
+
     @router.get("/catalogue/foods")
     def find_foods(
         q: str = Query(default="", max_length=200), limit: int = Query(default=10, ge=1, le=50)
     ) -> list[FoodCatalogueItem]:
+        if not q.strip():
+            return features.catalogue.list_foods(limit)
         return features.catalogue.autocomplete(q, limit)
 
     @router.get("/catalogue/foods/{food_id}/products")
@@ -1017,7 +1085,7 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
         return features.catalogue_identities.list_correction_events(
             kind=kind,
             alias=alias,
-            household_id=features.household_id,
+            household_id=getattr(features, "household_id", None),
             limit=limit,
         )
 
@@ -1030,16 +1098,61 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
     ) -> AliasResolution:
         if kind not in {"product", "unit"}:
             raise HTTPException(404, "Unknown identity kind")
-        return features.catalogue_identities.resolve(kind, locale, context, alias)
+        household_id = getattr(features, "household_id", None)
+        try:
+            return features.catalogue_identities.resolve(
+                kind, locale, context, alias, household_id=household_id
+            )
+        except TypeError:
+            return features.catalogue_identities.resolve(kind, locale, context, alias)
 
     @router.post("/catalogue/aliases/{kind}/{identity_id}", status_code=201)
     def add_canonical_alias(kind: str, identity_id: UUID, data: AliasInput) -> Response:
         if kind not in {"product", "unit"}:
             raise HTTPException(404, "Unknown identity kind")
-        features.catalogue_identities.add_alias(
-            kind, data.locale, data.context, data.alias, identity_id
-        )
+        source_type = data.source_type or "automatic_suggestion"
+        try:
+            features.catalogue_identities.add_alias(
+                kind,
+                data.locale,
+                data.context,
+                data.alias,
+                identity_id,
+                source_type=source_type,
+            )
+        except TypeError:
+            features.catalogue_identities.add_alias(
+                kind, data.locale, data.context, data.alias, identity_id
+            )
         return Response(status_code=201)
+
+    @router.post("/catalogue/aliases/correct")
+    def correct_canonical_alias_mapping(
+        data: AliasCorrectionInput, request: Request
+    ) -> dict[str, Any]:
+        if not data.reviewed:
+            raise HTTPException(
+                422,
+                "Explicit review confirmation (reviewed=true) is required to save a mapping correction.",
+            )
+        actor = getattr(request.state, "actor_id", None) or "api"
+        try:
+            event = features.catalogue_identities.correct_alias(
+                data.kind,
+                data.locale,
+                data.context,
+                data.alias,
+                data.identity_id,
+                actor_id=actor,
+                household_id=features.household_id,
+                channel="api",
+            )
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from None
+        return {
+            "status": "updated" if event is not None else "unchanged",
+            "event": event.model_dump(mode="json") if event is not None else None,
+        }
 
     @router.put("/catalogue/aliases/{kind}/{identity_id}/review")
     def correct_canonical_alias(
@@ -1048,6 +1161,7 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
         if kind not in {"product", "unit"}:
             raise HTTPException(404, "Unknown identity kind")
         actor = getattr(request.state, "actor_id", None) or "api"
+        source_type = data.source_type or "reviewed_correction"
         try:
             features.catalogue_identities.correct_alias(
                 kind,
@@ -1056,8 +1170,9 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
                 data.alias,
                 identity_id,
                 actor_id=actor,
-                household_id=features.household_id,
+                household_id=getattr(features, "household_id", None),
                 channel="api",
+                source_type=source_type,
             )
         except ValueError as exc:
             raise HTTPException(404, str(exc)) from None

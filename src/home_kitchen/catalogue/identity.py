@@ -10,6 +10,11 @@ from pydantic import AwareDatetime, BaseModel, Field
 
 from home_kitchen.models import NonBlank
 
+AliasSourceType = Literal["reviewed_correction", "automatic_suggestion", "imported_alias"]
+VALID_ALIAS_SOURCE_TYPES: frozenset[str] = frozenset(
+    {"reviewed_correction", "automatic_suggestion", "imported_alias"}
+)
+
 
 class CanonicalProduct(BaseModel):
     id: UUID
@@ -26,6 +31,7 @@ class AliasInput(BaseModel):
     alias: NonBlank
     locale: NonBlank
     context: str = ""
+    source_type: AliasSourceType | None = None
 
 
 class AliasCorrectionInput(BaseModel):
@@ -52,9 +58,41 @@ class IdentityCorrectionEvent(BaseModel):
     new_identity_id: UUID
     previous_reviewed: bool | None = None
     new_reviewed: bool = True
-    source_type: Literal["reviewed_correction", "automatic_suggestion", "imported_alias"] = (
-        "reviewed_correction"
-    )
+    source_type: AliasSourceType = "reviewed_correction"
+
+
+class IdentityCorrectionCitation(BaseModel):
+    """Auditable provenance citation for a product or unit identity mapping correction."""
+
+    event_id: UUID
+    kind: Literal["product", "unit"]
+    alias: str
+    locale: str
+    context: str
+    new_identity_id: UUID
+    previous_identity_id: UUID | None = None
+    actor_id: str
+    channel: Literal["app", "api", "mcp", "system"] = "api"
+    source_type: AliasSourceType = "reviewed_correction"
+    occurred_at: AwareDatetime | datetime
+    household_id: UUID | None = None
+
+    @classmethod
+    def from_event(cls, event: IdentityCorrectionEvent) -> "IdentityCorrectionCitation":
+        return cls(
+            event_id=event.id,
+            kind=event.kind,
+            alias=event.alias,
+            locale=event.locale,
+            context=event.context,
+            new_identity_id=event.new_identity_id,
+            previous_identity_id=event.previous_identity_id,
+            actor_id=event.actor_id,
+            channel=event.channel,
+            source_type=event.source_type,
+            occurred_at=event.occurred_at,
+            household_id=event.household_id,
+        )
 
 
 class ProductIdentityCreate(BaseModel):
@@ -69,6 +107,10 @@ class UnitIdentityCreate(BaseModel):
 class AliasResolution(BaseModel):
     status: Literal["unmapped", "resolved", "ambiguous"]
     candidates: list[CanonicalProduct | CanonicalUnit] = Field(default_factory=list)
+    source_type: AliasSourceType | None = None
+    source_types: list[AliasSourceType] = Field(default_factory=list)
+    reviewed: bool | None = None
+    household_scoped: bool = False
 
 
 class UnmappedIngredient(BaseModel):

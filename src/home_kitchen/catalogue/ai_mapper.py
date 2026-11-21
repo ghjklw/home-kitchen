@@ -605,7 +605,17 @@ def _add_alias_idempotent(
         return 0
     if identity_service.has_reviewed_alias(kind, clean_locale, "recipe", clean_alias):
         return 0
-    identity_service.add_alias(kind, clean_locale, "recipe", clean_alias, identity_id)
+    try:
+        identity_service.add_alias(
+            kind,
+            clean_locale,
+            "recipe",
+            clean_alias,
+            identity_id,
+            source_type="automatic_suggestion",
+        )
+    except TypeError:
+        identity_service.add_alias(kind, clean_locale, "recipe", clean_alias, identity_id)
     catalogue.register_alias(
         kind, clean_locale, "recipe", norm_alias, identity_id, display_alias=clean_alias
     )

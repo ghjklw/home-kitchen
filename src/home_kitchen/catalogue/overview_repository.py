@@ -14,7 +14,11 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 
-from home_kitchen.catalogue.identity import CanonicalProduct, normalize_identity_text
+from home_kitchen.catalogue.identity import (
+    AliasSourceType,
+    CanonicalProduct,
+    normalize_identity_text,
+)
 from home_kitchen.catalogue.overview_models import (
     ExcludedOdaSku,
     PreferredOdaSku,
@@ -256,15 +260,20 @@ class PostgresProductOverviewRepository:
             return {}
         result: dict[UUID, list[ProductAliasItem]] = defaultdict(list)
         with self.engine.connect() as connection:
-            # Check if aliases table exists
+            cols = {
+                col["name"] for col in inspect(connection).get_columns("kitchen_product_aliases")
+            }
+            source_col = (
+                "source_type" if "source_type" in cols else "'reviewed_correction' AS source_type"
+            )
             rows = connection.execute(
                 text(
-                    "SELECT product_id, locale, context, alias, reviewed "
+                    f"SELECT product_id, locale, context, alias, reviewed, {source_col} "
                     "FROM kitchen_product_aliases "
                     "WHERE product_id = ANY(:ids) "
                     "ORDER BY locale, reviewed DESC, alias"
                     if self.engine.dialect.name == "postgresql"
-                    else "SELECT product_id, locale, context, alias, reviewed "
+                    else f"SELECT product_id, locale, context, alias, reviewed, {source_col} "
                     "FROM kitchen_product_aliases "
                     "ORDER BY locale, reviewed DESC, alias"
                 ),
@@ -279,6 +288,7 @@ class PostgresProductOverviewRepository:
                             locale=r["locale"],
                             context=r["context"],
                             reviewed=bool(r["reviewed"]),
+                            source_type=r["source_type"] or "reviewed_correction",
                         )
                     )
         return dict(result)
@@ -1656,10 +1666,17 @@ class PostgresProductOverviewRepository:
             source_aliases: list[ProductAliasItem] = []
             target_aliases: list[ProductAliasItem] = []
             if inspector.has_table("kitchen_product_aliases"):
+                alias_cols = {
+                    col["name"] for col in inspector.get_columns("kitchen_product_aliases")
+                }
+                has_hh = "household_id" in alias_cols
+                has_src = "source_type" in alias_cols
+                hh_col = "household_id" if has_hh else "NULL AS household_id"
+                src_col = "source_type" if has_src else "'reviewed_correction' AS source_type"
                 alias_rows = (
                     connection.execute(
                         text(
-                            "SELECT locale, context, normalized_alias, alias, product_id, reviewed "
+                            f"SELECT {hh_col}, locale, context, normalized_alias, alias, product_id, reviewed, {src_col} "
                             "FROM kitchen_product_aliases "
                             "WHERE product_id IN (:target_id, :source_id)"
                         ),
@@ -1668,7 +1685,7 @@ class PostgresProductOverviewRepository:
                     .mappings()
                     .all()
                 )
-                target_alias_map: dict[tuple[str, str, str], dict[str, Any]] = {}
+                target_alias_map: dict[tuple[Any, str, str, str], dict[str, Any]] = {}
                 source_alias_rows: list[dict[str, Any]] = []
                 for r in alias_rows:
                     pid = UUID(str(r["product_id"]))
@@ -1678,60 +1695,78 @@ class PostgresProductOverviewRepository:
                         locale=r["locale"],
                         context=r["context"],
                         reviewed=bool(r["reviewed"]),
+                        source_type=r["source_type"] or "reviewed_correction",
+                    )
+                    key = (
+                        str(r["household_id"]) if r["household_id"] is not None else None,
+                        r["locale"],
+                        r["context"],
+                        r["normalized_alias"],
                     )
                     if pid == target_product_id:
                         target_aliases.append(item)
-                        target_alias_map[(r["locale"], r["context"], r["normalized_alias"])] = (
-                            row_dict
-                        )
+                        target_alias_map[key] = row_dict
                     else:
                         source_aliases.append(item)
                         source_alias_rows.append(row_dict)
 
                 for sr in source_alias_rows:
-                    key = (sr["locale"], sr["context"], sr["normalized_alias"])
+                    hh_val = sr["household_id"]
+                    key = (
+                        str(hh_val) if hh_val is not None else None,
+                        sr["locale"],
+                        sr["context"],
+                        sr["normalized_alias"],
+                    )
+                    hh_clause = (
+                        " AND household_id = :hh"
+                        if has_hh and hh_val is not None
+                        else (" AND household_id IS NULL" if has_hh else "")
+                    )
+                    base_where_params: dict[str, Any] = {
+                        "loc": sr["locale"],
+                        "ctx": sr["context"],
+                        "norm": sr["normalized_alias"],
+                    }
+                    if has_hh and hh_val is not None:
+                        base_where_params["hh"] = hh_val
                     existing_target = target_alias_map.get(key)
                     if existing_target is not None:
                         if bool(sr["reviewed"]) and not bool(existing_target["reviewed"]):
+                            set_src = ", source_type = :src" if has_src else ""
+                            update_params = {
+                                **base_where_params,
+                                "rev": True,
+                                "pid": target_product_id,
+                            }
+                            if has_src:
+                                update_params["src"] = sr["source_type"] or "reviewed_correction"
                             connection.execute(
                                 text(
-                                    "UPDATE kitchen_product_aliases SET reviewed = :rev "
-                                    "WHERE locale = :loc AND context = :ctx "
-                                    "AND normalized_alias = :norm AND product_id = :pid"
+                                    f"UPDATE kitchen_product_aliases SET reviewed = :rev{set_src} "
+                                    f"WHERE locale = :loc AND context = :ctx "
+                                    f"AND normalized_alias = :norm AND product_id = :pid{hh_clause}"
                                 ),
-                                {
-                                    "rev": True,
-                                    "loc": sr["locale"],
-                                    "ctx": sr["context"],
-                                    "norm": sr["normalized_alias"],
-                                    "pid": target_product_id,
-                                },
+                                update_params,
                             )
                         connection.execute(
                             text(
                                 "DELETE FROM kitchen_product_aliases "
                                 "WHERE locale = :loc AND context = :ctx "
-                                "AND normalized_alias = :norm AND product_id = :pid"
+                                f"AND normalized_alias = :norm AND product_id = :pid{hh_clause}"
                             ),
-                            {
-                                "loc": sr["locale"],
-                                "ctx": sr["context"],
-                                "norm": sr["normalized_alias"],
-                                "pid": source_product_id,
-                            },
+                            {**base_where_params, "pid": source_product_id},
                         )
                     else:
                         connection.execute(
                             text(
                                 "UPDATE kitchen_product_aliases SET product_id = :target_id "
                                 "WHERE locale = :loc AND context = :ctx "
-                                "AND normalized_alias = :norm AND product_id = :source_id"
+                                f"AND normalized_alias = :norm AND product_id = :source_id{hh_clause}"
                             ),
                             {
+                                **base_where_params,
                                 "target_id": target_product_id,
-                                "loc": sr["locale"],
-                                "ctx": sr["context"],
-                                "norm": sr["normalized_alias"],
                                 "source_id": source_product_id,
                             },
                         )
@@ -1741,6 +1776,7 @@ class PostgresProductOverviewRepository:
                                 locale=sr["locale"],
                                 context=sr["context"],
                                 reviewed=bool(sr["reviewed"]),
+                                source_type=sr["source_type"] or "reviewed_correction",
                             )
                         )
 
@@ -2176,6 +2212,7 @@ class MemoryProductOverviewRepository:
         locale: str = "nb",
         context: str = "recipe",
         reviewed: bool = True,
+        source_type: AliasSourceType = "reviewed_correction",
     ) -> None:
         self.aliases[product_id].append(
             ProductAliasItem(
@@ -2183,6 +2220,7 @@ class MemoryProductOverviewRepository:
                 locale=locale,
                 context=context,
                 reviewed=reviewed,
+                source_type=source_type,
             )
         )
 

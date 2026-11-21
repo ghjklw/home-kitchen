@@ -38,6 +38,7 @@ class ImportedDraft(BaseModel):
     instructions: list[str]
     source_url: HttpUrl
     image_url: HttpUrl | None = None
+    source_language: str | None = None
     recipe_type: RecipeType | None = None
     prep_time_minutes: int | None = None
     prep_category: PrepCategory | None = None

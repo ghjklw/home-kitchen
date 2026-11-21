@@ -41,7 +41,7 @@ from .recipes.source_quantities import normalize_source_quantity, source_ingredi
 from .recipes.translation import RecipeTranslator, compute_recipe_version
 from .settings import Settings
 from .shopping import ClosedSourceKey, ShoppingBuilder, ShoppingContext, default_shopping_builder
-from .store import Store
+from .store import Store, resolve_recipe_mapping_repository
 from .units import scale_quantity
 
 _LOG = logging.getLogger(__name__)
@@ -385,7 +385,7 @@ class KitchenService:
             from home_kitchen.catalogue.ai_mapper import auto_map_unmapped_ingredients
 
             summary = auto_map_unmapped_ingredients(
-                self.store,
+                resolve_recipe_mapping_repository(self.store),
                 settings,
                 household_id=self.household_id,
                 actor_id=history_context.get().actor_id or "system",

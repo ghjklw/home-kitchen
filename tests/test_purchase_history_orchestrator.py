@@ -828,12 +828,20 @@ def test_sync_proactively_refreshes_expiring_coop_and_rema_tokens_before_fetch(m
         if "coop.no" in str(request.url):
             return httpx.Response(
                 200,
-                json={"access_token": "fresh-coop", "refresh_token": "coop-ref-2", "expires_in": 3600},
+                json={
+                    "access_token": "fresh-coop",
+                    "refresh_token": "coop-ref-2",
+                    "expires_in": 3600,
+                },
             )
         if "rema.no" in str(request.url):
             return httpx.Response(
                 200,
-                json={"access_token": "fresh-rema", "refresh_token": "rema-ref-2", "expires_in": 3600},
+                json={
+                    "access_token": "fresh-rema",
+                    "refresh_token": "rema-ref-2",
+                    "expires_in": 3600,
+                },
             )
         return httpx.Response(404)
 
@@ -932,12 +940,20 @@ def test_sync_retries_once_after_auth_error_for_coop_rema_and_trumf(memory_engin
         if "coop.no" in str(request.url):
             return httpx.Response(
                 200,
-                json={"access_token": "renewed-coop", "refresh_token": "coop-ref-2", "expires_in": 3600},
+                json={
+                    "access_token": "renewed-coop",
+                    "refresh_token": "coop-ref-2",
+                    "expires_in": 3600,
+                },
             )
         if "rema.no" in str(request.url):
             return httpx.Response(
                 200,
-                json={"access_token": "renewed-rema", "refresh_token": "rema-ref-2", "expires_in": 3600},
+                json={
+                    "access_token": "renewed-rema",
+                    "refresh_token": "rema-ref-2",
+                    "expires_in": 3600,
+                },
             )
         if "trumf.no" in str(request.url) and request.url.path == "/api/auth/session":
             return httpx.Response(
@@ -1084,7 +1100,9 @@ def test_sync_records_expired_auth_state_and_sanitizes_errors_across_all_provide
             has_connection=lambda acc: acc == "household-a",
             list_connected_actors=lambda: ["household-a"],
         ),
-        list_orders=AsyncMock(side_effect=OdaError("Your Oda connection expired; connect again", 409)),
+        list_orders=AsyncMock(
+            side_effect=OdaError("Your Oda connection expired; connect again", 409)
+        ),
         track_order=AsyncMock(),
     )
 

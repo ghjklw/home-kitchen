@@ -1460,8 +1460,18 @@ def test_postgres_repository_excludes_cancelled_and_returned_provider_orders(
                         "hasReceipt": True,
                         "totalAmount": 25.0,
                         "lines": [
-                            {"name": "Helmelk 1L", "ean": "7038010000011", "quantity": 2, "amount": 50.0},
-                            {"name": "Helmelk 1L", "ean": "7038010000011", "quantity": -1, "amount": -25.0},
+                            {
+                                "name": "Helmelk 1L",
+                                "ean": "7038010000011",
+                                "quantity": 2,
+                                "amount": 50.0,
+                            },
+                            {
+                                "name": "Helmelk 1L",
+                                "ean": "7038010000011",
+                                "quantity": -1,
+                                "amount": -25.0,
+                            },
                         ],
                     }
                 ),

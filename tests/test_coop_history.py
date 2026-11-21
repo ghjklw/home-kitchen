@@ -11,6 +11,8 @@ from sqlalchemy import create_engine, func, select
 from home_kitchen.coop_history import (
     COOP_SCHEMA_SOURCE,
     COOP_SCHEMA_VERSION,
+    DEFAULT_COOP_BASE_URL,
+    DEFAULT_COOP_USER_AGENT,
     CoopAuthenticationError,
     CoopHttpSource,
     UnsupportedCoopContract,
@@ -147,15 +149,17 @@ def test_fixture_imports_dedupe_overlap_and_preserve_correction_revisions():
         engine.dispose()
 
 
-def test_coop_http_source_falls_back_from_list_404_to_search():
-    calls: list[tuple[str, str]] = []
+def test_coop_http_source_defaults_and_falls_back_from_list_404_to_search():
+    calls: list[tuple[str, str, str]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        calls.append((request.url.path, request.url.query.decode()))
+        calls.append((request.url.host, request.url.path, request.url.query.decode()))
+        assert request.headers.get("user-agent") == DEFAULT_COOP_USER_AGENT
+        assert request.headers.get("x-locale") == "nb-NO"
         if request.url.path == "/user/pay/history/list":
             return httpx.Response(404)
         if request.url.path == "/user/pay/history/search":
-            assert request.url.params.get("searchQuery") == ""
+            assert request.url.params.get("searchText") == ""
             return httpx.Response(
                 200,
                 json={
@@ -172,20 +176,53 @@ def test_coop_http_source_falls_back_from_list_404_to_search():
         return httpx.Response(404)
 
     source = CoopHttpSource(access_token="coop-token", transport=httpx.MockTransport(handler))
+    assert source.base_url == DEFAULT_COOP_BASE_URL == "https://coopay.coop.no"
     purchases = source.get_purchases("user-1")
     assert [p.summary_id for p in purchases] == ["coop-search-1"]
     assert purchases[0].amount == Decimal("210.00")
     assert calls == [
+        ("coopay.coop.no", "/user/pay/history/list", ""),
+        ("coopay.coop.no", "/user/pay/history/search", "searchText="),
+    ]
+
+
+def test_coop_http_source_retries_list_with_number_of_purchases_on_400():
+    calls: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, request.url.query.decode()))
+        if request.url.path == "/user/pay/history/list":
+            if request.url.params.get("numberOfPurchases") == "50":
+                return httpx.Response(
+                    200,
+                    json={
+                        "purchases": [
+                            {
+                                "summaryId": "coop-list-50",
+                                "storeName": "Coop Extra",
+                                "purchaseDate": "2026-11-19T12:00:00Z",
+                                "amount": "120.00",
+                            }
+                        ]
+                    },
+                )
+            return httpx.Response(400)
+        return httpx.Response(404)
+
+    source = CoopHttpSource(access_token="coop-token", transport=httpx.MockTransport(handler))
+    purchases = source.get_purchases("user-1")
+    assert [p.summary_id for p in purchases] == ["coop-list-50"]
+    assert calls == [
         ("/user/pay/history/list", ""),
-        ("/user/pay/history/search", "searchQuery="),
+        ("/user/pay/history/list", "numberOfPurchases=50"),
     ]
 
 
 def test_coop_http_source_falls_back_to_month_and_dashboard_on_404():
-    month_calls: list[str] = []
+    month_calls: list[tuple[str, dict[str, str]]] = []
 
     def month_handler(request: httpx.Request) -> httpx.Response:
-        month_calls.append(request.url.path)
+        month_calls.append((request.url.path, dict(request.url.params)))
         if request.url.path in ("/user/pay/history/list", "/user/pay/history/search"):
             return httpx.Response(404)
         if request.url.path == "/user/pay/history/month":
@@ -209,11 +246,12 @@ def test_coop_http_source_falls_back_to_month_and_dashboard_on_404():
     )
     purchases = month_source.get_purchases("user-1")
     assert [p.summary_id for p in purchases] == ["coop-month-1"]
-    assert month_calls == [
+    assert [path for path, _ in month_calls] == [
         "/user/pay/history/list",
         "/user/pay/history/search",
         "/user/pay/history/month",
     ]
+    assert set(month_calls[2][1]) == {"year", "month"}
 
     dash_calls: list[str] = []
 
@@ -272,3 +310,79 @@ def test_coop_http_source_raises_auth_or_contract_error_when_fallbacks_fail():
     )
     with pytest.raises(CoopAuthenticationError):
         unauth_source.get_purchases("user-1")
+
+    upgrade_source = CoopHttpSource(
+        access_token="coop-token",
+        transport=httpx.MockTransport(
+            lambda req: httpx.Response(403, headers={"x-client-upgrade": "force"})
+        ),
+    )
+    with pytest.raises(UnsupportedCoopContract, match="app-oppgradering"):
+        upgrade_source.get_purchases("user-1")
+
+
+def test_coop_http_source_handles_base_response_errors_and_extra_442_fields():
+    perm_error_source = CoopHttpSource(
+        access_token="coop-token",
+        transport=httpx.MockTransport(
+            lambda req: httpx.Response(
+                200,
+                json={
+                    "resultCode": "PERMANENT_ERROR",
+                    "errorCode": "UNEXPECTED_SERVER_ERROR",
+                    "errorMessage": "A temporary error has occurred.",
+                },
+            )
+        ),
+    )
+    with pytest.raises(UnsupportedCoopContract, match="PERMANENT_ERROR: UNEXPECTED_SERVER_ERROR"):
+        perm_error_source.get_purchases("user-1")
+
+    token_error_source = CoopHttpSource(
+        access_token="coop-token",
+        transport=httpx.MockTransport(
+            lambda req: httpx.Response(
+                200,
+                json={"resultCode": "PERMANENT_ERROR", "errorCode": "INVALID_TOKEN"},
+            )
+        ),
+    )
+    with pytest.raises(CoopAuthenticationError):
+        token_error_source.get_purchases("user-1")
+
+    def detail_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user/pay/history/details":
+            return httpx.Response(
+                200,
+                json={
+                    "resultCode": "OK",
+                    "summary": {
+                        "summaryId": "sum-442",
+                        "receiptId": "rec-442",
+                        "purchaseDate": "2026-11-20T12:00:00Z",
+                        "storeName": "Coop Mega",
+                        "amount": "199.00",
+                        "couponDiscount": "10.00",
+                        "subTotalDiscount": "15.00",
+                        "lines": [
+                            {
+                                "productName": "Gulost",
+                                "ean13": "7038010009457",
+                                "quantity": "1",
+                                "amount": "99.00",
+                                "lowestPriceDiscount": "5.00",
+                            }
+                        ],
+                    },
+                },
+            )
+        return httpx.Response(404)
+
+    detail_source = CoopHttpSource(
+        access_token="coop-token", transport=httpx.MockTransport(detail_handler)
+    )
+    receipt = detail_source.get_receipt("user-1", "sum-442")
+    assert receipt is not None
+    assert receipt.summary_id == "sum-442"
+    assert receipt.lines is not None
+    assert receipt.lines[0].product_name == "Gulost"

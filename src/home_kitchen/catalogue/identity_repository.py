@@ -15,6 +15,7 @@ from home_kitchen.catalogue.identity import (
     AliasSourceType,
     CanonicalProduct,
     CanonicalUnit,
+    IdentityAliasRecord,
     IdentityCorrectionEvent,
     normalize_identity_text,
 )
@@ -539,6 +540,64 @@ class PostgresIdentityRepository:
             }
         if existing != ids:
             raise ValueError(f"Recipe contains an unknown canonical {kind} identity")
+
+    def list_products(self) -> list[CanonicalProduct]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    "SELECT id, canonical_name, variant FROM kitchen_canonical_products "
+                    "ORDER BY canonical_name, variant, id"
+                )
+            ).mappings()
+            return [CanonicalProduct.model_validate(dict(row)) for row in rows]
+
+    def list_units(self) -> list[CanonicalUnit]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    "SELECT id, canonical_name FROM kitchen_canonical_units "
+                    "ORDER BY canonical_name, id"
+                )
+            ).mappings()
+            return [CanonicalUnit.model_validate(dict(row)) for row in rows]
+
+    def list_aliases(self) -> list[IdentityAliasRecord]:
+        records: list[IdentityAliasRecord] = []
+        with self.engine.connect() as connection:
+            for row in connection.execute(
+                text(
+                    "SELECT locale, context, normalized_alias, alias, product_id "
+                    "FROM kitchen_product_aliases"
+                )
+            ).mappings():
+                records.append(
+                    IdentityAliasRecord.model_validate(
+                        {
+                            "kind": "product",
+                            "locale": row["locale"],
+                            "context": row["context"],
+                            "normalized_alias": row["normalized_alias"],
+                            "identity_id": row["product_id"],
+                            "alias": row.get("alias"),
+                        }
+                    )
+                )
+            for row in connection.execute(
+                text("SELECT locale, context, normalized_alias, unit_id FROM kitchen_unit_aliases")
+            ).mappings():
+                records.append(
+                    IdentityAliasRecord.model_validate(
+                        {
+                            "kind": "unit",
+                            "locale": row["locale"],
+                            "context": row["context"],
+                            "normalized_alias": row["normalized_alias"],
+                            "identity_id": row["unit_id"],
+                            "alias": None,
+                        }
+                    )
+                )
+        return records
 
     @staticmethod
     def _table(kind: str) -> tuple[str, str]:

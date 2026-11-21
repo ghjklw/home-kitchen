@@ -33,7 +33,12 @@ from home_kitchen.models import (
 )
 from home_kitchen.recipes.source_quantities import source_ingredient_parts
 from home_kitchen.service import KitchenService
-from home_kitchen.store import entity_values, metadata, recipes
+from home_kitchen.store import (
+    entity_values,
+    metadata,
+    recipes,
+    resolve_recipe_mapping_repository,
+)
 
 _LOG = logging.getLogger(__name__)
 CollectionKind = str
@@ -596,7 +601,7 @@ class CollectionService:
             from home_kitchen.catalogue.ai_mapper import auto_map_unmapped_ingredients_async
 
             await auto_map_unmapped_ingredients_async(
-                self.kitchen.store,
+                resolve_recipe_mapping_repository(self.kitchen.store),
                 kitchen_settings,
                 household_id=getattr(self.kitchen, "household_id", None),
                 actor_id=job.actor,

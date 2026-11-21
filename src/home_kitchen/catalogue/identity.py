@@ -27,6 +27,15 @@ class CanonicalUnit(BaseModel):
     canonical_name: NonBlank
 
 
+class IdentityAliasRecord(BaseModel):
+    kind: Literal["product", "unit"]
+    locale: str
+    context: str
+    normalized_alias: str
+    identity_id: UUID
+    alias: str | None = None
+
+
 class AliasInput(BaseModel):
     alias: NonBlank
     locale: NonBlank

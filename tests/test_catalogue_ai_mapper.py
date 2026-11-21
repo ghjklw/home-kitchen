@@ -1005,3 +1005,300 @@ def test_auto_map_api_route():
             assert mocked_route.call_args.kwargs["recipe_id"] == recipe.id
             assert mocked_route.call_args.kwargs["batch_size"] == 10
             assert mocked_route.call_args.kwargs["max_batches"] == 2
+
+
+def test_ai_mapper_has_no_direct_sqlalchemy_or_postgres_repo_imports():
+    import ast
+    from pathlib import Path
+
+    from home_kitchen.catalogue import ai_mapper
+
+    tree = ast.parse(Path(ai_mapper.__file__).read_text(encoding="utf-8"))
+    imported_modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported_modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported_modules.add(node.module)
+
+    forbidden = {
+        "sqlalchemy",
+        "home_kitchen.store",
+        "home_kitchen.catalogue.identity_repository",
+        "home_kitchen.history",
+    }
+    for mod in imported_modules:
+        assert not any(mod == f or mod.startswith(f"{f}.") for f in forbidden), (
+            f"Unexpected direct infrastructure import in ai_mapper.py: {mod}"
+        )
+
+
+def test_auto_map_uses_protocol_ports_without_store_engine_or_repo_attributes():
+    from home_kitchen.catalogue.identity import IdentityAliasRecord
+
+    class PortIdentityRepo:
+        def __init__(self):
+            self._products: dict[tuple[str, str], CanonicalProduct] = {}
+            self._units: dict[str, CanonicalUnit] = {}
+            self._aliases: list[IdentityAliasRecord] = []
+
+        def product(
+            self, canonical_name: str, variant: str = "", identity_id: UUID | None = None
+        ) -> CanonicalProduct:
+            key = (canonical_name, variant)
+            if key not in self._products:
+                self._products[key] = CanonicalProduct(
+                    id=identity_id or uuid4(), canonical_name=canonical_name, variant=variant
+                )
+            return self._products[key]
+
+        def unit(self, canonical_name: str, identity_id: UUID | None = None) -> CanonicalUnit:
+            if canonical_name not in self._units:
+                self._units[canonical_name] = CanonicalUnit(
+                    id=identity_id or uuid4(), canonical_name=canonical_name
+                )
+            return self._units[canonical_name]
+
+        def add_alias(
+            self, kind: str, locale: str, context: str, alias: str, identity_id: UUID
+        ) -> None:
+            self._aliases.append(
+                IdentityAliasRecord(
+                    kind=kind,  # type: ignore[arg-type]
+                    locale=locale,
+                    context=context,
+                    normalized_alias=" ".join(alias.split()).casefold(),
+                    identity_id=identity_id,
+                    alias=alias,
+                )
+            )
+
+        def correct_alias(self, *args, **kwargs) -> None:
+            return None
+
+        def resolve(self, *args, **kwargs) -> list[CanonicalProduct | CanonicalUnit]:
+            return []
+
+        def validate_identities(self, kind: str, ids: set[UUID]) -> None:
+            return None
+
+        def list_products(self) -> list[CanonicalProduct]:
+            return list(self._products.values())
+
+        def list_units(self) -> list[CanonicalUnit]:
+            return list(self._units.values())
+
+        def list_aliases(self) -> list[IdentityAliasRecord]:
+            return list(self._aliases)
+
+    class PortRecipeMappingRepo:
+        def __init__(self, recipe: Recipe, identity_repo: PortIdentityRepo):
+            self._recipes = {recipe.id: recipe}
+            self._identity_repo = identity_repo
+            self.saved_calls: list[tuple[list[Recipe], int, UUID | None, str]] = []
+
+        def get_recipe(self, recipe_id: UUID) -> Recipe:
+            return self._recipes[recipe_id]
+
+        def get_recipes(self, recipe_ids: list[UUID]) -> list[Recipe]:
+            return [self._recipes[rid] for rid in recipe_ids if rid in self._recipes]
+
+        def list_recipes(self) -> list[Recipe]:
+            return list(self._recipes.values())
+
+        def save_mapped_recipes(
+            self,
+            recipes: list[Recipe],
+            *,
+            mapped_occurrences: int,
+            household_id: UUID | None,
+            actor_id: str,
+        ) -> None:
+            for r in recipes:
+                self._recipes[r.id] = r
+            self.saved_calls.append((list(recipes), mapped_occurrences, household_id, actor_id))
+
+        def identity_repository(self) -> PortIdentityRepo:
+            return self._identity_repo
+
+    id_repo = PortIdentityRepo()
+    existing_garlic = id_repo.product("hvitløk")
+    id_repo.add_alias("product", "en", "recipe", "garlic", existing_garlic.id)
+    existing_clove = id_repo.unit("fedd")
+    id_repo.add_alias("unit", "en", "recipe", "cloves", existing_clove.id)
+
+    recipe = Recipe(
+        id=uuid4(),
+        title="Port Soup",
+        servings=2,
+        source_language="en",
+        ingredients=[Ingredient(name="garlic", quantity="2", unit="cloves")],
+        instructions=["Simmer"],
+    )
+    mapping_repo = PortRecipeMappingRepo(recipe, id_repo)
+    household_id = uuid4()
+
+    with patch(
+        "home_kitchen.catalogue.ai_mapper.build_ingredient_mapper",
+        side_effect=AssertionError("Deterministic resolution should not invoke AI"),
+    ):
+        result = auto_map_unmapped_ingredients(
+            mapping_repo,
+            _configured_settings(),
+            household_id=household_id,
+            actor_id="port-tester",
+        )
+
+    assert result == {
+        "processed_unique": 1,
+        "mapped_occurrences": 1,
+        "created_products": 0,
+        "created_aliases": 0,
+        "remaining_unmapped": 0,
+    }
+    assert len(mapping_repo.saved_calls) == 1
+    saved_recipes, saved_occ, saved_hh, saved_actor = mapping_repo.saved_calls[0]
+    assert saved_occ == 1
+    assert saved_hh == household_id
+    assert saved_actor == "port-tester"
+    assert saved_recipes[0].ingredients[0].canonical_product_id == existing_garlic.id
+    assert saved_recipes[0].ingredients[0].canonical_unit_id == existing_clove.id
+
+
+def test_engine_recipe_mapping_and_postgres_identity_catalogue_ports(tmp_path):
+    from home_kitchen.catalogue.identity_repository import PostgresIdentityRepository
+    from home_kitchen.store import EngineRecipeMappingRepository
+
+    db_path = tmp_path / "ports_adapter.db"
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    try:
+        _create_import_sqlite_schema(engine)
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE kitchen_canonical_products (
+                        id TEXT PRIMARY KEY,
+                        canonical_name TEXT NOT NULL,
+                        variant TEXT NOT NULL DEFAULT '',
+                        UNIQUE (canonical_name, variant)
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE kitchen_canonical_units (
+                        id TEXT PRIMARY KEY,
+                        canonical_name TEXT NOT NULL UNIQUE
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE kitchen_product_aliases (
+                        locale TEXT NOT NULL,
+                        context TEXT NOT NULL,
+                        normalized_alias TEXT NOT NULL,
+                        alias TEXT NOT NULL,
+                        product_id TEXT NOT NULL,
+                        reviewed BOOLEAN NOT NULL DEFAULT 0
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE kitchen_unit_aliases (
+                        locale TEXT NOT NULL,
+                        context TEXT NOT NULL,
+                        normalized_alias TEXT NOT NULL,
+                        alias TEXT NOT NULL,
+                        unit_id TEXT NOT NULL,
+                        reviewed BOOLEAN NOT NULL DEFAULT 0
+                    )
+                    """
+                )
+            )
+
+            prod_id = uuid4()
+            unit_id = uuid4()
+            recipe_id = uuid4()
+            conn.execute(
+                text(
+                    "INSERT INTO kitchen_canonical_products (id, canonical_name, variant) "
+                    "VALUES (:id, 'gulrot', '')"
+                ),
+                {"id": prod_id.hex},
+            )
+            conn.execute(
+                text("INSERT INTO kitchen_canonical_units (id, canonical_name) VALUES (:id, 'g')"),
+                {"id": unit_id.hex},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO kitchen_product_aliases "
+                    "(locale, context, normalized_alias, alias, product_id, reviewed) "
+                    "VALUES ('en', 'recipe', 'carrot', 'carrot', :pid, 0)"
+                ),
+                {"pid": prod_id.hex},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO kitchen_unit_aliases "
+                    "(locale, context, normalized_alias, alias, unit_id, reviewed) "
+                    "VALUES ('en', 'recipe', 'grams', 'grams', :uid, 0)"
+                ),
+                {"uid": unit_id.hex},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO recipes "
+                    "(id, position, title, servings, ingredients, instructions, source, source_language) "
+                    "VALUES (:id, 1, 'Soup', 2, :ing, :inst, 'manual', 'en')"
+                ),
+                {
+                    "id": recipe_id.hex,
+                    "ing": json.dumps([{"name": "carrot", "quantity": "200", "unit": "grams"}]),
+                    "inst": json.dumps(["Cook"]),
+                },
+            )
+
+        id_repo = PostgresIdentityRepository(engine)
+        assert [p.id for p in id_repo.list_products()] == [prod_id]
+        assert [u.id for u in id_repo.list_units()] == [unit_id]
+        aliases = id_repo.list_aliases()
+        assert {(a.kind, a.normalized_alias, a.identity_id) for a in aliases} == {
+            ("product", "carrot", prod_id),
+            ("unit", "grams", unit_id),
+        }
+
+        mapping_repo = EngineRecipeMappingRepository(engine)
+        assert mapping_repo.get_recipes([]) == []
+        assert [r.id for r in mapping_repo.get_recipes([recipe_id, uuid4()])] == [recipe_id]
+        assert [r.id for r in mapping_repo.list_recipes()] == [recipe_id]
+        with pytest.raises(KeyError):
+            mapping_repo.get_recipe(uuid4())
+
+        result = auto_map_unmapped_ingredients(
+            mapping_repo,
+            _configured_settings(),
+            recipe_id=recipe_id,
+            model=TestModel(custom_output_args={"mappings": []}),
+        )
+        assert result == {
+            "processed_unique": 1,
+            "mapped_occurrences": 1,
+            "created_products": 0,
+            "created_aliases": 0,
+            "remaining_unmapped": 0,
+        }
+        updated = mapping_repo.get_recipe(recipe_id)
+        assert updated.ingredients[0].canonical_product_id == prod_id
+        assert updated.ingredients[0].canonical_unit_id == unit_id
+    finally:
+        engine.dispose()

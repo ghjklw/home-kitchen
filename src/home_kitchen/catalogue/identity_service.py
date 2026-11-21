@@ -8,9 +8,16 @@ from home_kitchen.catalogue.identity import (
     AliasSourceType,
     CanonicalProduct,
     CanonicalUnit,
+    IdentityAliasRecord,
     IdentityCorrectionEvent,
     normalize_identity_text,
 )
+
+
+class IdentityCatalogueReader(Protocol):
+    def list_products(self) -> list[CanonicalProduct]: ...
+    def list_units(self) -> list[CanonicalUnit]: ...
+    def list_aliases(self) -> list[IdentityAliasRecord]: ...
 
 
 class IdentityRepository(Protocol):

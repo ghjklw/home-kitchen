@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import builtins
 import json
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 from uuid import UUID
 
 from alembic.config import Config as AlembicConfig
@@ -38,7 +38,10 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.dialects.postgresql import JSONB, insert
-from sqlalchemy.engine import Connection, make_url
+from sqlalchemy.engine import Connection, Engine, make_url
+
+if TYPE_CHECKING:
+    from home_kitchen.catalogue.identity_service import IdentityRepository
 
 from .context import history_context
 from .history import HistoryEntryCreate, HistoryRepository
@@ -637,3 +640,133 @@ class Store:
                     feedback_count=feedback_counts.get(target_id, 0),
                 )
             return result
+
+    def get_recipe(self, recipe_id: UUID) -> Recipe:
+        return self.get("recipe", recipe_id, Recipe)
+
+    def get_recipes(self, recipe_ids: Sequence[UUID]) -> builtins.list[Recipe]:
+        return EngineRecipeMappingRepository(self.engine).get_recipes(recipe_ids)
+
+    def list_recipes(self) -> builtins.list[Recipe]:
+        return self.list("recipe", Recipe)
+
+    def save_mapped_recipes(
+        self,
+        modified_recipes: Sequence[Recipe],
+        *,
+        mapped_occurrences: int,
+        household_id: UUID | None,
+        actor_id: str,
+    ) -> None:
+        EngineRecipeMappingRepository(self.engine).save_mapped_recipes(
+            modified_recipes,
+            mapped_occurrences=mapped_occurrences,
+            household_id=household_id,
+            actor_id=actor_id,
+        )
+
+    def identity_repository(self) -> IdentityRepository:
+        from home_kitchen.catalogue.identity_repository import PostgresIdentityRepository
+
+        return PostgresIdentityRepository(self.engine)
+
+
+def _row_to_recipe(row: dict[str, Any]) -> Recipe:
+    decoded = dict(row)
+    for json_field in (
+        "ingredients",
+        "instructions",
+        "source_ingredients",
+        "provenance",
+        "photo_source",
+        "image_attribution",
+    ):
+        value = decoded.get(json_field)
+        if isinstance(value, str):
+            decoded[json_field] = json.loads(value)
+    return Recipe.model_validate(decoded)
+
+
+class EngineRecipeMappingRepository:
+    """SQLAlchemy recipe-mapping repository backed by an Engine."""
+
+    def __init__(self, engine: Engine):
+        self.engine = engine
+
+    def get_recipe(self, recipe_id: UUID) -> Recipe:
+        with self.engine.connect() as conn:
+            row = conn.execute(select(recipes).where(recipes.c.id == recipe_id)).mappings().first()
+        if row is None:
+            raise KeyError(str(recipe_id))
+        return _row_to_recipe(dict(row))
+
+    def get_recipes(self, recipe_ids: Sequence[UUID]) -> builtins.list[Recipe]:
+        id_list = list(dict.fromkeys(recipe_ids))
+        if not id_list:
+            return []
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(recipes).where(recipes.c.id.in_(id_list))).mappings().all()
+        by_id = {recipe.id: recipe for recipe in (_row_to_recipe(dict(r)) for r in rows)}
+        return [by_id[rid] for rid in id_list if rid in by_id]
+
+    def list_recipes(self) -> builtins.list[Recipe]:
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(recipes).order_by(recipes.c.position)).mappings().all()
+        return [_row_to_recipe(dict(r)) for r in rows]
+
+    def save_mapped_recipes(
+        self,
+        modified_recipes: Sequence[Recipe],
+        *,
+        mapped_occurrences: int,
+        household_id: UUID | None,
+        actor_id: str,
+    ) -> None:
+        if not modified_recipes:
+            return
+        with self.engine.begin() as conn:
+            for updated_recipe in modified_recipes:
+                serialized_ingredients = [
+                    ing.model_dump(mode="json") for ing in updated_recipe.ingredients
+                ]
+                conn.execute(
+                    update(recipes)
+                    .where(recipes.c.id == updated_recipe.id)
+                    .values(ingredients=serialized_ingredients)
+                )
+            if conn.dialect.name == "postgresql":
+                HistoryRepository(self.engine).record(
+                    HistoryEntryCreate(
+                        channel=history_context.get().channel,
+                        kind="domain_event",
+                        message=f"Auto-mapped {mapped_occurrences} ingredient occurrences",
+                        structured={
+                            "entity_type": "ingredient_auto_map",
+                            "mapped_occurrences": mapped_occurrences,
+                            "household_id": str(household_id) if household_id else None,
+                        },
+                        recipe_id=modified_recipes[0].id if len(modified_recipes) == 1 else None,
+                    ),
+                    actor_id=actor_id,
+                    connection=conn,
+                )
+
+    def identity_repository(self) -> IdentityRepository:
+        from home_kitchen.catalogue.identity_repository import PostgresIdentityRepository
+
+        return PostgresIdentityRepository(self.engine)
+
+
+def resolve_recipe_mapping_repository(store: Any) -> Any:
+    """Return a RecipeMappingRepository-compatible object for a Store, engine wrapper, or mock."""
+    if (
+        callable(getattr(store, "get_recipe", None))
+        and callable(getattr(store, "get_recipes", None))
+        and callable(getattr(store, "list_recipes", None))
+        and callable(getattr(store, "save_mapped_recipes", None))
+    ):
+        return store
+    engine = getattr(store, "engine", None)
+    if engine is not None and not hasattr(store, "recipes"):
+        return EngineRecipeMappingRepository(engine)
+    return store

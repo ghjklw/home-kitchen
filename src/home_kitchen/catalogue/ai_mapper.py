@@ -5,17 +5,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol, cast
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
-from sqlalchemy import select, text, update
 
 from home_kitchen.ai_credentials import anthropic_model
 from home_kitchen.catalogue.identity import (
@@ -26,13 +25,13 @@ from home_kitchen.catalogue.identity import (
     strip_ingredient_attributes,
     strip_variant_attributes,
 )
-from home_kitchen.catalogue.identity_repository import PostgresIdentityRepository
-from home_kitchen.catalogue.identity_service import CanonicalIdentityService
-from home_kitchen.context import history_context
-from home_kitchen.history import HistoryEntryCreate, HistoryRepository
+from home_kitchen.catalogue.identity_service import (
+    CanonicalIdentityService,
+    IdentityCatalogueReader,
+    IdentityRepository,
+)
 from home_kitchen.models import Ingredient, Recipe
 from home_kitchen.settings import Settings
-from home_kitchen.store import recipes as recipes_table
 
 _LOG = logging.getLogger(__name__)
 
@@ -160,20 +159,67 @@ def build_ingredient_mapper(
     )
 
 
-def _row_to_recipe(row: dict[str, Any]) -> Recipe:
-    decoded = dict(row)
-    for json_field in (
-        "ingredients",
-        "instructions",
-        "source_ingredients",
-        "provenance",
-        "photo_source",
-        "image_attribution",
+class RecipeMappingRepository(Protocol):
+    """Port for reading target recipes and persisting mapped ingredient updates."""
+
+    def get_recipe(self, recipe_id: UUID) -> Recipe: ...
+    def get_recipes(self, recipe_ids: Sequence[UUID]) -> list[Recipe]: ...
+    def list_recipes(self) -> list[Recipe]: ...
+    def save_mapped_recipes(
+        self,
+        recipes: Sequence[Recipe],
+        *,
+        mapped_occurrences: int,
+        household_id: UUID | None,
+        actor_id: str,
+    ) -> None: ...
+
+
+class IdentityRepositoryProvider(Protocol):
+    """Optional port for resolving an IdentityRepository when none was supplied."""
+
+    def identity_repository(self) -> IdentityRepository: ...
+
+
+class _LegacyStoreRecipeMappingAdapter:
+    """Adapt an in-memory get/list/save store to RecipeMappingRepository."""
+
+    def __init__(self, store: Any):
+        self._store = store
+
+    def get_recipe(self, recipe_id: UUID) -> Recipe:
+        getter = getattr(self._store, "get", None)
+        if not callable(getter):
+            raise KeyError(str(recipe_id))
+        return cast(Recipe, getter("recipe", recipe_id, Recipe))
+
+    def get_recipes(self, recipe_ids: Sequence[UUID]) -> list[Recipe]:
+        return [self.get_recipe(rid) for rid in recipe_ids]
+
+    def list_recipes(self) -> list[Recipe]:
+        return list(self._store.list("recipe", Recipe))
+
+    def save_mapped_recipes(
+        self,
+        recipes: Sequence[Recipe],
+        *,
+        mapped_occurrences: int,
+        household_id: UUID | None,
+        actor_id: str,
+    ) -> None:
+        for updated_recipe in recipes:
+            self._store.save("recipe", updated_recipe)
+
+
+def _as_recipe_mapping_repository(store: Any) -> RecipeMappingRepository:
+    if (
+        callable(getattr(store, "get_recipe", None))
+        and callable(getattr(store, "get_recipes", None))
+        and callable(getattr(store, "list_recipes", None))
+        and callable(getattr(store, "save_mapped_recipes", None))
     ):
-        value = decoded.get(json_field)
-        if isinstance(value, str):
-            decoded[json_field] = json.loads(value)
-    return Recipe.model_validate(decoded)
+        return cast(RecipeMappingRepository, store)
+    return _LegacyStoreRecipeMappingAdapter(store)
 
 
 def _load_target_recipes(
@@ -181,36 +227,15 @@ def _load_target_recipes(
     recipe_id: UUID | None,
     recipe_ids: Iterable[UUID] | None = None,
 ) -> list[Recipe]:
-    engine = getattr(store, "engine", None)
+    repo = _as_recipe_mapping_repository(store)
     if recipe_id is not None:
-        if hasattr(store, "get"):
-            return [store.get("recipe", recipe_id, Recipe)]
-        if engine is not None:
-            with engine.connect() as conn:
-                row = (
-                    conn.execute(select(recipes_table).where(recipes_table.c.id == recipe_id))
-                    .mappings()
-                    .first()
-                )
-            if row is None:
-                raise KeyError(str(recipe_id))
-            return [_row_to_recipe(dict(row))]
-        raise KeyError(str(recipe_id))
+        return [repo.get_recipe(recipe_id)]
     if recipe_ids is not None:
         id_list = list(dict.fromkeys(recipe_ids))
         if not id_list:
             return []
-        if engine is not None and not hasattr(store, "recipes"):
-            with engine.connect() as conn:
-                rows = (
-                    conn.execute(select(recipes_table).where(recipes_table.c.id.in_(id_list)))
-                    .mappings()
-                    .all()
-                )
-            by_id = {recipe.id: recipe for recipe in (_row_to_recipe(dict(r)) for r in rows)}
-            return [by_id[rid] for rid in id_list if rid in by_id]
-        return [store.get("recipe", rid, Recipe) for rid in id_list]
-    return list(store.list("recipe", Recipe))
+        return repo.get_recipes(id_list)
+    return repo.list_recipes()
 
 
 def _collect_unmapped_groups(
@@ -265,10 +290,10 @@ def _resolve_identity_service(
 ) -> CanonicalIdentityService:
     if identity_service is not None:
         return identity_service
-    engine = getattr(store, "engine", None)
-    if engine is not None:
-        return CanonicalIdentityService(PostgresIdentityRepository(engine))
-    raise ValueError("identity_service is required when store has no database engine")
+    provider = getattr(store, "identity_repository", None)
+    if callable(provider):
+        return CanonicalIdentityService(cast(IdentityRepository, provider()))
+    raise ValueError("identity_service is required when store has no identity repository")
 
 
 @dataclass
@@ -327,52 +352,28 @@ class _CatalogueIndex:
 def _load_existing_catalogue(
     store: Any, identity_service: CanonicalIdentityService
 ) -> _CatalogueIndex:
+    del store
     catalogue = _CatalogueIndex()
     repo = identity_service.repository
-    engine = getattr(store, "engine", None)
-    if engine is not None and not hasattr(repo, "products"):
-        with engine.connect() as conn:
-            product_rows = conn.execute(
-                text(
-                    "SELECT id, canonical_name, variant FROM kitchen_canonical_products "
-                    "ORDER BY canonical_name, variant, id"
-                )
-            ).mappings()
-            for row in product_rows:
-                catalogue.register_product(CanonicalProduct.model_validate(dict(row)))
-
-            unit_rows = conn.execute(
-                text(
-                    "SELECT id, canonical_name FROM kitchen_canonical_units ORDER BY canonical_name, id"
-                )
-            ).mappings()
-            for row in unit_rows:
-                catalogue.register_unit(CanonicalUnit.model_validate(dict(row)))
-
-            for row in conn.execute(
-                text(
-                    "SELECT locale, context, normalized_alias, alias, product_id "
-                    "FROM kitchen_product_aliases"
-                )
-            ).mappings():
-                catalogue.register_alias(
-                    "product",
-                    row["locale"],
-                    row["context"],
-                    row["normalized_alias"],
-                    row["product_id"],
-                    row.get("alias"),
-                )
-            for row in conn.execute(
-                text("SELECT locale, context, normalized_alias, unit_id FROM kitchen_unit_aliases")
-            ).mappings():
-                catalogue.register_alias(
-                    "unit",
-                    row["locale"],
-                    row["context"],
-                    row["normalized_alias"],
-                    row["unit_id"],
-                )
+    if (
+        callable(getattr(repo, "list_products", None))
+        and callable(getattr(repo, "list_units", None))
+        and callable(getattr(repo, "list_aliases", None))
+    ):
+        reader = cast(IdentityCatalogueReader, repo)
+        for prod in reader.list_products():
+            catalogue.register_product(prod)
+        for unit in reader.list_units():
+            catalogue.register_unit(unit)
+        for alias_rec in reader.list_aliases():
+            catalogue.register_alias(
+                alias_rec.kind,
+                alias_rec.locale,
+                alias_rec.context,
+                alias_rec.normalized_alias,
+                alias_rec.identity_id,
+                alias_rec.alias,
+            )
         return catalogue
 
     for prod in getattr(repo, "products", {}).values():
@@ -771,37 +772,12 @@ def _persist_recipe_updates(
         else:
             updated_recipes.append(recipe)
 
-    engine = getattr(store, "engine", None)
-    if engine is not None:
-        with engine.begin() as conn:
-            for updated_recipe in modified_recipes:
-                serialized_ingredients = [
-                    ing.model_dump(mode="json") for ing in updated_recipe.ingredients
-                ]
-                conn.execute(
-                    update(recipes_table)
-                    .where(recipes_table.c.id == updated_recipe.id)
-                    .values(ingredients=serialized_ingredients)
-                )
-            if conn.dialect.name == "postgresql":
-                HistoryRepository(engine).record(
-                    HistoryEntryCreate(
-                        channel=history_context.get().channel,
-                        kind="domain_event",
-                        message=f"Auto-mapped {mapped_occurrences} ingredient occurrences",
-                        structured={
-                            "entity_type": "ingredient_auto_map",
-                            "mapped_occurrences": mapped_occurrences,
-                            "household_id": str(household_id) if household_id else None,
-                        },
-                        recipe_id=modified_recipes[0].id if len(modified_recipes) == 1 else None,
-                    ),
-                    actor_id=actor_id,
-                    connection=conn,
-                )
-    else:
-        for updated_recipe in modified_recipes:
-            store.save("recipe", updated_recipe)
+    _as_recipe_mapping_repository(store).save_mapped_recipes(
+        modified_recipes,
+        mapped_occurrences=mapped_occurrences,
+        household_id=household_id,
+        actor_id=actor_id,
+    )
 
     return updated_recipes, mapped_occurrences
 

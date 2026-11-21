@@ -17,6 +17,20 @@ class FoodCatalogueService:
     def get(self, item_id: UUID) -> FoodCatalogueItem | None:
         return next((item for item in self.repository.list_all() if item.id == item_id), None)
 
+    def list_foods(self, limit: int = 37) -> list[FoodCatalogueItem]:
+        """Return deterministic seeded foods for empty-query catalogue browsing."""
+        if not 1 <= limit <= 50:
+            raise ValueError("limit must be between 1 and 50")
+        items = sorted(
+            self.repository.list_all(),
+            key=lambda item: (
+                " ".join(item.display_name.split()).casefold(),
+                item.source_item_id,
+                str(item.id),
+            ),
+        )
+        return items[:limit]
+
     def autocomplete(self, query: str, limit: int = 10) -> list[FoodCatalogueItem]:
         """Search names and source keywords; never equate or merge separate foods."""
         if not 1 <= limit <= 50:

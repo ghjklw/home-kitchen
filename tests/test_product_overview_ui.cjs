@@ -78,6 +78,15 @@ class MockNode {
     }
   }
 
+  async change(val) {
+    this.value = val;
+    if (this.listeners.change) {
+      await this.listeners.change({ target: this });
+    }
+  }
+
+  focus() {}
+
   async submit() {
     if (this.listeners.submit) {
       await this.listeners.submit({ preventDefault: () => {} });
@@ -1013,4 +1022,198 @@ test("renderProductCard translates unknown and every X days badges to Bokmål", 
     excluded_oda_skus: [],
   });
   assert.equal(knownCard.querySelector(".frequency-badge").textContent, "hver 2,5 dager");
+});
+
+test("renderCuratedFoodsSection translates food categories to Bokmål, browses with empty query, and links products via POST", async () => {
+  const shoppingView = require("../src/home_kitchen/static/shopping-view.js");
+  const prevWindow = globalThis.window;
+  globalThis.window = { KitchenShoppingView: shoppingView };
+
+  try {
+    const container = new MockNode("div");
+    const calls = [];
+    const notifications = [];
+    let linkedOptions = [];
+
+    const mockApi = async (path, method = "GET", body = null) => {
+      calls.push({ path, method, body });
+      if (path === "/catalogue/foods?q=&limit=37") {
+        return [
+          {
+            id: "11111111-1111-1111-1111-111111111111",
+            source_item_id: "01.001",
+            source_name: "Melk, hel",
+            display_name: "Helmelk",
+            category: "Dairy",
+            default_unit: "l",
+          },
+          {
+            id: "33333333-3333-3333-3333-333333333333",
+            source_item_id: "06.036",
+            source_name: "Gulrot, norsk, rå",
+            display_name: "Gulrot",
+            category: "Produce",
+            default_unit: "kg",
+          },
+        ];
+      }
+      if (path === "/catalogue/foods/11111111-1111-1111-1111-111111111111/products" && method === "GET") {
+        return linkedOptions;
+      }
+      if (path === "/catalogue/foods/11111111-1111-1111-1111-111111111111/products" && method === "POST") {
+        const created = {
+          id: "opt-new-1",
+          provider: body.provider,
+          product_id: body.product_id,
+          preferred: false,
+          snapshot: { name: body.name },
+        };
+        linkedOptions = [created];
+        return created;
+      }
+      throw new Error(`Unexpected API call: ${method} ${path}`);
+    };
+
+    const section = overviewView.renderCuratedFoodsSection(container, {
+      api: mockApi,
+      notify: (msg) => notifications.push(msg),
+      products: [
+        {
+          id: "prod-milk",
+          canonical_name: "whole milk",
+          display_name: "helmelk",
+          preferred_oda_skus: [{ oda_product_id: "oda-milk-1", name: "Tine Helmelk 1L" }],
+        },
+      ],
+    });
+
+    await section.loadFoods("");
+    assert.ok(calls.some((c) => c.method === "GET" && c.path === "/catalogue/foods?q=&limit=37"));
+    assert.match(container.textContent, /Meieri/);
+    assert.match(container.textContent, /Frukt og grønt/);
+    assert.doesNotMatch(container.textContent, /\bDairy\b/);
+    assert.doesNotMatch(container.textContent, /\bProduce\b/);
+
+    const firstCard = container.querySelectorAll(".curated-food-card")[0];
+    const linkForm = firstCard.querySelector(".curated-food-link-form");
+    assert.ok(linkForm);
+    const linkSelect = linkForm.querySelector(".curated-food-link-select");
+    await linkSelect.change("oda:oda-milk-1");
+    await linkForm.submit();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const postCall = calls.find((c) => c.method === "POST");
+    assert.ok(postCall);
+    assert.equal(postCall.path, "/catalogue/foods/11111111-1111-1111-1111-111111111111/products");
+    assert.equal(postCall.body.provider, "oda");
+    assert.equal(postCall.body.product_id, "oda-milk-1");
+    assert.equal(postCall.body.name, "Tine Helmelk 1L");
+    assert.match(firstCard.textContent, /Tine Helmelk 1L \(Oda\)/);
+    assert.match(notifications[0], /Koblet «Tine Helmelk 1L»/);
+  } finally {
+    if (prevWindow === undefined) delete globalThis.window;
+    else globalThis.window = prevWindow;
+  }
+});
+
+test("renderProductOverview supports inline alias reassign (Endre kobling) via POST /catalogue/aliases/correct", async () => {
+  const container = new MockNode("div");
+  const calls = [];
+  const notifications = [];
+  let reassigned = false;
+
+  const prodA = {
+    id: "prod-butter",
+    canonical_name: "butter",
+    display_name: "smør",
+    aliases: [
+      { alias: "margarin", locale: "nb", context: "", reviewed: true },
+    ],
+    translations_by_locale: { nb: ["margarin"] },
+    stock: { in_stock: false, total_quantity: "0", unit: null, items: [], provenance: "kitchen_inventory" },
+    purchase_frequency: { status: "unknown", frequency_display: "unknown" },
+    preferred_oda_skus: [],
+    excluded_oda_skus: [],
+    remembered_oda_skus: [],
+    previously_purchased_skus: [],
+  };
+
+  const prodB = {
+    id: "prod-margarine",
+    canonical_name: "margarine",
+    display_name: "margarin",
+    aliases: [],
+    translations_by_locale: {},
+    stock: { in_stock: false, total_quantity: "0", unit: null, items: [], provenance: "kitchen_inventory" },
+    purchase_frequency: { status: "unknown", frequency_display: "unknown" },
+    preferred_oda_skus: [],
+    excluded_oda_skus: [],
+    remembered_oda_skus: [],
+    previously_purchased_skus: [],
+  };
+
+  const mockApi = async (path, method = "GET", body = null) => {
+    calls.push({ path, method, body });
+    if (method === "GET" && path.startsWith("/catalogue/overview")) {
+      if (!reassigned) return [prodA, prodB];
+      return [
+        { ...prodA, aliases: [], translations_by_locale: {} },
+        {
+          ...prodB,
+          aliases: [{ alias: "margarin", locale: "nb", context: "", reviewed: true }],
+          translations_by_locale: { nb: ["margarin"] },
+        },
+      ];
+    }
+    if (method === "POST" && path === "/catalogue/aliases/correct") {
+      reassigned = true;
+      return { status: "updated" };
+    }
+    throw new Error(`Unexpected API call: ${method} ${path}`);
+  };
+
+  const view = overviewView.renderProductOverview(container, {
+    api: mockApi,
+    notify: (msg) => notifications.push(msg),
+    locale: "nb",
+  });
+  await view.ready;
+
+  const cards = container.querySelectorAll(".product-overview-card");
+  assert.equal(cards.length, 2);
+
+  const butterCard = cards[0];
+  const reassignBtn = butterCard.querySelector(".reassign-alias-btn");
+  assert.ok(reassignBtn);
+  assert.equal(reassignBtn.textContent, "Endre kobling");
+  assert.equal(reassignBtn.getAttribute("aria-expanded"), "false");
+
+  const reassignForm = butterCard.querySelector(".alias-reassign-form");
+  assert.equal(reassignForm.hidden, true);
+  await reassignBtn.click();
+  assert.equal(reassignForm.hidden, false);
+  assert.equal(reassignBtn.getAttribute("aria-expanded"), "true");
+
+  const reassignSelect = reassignForm.querySelector(".alias-reassign-select");
+  reassignSelect.value = "prod-margarine";
+  await reassignForm.submit();
+  await new Promise((r) => setTimeout(r, 10));
+
+  const correctCall = calls.find((c) => c.method === "POST" && c.path === "/catalogue/aliases/correct");
+  assert.ok(correctCall);
+  assert.deepEqual(correctCall.body, {
+    kind: "product",
+    identity_id: "prod-margarine",
+    alias: "margarin",
+    locale: "nb",
+    context: "",
+    reviewed: true,
+  });
+  assert.match(notifications[0], /Kallenavnet «margarin» ble flyttet til «margarin»/);
+
+  // Overview reloaded: alias moved from butter card to margarine card
+  const refreshedCards = container.querySelectorAll(".product-overview-card");
+  assert.equal(refreshedCards[0].querySelectorAll(".alias-review-row").length, 0);
+  assert.equal(refreshedCards[1].querySelectorAll(".alias-review-row").length, 1);
+  assert.match(refreshedCards[1].querySelector(".alias-review-row").textContent, /margarin/);
 });

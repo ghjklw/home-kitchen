@@ -181,14 +181,27 @@
     return provider || "Butikk";
   }
 
+  function translateFoodCategory(category) {
+    const raw = String(category || "").trim();
+    if (!raw) return "";
+    const shoppingView =
+      (typeof window !== "undefined" ? window.KitchenShoppingView : null) ||
+      root.KitchenShoppingView;
+    return shoppingView?.categoryLabel?.(raw) || raw;
+  }
+
   function renderProductCard(product, options = {}) {
     const api = options.api;
     const notify = options.notify || (() => {});
     const onUpdated = options.onUpdated || (() => {});
     const onMerged = options.onMerged || (() => {});
+    const onAliasReassigned = options.onAliasReassigned || (() => {});
     const mergeCandidates = Array.isArray(options.mergeCandidates)
       ? options.mergeCandidates
       : [];
+    const reassignCandidates = Array.isArray(options.reassignCandidates)
+      ? options.reassignCandidates
+      : mergeCandidates;
 
     let currentProduct = { ...product };
     let prefStatusBox = null;
@@ -284,6 +297,131 @@
               }
             });
             row.append(confirmBtn);
+          }
+
+          if (typeof api === "function") {
+            const otherProducts = reassignCandidates.filter(
+              (p) => p && p.id !== currentProduct.id,
+            );
+            const reassignBtn = document.createElement("button");
+            reassignBtn.type = "button";
+            reassignBtn.className = "quiet small reassign-alias-btn";
+            reassignBtn.textContent = "Endre kobling";
+            reassignBtn.setAttribute("aria-expanded", "false");
+            reassignBtn.setAttribute(
+              "aria-label",
+              `Endre kobling for kallenavn ${aliasObj.alias} (${formatLocaleBadge(aliasObj.locale)})`,
+            );
+            reassignBtn.disabled = otherProducts.length === 0;
+            row.append(reassignBtn);
+
+            const reassignForm = document.createElement("form");
+            reassignForm.className = "alias-reassign-form";
+            reassignForm.hidden = true;
+
+            const reassignSelect = document.createElement("select");
+            reassignSelect.className = "alias-reassign-select";
+            reassignSelect.setAttribute(
+              "aria-label",
+              `Velg ny råvare for kallenavn ${aliasObj.alias}`,
+            );
+
+            const placeholderOpt = document.createElement("option");
+            placeholderOpt.value = "";
+            placeholderOpt.textContent =
+              otherProducts.length > 0 ? "Velg ny råvare …" : "Ingen andre råvarer tilgjengelig";
+            reassignSelect.append(placeholderOpt);
+
+            otherProducts.forEach((cand) => {
+              const opt = document.createElement("option");
+              opt.value = cand.id;
+              const variantPart = cand.variant ? ` · ${cand.variant}` : "";
+              opt.textContent = `${cand.display_name || cand.canonical_name} (${cand.canonical_name}${variantPart})`;
+              reassignSelect.append(opt);
+            });
+
+            const reassignSubmitBtn = document.createElement("button");
+            reassignSubmitBtn.type = "submit";
+            reassignSubmitBtn.className = "quiet small alias-reassign-submit";
+            reassignSubmitBtn.textContent = "Flytt kobling";
+            reassignSubmitBtn.disabled = otherProducts.length === 0;
+
+            const reassignCancelBtn = document.createElement("button");
+            reassignCancelBtn.type = "button";
+            reassignCancelBtn.className = "quiet small alias-reassign-cancel";
+            reassignCancelBtn.textContent = "Avbryt";
+
+            reassignBtn.addEventListener("click", () => {
+              const willOpen = reassignForm.hidden;
+              reassignForm.hidden = !willOpen;
+              reassignBtn.setAttribute("aria-expanded", willOpen ? "true" : "false");
+              if (willOpen && typeof reassignSelect.focus === "function") {
+                reassignSelect.focus();
+              }
+            });
+
+            reassignCancelBtn.addEventListener("click", () => {
+              reassignForm.hidden = true;
+              reassignBtn.setAttribute("aria-expanded", "false");
+              if (typeof reassignBtn.focus === "function") {
+                reassignBtn.focus();
+              }
+            });
+
+            let reassigning = false;
+            async function submitReassign(e) {
+              if (e && typeof e.preventDefault === "function") e.preventDefault();
+              if (reassigning) return;
+              const targetId = String(reassignSelect.value || "").trim();
+              if (!targetId || targetId === currentProduct.id) return;
+              const targetCandidate = otherProducts.find((p) => p.id === targetId);
+              const targetLabel =
+                targetCandidate?.display_name || targetCandidate?.canonical_name || targetId;
+              reassigning = true;
+              reassignSubmitBtn.disabled = true;
+              try {
+                await api("/catalogue/aliases/correct", "POST", {
+                  kind: "product",
+                  identity_id: targetId,
+                  alias: aliasObj.alias,
+                  locale: aliasObj.locale || "nb",
+                  context: aliasObj.context ?? "",
+                  reviewed: true,
+                });
+                currentProduct.aliases = (currentProduct.aliases || []).filter(
+                  (a) =>
+                    !(
+                      a.alias === aliasObj.alias &&
+                      (a.locale || "nb") === (aliasObj.locale || "nb") &&
+                      (a.context ?? "") === (aliasObj.context ?? "")
+                    ),
+                );
+                if (
+                  currentProduct.translations_by_locale &&
+                  Array.isArray(currentProduct.translations_by_locale[aliasObj.locale])
+                ) {
+                  currentProduct.translations_by_locale = {
+                    ...currentProduct.translations_by_locale,
+                    [aliasObj.locale]: currentProduct.translations_by_locale[
+                      aliasObj.locale
+                    ].filter((name) => name !== aliasObj.alias),
+                  };
+                }
+                notify(`Kallenavnet «${aliasObj.alias}» ble flyttet til «${targetLabel}».`);
+                renderCardContent();
+                onUpdated(currentProduct);
+                onAliasReassigned(targetId, aliasObj);
+              } catch (err) {
+                notify(`Kunne ikke flytte kallenavn: ${err.message || "Ukjent feil"}`, true);
+                reassignSubmitBtn.disabled = false;
+              } finally {
+                reassigning = false;
+              }
+            }
+
+            reassignForm.addEventListener("submit", submitReassign);
+            reassignForm.append(reassignSelect, reassignSubmitBtn, reassignCancelBtn);
+            row.append(reassignForm);
           }
 
           translationsList.append(row);
@@ -1281,6 +1419,10 @@
               allProducts = [];
               await loadProducts(searchInput.value);
             },
+            onAliasReassigned: async () => {
+              allProducts = [];
+              await loadProducts(searchInput.value);
+            },
           });
           resultsContainer.append(card);
         });
@@ -1305,7 +1447,11 @@
     const initialLoad = loadProducts("");
     const curatedHost = document.createElement("div");
     curatedHost.className = "curated-catalogue-host";
-    renderCuratedFoodsSection(curatedHost, { api, notify });
+    renderCuratedFoodsSection(curatedHost, {
+      api,
+      notify,
+      getProducts: () => allProducts,
+    });
     wrapper.append(curatedHost);
     container.append(wrapper);
 
@@ -1315,7 +1461,53 @@
     };
   }
 
-  function renderCuratedFoodsSection(container, { api, notify }) {
+  function collectCuratedLinkCandidates(products) {
+    const candidates = [];
+    const seen = new Set();
+    (Array.isArray(products) ? products : []).forEach((prod) => {
+      if (!prod || !prod.id) return;
+      const canonicalKey = `canonical:${prod.id}`;
+      if (!seen.has(canonicalKey)) {
+        seen.add(canonicalKey);
+        const prodName = prod.display_name || prod.canonical_name;
+        candidates.push({
+          key: canonicalKey,
+          label: `Råvare: ${prodName}`,
+          provider: "canonical",
+          product_id: String(prod.id),
+          name: prodName,
+        });
+      }
+      const addSku = (provider, skuId, skuName) => {
+        const prov = String(provider || "oda").trim().toLowerCase();
+        const pid = String(skuId || "").trim();
+        if (!pid) return;
+        const key = `${prov}:${pid}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        const labelName = skuName || pid;
+        candidates.push({
+          key,
+          label: `${formatProviderLabel(prov)}: ${labelName}`,
+          provider: prov,
+          product_id: pid,
+          name: labelName,
+        });
+      };
+      (prod.preferred_oda_skus || []).forEach((s) => addSku("oda", s.oda_product_id, s.name));
+      (prod.remembered_oda_skus || []).forEach((s) =>
+        addSku(s.provider || "oda", s.oda_product_id, s.name),
+      );
+      (prod.previously_purchased_skus || []).forEach((s) =>
+        addSku(s.provider || "oda", s.sku_id, s.name),
+      );
+    });
+    return candidates;
+  }
+
+  function renderCuratedFoodsSection(container, options = {}) {
+    const { api, notify, getProducts } = options;
+    const staticProducts = Array.isArray(options.products) ? options.products : null;
     const details = document.createElement("details");
     details.className = "panel curated-foods-panel";
 
@@ -1369,8 +1561,8 @@
               ? `Kilde: ${food.source_name}`
               : null,
             `ID: ${food.source_item_id}`,
-            food.category,
-            food.default_unit ? `Standard enhet: ${food.default_unit}` : null,
+            translateFoodCategory(food.category) || null,
+            food.default_unit ? `Standard enhet: ${formatUnitLabel(food.default_unit)}` : null,
           ].filter(Boolean);
           meta.textContent = parts.join(" · ");
           card.append(meta);
@@ -1387,7 +1579,8 @@
             "aria-label",
             `Vis produktkoblinger for ${food.display_name || food.source_name}`,
           );
-          loadOptsBtn.addEventListener("click", async () => {
+
+          async function refreshFoodOptions() {
             loadOptsBtn.disabled = true;
             try {
               const opts = await api(`/catalogue/foods/${encodeURIComponent(food.id)}/products`);
@@ -1405,7 +1598,7 @@
                   const li = document.createElement("li");
                   const label = document.createElement("span");
                   const optName = opt.snapshot?.name || opt.product_id;
-                  label.textContent = `${optName} (${opt.provider})${opt.preferred ? " ★ Foretrukket" : ""}`;
+                  label.textContent = `${optName} (${formatProviderLabel(opt.provider)})${opt.preferred ? " ★ Foretrukket" : ""}`;
                   const toggleBtn = document.createElement("button");
                   toggleBtn.type = "button";
                   toggleBtn.className = "quiet small";
@@ -1421,7 +1614,7 @@
                       opt.preferred ? "DELETE" : "PUT",
                     );
                     if (notify) notify("Produktpreferanse oppdatert.");
-                    loadOptsBtn.click();
+                    await refreshFoodOptions();
                   });
                   li.append(label, " ", toggleBtn);
                   ul.append(li);
@@ -1433,9 +1626,163 @@
             } finally {
               loadOptsBtn.disabled = false;
             }
-          });
+          }
 
+          loadOptsBtn.addEventListener("click", refreshFoodOptions);
           card.append(loadOptsBtn, optionsHost);
+
+          if (typeof api === "function") {
+            const linkForm = document.createElement("form");
+            linkForm.className = "curated-food-link-form";
+
+            const candidates = collectCuratedLinkCandidates(
+              typeof getProducts === "function" ? getProducts() : staticProducts,
+            );
+
+            const linkSelect = document.createElement("select");
+            linkSelect.className = "curated-food-link-select";
+            linkSelect.setAttribute(
+              "aria-label",
+              `Velg råvare eller butikkprodukt å koble til ${food.display_name || food.source_name}`,
+            );
+
+            const manualBox = document.createElement("div");
+            manualBox.className = "curated-food-link-manual";
+
+            if (candidates.length > 0) {
+              const placeholderOpt = document.createElement("option");
+              placeholderOpt.value = "";
+              placeholderOpt.textContent = "Koble til råvare eller butikkprodukt …";
+              linkSelect.append(placeholderOpt);
+
+              candidates.forEach((cand) => {
+                const opt = document.createElement("option");
+                opt.value = cand.key;
+                opt.textContent = cand.label;
+                linkSelect.append(opt);
+              });
+            }
+
+            const customOpt = document.createElement("option");
+            customOpt.value = "__custom__";
+            customOpt.textContent = "Annet butikkprodukt (skriv inn) …";
+            linkSelect.append(customOpt);
+
+            if (candidates.length === 0) {
+              linkSelect.value = "__custom__";
+            }
+
+            const providerSelect = document.createElement("select");
+            providerSelect.className = "curated-food-provider-select";
+            providerSelect.setAttribute("aria-label", "Leverandør eller butikk");
+            [
+              ["oda", "Oda"],
+              ["rema1000", "REMA 1000"],
+              ["coop", "Coop"],
+              ["trumf", "Trumf"],
+              ["manual", "Annen / manuell"],
+            ].forEach(([val, text]) => {
+              const opt = document.createElement("option");
+              opt.value = val;
+              opt.textContent = text;
+              providerSelect.append(opt);
+            });
+
+            const productIdInput = document.createElement("input");
+            productIdInput.type = "text";
+            productIdInput.className = "curated-food-product-id-input";
+            productIdInput.placeholder = "Produkt-ID / SKU";
+            productIdInput.setAttribute("aria-label", "Produkt-ID for kobling");
+
+            const productNameInput = document.createElement("input");
+            productNameInput.type = "text";
+            productNameInput.className = "curated-food-product-name-input";
+            productNameInput.placeholder = "Produktnavn (f.eks. Tine Helmelk 1L)";
+            productNameInput.setAttribute("aria-label", "Produktnavn for kobling");
+
+            const syncManualVisibility = () => {
+              const showManual = candidates.length === 0 || linkSelect.value === "__custom__";
+              manualBox.hidden = !showManual;
+            };
+            syncManualVisibility();
+            linkSelect.addEventListener("change", syncManualVisibility);
+
+            manualBox.append(providerSelect, productIdInput, productNameInput);
+
+            const linkBtn = document.createElement("button");
+            linkBtn.type = "submit";
+            linkBtn.className = "quiet small curated-food-link-btn";
+            linkBtn.textContent = "Koble produkt";
+
+            let linking = false;
+            async function submitLink(e) {
+              if (e && typeof e.preventDefault === "function") e.preventDefault();
+              if (linking) return;
+              const selectedVal = String(linkSelect.value || "").trim();
+              let payload = null;
+              if (selectedVal && selectedVal !== "__custom__") {
+                const cand = candidates.find((c) => c.key === selectedVal);
+                if (cand) {
+                  payload = {
+                    provider: cand.provider,
+                    product_id: cand.product_id,
+                    name: cand.name,
+                    observed_at: new Date().toISOString(),
+                    evidence_status: "unverified",
+                  };
+                }
+              } else if (selectedVal === "__custom__" || candidates.length === 0) {
+                const pid = String(productIdInput.value || "").trim();
+                const pname = String(productNameInput.value || "").trim();
+                const prov = String(providerSelect.value || "oda").trim() || "oda";
+                if (!pid || !pname) {
+                  if (notify) notify("Oppgi både produkt-ID og produktnavn for å koble.", true);
+                  return;
+                }
+                payload = {
+                  provider: prov,
+                  product_id: pid,
+                  name: pname,
+                  observed_at: new Date().toISOString(),
+                  evidence_status: "unverified",
+                };
+              }
+              if (!payload) return;
+              linking = true;
+              linkBtn.disabled = true;
+              try {
+                await api(
+                  `/catalogue/foods/${encodeURIComponent(food.id)}/products`,
+                  "POST",
+                  payload,
+                );
+                if (notify) {
+                  notify(
+                    `Koblet «${payload.name}» til «${food.display_name || food.source_name}».`,
+                  );
+                }
+                productIdInput.value = "";
+                productNameInput.value = "";
+                if (candidates.length > 0) {
+                  linkSelect.value = "";
+                  syncManualVisibility();
+                }
+                await refreshFoodOptions();
+              } catch (err) {
+                if (notify) {
+                  notify(`Kunne ikke koble produkt: ${err.message || "Ukjent feil"}`, true);
+                }
+              } finally {
+                linking = false;
+                linkBtn.disabled = false;
+              }
+            }
+
+            linkForm.addEventListener("submit", submitLink);
+            linkForm.append(linkSelect, manualBox, linkBtn);
+            card.append(linkForm);
+          }
+
           listEl.append(card);
         });
       } catch (err) {
@@ -1473,6 +1820,7 @@
     formatFrequencySummary,
     formatProvenanceCounts,
     formatProviderLabel,
+    translateFoodCategory,
     reorderPreferredSkus,
     addPreferredSku,
     removePreferredSku,

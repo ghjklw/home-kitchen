@@ -2034,18 +2034,27 @@ button.link {
 .add-preferred-sku-form input,
 .add-excluded-sku-form input,
 .stock-edit-form input,
-.merge-product-form select {
+.merge-product-form select,
+.alias-reassign-form select,
+.curated-food-link-form select,
+.curated-food-link-form input {
   flex: 1;
   min-width: 140px;
   font-size: 13px;
   padding: 6px 10px;
 }
 .stock-edit-form,
-.merge-product-form {
+.merge-product-form,
+.alias-reassign-form,
+.curated-food-link-form,
+.curated-food-link-manual {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
   margin-top: 6px;
+}
+.alias-reassign-form {
+  flex-basis: 100%;
 }
 .stock-qty-input {
   max-width: 110px;

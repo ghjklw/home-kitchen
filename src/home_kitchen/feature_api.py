@@ -34,6 +34,7 @@ from home_kitchen.basket.jobs import (
 from home_kitchen.basket.matching import AvailabilityTarget, BasketMatchResult
 from home_kitchen.basket.repository import BasketService
 from home_kitchen.catalogue.identity import (
+    AliasCorrectionInput,
     AliasInput,
     AliasResolution,
     CanonicalProduct,
@@ -991,6 +992,8 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
     def find_foods(
         q: str = Query(default="", max_length=200), limit: int = Query(default=10, ge=1, le=50)
     ) -> list[FoodCatalogueItem]:
+        if not q.strip():
+            return features.catalogue.list_foods(limit)
         return features.catalogue.autocomplete(q, limit)
 
     @router.get("/catalogue/foods/{food_id}/products")
@@ -1040,6 +1043,34 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
             kind, data.locale, data.context, data.alias, identity_id
         )
         return Response(status_code=201)
+
+    @router.post("/catalogue/aliases/correct")
+    def correct_canonical_alias_mapping(
+        data: AliasCorrectionInput, request: Request
+    ) -> dict[str, Any]:
+        if not data.reviewed:
+            raise HTTPException(
+                422,
+                "Explicit review confirmation (reviewed=true) is required to save a mapping correction.",
+            )
+        actor = getattr(request.state, "actor_id", None) or "api"
+        try:
+            event = features.catalogue_identities.correct_alias(
+                data.kind,
+                data.locale,
+                data.context,
+                data.alias,
+                data.identity_id,
+                actor_id=actor,
+                household_id=features.household_id,
+                channel="api",
+            )
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from None
+        return {
+            "status": "updated" if event is not None else "unchanged",
+            "event": event.model_dump(mode="json") if event is not None else None,
+        }
 
     @router.put("/catalogue/aliases/{kind}/{identity_id}/review")
     def correct_canonical_alias(

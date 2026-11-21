@@ -13,7 +13,7 @@ from home_kitchen.basket.repository import BasketService
 from home_kitchen.context import HistoryContext, history_context
 from home_kitchen.history import HistoryRepository
 from home_kitchen.inventory import InventoryService
-from home_kitchen.models import ShoppingItemCreate
+from home_kitchen.models import Ingredient, MealCreate, RecipeCreate, ShoppingItemCreate
 from home_kitchen.purchasing_reconciliation import (
     PurchasedLineCreate,
     PurchasedProductCreate,
@@ -335,3 +335,55 @@ def test_pickup_is_not_a_purchase_and_actor_change_requires_new_review(services)
             service.complete(data)
     finally:
         history_context.reset(token)
+
+
+def test_extras_and_store_trip_checkmarks_survive_meal_plan_mutations(services):
+    from home_kitchen.purchasing import StoreTripService
+
+    kitchen, service, history = services
+    today = date.today()
+    trip_service = StoreTripService(service.inventory, history)
+
+    soap = kitchen.add_item(
+        ShoppingItemCreate(name="Soap", quantity=1, unit="pack", category="Household")
+    )
+    milk = kitchen.add_item(ShoppingItemCreate(name="Milk", quantity=2, unit="l", category="Dairy"))
+    soup = kitchen.create_recipe(
+        RecipeCreate(
+            title="Carrot soup",
+            servings=2,
+            ingredients=[Ingredient(name="Carrot", quantity=2, unit="kg", category="Produce")],
+            instructions=["Cook"],
+        )
+    )
+    pasta = kitchen.create_recipe(
+        RecipeCreate(
+            title="Tomato pasta",
+            servings=2,
+            ingredients=[Ingredient(name="Tomato", quantity=4, unit="item", category="Produce")],
+            instructions=["Boil"],
+        )
+    )
+
+    soup_meal = kitchen.plan_meal(MealCreate(date=today, recipe_id=soup.id, servings=2))
+    initial_trip = trip_service.review(today, today)
+    soap_line = next(line for line in initial_trip.lines if line.name == "Soap")
+    checked_trip = trip_service.check(today, today, soap_line.id, True)
+    assert next(line for line in checked_trip.lines if line.id == soap_line.id).checked is True
+
+    # Add another meal, edit the first meal, then delete the added meal.
+    pasta_meal = kitchen.plan_meal(MealCreate(date=today, recipe_id=pasta.id, servings=2))
+    kitchen.update_meal(soup_meal.id, MealCreate(date=today, recipe_id=soup.id, servings=4))
+    kitchen.delete_meal(pasta_meal.id)
+
+    after_trip = trip_service.review(today, today)
+    after_soap = next(line for line in after_trip.lines if line.name == "Soap")
+    assert after_soap.id == soap_line.id
+    assert after_soap.checked is True
+    assert after_soap.checked_quantity == Decimal("1")
+    assert {item.id for item in kitchen.list_items()} == {soap.id, milk.id}
+    assert all(not item.completed for item in kitchen.list_items())
+    assert next(
+        line for line in after_trip.lines if line.name == "Carrot"
+    ).to_buy_quantity == Decimal("4")
+    assert all(line.name != "Tomato" for line in after_trip.lines)

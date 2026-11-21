@@ -211,6 +211,50 @@ async def test_api_and_mcp_correction_parity_and_review_boundary(identity_engine
         assert events[0]["actor_id"] == "api-user"
         assert events[0]["channel"] == "api"
 
+        unreviewed = client.post(
+            "/api/catalogue/aliases/correct",
+            json={
+                "kind": "product",
+                "identity_id": str(margarine.id),
+                "alias": "smør",
+                "locale": "nb",
+                "context": "recipe",
+                "reviewed": False,
+            },
+        )
+        assert unreviewed.status_code == 422
+
+        reassigned = client.post(
+            "/api/catalogue/aliases/correct",
+            json={
+                "kind": "product",
+                "identity_id": str(margarine.id),
+                "alias": "smør",
+                "locale": "nb",
+                "context": "recipe",
+                "reviewed": True,
+            },
+        )
+        assert reassigned.status_code == 200
+        body = reassigned.json()
+        assert body["status"] == "updated"
+        assert body["event"]["previous_identity_id"] == str(butter.id)
+        assert body["event"]["new_identity_id"] == str(margarine.id)
+
+        # Re-assign back to butter so the MCP assertion below keeps checking butter -> margarine
+        reverted = client.post(
+            "/api/catalogue/aliases/correct",
+            json={
+                "kind": "product",
+                "identity_id": str(butter.id),
+                "alias": "smør",
+                "locale": "nb",
+                "context": "recipe",
+                "reviewed": True,
+            },
+        )
+        assert reverted.status_code == 200
+
     mcp = FastMCP("test-kitchen")
     install_feature_tools(mcp, features, basket=SimpleNamespace())
     correct_tool = await mcp.get_tool("correct_identity_mapping")
@@ -249,6 +293,6 @@ async def test_api_and_mcp_correction_parity_and_review_boundary(identity_engine
         assert out["event"]["previous_identity_id"] == str(butter.id)
 
         listed = list_tool.fn(kind="product", alias="smør")
-        assert len(listed) == 2
+        assert len(listed) == 4
     finally:
         history_context.reset(token)

@@ -22,6 +22,9 @@ class CatalogueSkuService:
         self.foods = foods
         self.repository = repository
 
+    def list_foods(self, limit: int = 37):
+        return self.foods.list_foods(limit)
+
     def autocomplete(self, query: str, limit: int = 10):
         return self.foods.autocomplete(query, limit)
 

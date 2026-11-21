@@ -853,6 +853,28 @@ async function mutate(path, method, body, message) {
     }
   }
 }
+function isBasketRefineFormActiveOrDirty(form, activeElement = document.activeElement) {
+  if (!form) return false;
+  if (activeElement && typeof form.contains === "function" && form.contains(activeElement)) {
+    return true;
+  }
+  if (form.dataset?.dirty === "true") return true;
+  const input = form.querySelector?.(".basket-match-refine-input, input");
+  if (!input) return false;
+  const baseline = input.defaultValue ?? "";
+  return String(input.value ?? "") !== String(baseline);
+}
+function hasOpenShoppingForm(main = $("#main"), activeElement = document.activeElement) {
+  if (!main || typeof main.querySelectorAll !== "function") return false;
+  const forms = Array.from(main.querySelectorAll("form"));
+  return forms.some((form) => {
+    const isRefine =
+      form.classList?.contains?.("basket-match-refine") ||
+      /\bbasket-match-refine\b/.test(String(form.className || ""));
+    if (!isRefine) return true;
+    return isBasketRefineFormActiveOrDirty(form, activeElement);
+  });
+}
 function shouldRefreshHouseholdView(targetView, view, visibility, modalOpen, formOpen, dirty = false) {
   return (
     view === targetView &&
@@ -935,7 +957,10 @@ async function refreshHouseholdViewIfSafe(targetView, force = false) {
   const config = HOUSEHOLD_REFRESH_CONFIG[targetView];
   if (!config || state.view !== targetView) return;
   const modalOpen = Boolean($("#modal")?.open || $("#private-photo-modal")?.open);
-  const formOpen = Boolean($("#main form"));
+  const formOpen =
+    targetView === "shopping"
+      ? hasOpenShoppingForm($("#main"), document.activeElement)
+      : Boolean($("#main form"));
   const dirty = targetView === "week" ? Boolean(state.mealPlanEditorDirty) : false;
   if (
     !shouldRefreshHouseholdView(
@@ -5298,10 +5323,16 @@ function openBasketBatchReview(targetNeedId = null) {
     if (targetNeedId && id === String(targetNeedId)) {
       targetSection = section;
     }
-    const currentQuery = state.basketMatchQueries?.[id] ?? result?.search_query ?? need.name;
+    const baselineQuery = result?.search_query ?? need.name;
+    const currentQuery = state.basketMatchQueries?.[id] ?? baselineQuery;
     const refineForm = el("form", null, "basket-match-refine");
+    refineForm.dataset ||= {};
+    if (currentQuery !== baselineQuery) {
+      refineForm.dataset.dirty = "true";
+    }
     const refineInput = el("input", null, "basket-match-refine-input");
     refineInput.type = "search";
+    refineInput.defaultValue = baselineQuery;
     refineInput.value = currentQuery;
     refineInput.maxLength = 200;
     refineInput.placeholder = "Tilpass søkeord hos Oda …";
@@ -5312,8 +5343,14 @@ function openBasketBatchReview(targetNeedId = null) {
     refineInput.addEventListener?.("input", () => {
       state.basketMatchQueries ||= {};
       state.basketMatchQueries[id] = refineInput.value;
+      if (refineInput.value !== baselineQuery) {
+        refineForm.dataset.dirty = "true";
+      } else {
+        delete refineForm.dataset.dirty;
+      }
     });
     const runRefine = () => {
+      delete refineForm.dataset.dirty;
       if (typeof retryBasketMatchNeed === "function") {
         void retryBasketMatchNeed(id, refineInput.value, { page: 1, inModal: true });
       } else {
@@ -7308,10 +7345,16 @@ function renderBasketMatchNeed(need) {
       add(panel, alternatives);
     }
   }
-  const currentQuery = state.basketMatchQueries?.[id] ?? result?.search_query ?? need.name;
+  const baselineQuery = result?.search_query ?? need.name;
+  const currentQuery = state.basketMatchQueries?.[id] ?? baselineQuery;
   const refineForm = el("form", null, "basket-match-refine");
+  refineForm.dataset ||= {};
+  if (currentQuery !== baselineQuery) {
+    refineForm.dataset.dirty = "true";
+  }
   const refineInput = el("input", null, "basket-match-refine-input");
   refineInput.type = "search";
+  refineInput.defaultValue = baselineQuery;
   refineInput.value = currentQuery;
   refineInput.maxLength = 200;
   refineInput.placeholder = "Tilpass søkeord hos Oda …";
@@ -7322,8 +7365,14 @@ function renderBasketMatchNeed(need) {
   refineInput.addEventListener?.("input", () => {
     state.basketMatchQueries ||= {};
     state.basketMatchQueries[id] = refineInput.value;
+    if (refineInput.value !== baselineQuery) {
+      refineForm.dataset.dirty = "true";
+    } else {
+      delete refineForm.dataset.dirty;
+    }
   });
   const runRefine = () => {
+    delete refineForm.dataset.dirty;
     if (typeof retryBasketMatchNeed === "function") {
       void retryBasketMatchNeed(id, refineInput.value, { page: 1 });
     } else {
@@ -8674,7 +8723,13 @@ function renderConnectionSettings() {
       el("strong", "Varsler for tilkoblinger og ferskhet"),
     );
     const list = el("ul", null, "stack");
-    health.actionable_issues.forEach((msg) => add(list, el("li", msg)));
+    health.actionable_issues.forEach((msg) => {
+      const formattedMsg =
+        typeof window.KitchenSettingsView?.formatIntegrationIssueMessage === "function"
+          ? window.KitchenSettingsView.formatIntegrationIssueMessage(msg)
+          : msg;
+      add(list, el("li", formattedMsg));
+    });
     add(healthBox, list);
   } else if (health?.background_matching?.last_completed_at) {
     add(
@@ -8763,7 +8818,14 @@ function renderConnectionSettings() {
       }
       add(row, el("p", syncParts.join(" · "), "muted connection-sync-status"));
       if (syncInfo.last_sync_error) {
-        add(row, el("p", syncInfo.last_sync_error, "callout danger connection-expiry"));
+        const formattedSyncErr =
+          typeof window.KitchenSettingsView?.formatSyncErrorMessage === "function"
+            ? window.KitchenSettingsView.formatSyncErrorMessage(syncInfo.last_sync_error)
+            : syncInfo.last_sync_error;
+        add(
+          row,
+          el("p", `Siste synkroniseringsfeil: ${formattedSyncErr}`, "callout danger connection-expiry"),
+        );
       }
     }
     const expiryNotice = window.KitchenSettingsView.integrationExpiryNotice(integration);
@@ -8841,7 +8903,11 @@ function renderConnectionSettings() {
             );
           }
           if (account.last_error) {
-            add(accRow, el("p", account.last_error, "callout danger connection-expiry"));
+            const formattedAccErr =
+              typeof window.KitchenSettingsView?.formatSyncErrorMessage === "function"
+                ? window.KitchenSettingsView.formatSyncErrorMessage(account.last_error)
+                : account.last_error;
+            add(accRow, el("p", formattedAccErr, "callout danger connection-expiry"));
           }
           const accActions = add(el("div", null, "actions connection-account-actions"));
           if (account.refresh_available) {
@@ -8905,7 +8971,11 @@ function renderConnectionSettings() {
         add(row, actions);
       } else {
         if (integration.last_error) {
-          add(row, el("p", integration.last_error, "callout danger connection-expiry"));
+          const formattedIntErr =
+            typeof window.KitchenSettingsView?.formatSyncErrorMessage === "function"
+              ? window.KitchenSettingsView.formatSyncErrorMessage(integration.last_error)
+              : integration.last_error;
+          add(row, el("p", formattedIntErr, "callout danger connection-expiry"));
         }
         const supportsRefresh =
           typeof integration.refresh_available === "boolean"

@@ -7,6 +7,7 @@ without calling live endpoints, loading credentials, or writing to kitchen domai
 from decimal import Decimal
 from typing import Any, cast
 
+import httpx
 import pytest
 from fixtures.synthetic_kitchen.purchase_history import (
     rema1000_transaction_pages,
@@ -26,6 +27,8 @@ from home_kitchen.purchase_sync import (
     sync_account,
 )
 from home_kitchen.rema1000_history import (
+    DEFAULT_REMA1000_BASE_URL,
+    DEFAULT_REMA1000_SUBSCRIPTION_KEY,
     REMA1000_AUTH_METHOD,
     REMA1000_HISTORY_WINDOW_MONTHS,
     REMA1000_LIMITATIONS,
@@ -33,6 +36,7 @@ from home_kitchen.rema1000_history import (
     REMA1000_SCHEMA_VERSION,
     Rema1000AuthenticationError,
     Rema1000FixtureSource,
+    Rema1000HttpSource,
     Rema1000PurchaseHistoryAdapter,
     Rema1000Receipt,
     Rema1000ReceiptLine,
@@ -597,3 +601,117 @@ def test_line_item_ean_normalization_and_nullable_barcode():
 def _no_kassal_enrichment(monkeypatch):
     """These fixtures predate the Kassal requirement; barcode enrichment is tested separately."""
     monkeypatch.setattr("home_kitchen.purchase_sync.extract_line_ean", lambda line: None)
+
+
+def test_rema1000_http_source_uses_bella_endpoints_and_headers():
+    seen_requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_requests.append(request)
+        if request.url.path == "/v1/bella/transaction/v2/heads":
+            return httpx.Response(
+                200,
+                json={
+                    "transactions": [
+                        {
+                            "id": "bella-tx-1",
+                            "purchaseDate": "2026-11-18T14:00:00Z",
+                            "storeId": "1042",
+                            "storeName": "REMA 1000 Vulkan",
+                            "amount": "129.90",
+                            "discount": "20.00",
+                            "hasReceipt": True,
+                        }
+                    ]
+                },
+            )
+        if request.url.path == "/v1/bella/transaction/v2/rows/bella-tx-1":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "prodtxt1": "NORVEGIA 1KG",
+                        "prodtxt3": "7038010009457",
+                        "unitPrice": "149.90",
+                        "amount": "129.90",
+                        "discount": "20.00",
+                    }
+                ],
+            )
+        return httpx.Response(404)
+
+    source = Rema1000HttpSource("rema-jwt", transport=httpx.MockTransport(handler))
+    assert source.base_url == DEFAULT_REMA1000_BASE_URL == "https://api.rema.no"
+    assert source.subscription_key == DEFAULT_REMA1000_SUBSCRIPTION_KEY
+
+    txs = source.get_transactions("alice")
+    assert len(txs) == 1
+    assert txs[0].receipt_id == "bella-tx-1"
+    assert txs[0].store_name == "REMA 1000 Vulkan"
+    assert txs[0].total_amount == Decimal("129.90")
+    assert txs[0].total_discount == Decimal("20.00")
+
+    receipt = source.get_receipt("alice", "bella-tx-1")
+    assert receipt is not None
+    assert receipt.receipt_id == "bella-tx-1"
+    assert receipt.store_name == "REMA 1000 Vulkan"
+    assert len(receipt.lines) == 1
+    assert receipt.lines[0].name == "NORVEGIA 1KG"
+    assert receipt.lines[0].ean == "7038010009457"
+    assert receipt.lines[0].amount == Decimal("129.90")
+    assert receipt.lines[0].discount == Decimal("20.00")
+
+    assert source.get_receipt("alice", "missing-tx") is None
+
+    assert [req.url.path for req in seen_requests] == [
+        "/v1/bella/transaction/v2/heads",
+        "/v1/bella/transaction/v2/rows/bella-tx-1",
+        "/v1/bella/transaction/v2/rows/missing-tx",
+    ]
+    for req in seen_requests:
+        assert req.headers.get("authorization") == "Bearer rema-jwt"
+        assert req.headers.get("ocp-apim-subscription-key") == DEFAULT_REMA1000_SUBSCRIPTION_KEY
+        assert req.headers.get("x-app") == "Bella"
+        assert req.headers.get("x-platform") == "CLI"
+        assert req.headers.get("x-app-version") == "3.13.0.1181"
+        assert req.headers.get("accept-language") == "no"
+
+
+def test_rema1000_http_source_custom_subscription_key_and_404_fallback():
+    seen_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_paths.append(request.url.path)
+        assert request.headers.get("ocp-apim-subscription-key") == "custom-sub-key"
+        assert request.headers.get("x-app") == "Bella"
+        if request.url.path == "/v1/receipts":
+            return httpx.Response(
+                200,
+                json={
+                    "receipts": [
+                        {
+                            "receiptId": "legacy-1",
+                            "storeName": "REMA 1000 Majorstuen",
+                            "totalAmount": "50.00",
+                            "timestamp": "2026-11-18T14:00:00Z",
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(404)
+
+    source = Rema1000HttpSource(
+        "rema-jwt",
+        subscription_key="custom-sub-key",
+        transport=httpx.MockTransport(handler),
+    )
+    txs = source.get_transactions("alice")
+    assert [tx.receipt_id for tx in txs] == ["legacy-1"]
+    assert seen_paths == ["/v1/bella/transaction/v2/heads", "/v1/receipts"]
+
+    failing_source = Rema1000HttpSource(
+        "rema-jwt",
+        transport=httpx.MockTransport(lambda req: httpx.Response(404)),
+    )
+    with pytest.raises(UnsupportedRema1000Contract, match="HTTP 404"):
+        failing_source.get_transactions("alice")

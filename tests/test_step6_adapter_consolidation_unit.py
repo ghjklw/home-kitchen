@@ -375,25 +375,22 @@ async def test_in_memory_cookidoo_plan_sync_roundtrip_and_guards() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content.decode()) if request.content else None
-        if request.method == "GET" and request.url.path == "/planner/en/api/my-week":
+        if request.method == "GET" and request.url.path == "/planning/en/api/my-week/2026-11-23":
             return httpx.Response(
                 200,
                 json={
-                    "weeks": [
+                    "myDays": [
                         {
-                            "days": [
+                            "id": "2026-11-23",
+                            "dayKey": "2026-11-23",
+                            "recipes": [
                                 {
-                                    "id": "2026-11-23",
-                                    "recipes": [
-                                        {
-                                            "entryId": "mw-10",
-                                            "recipeId": "r-mw-1",
-                                            "title": "Kremet kyllingsuppe",
-                                            "servings": 4,
-                                        }
-                                    ],
+                                    "entryId": "mw-10",
+                                    "id": "r-mw-1",
+                                    "title": "Kremet kyllingsuppe",
+                                    "servings": 4,
                                 }
-                            ]
+                            ],
                         }
                     ]
                 },
@@ -409,17 +406,24 @@ async def test_in_memory_cookidoo_plan_sync_roundtrip_and_guards() -> None:
                     "recipeStepGroups": [{"recipeSteps": [{"formattedText": "Kok suppe"}]}],
                 },
             )
-        if request.method == "POST" and request.url.path == "/planner/en/api/my-week":
+        if request.method == "PUT" and request.url.path == "/planning/en/api/my-day":
             assert body is not None
             posted_payloads.append(body)
             return httpx.Response(
-                201,
+                200,
                 json={
-                    "entryId": "mw-created-1",
-                    "recipeId": body["recipeId"],
-                    "date": body["date"],
-                    "title": "Kremet kyllingsuppe",
-                    "servings": body.get("servings", 4),
+                    "message": "Planned",
+                    "content": {
+                        "id": body["dayKey"],
+                        "dayKey": body["dayKey"],
+                        "recipes": [
+                            {
+                                "entryId": "mw-created-1",
+                                "id": body["recipeIds"][0],
+                                "title": "Kremet kyllingsuppe",
+                            }
+                        ],
+                    },
                 },
             )
         return httpx.Response(404)
@@ -493,7 +497,7 @@ async def test_in_memory_cookidoo_plan_sync_roundtrip_and_guards() -> None:
     )
     assert export_done.applied_count == 1
     assert len(posted_payloads) == 1
-    assert posted_payloads[0]["recipeId"] == "r-mw-1"
+    assert posted_payloads[0] == {"dayKey": "2026-11-23", "recipeIds": ["r-mw-1"]}
 
 
 def test_in_memory_purchase_sync_service_and_conflicts() -> None:

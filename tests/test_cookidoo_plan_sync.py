@@ -43,49 +43,54 @@ async def test_cookidoo_client_my_week_read_and_write_reads_before_add(connector
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content.decode()) if request.content else None
         calls.append((request.method, request.url.path, body))
-        if request.method == "GET" and request.url.path == "/planner/en/api/my-week":
+        if request.method == "GET" and request.url.path == "/planning/en/api/my-week/2026-11-23":
             return httpx.Response(
                 200,
                 json={
-                    "weeks": [
+                    "myDays": [
                         {
-                            "days": [
+                            "id": "2026-11-23",
+                            "dayKey": "2026-11-23",
+                            "recipes": [
                                 {
-                                    "id": "2026-11-23",
-                                    "recipes": [
-                                        {
-                                            "entryId": "mw-1",
-                                            "recipeId": "r100",
-                                            "title": "Fiskesuppe",
-                                            "servings": 4,
+                                    "entryId": "mw-1",
+                                    "id": "r100",
+                                    "title": "Fiskesuppe",
+                                    "servings": 4,
+                                    "assets": {
+                                        "images": {
+                                            "square": "https://assets.tmecosys.com/image/upload/{transformation}/img/r100"
                                         }
-                                    ],
+                                    },
                                 }
-                            ]
+                            ],
+                            "customerRecipeIds": [],
                         }
                     ]
                 },
             )
-        if request.method == "POST" and request.url.path == "/planner/en/api/my-week":
-            return httpx.Response(
-                201,
-                json={
-                    "entryId": "mw-2",
-                    "recipeId": body["recipeId"],
-                    "date": body["date"],
-                    "title": "Tomatsuppe",
-                    "servings": body.get("servings", 4),
-                },
-            )
-        if request.method == "PUT" and request.url.path == "/planner/en/api/my-week/mw-1":
+        if request.method == "PUT" and request.url.path == "/planning/en/api/my-day":
+            recipe_id = body["recipeIds"][0]
             return httpx.Response(
                 200,
                 json={
-                    "entryId": "mw-1",
-                    "recipeId": body["recipeId"],
-                    "date": body["date"],
-                    "title": "Oppdatert fiskesuppe",
-                    "servings": body.get("servings", 4),
+                    "message": "Recipe planned!",
+                    "content": {
+                        "id": body["dayKey"],
+                        "dayKey": body["dayKey"],
+                        "recipes": [
+                            {
+                                "entryId": "mw-2" if recipe_id == "r200" else "mw-1",
+                                "id": recipe_id,
+                                "title": "Tomatsuppe"
+                                if recipe_id == "r200"
+                                else "Oppdatert fiskesuppe",
+                                "servings": 2 if recipe_id == "r200" else 6,
+                            }
+                        ],
+                        "customerRecipeIds": [],
+                    },
+                    "code": None,
                 },
             )
         return httpx.Response(404)
@@ -98,21 +103,27 @@ async def test_cookidoo_client_my_week_read_and_write_reads_before_add(connector
     assert entries[0].external_entry_id == "mw-1"
     assert entries[0].cookidoo_recipe_id == "r100"
     assert entries[0].source_url == "https://cookidoo.international/recipes/recipe/nb-NO/r100"
+    assert entries[0].image_url == (
+        "https://assets.tmecosys.com/image/upload/t_web_rdp_recipe_584x480_1_5x/img/r100"
+    )
     assert entries[0].date == date(2026, 11, 23)
 
     calls.clear()
     added = await provider.add_to_my_week("r200", date(2026, 11, 23), servings=2)
     assert calls[0][0] == "GET"
-    assert calls[1][0] == "POST"
+    assert calls[1][0] == "PUT"
+    assert calls[1][1] == "/planning/en/api/my-day"
+    assert calls[1][2] == {"dayKey": "2026-11-23", "recipeIds": ["r200"]}
     assert added.external_entry_id == "mw-2"
     assert added.cookidoo_recipe_id == "r200"
     assert added.source_url == "https://cookidoo.international/recipes/recipe/nb-NO/r200"
 
-    # Explicit edit with known entry_id issues PUT
+    # Explicit edit with known entry_id issues PUT /planning/en/api/my-day
     updated = await provider.add_to_my_week("r100", date(2026, 11, 23), servings=6, entry_id="mw-1")
     assert updated.external_entry_id == "mw-1"
     assert updated.servings == 6
     assert calls[-1][0] == "PUT"
+    assert calls[-1][1] == "/planning/en/api/my-day"
 
     # Missing entry_id fails closed with 409 instead of overwriting
     with pytest.raises(CookidooError) as exc_missing:
@@ -167,7 +178,7 @@ def test_rest_api_cookidoo_plan_sync_import_shared_dates_repeats_edits_and_tm6(
         )
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/planner/en/api/my-week":
+        if request.url.path == "/planning/en/api/my-week/2026-11-23":
             return httpx.Response(
                 200,
                 json={
@@ -416,17 +427,17 @@ def test_rest_api_cookidoo_plan_sync_export_reads_my_week_and_skips_ai_drafts(
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content.decode()) if request.content else None
         requests_log.append((request.method, request.url.path, body))
-        if request.method == "GET" and request.url.path == "/planner/en/api/my-week":
+        if request.method == "GET" and request.url.path == "/planning/en/api/my-week/2026-11-23":
             return httpx.Response(
                 200,
                 json={
-                    "days": [
+                    "myDays": [
                         {
-                            "date": "2026-11-23",
+                            "dayKey": "2026-11-23",
                             "recipes": [
                                 {
                                     "entryId": "mw-existing-1",
-                                    "recipeId": "r-other",
+                                    "id": "r-other",
                                     "title": "Eksisterende My Week-rett",
                                     "servings": 4,
                                 }
@@ -435,24 +446,31 @@ def test_rest_api_cookidoo_plan_sync_export_reads_my_week_and_skips_ai_drafts(
                     ]
                 },
             )
-        if request.method == "POST" and request.url.path == "/planner/en/api/my-week":
+        if (
+            request.method == "DELETE"
+            and request.url.path == "/planning/en/api/my-day/2026-11-23/recipes/r-other"
+        ):
             return httpx.Response(
-                201,
-                json={
-                    "entryId": f"mw-new-{len(requests_log)}",
-                    "recipeId": body["recipeId"],
-                    "date": body["date"],
-                    "servings": body["servings"],
-                },
+                200,
+                json={"message": "Removed", "content": None, "code": None},
             )
-        if request.method == "PUT" and request.url.path == "/planner/en/api/my-week/mw-existing-1":
+        if request.method == "PUT" and request.url.path == "/planning/en/api/my-day":
+            recipe_id = body["recipeIds"][0]
             return httpx.Response(
                 200,
                 json={
-                    "entryId": "mw-existing-1",
-                    "recipeId": body["recipeId"],
-                    "date": body["date"],
-                    "servings": body["servings"],
+                    "message": "Planned",
+                    "content": {
+                        "id": body["dayKey"],
+                        "dayKey": body["dayKey"],
+                        "recipes": [
+                            {
+                                "entryId": f"mw-new-{len(requests_log)}",
+                                "id": recipe_id,
+                                "title": "Cookidoo Wok",
+                            }
+                        ],
+                    },
                 },
             )
         return httpx.Response(404)
@@ -482,7 +500,7 @@ def test_rest_api_cookidoo_plan_sync_export_reads_my_week_and_skips_ai_drafts(
         )
         assert preview_resp.status_code == 200, preview_resp.text
         preview = preview_resp.json()
-        # Only GET happened during preview; no POST/PUT yet
+        # Only GET happened during preview; no PUT/DELETE yet
         assert [m for m, _, _ in requests_log] == ["GET"]
         assert len(preview["additions"]) == 1
         assert preview["additions"][0]["cookidoo_recipe_id"] == "r-wok"
@@ -500,7 +518,7 @@ def test_rest_api_cookidoo_plan_sync_export_reads_my_week_and_skips_ai_drafts(
         confirmed = confirm_resp.json()
         assert confirmed["status"] == "applied"
         assert confirmed["applied_count"] == 2
-        assert [m for m, _, _ in requests_log] == ["GET", "GET", "POST", "PUT"]
+        assert [m for m, _, _ in requests_log] == ["GET", "GET", "PUT", "DELETE", "PUT"]
 
 
 @pytest.mark.asyncio
@@ -511,7 +529,7 @@ async def test_mcp_cookidoo_plan_sync_tools_and_actor_isolation(
     hid = uuid4()
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/planner/en/api/my-week":
+        if request.url.path == "/planning/en/api/my-week/2026-11-23":
             return httpx.Response(
                 200,
                 json={
@@ -612,47 +630,50 @@ async def test_my_week_resolves_custom_recipes_and_changed_day_write_responses(
     hid = uuid4()
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/planner/en/api/my-week":
-            if request.method == "GET":
-                return httpx.Response(
-                    200,
-                    json={
-                        "days": [
-                            {
-                                "date": "2026-11-23",
-                                "recipes": [
-                                    {
-                                        "entryId": "mw-cat-1",
-                                        "recipeId": "r-cat-1",
-                                        "title": "Katalogsuppe",
-                                        "ingredients": ["400 g tomat"],
-                                        "instructions": [
-                                            "Kok opp <nobr>5 min/100°C/hastighet 2</nobr>"
-                                        ],
-                                    }
-                                ],
-                                "customRecipes": ["cust-id-1"],
-                            }
-                        ]
-                    },
-                )
-            if request.method == "POST":
-                body = json.loads(request.content.decode())
-                return httpx.Response(
-                    200,
-                    json={
-                        "id": "2026-11-23",
-                        "date": "2026-11-23",
+        if request.url.path == "/planning/en/api/my-week/2026-11-23" and request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "myDays": [
+                        {
+                            "id": "2026-11-23",
+                            "dayKey": "2026-11-23",
+                            "recipes": [
+                                {
+                                    "entryId": "mw-cat-1",
+                                    "id": "r-cat-1",
+                                    "title": "Katalogsuppe",
+                                    "ingredients": ["400 g tomat"],
+                                    "instructions": [
+                                        "Kok opp <nobr>5 min/100°C/hastighet 2</nobr>"
+                                    ],
+                                }
+                            ],
+                            "customerRecipeIds": ["cust-id-1"],
+                        }
+                    ]
+                },
+            )
+        if request.url.path == "/planning/en/api/my-day" and request.method == "PUT":
+            body = json.loads(request.content.decode())
+            return httpx.Response(
+                200,
+                json={
+                    "message": "Recipe planned!",
+                    "content": {
+                        "id": body["dayKey"],
+                        "dayKey": body["dayKey"],
                         "recipes": [
                             {
                                 "entryId": "mw-day-ret-99",
-                                "recipeId": body["recipeId"],
+                                "id": body["recipeIds"][0],
                                 "title": "Skrevet rett",
-                                "servings": body.get("servings", 4),
                             }
                         ],
                     },
-                )
+                    "code": None,
+                },
+            )
         if request.url.path == "/created-recipes/en":
             return httpx.Response(
                 200,
@@ -767,7 +788,7 @@ def test_cookidoo_plan_sync_rejects_duplicate_edit_targets_and_unknown_source_ke
         )
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/planner/en/api/my-week":
+        if request.url.path == "/planning/en/api/my-week/2026-11-23":
             return httpx.Response(
                 200,
                 json={
@@ -819,3 +840,191 @@ def test_cookidoo_plan_sync_rejects_duplicate_edit_targets_and_unknown_source_ke
             },
         )
         assert unknown_source.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_kitchen_to_cookidoo_uses_put_planning_my_day_and_custom_recipe_source(
+    sqlite_engine,  # noqa: F811
+    cipher,  # noqa: F811
+):
+    hid = uuid4()
+    custom_recipe_id = uuid4()
+    custom_meal_id = uuid4()
+    catalogue_recipe_id = uuid4()
+    catalogue_meal_id = uuid4()
+
+    with sqlite_engine.begin() as conn:
+        conn.execute(
+            insert(recipes).values(
+                id=catalogue_recipe_id,
+                title="Vafler",
+                servings=4,
+                ingredients=[{"name": "mel", "quantity": "200", "unit": "g", "category": "Other"}],
+                instructions=["Stek vafler"],
+                source="cookidoo",
+                source_url="https://cookidoo.international/recipes/recipe/nb-NO/r214846",
+                source_ingredients=[],
+                source_language="nob",
+                guided_steps=[],
+            )
+        )
+        conn.execute(
+            insert(recipes).values(
+                id=custom_recipe_id,
+                title="Egen grøt",
+                servings=2,
+                ingredients=[
+                    {"name": "havregryn", "quantity": "2", "unit": "dl", "category": "Other"}
+                ],
+                instructions=["Kok grøt"],
+                source="cookidoo",
+                source_url="https://cookidoo.international/created-recipes/en/01K2CTJ9Y1BABRG5MXK44CFZS4",
+                source_ingredients=[],
+                source_language="nob",
+                guided_steps=[],
+            )
+        )
+        conn.execute(
+            insert(meals).values(
+                id=catalogue_meal_id,
+                date=date(2026, 11, 23),
+                label="Middag",
+                recipe_id=catalogue_recipe_id,
+                servings=4,
+            )
+        )
+        conn.execute(
+            insert(meals).values(
+                id=custom_meal_id,
+                date=date(2026, 11, 30),
+                label="Kvelds",
+                recipe_id=custom_recipe_id,
+                servings=2,
+            )
+        )
+
+    requests_log: list[tuple[str, str, dict | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode()) if request.content else None
+        requests_log.append((request.method, request.url.path, body))
+        if request.url.path.startswith("/planner/"):
+            return httpx.Response(405)
+        if request.method == "GET" and request.url.path == "/planning/en/api/my-week/2026-11-23":
+            return httpx.Response(
+                200,
+                json={
+                    "myDays": [
+                        {
+                            "id": "2026-11-23",
+                            "dayKey": "2026-11-23",
+                            "recipes": [
+                                {
+                                    "id": "r999",
+                                    "title": "Eksisterende rett",
+                                    "totalTime": "1500.0",
+                                    "assets": {
+                                        "images": {
+                                            "square": "https://assets.tmecosys.com/image/upload/{transformation}/img/r999"
+                                        }
+                                    },
+                                }
+                            ],
+                            "customerRecipeIds": [],
+                        }
+                    ]
+                },
+            )
+        if request.method == "GET" and request.url.path == "/planning/en/api/my-week/2026-11-30":
+            return httpx.Response(200, json={"myDays": []})
+        if request.method == "PUT" and request.url.path == "/planning/en/api/my-day":
+            assert body is not None
+            if body.get("recipeSource") == "CUSTOMER":
+                return httpx.Response(
+                    201,
+                    json={
+                        "message": "Recipe planned!",
+                        "content": {
+                            "id": body["dayKey"],
+                            "dayKey": body["dayKey"],
+                            "recipes": [],
+                            "customerRecipeIds": body["recipeIds"],
+                        },
+                        "code": None,
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "message": "Recipe planned!",
+                    "content": {
+                        "id": body["dayKey"],
+                        "dayKey": body["dayKey"],
+                        "recipes": [
+                            {
+                                "id": body["recipeIds"][0],
+                                "title": "Vafler",
+                                "totalTime": "1500.0",
+                                "assets": {
+                                    "images": {
+                                        "square": "https://assets.tmecosys.com/image/upload/{transformation}/img/r214846"
+                                    }
+                                },
+                            }
+                        ],
+                        "customerRecipeIds": [],
+                    },
+                    "code": None,
+                },
+            )
+        return httpx.Response(404)
+
+    app, _, _, store = _offline_app(
+        sqlite_engine,
+        cipher,
+        household_id=hid,
+        cookidoo_transport=httpx.MockTransport(handler),
+    )
+    _save_cookidoo_connection(store, hid)
+
+    with TestClient(app) as client:
+        prev_resp = client.post(
+            "/api/cookidoo/plan-sync/preview",
+            json={
+                "direction": "kitchen_to_cookidoo",
+                "start": "2026-11-23",
+                "end": "2026-12-01",
+            },
+        )
+        assert prev_resp.status_code == 200, prev_resp.text
+        preview = prev_resp.json()
+        assert len(preview["additions"]) == 2
+        assert len(preview["existing_my_week_entries"]) == 1
+        assert preview["existing_my_week_entries"][0]["cookidoo_recipe_id"] == "r999"
+
+        conf_resp = client.post(
+            f"/api/cookidoo/plan-sync/{preview['preview_id']}/confirm",
+            json={"reviewed": True},
+        )
+        assert conf_resp.status_code == 200, conf_resp.text
+        confirmed = conf_resp.json()
+        assert confirmed["status"] == "applied"
+        assert confirmed["applied_count"] == 2
+
+    put_calls = [
+        (method, path, body)
+        for method, path, body in requests_log
+        if method == "PUT" and path == "/planning/en/api/my-day"
+    ]
+    assert put_calls == [
+        ("PUT", "/planning/en/api/my-day", {"dayKey": "2026-11-23", "recipeIds": ["r214846"]}),
+        (
+            "PUT",
+            "/planning/en/api/my-day",
+            {
+                "dayKey": "2026-11-30",
+                "recipeIds": ["01K2CTJ9Y1BABRG5MXK44CFZS4"],
+                "recipeSource": "CUSTOMER",
+            },
+        ),
+    ]

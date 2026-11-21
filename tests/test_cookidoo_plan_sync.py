@@ -31,6 +31,8 @@ from home_kitchen.recipes.collections import source_links
 from home_kitchen.settings import Household
 from home_kitchen.store import meals, recipes
 
+pytestmark = pytest.mark.mocked_provider
+
 
 @pytest.mark.asyncio
 async def test_cookidoo_client_my_week_read_and_write_reads_before_add(connector_store):  # noqa: F811

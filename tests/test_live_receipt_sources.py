@@ -25,6 +25,8 @@ from home_kitchen.trumf_history import (
     TrumfPurchaseHistoryAdapter,
 )
 
+pytestmark = pytest.mark.mocked_provider
+
 
 def test_coop_http_source_fetches_purchases_and_receipt_detail():
     calls: list[str] = []

@@ -36,6 +36,8 @@ from home_kitchen.recipes.collections import CollectionEntry, CollectionJob, Col
 from home_kitchen.service import KitchenService
 from home_kitchen.settings import Settings
 
+pytestmark = pytest.mark.mocked_provider
+
 
 class MemoryIdentityRepository:
     def __init__(self):

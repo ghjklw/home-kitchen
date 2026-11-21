@@ -5,6 +5,8 @@ import pytest
 
 from home_kitchen import imports
 
+pytestmark = pytest.mark.mocked_provider
+
 
 @pytest.mark.parametrize(
     "url",

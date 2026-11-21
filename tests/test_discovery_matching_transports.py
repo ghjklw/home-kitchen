@@ -14,6 +14,8 @@ from home_kitchen.models import ShoppingItemCreate
 from home_kitchen.recipes.discovery import RecipeDiscoveryResponse
 from home_kitchen.settings import Settings
 
+pytestmark = pytest.mark.mocked_provider
+
 START = "2026-11-16"
 END = "2026-11-22"
 

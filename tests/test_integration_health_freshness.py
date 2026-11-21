@@ -17,6 +17,8 @@ from home_kitchen.feature_api import feature_router
 from home_kitchen.feature_mcp import install_feature_tools
 from home_kitchen.integrations import IntegrationAccountInfo, IntegrationInfo
 
+pytestmark = pytest.mark.mocked_provider
+
 
 def _make_jobs(clock_fn):
     matching = MagicMock(spec=BasketMatchingService)

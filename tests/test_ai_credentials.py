@@ -14,6 +14,8 @@ from home_kitchen.ai_credentials import CLAUDE_ENTRA_SCOPE, anthropic_model, clo
 from home_kitchen.recommendations import build_planner
 from home_kitchen.settings import Settings
 
+pytestmark = pytest.mark.mocked_provider
+
 
 @pytest.fixture
 def wif_values():

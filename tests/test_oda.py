@@ -30,6 +30,8 @@ from home_kitchen.oda.service import (
 from home_kitchen.oda_api import oda_router
 from home_kitchen.settings import Settings
 
+pytestmark = pytest.mark.mocked_provider
+
 
 @pytest.fixture
 def oda():

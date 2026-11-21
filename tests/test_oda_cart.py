@@ -23,6 +23,8 @@ from home_kitchen.oda.cart import (
 from home_kitchen.oda.repository import OdaRepository
 from home_kitchen.oda.repository import metadata as oauth_metadata
 
+pytestmark = pytest.mark.mocked_provider
+
 
 @asynccontextmanager
 async def protocol_test_gate():

@@ -13,6 +13,8 @@ from home_kitchen.oda import OdaError, OdaService
 from home_kitchen.oda.repository import metadata
 from home_kitchen.settings import Settings
 
+pytestmark = pytest.mark.mocked_provider
+
 
 def recipe_tool(name, *, read_only=True, bad_schema=False, with_intent=False):
     properties = {

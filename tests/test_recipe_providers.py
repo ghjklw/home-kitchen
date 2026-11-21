@@ -17,6 +17,8 @@ from home_kitchen.recipes import (
 from home_kitchen.recipes.models import EditableRecipeDraft
 from home_kitchen.settings import Household, Settings
 
+pytestmark = pytest.mark.mocked_provider
+
 
 @pytest.fixture
 def recipe():

@@ -47,6 +47,8 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
   "integration: DB-backed or disposable infrastructure integration tests",
+  "mocked_provider: offline tests using mocked, stubbed, or synthetic provider/AI transports (not live acceptance evidence)",
+  "live_acceptance: live provider acceptance tests against real external endpoints or credentials (excluded from offline CI)",
 ]
 
 [tool.ruff]

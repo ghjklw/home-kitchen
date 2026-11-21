@@ -22,6 +22,8 @@ from home_kitchen.recipes.collections import (
 )
 from home_kitchen.service import KitchenService
 
+pytestmark = pytest.mark.mocked_provider
+
 URL = "https://oda.com/no/recipes/731-tomato-soup/"
 
 

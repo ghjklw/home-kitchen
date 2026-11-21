@@ -20,6 +20,8 @@ from home_kitchen.recipes.photo_storage import (
 )
 from home_kitchen.store import recipes
 
+pytestmark = pytest.mark.mocked_provider
+
 
 def age(store, photo_id, at):
     with store.connection() as connection:

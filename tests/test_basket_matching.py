@@ -19,6 +19,8 @@ from home_kitchen.basket.matching import (
 )
 from home_kitchen.oda.media import ProductMedia
 
+pytestmark = pytest.mark.mocked_provider
+
 
 class FakeInventory:
     def __init__(self, lines):

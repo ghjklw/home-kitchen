@@ -132,6 +132,14 @@ def pytest_configure(config):
         "markers",
         "integration: DB-backed or disposable infrastructure integration tests",
     )
+    config.addinivalue_line(
+        "markers",
+        "mocked_provider: offline tests using mocked, stubbed, or synthetic provider/AI transports (not live acceptance evidence)",
+    )
+    config.addinivalue_line(
+        "markers",
+        "live_acceptance: live provider acceptance tests against real external endpoints or credentials (excluded from offline CI)",
+    )
 
 
 def pytest_collection_modifyitems(items):

@@ -45,6 +45,8 @@ from home_kitchen.integrations import (
 )
 from home_kitchen.settings import Settings
 
+pytestmark = pytest.mark.mocked_provider
+
 
 @pytest.fixture
 def sqlite_engine():

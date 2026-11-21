@@ -19,6 +19,8 @@ from home_kitchen.recipes.source_quantities import (
 from home_kitchen.settings import Household, Settings
 from home_kitchen.shopping import PlannedRecipes, ShoppingContext
 
+pytestmark = pytest.mark.mocked_provider
+
 
 @pytest.mark.parametrize(
     ("text", "expected"),

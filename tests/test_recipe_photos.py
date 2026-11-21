@@ -16,6 +16,8 @@ from home_kitchen.recipes.photos import (
 )
 from home_kitchen.settings import Household, Settings
 
+pytestmark = pytest.mark.mocked_provider
+
 
 def image_bytes(image_format="PNG", size=(8, 6), **options):
     output = BytesIO()

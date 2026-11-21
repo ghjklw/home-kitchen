@@ -8,6 +8,8 @@ from home_kitchen.purchase_sync import (
     extract_line_ean,
 )
 
+pytestmark = pytest.mark.mocked_provider
+
 
 def _transport(calls):
     def handler(request: httpx.Request) -> httpx.Response:

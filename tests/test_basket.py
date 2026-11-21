@@ -15,6 +15,8 @@ from home_kitchen.basket import (
 from home_kitchen.basket.matching import NeedMatchResult
 from home_kitchen.basket.repository import BasketService
 
+pytestmark = pytest.mark.mocked_provider
+
 NOW = datetime(2026, 11, 15, 12, tzinfo=UTC)
 
 

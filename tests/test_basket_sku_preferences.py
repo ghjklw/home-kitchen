@@ -16,6 +16,8 @@ from home_kitchen.basket.matching import (
 )
 from home_kitchen.inventory import PurchasePlan, PurchasePlanLine
 
+pytestmark = pytest.mark.mocked_provider
+
 
 class _FakeProvider:
     def __init__(self, products: list[ProviderProduct]) -> None:

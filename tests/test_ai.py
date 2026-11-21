@@ -13,6 +13,8 @@ from home_kitchen.recommendations import PlanDraft, build_planner, recommend_pla
 from home_kitchen.service import KitchenService
 from home_kitchen.settings import Household, Settings
 
+pytestmark = pytest.mark.mocked_provider
+
 
 def recipe() -> Recipe:
     return Recipe(

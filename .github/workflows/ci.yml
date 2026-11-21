@@ -44,11 +44,32 @@ jobs:
           node-version: '24.22.3'
       - name: Install dependencies
         run: uv sync --locked
-      - name: Static checks
+      - name: Static checks & JS tests
         run: uv run pre-commit run --all-files
-      - name: Unit tests
-        run: uv run pytest -m "not integration" -q
+      - name: Core unit tests (offline, no providers)
+        run: uv run pytest -m "not integration and not mocked_provider and not live_acceptance" -q
         env:
           KITCHEN_TEST_DATABASE_URL: ""
-      - name: Integration tests
-        run: uv run pytest -m integration -q
+      - name: Mocked provider tests (offline synthetic/mocked transports, NOT live acceptance)
+        run: uv run pytest -m "mocked_provider and not integration and not live_acceptance" -q
+        env:
+          KITCHEN_TEST_DATABASE_URL: ""
+      - name: Integration tests (disposable PostgreSQL; providers mocked where marked)
+        run: uv run pytest -m "integration and not live_acceptance" -q
+      - name: Summarize CI test scope vs live acceptance evidence
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Kitchen CI Test Scope (Offline Only)"
+            echo ""
+            echo "| Suite | Marker filter | External network / real credentials | Live acceptance evidence? |"
+            echo "|---|---|---|---|"
+            echo "| JS frontend unit & journey tests | \`node --test tests/*.cjs\` | None | No |"
+            echo "| Core unit tests | \`not integration and not mocked_provider and not live_acceptance\` | None | No |"
+            echo "| Mocked provider tests | \`mocked_provider and not integration and not live_acceptance\` | None (MockTransport / TestModel / fakes) | **No** |"
+            echo "| Integration tests | \`integration and not live_acceptance\` | Disposable PostgreSQL only | **No** |"
+            echo "| Live acceptance tests | \`live_acceptance\` | Real provider endpoints/credentials | **Not run in CI** |"
+            echo ""
+            echo "> Passing \`mocked_provider\` tests confirms offline adapter/contract behavior only and does **not** constitute live acceptance evidence."
+          } >> "$GITHUB_STEP_SUMMARY"

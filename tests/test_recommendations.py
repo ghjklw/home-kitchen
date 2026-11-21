@@ -11,6 +11,8 @@ from home_kitchen.models import Ingredient, Recipe
 from home_kitchen.recommendations import PlanDraft, recommend_plan
 from home_kitchen.settings import Household
 
+pytestmark = pytest.mark.mocked_provider
+
 
 def _make_recipe(title: str, ingredient_count: int = 3) -> Recipe:
     return Recipe(

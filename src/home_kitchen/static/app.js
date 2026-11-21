@@ -394,6 +394,87 @@ function renderRecipeStatsBadges(recipe) {
   });
   return wrap;
 }
+function renderRecipeQuickFeedbackWidget(recipe, onStatsUpdated) {
+  if (!recipe?.id || !window.KitchenRecipeQuickFeedback?.renderQuickFeedbackBar) return null;
+  if (
+    !recipe.activity_stats &&
+    !recipe.stats &&
+    typeof state !== "undefined" &&
+    Array.isArray(state?.recipes)
+  ) {
+    const known = state.recipes.find((item) => item.id === recipe.id);
+    const knownStats = known?.activity_stats || known?.stats;
+    if (knownStats) {
+      recipe.activity_stats = knownStats;
+      recipe.stats = knownStats;
+    }
+  }
+  let statsUpdateSeq = 0;
+  const quickFeedbackWrap = el("section", null, "quick-feedback-widget");
+  const quickFeedbackLabel = el("p", "Hurtigvurdering", "quick-feedback-label");
+  const quickFeedbackBar = window.KitchenRecipeQuickFeedback.renderQuickFeedbackBar(
+    recipe,
+    async (result, payload) => {
+      const seq = ++statsUpdateSeq;
+      let nextStats = result?.activity_stats || result?.stats || null;
+      if (!nextStats && typeof api === "function") {
+        try {
+          const fetched = await api("/recipes/" + encodeURIComponent(recipe.id) + "/stats");
+          if (seq !== statsUpdateSeq) return;
+          if (
+            fetched &&
+            typeof fetched === "object" &&
+            (
+              "times_planned" in fetched ||
+              "times_cooked" in fetched ||
+              "times_ordered" in fetched ||
+              "latest_rating" in fetched ||
+              "average_rating" in fetched ||
+              "would_make_again" in fetched ||
+              "feedback_count" in fetched
+            )
+          ) {
+            nextStats = fetched;
+          }
+        } catch {}
+      }
+      if (seq !== statsUpdateSeq) return;
+      if (!nextStats) {
+        const prev = recipe.activity_stats || recipe.stats || {};
+        nextStats = {
+          ...prev,
+          ...(payload?.rating != null ? { latest_rating: payload.rating } : {}),
+          ...(payload?.would_make_again != null
+            ? { would_make_again: payload.would_make_again }
+            : {}),
+          feedback_count: (Number(prev.feedback_count) || 0) + 1,
+        };
+        if (nextStats.average_rating == null && payload?.rating != null) {
+          nextStats.average_rating = payload.rating;
+        }
+      }
+      recipe.activity_stats = nextStats;
+      recipe.stats = nextStats;
+      if (typeof state !== "undefined" && Array.isArray(state?.recipes)) {
+        state.recipes = state.recipes.map((item) =>
+          item.id === recipe.id
+            ? { ...item, activity_stats: nextStats, stats: nextStats }
+            : item,
+        );
+      }
+      if (typeof onStatsUpdated === "function") onStatsUpdated(nextStats);
+      if (typeof render === "function" && typeof state !== "undefined" && state?.view === "recipes") {
+        render();
+      }
+    },
+    {
+      ...(typeof api === "function" ? { api } : {}),
+      ...(typeof document !== "undefined" ? { document } : {}),
+    },
+  );
+  add(quickFeedbackWrap, quickFeedbackLabel, quickFeedbackBar);
+  return quickFeedbackWrap;
+}
 function formatGuidedStepDuration(seconds) {
   const num = Number(seconds);
   if (!Number.isFinite(num) || num <= 0) return "";
@@ -3205,71 +3286,11 @@ function viewRecipe(recipe) {
     el("p", formatUiCount(recipe.servings) + " porsjoner", "muted"),
     statsContainer,
   );
-  if (recipe?.id && window.KitchenRecipeQuickFeedback?.renderQuickFeedbackBar) {
-    let statsUpdateSeq = 0;
-    const quickFeedbackWrap = el("section", null, "quick-feedback-widget");
-    const quickFeedbackLabel = el("p", "Hurtigvurdering", "quick-feedback-label");
-    const quickFeedbackBar = window.KitchenRecipeQuickFeedback.renderQuickFeedbackBar(
-      recipe,
-      async (result, payload) => {
-        const seq = ++statsUpdateSeq;
-        let nextStats = result?.activity_stats || result?.stats || null;
-        if (!nextStats && typeof api === "function") {
-          try {
-            const fetched = await api("/recipes/" + encodeURIComponent(recipe.id) + "/stats");
-            if (seq !== statsUpdateSeq) return;
-            if (
-              fetched &&
-              typeof fetched === "object" &&
-              (
-                "times_planned" in fetched ||
-                "times_cooked" in fetched ||
-                "times_ordered" in fetched ||
-                "latest_rating" in fetched ||
-                "average_rating" in fetched ||
-                "would_make_again" in fetched ||
-                "feedback_count" in fetched
-              )
-            ) {
-              nextStats = fetched;
-            }
-          } catch {}
-        }
-        if (seq !== statsUpdateSeq) return;
-        if (!nextStats) {
-          const prev = recipe.activity_stats || recipe.stats || {};
-          nextStats = {
-            ...prev,
-            ...(payload?.rating != null ? { latest_rating: payload.rating } : {}),
-            ...(payload?.would_make_again != null
-              ? { would_make_again: payload.would_make_again }
-              : {}),
-            feedback_count: (Number(prev.feedback_count) || 0) + 1,
-          };
-          if (nextStats.average_rating == null && payload?.rating != null) {
-            nextStats.average_rating = payload.rating;
-          }
-        }
-        recipe.activity_stats = nextStats;
-        recipe.stats = nextStats;
-        if (Array.isArray(state?.recipes)) {
-          state.recipes = state.recipes.map((item) =>
-            item.id === recipe.id
-              ? { ...item, activity_stats: nextStats, stats: nextStats }
-              : item,
-          );
-        }
-        updateStatsDisplay(recipe);
-        if (typeof render === "function" && state?.view === "recipes") render();
-      },
-      {
-        api,
-        ...(typeof document !== "undefined" ? { document } : {}),
-      },
-    );
-    add(quickFeedbackWrap, quickFeedbackLabel, quickFeedbackBar);
-    add(body, quickFeedbackWrap);
-  }
+  const quickFeedbackWidget =
+    typeof renderRecipeQuickFeedbackWidget === "function"
+      ? renderRecipeQuickFeedbackWidget(recipe, () => updateStatsDisplay(recipe))
+      : null;
+  if (quickFeedbackWidget) add(body, quickFeedbackWidget);
   if (recipe.photo_source) {
     const citation = [
       recipe.photo_source.book_title,
@@ -4550,11 +4571,17 @@ function plannedMealView(view) {
     content.select();
     notify("Marker og kopier ingredienslisten.");
   }, "quiet");
+  const quickFeedbackWidget =
+    typeof renderRecipeQuickFeedbackWidget === "function"
+      ? renderRecipeQuickFeedbackWidget(recipe)
+      : null;
+  if (quickFeedbackWidget) add(body, quickFeedbackWidget);
   add(
     body,
     add(
       el("div", null, "actions"),
       shareIngredients,
+      recipe?.id ? button("Gi tilbakemelding", () => feedbackForm(recipe), "quiet") : null,
       button("Vis mengdene i den lagrede oppskriften", () => viewRecipe(recipe), "quiet"),
     ),
   );

@@ -25,6 +25,8 @@ from home_kitchen.purchase_sync import (
 )
 from home_kitchen.settings import Settings
 
+pytestmark = pytest.mark.mocked_provider
+
 FIXTURES = Path(__file__).parent / "fixtures" / "oda"
 
 

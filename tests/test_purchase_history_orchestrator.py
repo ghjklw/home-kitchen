@@ -65,6 +65,8 @@ from home_kitchen.trumf_history import (
     parse_receipt,
 )
 
+pytestmark = pytest.mark.mocked_provider
+
 
 @pytest.fixture
 def memory_engine():

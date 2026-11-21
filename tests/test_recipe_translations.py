@@ -20,6 +20,8 @@ from home_kitchen.recipes.translation import MockRecipeTranslator, compute_recip
 from home_kitchen.service import KitchenService
 from home_kitchen.settings import Household, Settings
 
+pytestmark = pytest.mark.mocked_provider
+
 
 class MemoryStore:
     def __init__(self):

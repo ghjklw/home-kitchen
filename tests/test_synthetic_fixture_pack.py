@@ -78,6 +78,8 @@ from home_kitchen.oda.service import OdaService
 from home_kitchen.recipes.collections import OdaCollectionProvider
 from home_kitchen.service import KitchenService
 
+pytestmark = pytest.mark.mocked_provider
+
 
 def test_fictional_recipe_roundtrip_preserves_source_mapping_and_unknown_quantity():
     original = synthetic_recipe()

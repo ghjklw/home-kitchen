@@ -15,6 +15,8 @@ from home_kitchen.context import HistoryContext, history_context
 from home_kitchen.feature_api import feature_router
 from home_kitchen.feature_mcp import install_feature_tools
 
+pytestmark = pytest.mark.mocked_provider
+
 START = date(2026, 11, 16)
 END = date(2026, 11, 22)
 NEED_IDS = (UUID(int=1), UUID(int=2))

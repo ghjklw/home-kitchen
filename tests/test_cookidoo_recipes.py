@@ -48,6 +48,8 @@ from home_kitchen.recipes.collections import (
 from home_kitchen.settings import Household, Settings
 from home_kitchen.store import recipes
 
+pytestmark = pytest.mark.mocked_provider
+
 
 @pytest.fixture
 def sqlite_engine(tmp_path):

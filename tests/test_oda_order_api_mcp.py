@@ -14,6 +14,8 @@ from home_kitchen.feature_mcp import install_feature_tools
 from home_kitchen.oda import OdaError
 from home_kitchen.oda_api import oda_router
 
+pytestmark = pytest.mark.mocked_provider
+
 
 @pytest.fixture
 def oda():

@@ -27,6 +27,8 @@ from home_kitchen.recipes.models import EditableRecipeDraft
 from home_kitchen.recipes.photos import PhotoExtraction
 from home_kitchen.settings import Settings
 
+pytestmark = pytest.mark.mocked_provider
+
 
 def png_bytes():
     stream = BytesIO()

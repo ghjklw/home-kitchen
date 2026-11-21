@@ -23,6 +23,8 @@ from home_kitchen.recipes.discovery import (
 from home_kitchen.recipes.models import EvidenceSnippet
 from home_kitchen.settings import Household
 
+pytestmark = pytest.mark.mocked_provider
+
 
 def test_query_and_source_request_validation():
     assert RecipeDiscoveryRequest(query="  pasta ").query == "pasta"

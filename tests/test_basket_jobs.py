@@ -11,6 +11,8 @@ from home_kitchen.basket.jobs import SAFE_ERROR, BasketMatchJobs
 from home_kitchen.basket.matching import BasketCandidate, BasketMatchResult, NeedMatchResult
 from home_kitchen.inventory import PurchasePlan, PurchasePlanLine
 
+pytestmark = pytest.mark.mocked_provider
+
 START = date(2026, 11, 15)
 END = date(2026, 11, 21)
 

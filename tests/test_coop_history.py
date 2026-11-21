@@ -20,6 +20,8 @@ from home_kitchen.coop_history import (
 )
 from home_kitchen.purchase_sync import ProviderPage, metadata, provider_order_sources, sync_account
 
+pytestmark = pytest.mark.mocked_provider
+
 
 def test_purchase_list_maps_fixture_stub_fields_and_overlapping_page():
     pages = coop_purchase_list_pages()

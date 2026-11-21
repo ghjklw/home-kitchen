@@ -51,6 +51,8 @@ from home_kitchen.rema1000_history import (
     to_provider_order_record,
 )
 
+pytestmark = pytest.mark.mocked_provider
+
 
 @pytest.fixture
 def memory_engine():

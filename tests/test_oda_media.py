@@ -11,6 +11,8 @@ from home_kitchen.oda.media import (
     fetch_product_media,
 )
 
+pytestmark = pytest.mark.mocked_provider
+
 PRODUCT_URL = "https://oda.com/no/products/2257-tine-okologisk-lettmelk-12/"
 IMAGE_URLS = [f"https://images.oda.com/no/products/milk-{index}.jpg" for index in range(5)]
 

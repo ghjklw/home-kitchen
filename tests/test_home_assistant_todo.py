@@ -21,6 +21,8 @@ from home_kitchen.home_assistant import (
 )
 from home_kitchen.settings import Settings
 
+pytestmark = pytest.mark.mocked_provider
+
 
 def _ha_mock_transport(
     state_items: list[dict],

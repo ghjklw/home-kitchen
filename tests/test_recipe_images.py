@@ -11,6 +11,8 @@ from home_kitchen.recipes.images import (
     WikimediaCommonsImageProvider,
 )
 
+pytestmark = pytest.mark.mocked_provider
+
 
 def _page(
     *,

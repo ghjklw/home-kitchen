@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+import httpx
 import pytest
 from fixtures.synthetic_kitchen.purchase_history import (
     coop_purchase_list_pages,
@@ -10,6 +11,8 @@ from sqlalchemy import create_engine, func, select
 from home_kitchen.coop_history import (
     COOP_SCHEMA_SOURCE,
     COOP_SCHEMA_VERSION,
+    CoopAuthenticationError,
+    CoopHttpSource,
     UnsupportedCoopContract,
     parse_purchase_list,
     parse_receipt_detail,
@@ -140,3 +143,130 @@ def test_fixture_imports_dedupe_overlap_and_preserve_correction_revisions():
         assert all(row["source_updated_at"] is None for row in rows)
     finally:
         engine.dispose()
+
+
+def test_coop_http_source_falls_back_from_list_404_to_search():
+    calls: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, request.url.query.decode()))
+        if request.url.path == "/user/pay/history/list":
+            return httpx.Response(404)
+        if request.url.path == "/user/pay/history/search":
+            assert request.url.params.get("searchQuery") == ""
+            return httpx.Response(
+                200,
+                json={
+                    "purchases": [
+                        {
+                            "summaryId": "coop-search-1",
+                            "storeName": "Coop Mega Bislett",
+                            "purchaseDate": "2026-11-18T12:00:00Z",
+                            "amount": "210.00",
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(404)
+
+    source = CoopHttpSource(access_token="coop-token", transport=httpx.MockTransport(handler))
+    purchases = source.get_purchases("user-1")
+    assert [p.summary_id for p in purchases] == ["coop-search-1"]
+    assert purchases[0].amount == Decimal("210.00")
+    assert calls == [
+        ("/user/pay/history/list", ""),
+        ("/user/pay/history/search", "searchQuery="),
+    ]
+
+
+def test_coop_http_source_falls_back_to_month_and_dashboard_on_404():
+    month_calls: list[str] = []
+
+    def month_handler(request: httpx.Request) -> httpx.Response:
+        month_calls.append(request.url.path)
+        if request.url.path in ("/user/pay/history/list", "/user/pay/history/search"):
+            return httpx.Response(404)
+        if request.url.path == "/user/pay/history/month":
+            return httpx.Response(
+                200,
+                json={
+                    "purchases": [
+                        {
+                            "summaryId": "coop-month-1",
+                            "storeName": "Extra Sagene",
+                            "purchaseDate": "2026-11-15T10:30:00Z",
+                            "amount": "95.50",
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(404)
+
+    month_source = CoopHttpSource(
+        access_token="coop-token", transport=httpx.MockTransport(month_handler)
+    )
+    purchases = month_source.get_purchases("user-1")
+    assert [p.summary_id for p in purchases] == ["coop-month-1"]
+    assert month_calls == [
+        "/user/pay/history/list",
+        "/user/pay/history/search",
+        "/user/pay/history/month",
+    ]
+
+    dash_calls: list[str] = []
+
+    def dashboard_handler(request: httpx.Request) -> httpx.Response:
+        dash_calls.append(request.url.path)
+        if request.url.path == "/user/pay/history/dashboard":
+            return httpx.Response(
+                200,
+                json={
+                    "monthlyBreakdown": [
+                        {
+                            "month": "2026-11",
+                            "purchases": [
+                                {
+                                    "summaryId": "coop-dash-1",
+                                    "storeName": "Coop Prix",
+                                    "purchaseDate": "2026-11-10T09:00:00Z",
+                                    "amount": "64.00",
+                                }
+                            ],
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(404)
+
+    dash_source = CoopHttpSource(
+        access_token="coop-token", transport=httpx.MockTransport(dashboard_handler)
+    )
+    dash_purchases = dash_source.get_purchases("user-1")
+    assert [p.summary_id for p in dash_purchases] == ["coop-dash-1"]
+    assert dash_calls == [
+        "/user/pay/history/list",
+        "/user/pay/history/search",
+        "/user/pay/history/month",
+        "/user/pay/history/dashboard",
+    ]
+
+
+def test_coop_http_source_raises_auth_or_contract_error_when_fallbacks_fail():
+    all_404 = CoopHttpSource(
+        access_token="coop-token",
+        transport=httpx.MockTransport(lambda req: httpx.Response(404)),
+    )
+    with pytest.raises(UnsupportedCoopContract, match="HTTP 404"):
+        all_404.get_purchases("user-1")
+
+    def auth_fail_on_fallback(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user/pay/history/list":
+            return httpx.Response(404)
+        return httpx.Response(403)
+
+    unauth_source = CoopHttpSource(
+        access_token="expired",
+        transport=httpx.MockTransport(auth_fail_on_fallback),
+    )
+    with pytest.raises(CoopAuthenticationError):
+        unauth_source.get_purchases("user-1")

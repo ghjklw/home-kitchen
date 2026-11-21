@@ -93,39 +93,33 @@ def test_coop_http_source_raises_on_401():
 def test_rema1000_http_source_fetches_transactions_and_receipt():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers.get("authorization") == "Bearer rema-jwt"
-        if request.url.path == "/v1/receipts":
+        assert request.headers.get("x-app") == "Bella"
+        if request.url.path == "/v1/bella/transaction/v2/heads":
             return httpx.Response(
                 200,
                 json={
-                    "receipts": [
+                    "transactions": [
                         {
-                            "receiptId": "r-101",
-                            "timestamp": "2026-11-18T14:00:00Z",
+                            "id": "r-101",
+                            "purchaseDate": "2026-11-18T14:00:00Z",
                             "storeName": "REMA 1000 Majorstuen",
-                            "totalAmount": "89.00",
+                            "amount": "89.00",
                             "hasReceipt": True,
                         }
                     ]
                 },
             )
-        if request.url.path == "/v1/receipts/r-101":
+        if request.url.path == "/v1/bella/transaction/v2/rows/r-101":
             return httpx.Response(
                 200,
-                json={
-                    "receiptId": "r-101",
-                    "timestamp": "2026-11-18T14:00:00Z",
-                    "storeName": "REMA 1000 Majorstuen",
-                    "totalAmount": "89.00",
-                    "hasReceipt": True,
-                    "lines": [
-                        {
-                            "name": "Gulrot",
-                            "ean": "7038010000188",
-                            "quantity": "1",
-                            "amount": "29.00",
-                        }
-                    ],
-                },
+                json=[
+                    {
+                        "prodtxt1": "Gulrot",
+                        "prodtxt3": "7038010000188",
+                        "quantity": "1",
+                        "amount": "29.00",
+                    }
+                ],
             )
         return httpx.Response(404)
 

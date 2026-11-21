@@ -237,6 +237,42 @@ class CoopFixtureSource:
         return parse_receipt_detail(raw)
 
 
+def _extract_coop_purchase_stubs(data: Any) -> list[CoopPurchaseStub]:
+    raw_list: list[Any]
+    if isinstance(data, list):
+        raw_list = data
+    elif isinstance(data, dict):
+        purchases = data.get("purchases")
+        items = data.get("items")
+        monthly = data.get("monthlyBreakdown")
+        if purchases is not None and not isinstance(purchases, list):
+            raise UnsupportedCoopContract("Coop purchase list response has unexpected shape")
+        if items is not None and not isinstance(items, list):
+            raise UnsupportedCoopContract("Coop purchase list response has unexpected shape")
+        if monthly is not None and not isinstance(monthly, list):
+            raise UnsupportedCoopContract("Coop purchase list response has unexpected shape")
+        if purchases:
+            raw_list = purchases
+        elif items:
+            raw_list = items
+        elif monthly:
+            raw_list = []
+            for entry in monthly:
+                if not isinstance(entry, dict):
+                    continue
+                if isinstance(entry.get("purchases"), list):
+                    raw_list.extend(entry["purchases"])
+                elif isinstance(entry.get("items"), list):
+                    raw_list.extend(entry["items"])
+                elif "summaryId" in entry or "summary_id" in entry:
+                    raw_list.append(entry)
+        else:
+            raw_list = []
+    else:
+        raise UnsupportedCoopContract("Coop purchase list response has unexpected shape")
+    return [CoopPurchaseStub.model_validate(item) for item in raw_list]
+
+
 class CoopHttpSource:
     """Live HTTP source for Coop purchases and digital receipts (api.coop.no)."""
 
@@ -273,24 +309,41 @@ class CoopHttpSource:
             headers=headers,
         )
 
-    def get_purchases(self, account_id: str) -> list[CoopPurchaseStub]:
-        url = f"{self.base_url}/user/pay/history/list"
-        with self._client() as client:
-            resp = client.get(url)
+    def _raise_for_response_status(self, resp: httpx.Response, *, allow_404: bool = False) -> None:
         if resp.status_code in (401, 403):
             raise CoopAuthenticationError(
                 "Coop-sesjonen er utløpt eller ugyldig; forny eller koble til på nytt i Innstillinger."
             )
+        if resp.status_code == 404 and allow_404:
+            return
         if resp.status_code >= 400:
             raise UnsupportedCoopContract(f"Coop svarte med HTTP {resp.status_code}")
-        data = resp.json()
-        if isinstance(data, list):
-            raw_list = data
-        elif isinstance(data, dict):
-            raw_list = data.get("purchases") or data.get("items") or []
-        else:
-            raise UnsupportedCoopContract("Coop purchase list response has unexpected shape")
-        return [CoopPurchaseStub.model_validate(item) for item in raw_list]
+
+    def get_purchases(self, account_id: str) -> list[CoopPurchaseStub]:
+        with self._client() as client:
+            resp = client.get(f"{self.base_url}/user/pay/history/list")
+            if resp.status_code == 404:
+                resp = client.get(
+                    f"{self.base_url}/user/pay/history/search",
+                    params={"searchQuery": ""},
+                )
+            if resp.status_code != 404:
+                self._raise_for_response_status(resp)
+                return _extract_coop_purchase_stubs(resp.json())
+
+            month_resp = client.get(f"{self.base_url}/user/pay/history/month")
+            self._raise_for_response_status(month_resp, allow_404=True)
+            month_stubs: list[CoopPurchaseStub] | None = None
+            if month_resp.status_code < 400:
+                month_stubs = _extract_coop_purchase_stubs(month_resp.json())
+                if month_stubs:
+                    return month_stubs
+
+            dash_resp = client.get(f"{self.base_url}/user/pay/history/dashboard")
+            if dash_resp.status_code == 404 and month_stubs is not None:
+                return month_stubs
+            self._raise_for_response_status(dash_resp)
+            return _extract_coop_purchase_stubs(dash_resp.json())
 
     def get_receipt(self, account_id: str, summary_id: str) -> CoopReceipt | None:
         url = f"{self.base_url}/user/pay/history/details"

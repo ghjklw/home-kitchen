@@ -44,6 +44,8 @@ REMA1000_SCHEMA_SOURCE = "https://ae.rema1000.no"
 REMA1000_SCHEMA_VERSION = "v1"
 REMA1000_HISTORY_WINDOW_MONTHS = 24
 REMA1000_AUTH_METHOD = "manual_session_token"
+DEFAULT_REMA1000_BASE_URL = "https://api.rema.no"
+DEFAULT_REMA1000_SUBSCRIPTION_KEY = "fb5e24884b504d0bad761098f77e6605"
 REMA1000_LIMITATIONS = (
     "Rema 1000 Æ retains up to 24 months of purchase history. "
     "Authentication requires a customer session token or app credential; "
@@ -109,6 +111,7 @@ class Rema1000ReceiptLine(BaseModel):
     name: str = Field(
         validation_alias=AliasChoices(
             "name",
+            "prodtxt1",
             "produktNavn",
             "produkt_navn",
             "beskrivelse",
@@ -119,7 +122,11 @@ class Rema1000ReceiptLine(BaseModel):
         ),
         serialization_alias="name",
     )
-    ean: str | None = None
+    ean: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("ean", "prodtxt3", "ean13", "gtin13", "gtin", "barcode"),
+        serialization_alias="ean",
+    )
     quantity: Decimal | None = Field(
         default=None,
         validation_alias=AliasChoices("quantity", "antall"),
@@ -332,7 +339,7 @@ class Rema1000Receipt(BaseModel):
     )
     lines: list[Rema1000ReceiptLine] = Field(
         default_factory=list,
-        validation_alias=AliasChoices("lines", "varelinjer", "items", "receiptLines"),
+        validation_alias=AliasChoices("lines", "rows", "varelinjer", "items", "receiptLines"),
         serialization_alias="lines",
     )
     source_uri: str = REMA1000_SCHEMA_SOURCE
@@ -408,6 +415,8 @@ def parse_transactions(
             raw_list = payload["receipts"]
         elif "transactions" in payload:
             raw_list = payload["transactions"]
+        elif "heads" in payload:
+            raw_list = payload["heads"]
         elif "purchases" in payload:
             raw_list = payload["purchases"]
         elif "data" in payload and isinstance(payload["data"], list):
@@ -444,7 +453,7 @@ def parse_transactions(
 
 
 def parse_receipt(
-    payload: str | dict[str, Any],
+    payload: str | dict[str, Any] | list[Any],
     *,
     transaction: Rema1000Transaction | None = None,
 ) -> Rema1000Receipt:
@@ -467,6 +476,8 @@ def parse_receipt(
             raise UnsupportedRema1000Contract(
                 f"Malformed JSON in Rema 1000 receipt: {err}"
             ) from err
+    elif isinstance(payload, list) and transaction is not None:
+        raw_dict = {"lines": payload}
     elif isinstance(payload, dict):
         if _is_unauthenticated_dict(payload):
             raise Rema1000AuthenticationError(
@@ -688,14 +699,17 @@ class Rema1000HttpSource:
         self,
         session_token: str,
         *,
-        base_url: str = "https://api.rema.no",
+        base_url: str = DEFAULT_REMA1000_BASE_URL,
+        subscription_key: str = DEFAULT_REMA1000_SUBSCRIPTION_KEY,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         clean_token = session_token.strip() if isinstance(session_token, str) else ""
         if not clean_token:
             raise Rema1000AuthenticationError("Rema 1000-sesjonstoken mangler.")
+        clean_key = subscription_key.strip() if isinstance(subscription_key, str) else ""
         self.session_token = clean_token
         self.base_url = base_url.rstrip("/")
+        self.subscription_key = clean_key or DEFAULT_REMA1000_SUBSCRIPTION_KEY
         self.transport = transport
         self._tx_cache: dict[str, Rema1000Transaction] = {}
 
@@ -707,14 +721,20 @@ class Rema1000HttpSource:
             headers={
                 "Authorization": f"Bearer {self.session_token}",
                 "Accept": "application/json",
+                "Ocp-Apim-Subscription-Key": self.subscription_key,
+                "X-App": "Bella",
+                "X-Platform": "CLI",
+                "X-App-Version": "3.13.0.1181",
+                "Accept-Language": "no",
                 "User-Agent": "HomeKitchen/1.0",
             },
         )
 
     def get_transactions(self, account_id: str) -> list[Rema1000Transaction]:
-        url = f"{self.base_url}/v1/receipts"
         with self._client() as client:
-            resp = client.get(url)
+            resp = client.get(f"{self.base_url}/v1/bella/transaction/v2/heads")
+            if resp.status_code == 404:
+                resp = client.get(f"{self.base_url}/v1/receipts")
         if resp.status_code in (401, 403):
             raise Rema1000AuthenticationError(
                 "Rema 1000-sesjonen er utløpt eller ugyldig; forny eller koble til på nytt i Innstillinger."
@@ -727,7 +747,7 @@ class Rema1000HttpSource:
         return txs
 
     def get_receipt(self, account_id: str, receipt_id: str) -> Rema1000Receipt | None:
-        url = f"{self.base_url}/v1/receipts/{receipt_id}"
+        url = f"{self.base_url}/v1/bella/transaction/v2/rows/{receipt_id}"
         with self._client() as client:
             resp = client.get(url)
         if resp.status_code == 404:

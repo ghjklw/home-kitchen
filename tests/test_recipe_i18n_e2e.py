@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
@@ -18,7 +17,6 @@ from home_kitchen.app import create_app
 from home_kitchen.catalogue.identity import CanonicalProduct, CanonicalUnit
 from home_kitchen.catalogue.identity_service import CanonicalIdentityService
 from home_kitchen.models import (
-    Ingredient,
     Meal,
     Recipe,
     RecipeTranslation,
@@ -444,9 +442,7 @@ async def test_non_norwegian_recipe_i18n_end_to_end(monkeypatch, tmp_path):
         assert reopened_recipe["ingredients"][2]["unit"] == "pincée"
 
         # 5. On-demand translation -> save & reopen (cached without extra translator calls)
-        tr_res = client.post(
-            f"/api/recipes/{recipe_id}/translate", json={"target_locale": "nb"}
-        )
+        tr_res = client.post(f"/api/recipes/{recipe_id}/translate", json={"target_locale": "nb"})
         assert tr_res.status_code == 200
         tr = tr_res.json()
         assert tr["target_locale"] == "nb"
@@ -473,7 +469,10 @@ async def test_non_norwegian_recipe_i18n_end_to_end(monkeypatch, tmp_path):
 
         # Unconfigured AI translator returns 503 cleanly without saving
         service_no_ai = KitchenService(
-            store=store, identity_service=identities, translator=None, settings=Settings(local_dev=True)
+            store=store,
+            identity_service=identities,
+            translator=None,
+            settings=Settings(local_dev=True),
         )
         app_no_ai = create_app(Settings(local_dev=True), service=service_no_ai)
         client_no_ai = TestClient(app_no_ai, client=("127.0.0.1", 5000))
@@ -497,22 +496,18 @@ async def test_non_norwegian_recipe_i18n_end_to_end(monkeypatch, tmp_path):
         assert meal_res.status_code == 201
         meal_id = meal_res.json()["id"]
 
-        shopping = client.get(
-            "/api/shopping", params={"start": "2026-11-16", "end": "2026-11-22"}
-        )
+        shopping = client.get("/api/shopping", params={"start": "2026-11-16", "end": "2026-11-22"})
         assert shopping.status_code == 200
         lines_by_name = {line["name"]: line for line in shopping.json()["lines"]}
         assert Decimal(lines_by_name["pommes de terre"]["quantity"]) == Decimal("1500")
         assert lines_by_name["pommes de terre"]["unit"] == "g"
         assert lines_by_name["pommes de terre"]["category"] == "Produce"
-        assert Decimal(lines_by_name["crème fraîche"]["quantity"]) == Decimal("6")
-        assert lines_by_name["crème fraîche"]["unit"] == "dl"
+        assert Decimal(lines_by_name["crème fraîche"]["quantity"]) == Decimal("600")
+        assert lines_by_name["crème fraîche"]["unit"] == "ml"
         assert Decimal(lines_by_name["noix de muscade"]["quantity"]) == Decimal("3")
         assert lines_by_name["noix de muscade"]["unit"] == "pincée"
 
-        trip = client.get(
-            "/api/store-trip", params={"start": "2026-11-16", "end": "2026-11-22"}
-        )
+        trip = client.get("/api/store-trip", params={"start": "2026-11-16", "end": "2026-11-22"})
         assert trip.status_code == 200
         trip_lines = {line["name"]: line for line in trip.json()["lines"]}
         assert trip_lines["noix de muscade"]["unit"] == "pincée"

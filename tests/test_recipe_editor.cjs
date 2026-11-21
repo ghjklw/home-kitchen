@@ -1147,3 +1147,19 @@ test("DOM: recipeForm pre-populates unknown draft source_language in custom fiel
   assert.ok(postCall);
   assert.equal(postCall.body.source_language, "pt");
 });
+
+test("DOM: unsaved URL-imported draft pre-populates Kildespråk before save", async () => {
+  const harness = buildRecipeUiHarness();
+  harness.context.recipeForm({
+    title: "Gratin dauphinois",
+    servings: 4,
+    source_url: "https://www.marmiton.org/recettes/gratin-dauphinois/",
+    source_language: "fr",
+    ingredients: ["1 kg de pommes de terre", "4 dl de crème fraîche"],
+    instructions: ["Éplucher et couper les pommes de terre.", "Cuire au four."],
+  }, "imported");
+
+  const metaRow = harness.dialogRoot.querySelector(".recipe-metadata-row");
+  const langSelect = metaRow.findAll((n) => n.name === "source_language")[0];
+  assert.equal(langSelect.value, "fr");
+});

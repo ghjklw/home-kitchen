@@ -107,3 +107,44 @@ test("shares the same rounded amounts shown in planned cooking", () => {
     "Tomato pasta\nTil 7 porsjoner\n\nIngredienser:\n- 233.33 g pasta\n- Mengde ikke oppgitt · salt",
   );
 });
+
+test("localizes cooking units for en and fr household locales while preserving nb default and unmapped units", () => {
+  assert.deepEqual(formatPlannedIngredient({ name: "egg", quantity: "2", unit: "item" }, (v) => v, "en"), {
+    text: "2 pcs egg",
+    accessibleLabel: "Mengde: 2 pieces egg",
+    copyText: "2 pcs egg",
+  });
+  assert.deepEqual(formatPlannedIngredient({ name: "salt", quantity: "1", unit: "tsp" }, (v) => v, "en"), {
+    text: "1 tsp salt",
+    accessibleLabel: "Mengde: 1 teaspoon salt",
+    copyText: "1 tsp salt",
+  });
+  assert.deepEqual(formatPlannedIngredient({ name: "farine", quantity: "2", unit: "tbsp" }, (v) => v, "fr"), {
+    text: "2 c. à s. farine",
+    accessibleLabel: "Mengde: 2 cuillères à soupe farine",
+    copyText: "2 c. à s. farine",
+  });
+  assert.deepEqual(formatPlannedIngredient({ name: "crème", quantity: "4", unit: "dl" }, (v) => v, "fr"), {
+    text: "4 dl crème",
+    accessibleLabel: "Mengde: 4 décilitres crème",
+    copyText: "4 dl crème",
+  });
+  assert.equal(
+    formatPlannedIngredient({ name: "muscade", quantity: "2", unit: "pincée" }, (v) => v, "fr").text,
+    "2 pincée muscade",
+  );
+  assert.equal(
+    formatPlannedIngredient({ name: "egg", quantity: "2", unit: "item" }, (v) => v, undefined).text,
+    "2 stk. egg",
+  );
+  const listEn = formatPlannedIngredientList(
+    {
+      servings: 2,
+      sourceRecipe: { title: "Omelette" },
+      ingredients: [{ name: "egg", quantity: "2", unit: "item" }],
+    },
+    (v) => v,
+    "en",
+  );
+  assert.match(listEn, /- 2 pcs egg/);
+});

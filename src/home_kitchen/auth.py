@@ -70,6 +70,8 @@ class AccessControl:
             or request.url.path
             in {
                 "/.well-known/oauth-authorization-server/mcp",
+                "/.well-known/openid-configuration/mcp",
+                "/.well-known/openid-configuration",
                 "/.well-known/oauth-protected-resource/mcp/",
             }
         ):

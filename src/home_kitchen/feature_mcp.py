@@ -346,9 +346,13 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
         return features.inventory.upsert(data)
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True})
-    def remove_inventory(item_id: UUID) -> None:
+    def remove_inventory(item_id: UUID) -> dict[str, bool]:
         """Remove an incorrect stock record when requested by the user."""
-        features.inventory.remove(item_id)
+        try:
+            features.inventory.remove(item_id)
+        except KeyError:
+            raise ToolError(f"Inventory item not found: {item_id}") from None
+        return {"deleted": True}
 
     @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
     def get_store_trip(start: date, end: date) -> StoreTrip:

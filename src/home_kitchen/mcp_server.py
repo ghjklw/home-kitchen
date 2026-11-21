@@ -1,5 +1,6 @@
 """Curated MCP tools for the shared household kitchen service."""
 
+import json
 from collections.abc import Callable
 from datetime import date
 from typing import Annotated
@@ -7,6 +8,9 @@ from uuid import UUID
 
 from fastmcp import FastMCP
 from fastmcp.server.auth import AuthProvider
+from fastmcp.server.middleware import Middleware
+from fastmcp.tools.base import ToolResult
+from mcp.types import TextContent
 from pydantic import Field
 
 from .mcp_auth import MCPActorMiddleware
@@ -27,6 +31,32 @@ from .service import KitchenService
 from .settings import Household
 
 
+class TextContentCompatibilityMiddleware(Middleware):
+    """Ensure text-only MCP consumers always receive JSON text content, even for empty lists."""
+
+    async def on_call_tool(self, context, call_next):
+        result = await call_next(context)
+        if (
+            isinstance(result, ToolResult)
+            and not result.is_error
+            and not result.content
+            and result.structured_content is not None
+        ):
+            wrapped = bool((result.meta or {}).get("fastmcp", {}).get("wrap_result"))
+            payload = (
+                result.structured_content["result"]
+                if wrapped and "result" in result.structured_content
+                else result.structured_content
+            )
+            return ToolResult(
+                content=[TextContent(type="text", text=json.dumps(payload, separators=(",", ":")))],
+                structured_content=result.structured_content,
+                meta=result.meta,
+                is_error=result.is_error,
+            )
+        return result
+
+
 def build_mcp(
     service: KitchenService,
     get_household: Callable[[], Household],
@@ -45,6 +75,7 @@ def build_mcp(
             "retailer's own app."
         ),
     )
+    mcp.add_middleware(TextContentCompatibilityMiddleware())
     if auth is not None:
         mcp.add_middleware(MCPActorMiddleware())
 

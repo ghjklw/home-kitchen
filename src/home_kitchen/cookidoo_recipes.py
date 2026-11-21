@@ -20,12 +20,8 @@ from uuid import UUID, uuid4
 import httpx
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import insert, select, text
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from home_kitchen.connector_store import ConnectorStore, connector_credentials
-from home_kitchen.history import HistoryEntryCreate, HistoryRepository
+from home_kitchen.connector_ports import ConnectorCredentialPort
 from home_kitchen.imports import ImportedDraft
 from home_kitchen.models import (
     GuidedCookingStep,
@@ -34,14 +30,16 @@ from home_kitchen.models import (
     SourceIngredient,
     infer_recipe_metadata,
 )
-from home_kitchen.recipes.adapters.postgres import source_links
 from home_kitchen.recipes.collections import (
     CollectionEntry,
     CollectionPage,
     source_ingredient,
 )
-from home_kitchen.service import KitchenService
-from home_kitchen.store import entity_values, recipes
+from home_kitchen.recipes.ports import (
+    CollectionUnitOfWork,
+    HistoryRecordPort,
+    RecipeIdentityResolver,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -58,14 +56,6 @@ def _cookidoo_domain_for_country(country: str | None) -> str:
     if country_clean in _COOKIDOO_INTERNATIONAL_COUNTRIES:
         return "cookidoo.international"
     return f"cookidoo.{country_clean}"
-
-
-def _dialect_insert(table, dialect_name: str):
-    if dialect_name == "postgresql":
-        return pg_insert(table)
-    if dialect_name == "sqlite":
-        return sqlite_insert(table)
-    raise ValueError(f"unsupported database dialect: {dialect_name}")
 
 
 class CookidooError(HTTPException):
@@ -829,7 +819,7 @@ class CookidooCollectionProvider:
 
     def __init__(
         self,
-        store: ConnectorStore,
+        store: ConnectorCredentialPort,
         household_id: UUID,
         *,
         transport: httpx.AsyncBaseTransport | None = None,
@@ -873,43 +863,30 @@ class CookidooCollectionProvider:
         token_prefix = str(token)[:12]
         return f"{meta.updated_at.isoformat()}:{token_prefix}"
 
-    def lock_generation(self, connection, actor_id: str, generation: object) -> None:
+    def lock_generation(self, connection: Any, actor_id: str, generation: object) -> None:
         """Lock and verify Cookidoo credentials within transaction."""
-        stmt = select(
-            connector_credentials.c.updated_at,
-            connector_credentials.c.expires_at,
-            connector_credentials.c.encrypted_credentials,
-        ).where(
-            connector_credentials.c.household_id == self.household_id,
-            connector_credentials.c.provider_id == "cookidoo",
-        )
-        if connection.dialect.name == "postgresql":
-            stmt = stmt.with_for_update()
-        row = connection.execute(stmt).one_or_none()
-
-        if row is None:
+        locked = self.store.lock_connection_credentials(connection, self.household_id, "cookidoo")
+        if locked is None:
             raise ValueError("Cookidoo-tilkoblingen ble fjernet; forhåndsvis samlingen på nytt")
 
-        if row.expires_at is not None:
+        row_updated, row_exp, creds = locked
+        if row_exp is not None:
             now = datetime.now(UTC)
-            row_exp = (
-                row.expires_at.replace(tzinfo=UTC)
-                if row.expires_at.tzinfo is None
-                else row.expires_at.astimezone(UTC)
+            norm_exp = (
+                row_exp.replace(tzinfo=UTC) if row_exp.tzinfo is None else row_exp.astimezone(UTC)
             )
-            if row_exp < now:
+            if norm_exp < now:
                 raise ValueError(
                     "Cookidoo-tilkoblingen har utløpt; koble til på nytt under Innstillinger"
                 )
 
-        creds = self.store.decrypt(row.encrypted_credentials)
         token = creds.get("access_token") or creds.get("session_cookie") or ""
-        row_updated = (
-            row.updated_at.replace(tzinfo=UTC)
-            if row.updated_at.tzinfo is None
-            else row.updated_at.astimezone(UTC)
+        norm_updated = (
+            row_updated.replace(tzinfo=UTC)
+            if row_updated.tzinfo is None
+            else row_updated.astimezone(UTC)
         )
-        current_gen = f"{row_updated.isoformat()}:{str(token)[:12]}"
+        current_gen = f"{norm_updated.isoformat()}:{str(token)[:12]}"
         if current_gen != generation:
             raise ValueError("Cookidoo-tilkoblingen er endret; forhåndsvis samlingen på nytt")
 
@@ -1993,55 +1970,57 @@ class CookidooRecipeService:
 
     def __init__(
         self,
-        kitchen: KitchenService,
-        history: HistoryRepository,
-        store: ConnectorStore,
-        household_id: UUID,
+        uow_or_kitchen: CollectionUnitOfWork | Any,
+        history: HistoryRecordPort | Any = None,
+        store: ConnectorCredentialPort | Any | None = None,
+        household_id: UUID | None = None,
         *,
         collection_provider: CookidooCollectionProvider | None = None,
+        identity_resolver: RecipeIdentityResolver | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         base_url: str | None = None,
     ):
-        self.kitchen = kitchen
-        self.history = history
+        if callable(getattr(uow_or_kitchen, "session", None)) and callable(
+            getattr(uow_or_kitchen, "find_existing_recipe_id", None)
+        ):
+            self.uow: CollectionUnitOfWork = uow_or_kitchen
+            self.kitchen: Any = None
+            self.history = history
+            self.identity_resolver = identity_resolver
+        else:
+            from home_kitchen.recipes.bootstrap import create_collection_uow_for_kitchen
+
+            self.kitchen = uow_or_kitchen
+            self.history = history
+            self.uow, self.identity_resolver = create_collection_uow_for_kitchen(
+                uow_or_kitchen, history, identity_resolver=identity_resolver
+            )
+
         self.store = store
         self.household_id = household_id
-        self.provider = collection_provider or CookidooCollectionProvider(
-            store=store,
-            household_id=household_id,
-            transport=transport,
-            base_url=base_url,
-        )
-
-    def check_duplicate(self, entry: CollectionEntry, connection=None) -> tuple[UUID | None, bool]:
-        """Check whether the entry was already imported or linked."""
-
-        def lookup(conn):
-            linked = conn.execute(
-                select(source_links.c.recipe_id).where(
-                    source_links.c.provider == "cookidoo",
-                    source_links.c.external_recipe_id == entry.id,
+        if collection_provider is not None:
+            self.provider = collection_provider
+        else:
+            if store is None or household_id is None:
+                raise ValueError(
+                    "store and household_id are required when collection_provider is omitted"
                 )
-            ).scalar_one_or_none()
-            if linked is not None:
-                return linked, True
+            self.provider = CookidooCollectionProvider(
+                store=store,
+                household_id=household_id,
+                transport=transport,
+                base_url=base_url,
+            )
 
-            if entry.source_url is not None:
-                existing_recipe = conn.execute(
-                    select(recipes.c.id)
-                    .where(recipes.c.source_url == entry.source_url)
-                    .order_by(recipes.c.position)
-                    .limit(1)
-                ).scalar_one_or_none()
-                if existing_recipe is not None:
-                    return existing_recipe, True
-
-            return None, False
-
-        if connection is not None:
-            return lookup(connection)
-        with self.kitchen.store.engine.connect() as conn:
-            return lookup(conn)
+    def check_duplicate(
+        self, entry: CollectionEntry, session: Any = None
+    ) -> tuple[UUID | None, bool]:
+        """Check whether the entry was already imported or linked."""
+        if session is not None and callable(getattr(session, "find_existing_recipe_id", None)):
+            existing_id = session.find_existing_recipe_id("cookidoo", entry.id, entry.source_url)
+        else:
+            existing_id = self.uow.find_existing_recipe_id("cookidoo", entry.id, entry.source_url)
+        return existing_id, existing_id is not None
 
     def import_recipe_atomic(
         self,
@@ -2055,29 +2034,19 @@ class CookidooRecipeService:
 
         self.provider.validate_source(entry)
 
-        with self.kitchen.store.engine.begin() as connection:
-            if connection.dialect.name == "postgresql":
-                connection.execute(
-                    text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-                    {"key": f"recipe-source:cookidoo:{entry.id}"},
-                )
+        with self.uow.session() as session:
+            session.acquire_source_lock("cookidoo", entry.id)
 
-            existing_id, is_duplicate = self.check_duplicate(entry, connection)
+            existing_id, is_duplicate = self.check_duplicate(entry, session)
 
             if is_duplicate and existing_id is not None:
                 # Retain existing saved recipe without overwriting
-                link_stmt = _dialect_insert(source_links, connection.dialect.name)
-                connection.execute(
-                    link_stmt.values(
-                        provider="cookidoo",
-                        external_recipe_id=entry.id,
-                        recipe_id=existing_id,
-                        source_url=entry.source_url or "",
-                        metadata={"badges": entry.badges, **entry.metadata},
-                        created_at=datetime.now(UTC),
-                    ).on_conflict_do_nothing(
-                        index_elements=[source_links.c.provider, source_links.c.external_recipe_id]
-                    )
+                session.link_source(
+                    provider="cookidoo",
+                    external_recipe_id=entry.id,
+                    recipe_id=existing_id,
+                    source_url=entry.source_url or "",
+                    metadata={"badges": entry.badges, **entry.metadata},
                 )
                 return existing_id, True
 
@@ -2133,48 +2102,35 @@ class CookidooRecipeService:
                 prep_category=inferred_prep_category,
                 guided_steps=list(entry.guided_steps or []),
             )
-            resolve_fn = getattr(self.kitchen, "resolve_recipe_identities", None)
-            if callable(resolve_fn):
+            if self.identity_resolver is not None:
                 try:
-                    new_recipe = resolve_fn(new_recipe)
+                    new_recipe = self.identity_resolver.resolve_recipe_identities(new_recipe)
                 except Exception:
                     _LOG.warning(
                         "Fast alias resolution failed during Cookidoo import",
                         exc_info=True,
                     )
 
-            connection.execute(insert(recipes).values(**entity_values(new_recipe)))
+            session.save_recipe(new_recipe)
 
             # Record history domain event
-            self.history.record(
-                HistoryEntryCreate(
-                    kind="domain_event",
-                    message="Importerte Cookidoo-oppskrift",
-                    recipe_id=recipe_id,
-                    structured={
-                        "provider": "cookidoo",
-                        "external_recipe_id": entry.id,
-                        "source_url": entry.source_url,
-                        "badges": entry.badges,
-                    },
-                ),
+            session.record_import_history(
                 actor_id=actor_id,
-                connection=connection,
+                recipe_id=recipe_id,
+                provider="cookidoo",
+                external_recipe_id=entry.id,
+                source_url=entry.source_url,
+                badges=entry.badges,
+                message="Importerte Cookidoo-oppskrift",
             )
 
             # Link in source_links
-            link_stmt = _dialect_insert(source_links, connection.dialect.name)
-            connection.execute(
-                link_stmt.values(
-                    provider="cookidoo",
-                    external_recipe_id=entry.id,
-                    recipe_id=recipe_id,
-                    source_url=entry.source_url or "",
-                    metadata={"badges": entry.badges, **entry.metadata},
-                    created_at=datetime.now(UTC),
-                ).on_conflict_do_nothing(
-                    index_elements=[source_links.c.provider, source_links.c.external_recipe_id]
-                )
+            session.link_source(
+                provider="cookidoo",
+                external_recipe_id=entry.id,
+                recipe_id=recipe_id,
+                source_url=entry.source_url or "",
+                metadata={"badges": entry.badges, **entry.metadata},
             )
 
         return recipe_id, False

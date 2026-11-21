@@ -28,6 +28,7 @@ from sqlalchemy.pool import NullPool
 
 from home_kitchen.context import history_context
 from home_kitchen.history import HistoryEntryCreate, HistoryRepository
+from home_kitchen.recipes.ports import HistoryRecordPort
 
 from .models import OdaProduct
 from .repository import lifecycles
@@ -161,7 +162,7 @@ class OdaCartService:
     def __init__(
         self,
         oda: OdaService,
-        history_repository: HistoryRepository | None = None,
+        history_repository: HistoryRecordPort | None = None,
         *,
         gate_factory: Callable[[], AbstractAsyncContextManager[None]] | None = None,
     ):

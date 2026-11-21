@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import json
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from cryptography.fernet import Fernet, MultiFernet
-from pydantic import BaseModel, ConfigDict, Field
+from cryptography.fernet import MultiFernet
 from sqlalchemy import (
     JSON,
     Column,
@@ -31,10 +28,10 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 
+from home_kitchen.connector_ports import DEFAULT_ACCOUNT_ID as DEFAULT_ACCOUNT_ID
+from home_kitchen.connector_ports import ConnectorStatus as ConnectorStatus
 from home_kitchen.crypto import FernetCipher, build_multi_fernet
-from home_kitchen.settings import Settings
-
-DEFAULT_ACCOUNT_ID = "default"
+from home_kitchen.crypto import resolve_connector_cipher as resolve_connector_cipher
 
 metadata = MetaData()
 
@@ -81,19 +78,6 @@ def _normalize_account_label(account_label: str | None) -> str | None:
         return None
     cleaned = account_label.strip()
     return cleaned or None
-
-
-def resolve_connector_cipher(settings: Settings) -> FernetCipher | None:
-    """Resolve encryption cipher from connector or Oda key, or deterministic local_dev key."""
-    key = settings.connector_encryption_key or settings.oda_encryption_key
-    if key is not None:
-        return build_multi_fernet(key.get_secret_value())
-    if settings.local_dev:
-        deterministic_dev_key = base64.urlsafe_b64encode(
-            hashlib.sha256(b"kitchen-local-dev-connector-key-seed").digest()
-        )
-        return MultiFernet([Fernet(deterministic_dev_key)])
-    return None
 
 
 def _parse_datetime(val: Any) -> datetime | None:
@@ -155,28 +139,6 @@ def _row_to_status(row: Any) -> ConnectorStatus:
         ),
         metadata=_parse_json(row.metadata_json),
     )
-
-
-class ConnectorStatus(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    provider_id: str
-    account_id: str = DEFAULT_ACCOUNT_ID
-    account_label: str | None = None
-    auth_mode: str
-    expires_at: datetime | None = None
-    created_at: datetime
-    updated_at: datetime
-    actor_id: str | None = None
-    connected_by_actor_id: str | None = None
-    updated_by_actor_id: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-    @property
-    def is_expired(self) -> bool:
-        if self.expires_at is None:
-            return False
-        return self.expires_at < datetime.now(UTC)
 
 
 class ConnectorStore:
@@ -547,3 +509,301 @@ class ConnectorStore:
             if existing is None or (existing.is_expired and not status.is_expired):
                 results[status.provider_id] = status
         return results
+
+    def lock_connection_credentials(
+        self,
+        connection: Any,
+        household_id: UUID,
+        provider_id: str,
+        account_id: str | None = None,
+    ) -> tuple[datetime, datetime | None, dict[str, Any]] | None:
+        """Lock and decrypt one connector credential row within an active transaction."""
+        cleaned_id = _normalize_account_id(account_id)
+        stmt = select(
+            connector_credentials.c.updated_at,
+            connector_credentials.c.expires_at,
+            connector_credentials.c.encrypted_credentials,
+        ).where(
+            connector_credentials.c.household_id == household_id,
+            connector_credentials.c.provider_id == provider_id,
+        )
+        if cleaned_id is not None:
+            stmt = stmt.where(connector_credentials.c.account_id == cleaned_id)
+        if connection.dialect.name == "postgresql":
+            stmt = stmt.with_for_update()
+        row = connection.execute(stmt).one_or_none()
+        if row is None:
+            return None
+        updated_at = _parse_datetime(row.updated_at) or datetime.now(UTC)
+        expires_at = _parse_datetime(row.expires_at)
+        creds = self.decrypt(row.encrypted_credentials)
+        return updated_at, expires_at, creds
+
+
+class MemoryConnectorStore:
+    """In-memory secondary adapter implementing `ConnectorCredentialPort` for unit tests."""
+
+    def __init__(self, cipher: FernetCipher | str | None = None) -> None:
+        self.cipher: FernetCipher | None = (
+            build_multi_fernet(cipher) if isinstance(cipher, str) else cipher
+        )
+        self._records: dict[
+            tuple[UUID, str, str], tuple[ConnectorStatus, str | dict[str, Any]]
+        ] = {}
+
+    def _encode(self, payload: dict[str, Any]) -> str | dict[str, Any]:
+        if self.cipher is not None:
+            return self.cipher.encrypt(json.dumps(payload).encode("utf-8")).decode("utf-8")
+        return dict(payload)
+
+    def _decode(self, stored: str | dict[str, Any]) -> dict[str, Any]:
+        if isinstance(stored, str):
+            if self.cipher is None:
+                raise RuntimeError("Cipher required to decrypt stored credentials")
+            return json.loads(self.cipher.decrypt(stored.encode("utf-8")).decode("utf-8"))
+        return dict(stored)
+
+    def decrypt(self, encrypted_payload: str) -> dict[str, Any]:
+        if self.cipher is None:
+            return json.loads(encrypted_payload)
+        return json.loads(self.cipher.decrypt(encrypted_payload.encode("utf-8")).decode("utf-8"))
+
+    def resolve_account_id(
+        self,
+        household_id: UUID,
+        provider_id: str,
+        account_id: str | None = None,
+        *,
+        account_label: str | None = None,
+        add_account: bool = False,
+    ) -> str:
+        cleaned_id = _normalize_account_id(account_id)
+        if add_account or (cleaned_id is not None and cleaned_id.lower() == "new"):
+            return generate_account_id()
+        if cleaned_id is not None:
+            return cleaned_id
+        existing = self.list_credentials(household_id, provider_id)
+        if not existing:
+            return DEFAULT_ACCOUNT_ID
+        cleaned_label = _normalize_account_label(account_label)
+        if cleaned_label is not None:
+            for item in existing:
+                if item.account_label == cleaned_label:
+                    return item.account_id
+            return generate_account_id()
+        for item in existing:
+            if item.account_id == DEFAULT_ACCOUNT_ID:
+                return DEFAULT_ACCOUNT_ID
+        return existing[0].account_id
+
+    def save_connection(
+        self,
+        household_id: UUID,
+        provider_id: str,
+        auth_mode: str,
+        credentials: dict[str, Any],
+        *,
+        expires_at: datetime | None = None,
+        actor_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        account_id: str | None = None,
+        account_label: str | None = None,
+        add_account: bool = False,
+    ) -> ConnectorStatus:
+        now = datetime.now(UTC)
+        normalized_exp = _parse_datetime(expires_at)
+        resolved_id = self.resolve_account_id(
+            household_id,
+            provider_id,
+            account_id=account_id,
+            account_label=account_label,
+            add_account=add_account,
+        )
+        key = (household_id, provider_id, resolved_id)
+        prior = self._records.get(key)
+        created_at = prior[0].created_at if prior is not None else now
+        connected_by = (
+            prior[0].connected_by_actor_id
+            if prior is not None and prior[0].connected_by_actor_id is not None
+            else actor_id
+        )
+        resolved_label = (
+            _normalize_account_label(account_label)
+            if account_label is not None
+            else (prior[0].account_label if prior is not None else None)
+        )
+        status = ConnectorStatus(
+            provider_id=provider_id,
+            account_id=resolved_id,
+            account_label=resolved_label,
+            auth_mode=auth_mode,
+            expires_at=normalized_exp,
+            created_at=created_at,
+            updated_at=now,
+            actor_id=actor_id if actor_id is not None else (prior[0].actor_id if prior else None),
+            connected_by_actor_id=connected_by,
+            updated_by_actor_id=(
+                actor_id
+                if actor_id is not None
+                else (prior[0].updated_by_actor_id if prior else None)
+            ),
+            metadata=dict(metadata or {}),
+        )
+        self._records[key] = (status, self._encode(credentials))
+        return status.model_copy(deep=True)
+
+    def upsert_account_credentials(
+        self,
+        household_id: UUID,
+        provider_id: str,
+        auth_mode: str,
+        credentials: dict[str, Any],
+        *,
+        account_id: str | None = None,
+        account_label: str | None = None,
+        expires_at: datetime | None = None,
+        actor_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        add_account: bool = False,
+    ) -> ConnectorStatus:
+        return self.save_connection(
+            household_id=household_id,
+            provider_id=provider_id,
+            auth_mode=auth_mode,
+            credentials=credentials,
+            expires_at=expires_at,
+            actor_id=actor_id,
+            metadata=metadata,
+            account_id=account_id,
+            account_label=account_label,
+            add_account=add_account,
+        )
+
+    upsert_credentials = upsert_account_credentials
+
+    def update_account_metadata(
+        self,
+        household_id: UUID,
+        provider_id: str,
+        account_id: str,
+        metadata_updates: dict[str, Any],
+        *,
+        remove_keys: tuple[str, ...] = (),
+    ) -> None:
+        cleaned_id = _normalize_account_id(account_id)
+        if not cleaned_id:
+            return
+        key = (household_id, provider_id, cleaned_id)
+        entry = self._records.get(key)
+        if entry is None:
+            return
+        status, payload = entry
+        merged = dict(status.metadata)
+        for k in remove_keys:
+            merged.pop(k, None)
+        merged.update(metadata_updates)
+        updated = status.model_copy(update={"metadata": merged, "updated_at": datetime.now(UTC)})
+        self._records[key] = (updated, payload)
+
+    def _matching_entries(
+        self, household_id: UUID, provider_id: str, account_id: str | None = None
+    ) -> list[tuple[ConnectorStatus, str | dict[str, Any]]]:
+        cleaned_id = _normalize_account_id(account_id)
+        items = [
+            entry
+            for (hid, pid, aid), entry in self._records.items()
+            if hid == household_id
+            and pid == provider_id
+            and (cleaned_id is None or aid == cleaned_id)
+        ]
+        items.sort(
+            key=lambda item: (
+                0 if item[0].account_id == DEFAULT_ACCOUNT_ID else 1,
+                item[0].created_at,
+                item[0].account_id,
+            )
+        )
+        return items
+
+    def get_connection_metadata(
+        self,
+        household_id: UUID,
+        provider_id: str,
+        account_id: str | None = None,
+    ) -> ConnectorStatus | None:
+        items = self._matching_entries(household_id, provider_id, account_id=account_id)
+        return items[0][0].model_copy(deep=True) if items else None
+
+    def get_credentials(
+        self,
+        household_id: UUID,
+        provider_id: str,
+        account_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        items = self._matching_entries(household_id, provider_id, account_id=account_id)
+        return self._decode(items[0][1]) if items else None
+
+    def delete_connection(
+        self,
+        household_id: UUID,
+        provider_id: str,
+        account_id: str | None = None,
+    ) -> bool:
+        cleaned_id = _normalize_account_id(account_id)
+        keys = [
+            key
+            for key in self._records
+            if key[0] == household_id
+            and key[1] == provider_id
+            and (cleaned_id is None or key[2] == cleaned_id)
+        ]
+        for key in keys:
+            del self._records[key]
+        return bool(keys)
+
+    delete_credentials = delete_connection
+
+    def delete_account_credentials(
+        self,
+        household_id: UUID,
+        provider_id: str,
+        account_id: str,
+    ) -> bool:
+        cleaned_id = _normalize_account_id(account_id)
+        if cleaned_id is None:
+            raise ValueError("account_id must be non-empty")
+        return self.delete_connection(household_id, provider_id, account_id=cleaned_id)
+
+    def list_credentials(
+        self,
+        household_id: UUID,
+        provider_id: str | None = None,
+    ) -> list[ConnectorStatus]:
+        items = [
+            entry[0].model_copy(deep=True)
+            for (hid, pid, _), entry in self._records.items()
+            if hid == household_id and (provider_id is None or pid == provider_id)
+        ]
+        items.sort(
+            key=lambda s: (
+                s.provider_id,
+                0 if s.account_id == DEFAULT_ACCOUNT_ID else 1,
+                s.created_at,
+                s.account_id,
+            )
+        )
+        return items
+
+    def lock_connection_credentials(
+        self,
+        connection: Any,
+        household_id: UUID,
+        provider_id: str,
+        account_id: str | None = None,
+    ) -> tuple[datetime, datetime | None, dict[str, Any]] | None:
+        del connection
+        items = self._matching_entries(household_id, provider_id, account_id=account_id)
+        if not items:
+            return None
+        status, payload = items[0]
+        return status.updated_at, status.expires_at, self._decode(payload)

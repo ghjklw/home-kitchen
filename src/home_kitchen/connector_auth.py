@@ -28,7 +28,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 if TYPE_CHECKING:
-    from home_kitchen.connector_store import ConnectorStore
+    from home_kitchen.connector_ports import ConnectorCredentialPort
     from home_kitchen.integrations import IntegrationInfo, IntegrationRegistry
     from home_kitchen.settings import Settings
 
@@ -305,7 +305,7 @@ def parse_oauth_code_and_state(
 class ConnectorAuthService:
     def __init__(
         self,
-        store: ConnectorStore,
+        store: ConnectorCredentialPort,
         integrations: IntegrationRegistry,
         household_id: UUID | str,
         *,

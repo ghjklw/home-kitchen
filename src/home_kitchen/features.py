@@ -17,7 +17,11 @@ from home_kitchen.basket.adapters import (
 from home_kitchen.basket.jobs import BasketMatchJobs
 from home_kitchen.basket.matching import BasketMatchingService, OdaSearchAdapter
 from home_kitchen.bootstrap import (
+    create_connector_store,
+    create_cookidoo_plan_sync_service,
     create_inventory_service,
+    create_oda_service,
+    create_purchase_sync_service,
     create_store_trip_service,
     create_trip_completion_service,
 )
@@ -33,9 +37,7 @@ from home_kitchen.catalogue.service import FoodCatalogueService
 from home_kitchen.catalogue.sku_repository import PostgresCatalogueSkuRepository
 from home_kitchen.catalogue.sku_service import CatalogueSkuService
 from home_kitchen.connector_auth import ConnectorAuthService
-from home_kitchen.connector_store import ConnectorStore, resolve_connector_cipher
 from home_kitchen.context import PurchaseHistoryContext, history_context
-from home_kitchen.cookidoo_plan_sync import CookidooPlanSyncService
 from home_kitchen.cookidoo_recipes import CookidooCollectionProvider
 from home_kitchen.history import HistoryEntryCreate, HistoryRepository
 from home_kitchen.home_assistant import (
@@ -59,10 +61,9 @@ from home_kitchen.integrations import (
     TrumfIntegration,
 )
 from home_kitchen.models import RecipeCreate, ShoppingItem, ShoppingItemCreate
-from home_kitchen.oda import OdaService
 from home_kitchen.oda.cart import OdaCartService
 from home_kitchen.planning import create_planning_proposal_service
-from home_kitchen.purchase_sync import ProviderAdapter, PurchaseHistorySyncService
+from home_kitchen.purchase_sync import ProviderAdapter
 from home_kitchen.purchasing import InStoreMode, OdaMode, PurchaseModes
 from home_kitchen.recipe_feedback import RecipeFeedbackService
 from home_kitchen.recipes import (
@@ -154,11 +155,9 @@ class KitchenFeatures:
         )
         self.history = HistoryRepository(kitchen.store.engine)
         self.recipe_feedback = RecipeFeedbackService(kitchen, self.history)
-        self.oda = OdaService(kitchen.store.engine, settings)
+        self.oda = create_oda_service(kitchen.store.engine, settings)
         self.oda_cart = OdaCartService(self.oda)
-        self.connector_store = ConnectorStore(
-            kitchen.store.engine, resolve_connector_cipher(settings)
-        )
+        self.connector_store = create_connector_store(kitchen.store.engine, settings)
         self.integrations = IntegrationRegistry(
             [
                 OdaIntegration(self.oda),
@@ -217,7 +216,7 @@ class KitchenFeatures:
             self.inventory, self.history, engine=kitchen.store.engine
         )
         self.purchase_modes = PurchaseModes([OdaMode(self.oda), InStoreMode()])
-        self.purchase_sync = PurchaseHistorySyncService(
+        self.purchase_sync = create_purchase_sync_service(
             engine=kitchen.store.engine,
             settings=settings,
             oda_service=self.oda,
@@ -242,7 +241,7 @@ class KitchenFeatures:
                 "cookidoo": cookidoo_provider,
             },
         )
-        self.cookidoo_plan_sync = CookidooPlanSyncService(
+        self.cookidoo_plan_sync = create_cookidoo_plan_sync_service(
             kitchen,
             self.history,
             self.connector_store,
@@ -271,7 +270,10 @@ class KitchenFeatures:
 
     def purchase_history_context(self, *, limit: int = 25) -> PurchaseHistoryContext:
         sync_svc = getattr(self, "purchase_sync", None)
-        if sync_svc is None or getattr(sync_svc, "engine", None) is None:
+        if sync_svc is None or (
+            getattr(sync_svc, "engine", None) is None
+            and getattr(sync_svc, "_order_store", None) is None
+        ):
             return PurchaseHistoryContext()
         get_ctx = getattr(sync_svc, "get_bought_before_context", None)
         if callable(get_ctx):

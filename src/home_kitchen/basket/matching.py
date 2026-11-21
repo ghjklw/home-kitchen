@@ -45,7 +45,7 @@ SEARCH_CACHE_TTL = timedelta(minutes=5)
 SEARCH_EMPTY_CACHE_TTL = timedelta(seconds=20)
 SEARCH_CACHE_MAX_ENTRIES = 512
 ODA_QUERY_BATCH_SIZE = 5
-SEARCH_CACHE_VERSION = 2
+SEARCH_CACHE_VERSION = 3
 # Search-only expansions for legacy aliases not yet covered by the reviewed
 # identity table. These never establish product compatibility.
 _LEGACY_SEARCH_EXPANSIONS = {
@@ -158,9 +158,11 @@ _TRAILING_FORM_QUALIFIER = re.compile(
     re.I,
 )
 _RECIPE_INSTRUCTION_SUFFIX = re.compile(
-    r"(?:,\s*|\s+)(?:plus\s+extra\s+for\s+greasing|for\s+greasing|for\s+dusting|"
+    r"(?:,\s*|\s+)(?:plus\s+extra\s+for\s+(?:greasing|dusting|brushing|frying|serving)|"
+    r"for\s+(?:greasing|dusting|brushing|frying|serving)(?:\s+(?:the\s+)?(?:pan|tin|dish|mold|mould|bowl))?|"
     r"separated|to\s+taste|as\s+needed|at\s+room\s+temperature|room\s+temperature|"
-    r"melted|softened|divided|beaten)\s*$",
+    r"melted\s+and\s+cooled|softened\s+and\s+cubed|melted|softened|divided|"
+    r"(?:lightly|well)\s+beaten|beaten|sifted|chilled|cubed|cut\s+into\s+(?:cubes|pieces))\s*$",
     re.I,
 )
 
@@ -193,6 +195,12 @@ _IDENTITY_FAMILIES = (
         (
             ("almond", r"\b(?:almond flour|mandelmel)\b"),
             ("oat", r"\b(?:oat flour|havremel)\b"),
+            (
+                "other",
+                r"\b(?:rugmel|rye flour|speltmel|spelt flour|maismel|corn\s*flour|cornmeal|"
+                r"potetmel|potato\s*(?:flour|starch)|kokosmel|coconut flour|rismel|rice flour|"
+                r"kikertmel|chickpea flour|bokhvetemel|boghvetemel|buckwheat flour|soyamel|soy flour)\b",
+            ),
             ("wheat", r"\b(?:hvetemel|wheat flour|all[- ]purpose flour|plain flour)\b"),
             ("unspecified", r"\bflour\b"),
         ),
@@ -212,9 +220,13 @@ _IDENTITY_FAMILIES = (
         (
             (
                 "large",
-                r"\b(?:egg|eggs)\b.*\b(?:large|store|size L|xl|m/l)\b|\b(?:large|store|xl|m/l)\b.*\b(?:egg|eggs)\b",
+                r"\b(?:egg|eggs)\b.*\b(?:large|store|size\s*l|str\.?\s*l|xl|m/l|(?<!\d\s)(?<!\d)l)\b|"
+                r"\b(?:large|store|xl|m/l)\b.*\b(?:egg|eggs)\b",
             ),
-            ("medium", r"\b(?:egg|eggs)\b.*\b(?:medium|size M)\b"),
+            (
+                "medium",
+                r"\b(?:egg|eggs)\b.*\b(?:medium|size\s*m|str\.?\s*m|(?<!\d\s)(?<!\d)m)\b",
+            ),
             ("unspecified", r"\b(?:egg|eggs)\b"),
         ),
         ("large", "medium", "unspecified"),
@@ -410,11 +422,18 @@ _IDENTITY_FAMILIES = (
             ("chicken thigh", "thigh", "kyllinglår"),
             ("chicken thighs", "thigh", "kyllinglår"),
             ("kyllingfilet", "breast", None),
+            ("kyllingbryst", "breast", None),
+            ("kyllingbrystfilet", "breast", None),
             ("kyllinglår", "thigh", None),
         ),
         (
-            ("breast", r"\b(?:chicken breast|chicken breasts|kyllingfilet)\b"),
-            ("thigh", r"\b(?:chicken thigh|chicken thighs|kyllinglår)\b"),
+            ("breast", r"\b(?:chicken breasts?|kylling(?:filet|bryst(?:filet)?))\b"),
+            ("thigh", r"\b(?:chicken thighs?|kyllinglår)\b"),
+            (
+                "other",
+                r"\b(?:kylling(?:kjøttdeig|vinger|buljong|postei|salat|suppe|nuggets|pølse)|"
+                r"chicken\s+(?:wings?|nuggets?|stock|broth|bouillon|sausage|mince))\b",
+            ),
         ),
         ("breast", "thigh"),
         20,
@@ -432,7 +451,12 @@ _IDENTITY_FAMILIES = (
     _IdentityFamily(
         "chocolate",
         (),
-        (("unspecified", r"\b(?:chocolate|sjokolade|melkesjokolade)\b|\britter\s*sport\b"),),
+        (
+            (
+                "unspecified",
+                r"\b(?:chocolate|sjokolade|melkesjokolade|kinderegg|påskeegg|sjokoladeegg|marsipanegg)\b|\britter\s*sport\b",
+            ),
+        ),
         (),
         100,
     ),
@@ -442,7 +466,14 @@ _IDENTITY_FAMILIES = (
         (
             (
                 "unspecified",
-                r"\b(?:shower\s+(?:gel|oil|cream|wash)|oil\s+shower|dusj(?:gel[eé]|olje|såpe)|body\s+wash|shampoo|såpe|soap|lotion|nivea)\b|(?=.*\bshower\b)(?=.*\b(?:oil|gel|wash|body|bath|care|nivea)\b)",
+                r"\b(?:shower\s+(?:gel|oil|cream|wash)|oil\s+shower|dusj(?:gel[eé]|olje|såpe|krem)|"
+                r"body\s+(?:wash|oil|butter|cream|lotion)|shea\s+butter|"
+                r"baby\s*oil|babyolje|bath\s+oil|badeolje|hair\s+oil|hårolje|"
+                r"massage\s+oil|massasjeolje|sun\s+oil|sololje|kroppsolje|ansiktsolje|renseolje|skjeggolje|"
+                r"cleansing\s+oil|bio-oil|hand\s+cream|håndkrem|face\s+cream|ansiktskrem|hudkrem|kroppskrem|"
+                r"shampoo|sjampo|conditioner|balsam|deodorant|toothpaste|tannkrem|"
+                r"såpe|soap|lotion|nivea|dove|palmolive|rituals|garnier|neutrogena|vaseline|sterilan|lano)\b"
+                r"|(?=.*\b(?:shower|dusj)\b)(?=.*\b(?:oil|olje|gel|wash|body|bath|care|nivea)\b)",
             ),
         ),
         (),
@@ -468,7 +499,9 @@ _IDENTITY_FAMILIES = (
         (
             (
                 "unspecified",
-                r"\b(?:nicotine|nikotin|tobacco|tobakk|snus|all[\s-]+white|allwhite|super[\s-]+white|helhvit|porsjonssnus)\b|\b(?:loop|zyn|epok|velo)\b",
+                r"\b(?:nicotine|nikotin|nikotinposer|tobacco|tobakk|tobakksfri|tobaksfri|snus|"
+                r"all[\s-]+white|allwhite|super[\s-]+white|helhvit|porsjonssnus|nicotine\s+pouch(?:es)?)\b|"
+                r"\b(?:loop|zyn|epok|velo|skruf|lundgrens|xqs|white\s+fox)\b",
             ),
         ),
         (),
@@ -477,12 +510,35 @@ _IDENTITY_FAMILIES = (
     _IdentityFamily(
         "produce-box", (), (("unspecified", r"\b(?:fruit\s+(?:box|basket)|fruktkasse)\b"),), (), 100
     ),
-    _IdentityFamily("tonic", (), (("unspecified", r"\b(?:tonic|tonic water)\b"),), (), 100),
+    _IdentityFamily(
+        "tonic",
+        (),
+        (
+            (
+                "unspecified",
+                r"\b(?:tonic(?:\s+water)?|farris(?:\s+bris)?|imsdal|bonaqua|raml[oö]sa|"
+                r"mineralvann|kullsyrevann|sparkling\s+water|mineral\s+water|"
+                r"coconut\s+water|kokosvann|micellar\s+water|rose\s+water|schweppes)\b",
+            ),
+        ),
+        (),
+        100,
+    ),
     _IdentityFamily(
         "licorice", (), (("unspecified", r"\b(?:lakris|licorice|liquorice)\b"),), (), 100
     ),
     _IdentityFamily(
-        "peanut-butter", (), (("unspecified", r"\b(?:peanut butter|peanøttsmør)\b"),), (), 100
+        "peanut-butter",
+        (),
+        (
+            (
+                "unspecified",
+                r"\b(?:(?:peanut|almond|cashew|hazelnut)\s*butter|"
+                r"(?:peanøtt|mandel|cashew|hasselnøtt)smør|cocoa\s*butter|kakaosmør)\b",
+            ),
+        ),
+        (),
+        100,
     ),
     _IdentityFamily(
         "vanilla-ice-cream",
@@ -512,7 +568,19 @@ _IDENTITY_FAMILIES = (
         (),
         100,
     ),
-    _IdentityFamily("pasta", (), (("unspecified", r"\b(?:pasta|spaghetti|linguine)\b"),), (), 80),
+    _IdentityFamily(
+        "pasta",
+        (),
+        (
+            (
+                "unspecified",
+                r"\b(?:pasta|spaghetti|linguine|penne|fusilli|macaroni|makaroni|"
+                r"tagliatelle|lasagne(?:plater)?|eggnudler|nudler|noodles|gnocchi)\b",
+            ),
+        ),
+        (),
+        80,
+    ),
     _IdentityFamily(
         "flour-mix",
         (),
@@ -526,7 +594,38 @@ _IDENTITY_FAMILIES = (
         (
             (
                 "unspecified",
-                r"\b(?:pepperkakedeig|cookie\s+dough|gingerbread\s+dough|deig)\b",
+                r"\b(?:[a-zæøå]*deig|cookie\s+dough|gingerbread\s+dough)\b",
+            ),
+        ),
+        (),
+        100,
+    ),
+    _IdentityFamily(
+        "baked-goods",
+        (),
+        (("unspecified", r"\b(?:pepperkaker|gingerbread|kakebunn|pizzabunn)\b"),),
+        (),
+        100,
+    ),
+    _IdentityFamily(
+        "cleaning",
+        (),
+        (
+            (
+                "unspecified",
+                r"\b(?:vaskepulver|oppvaskpulver|washing\s+powder|detergent|allrent|rengjøring|tøyvask|skyllemiddel)\b",
+            ),
+        ),
+        (),
+        100,
+    ),
+    _IdentityFamily(
+        "seasoning-broth",
+        (),
+        (
+            (
+                "unspecified",
+                r"\b(?:seasoning|spice\s*mix|krydderblanding|marinade|buljong|bouillon|eggelikør)\b",
             ),
         ),
         (),
@@ -550,7 +649,9 @@ _PRODUCT_IDENTITIES = tuple(
     for variant, pattern in family.products
 )
 _EXPLICIT_MANUAL_INTENT = re.compile(
-    r"\b(?:shower\s+(?:gel|oil)|dusjgel[eé]|body\s+wash|dish\s+soap|coffee\s+mate|peanut\s+butter|peanøttsmør)\b",
+    r"\b(?:shower\s+(?:gel|oil)|dusj(?:gel[eé]|olje|såpe)|body\s+(?:wash|oil|butter)|"
+    r"babyolje|hair\s+oil|shampoo|sjampo|lotion|dish\s+soap|coffee\s+mate|"
+    r"peanut\s+butter|peanøttsmør)\b",
     re.I,
 )
 _ALLOWED_QUERY_QUALIFIERS = frozenset(
@@ -578,6 +679,12 @@ _ALLOWED_QUERY_QUALIFIERS = frozenset(
         "softened",
         "divided",
         "beaten",
+        "lightly",
+        "well",
+        "sifted",
+        "chilled",
+        "cubed",
+        "cooled",
     }
 )
 
@@ -841,34 +948,43 @@ class OdaSearchAdapter:
         self, actor_id: str, queries: list[str], page: int, size: int
     ) -> list[ProviderSearchGroup]:
         expanded_by_query = {query: _query_expansions(query) for query in queries}
-        provider_queries = list(
-            dict.fromkeys(expanded for query in queries for expanded in expanded_by_query[query])
-        )
+        seen_provider_queries: set[str] = set()
+        provider_queries: list[str] = []
+        for query in queries:
+            for expanded in expanded_by_query[query]:
+                normalized_expanded = " ".join(expanded.casefold().split())
+                if normalized_expanded not in seen_provider_queries:
+                    seen_provider_queries.add(normalized_expanded)
+                    provider_queries.append(expanded)
         response = OdaSearchResponse.model_validate(
             await self.service.search_products(actor_id, provider_queries, page, size)
         )
-        groups = {}
+        groups: dict[str, tuple[bool, list[ProviderProduct]]] = {}
         for group in response.result:
-            groups[" ".join(group.query.casefold().split())] = (
-                group.has_more,
-                [
-                    ProviderProduct(
-                        provider="oda",
-                        product_id=str(product.id),
-                        name=product.name,
-                        description=product.description,
-                        brand=product.brand,
-                        product_url=product.url,
-                        price=product.price,
-                        unit_price=product.unit_price,
-                        unit_name=product.unit_name,
-                        available=(
-                            product.availability.is_available if product.availability else None
-                        ),
-                    )
-                    for product in group.products
-                ],
-            )
+            normalized_group_query = " ".join(group.query.casefold().split())
+            products = [
+                ProviderProduct(
+                    provider="oda",
+                    product_id=str(product.id),
+                    name=product.name,
+                    description=product.description,
+                    brand=product.brand,
+                    product_url=product.url,
+                    price=product.price,
+                    unit_price=product.unit_price,
+                    unit_name=product.unit_name,
+                    available=(product.availability.is_available if product.availability else None),
+                )
+                for product in group.products
+            ]
+            if normalized_group_query in groups:
+                prev_has_more, prev_products = groups[normalized_group_query]
+                groups[normalized_group_query] = (
+                    prev_has_more or group.has_more,
+                    prev_products + products,
+                )
+            else:
+                groups[normalized_group_query] = (group.has_more, products)
 
         result = []
         for query in queries:
@@ -1339,7 +1455,21 @@ class BasketMatchingService:
                     except Exception:
                         correction_citations = []
 
-                filtered_products = [p for p in group.products if p.product_id not in excluded_ids]
+                effective_query = effective_queries[current_index]
+                if " ".join(group.query.casefold().split()) != " ".join(
+                    effective_query.casefold().split()
+                ):
+                    results[current_index].status = "search_unavailable"
+                    results[
+                        current_index
+                    ].detail = "The provider returned a result group for a different query."
+                    return
+                filtered_products = [
+                    p
+                    for p in group.products
+                    if p.product_id not in excluded_ids
+                    and _identity_status(effective_query, p) is not None
+                ]
                 if preferred_ids:
                     rank_map = {pid: idx for idx, pid in enumerate(preferred_ids)}
                     filtered_products.sort(

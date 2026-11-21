@@ -395,3 +395,43 @@ test("main shopping list keeps item rows compact without full inline match cards
   flourButton.action();
   assert.equal(fixture.openedReviewTarget(), "need-flour");
 });
+
+test("issue 135: compact shopping row does not present unverified candidates as product suggestions", () => {
+  const fixture = renderFixture({
+    oda: { configured: true, connected: true },
+    shoppingGrouping: "category",
+    household: { shopping_category_order: ["Tørrvarer"] },
+    storeTrip: {
+      lines: [
+        { id: "need-water", name: "Hot water", to_buy_quantity: "200", unit: "ml", category: "Tørrvarer", checked: false, origins: ["meal:meal-1"] },
+      ],
+      checked_count: 0,
+      total_count: 1,
+      unquantified: [],
+    },
+    basket: {
+      needs: [
+        { need: { id: "need-water", name: "Hot water", unit: "ml" }, selections: [] },
+      ],
+    },
+    basketMatchPages: {
+      "need-water": {
+        1: {
+          match_job_id: "job-1",
+          status: "matched",
+          candidates: [
+            { id: "c-unv", name: "Uavklart produkt", recommended_packages: 1, identity_status: "unverified", available: true },
+          ],
+        },
+      },
+    },
+  });
+
+  const groups = fixture.main.children.filter((node) => node.className.includes("actionable-shopping-group"));
+  const row = groups[0].children[1].children[0];
+  assert.doesNotMatch(row.text, /Forslag:/u);
+  assert.match(row.text, /Må bekreftes/u);
+  const btn = row.find((n) => n.tagName === "button" && n.textContent === "Se over");
+  assert.ok(btn);
+  assert.doesNotMatch(btn.attributes["aria-label"], /produktforslag/u);
+});

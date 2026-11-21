@@ -22,16 +22,22 @@ from starlette.concurrency import run_in_threadpool
 
 from home_kitchen.basket import BasketReview, SelectedProduct
 from home_kitchen.basket.application import (
+    AvailabilityRefreshItemInput,
+    AvailabilityRefreshValidationError,
     BatchSelectionInput,
     BatchSelectionValidationError,
+    select_basket_product,
     select_basket_products_batch,
+)
+from home_kitchen.basket.application import (
+    refresh_basket_availability as refresh_basket_availability_use_case,
 )
 from home_kitchen.basket.jobs import (
     BackgroundMatchingHealth,
     BasketAvailabilityRefreshResult,
     BasketMatchJob,
 )
-from home_kitchen.basket.matching import AvailabilityTarget, BasketMatchResult
+from home_kitchen.basket.matching import BasketMatchResult
 from home_kitchen.basket.repository import BasketService
 from home_kitchen.catalogue.identity import (
     AliasCorrectionInput,
@@ -204,15 +210,6 @@ class NeedMatchRetryRequest(BaseModel):
         if not cleaned:
             raise ValueError("Search query cannot be blank")
         return cleaned
-
-
-class AvailabilityRefreshItemInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    need_id: UUID
-    candidate_id: str | None = Field(default=None, min_length=1, max_length=200)
-    product_id: str | None = Field(default=None, min_length=1, max_length=200)
-    query: str | None = Field(default=None, max_length=200)
 
 
 class BasketAvailabilityRefreshRequest(BaseModel):
@@ -1467,7 +1464,16 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
 
     @router.put("/basket/selections")
     def select_product(data: BasketSelectionRequest) -> BasketReview:
-        return basket.select(data.start, data.end, data.selection)
+        try:
+            return select_basket_product(
+                basket,
+                start=data.start,
+                end=data.end,
+                selection=data.selection,
+                channel="api",
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
 
     @router.put("/basket/selections/batch")
     async def select_products_batch(
@@ -1501,66 +1507,18 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
     ) -> BasketAvailabilityRefreshResult:
         actor = authenticated_actor(request)
         response.headers["Cache-Control"] = "no-store"
-        if data.end < data.start:
-            raise HTTPException(422, "end date must be on or after start date")
         try:
-            if data.job_id is not None:
-                references = [
-                    (item.need_id, item.candidate_id)
-                    for item in (data.items or [])
-                    if item.candidate_id
-                ]
-                if not references:
-                    raise HTTPException(
-                        422, "Select at least one candidate to refresh availability"
-                    )
-                return await features.basket_jobs.refresh_candidate_availability(
-                    actor, data.job_id, data.start, data.end, references
-                )
-
-            review = await run_in_threadpool(basket.review, data.start, data.end)
-            requested_items = data.items or []
-            requested_pairs = {
-                (item.need_id, item.product_id)
-                for item in requested_items
-                if item.product_id is not None
-            }
-            requested_needs = {item.need_id for item in requested_items if item.product_id is None}
-            query_by_pair = {
-                (item.need_id, item.product_id): item.query
-                for item in requested_items
-                if item.product_id is not None and item.query
-            }
-            query_by_need = {item.need_id: item.query for item in requested_items if item.query}
-            targets: list[AvailabilityTarget] = []
-            for entry in review.needs:
-                for selection in entry.selections:
-                    product = selection.product
-                    if product.provider != "oda":
-                        continue
-                    if requested_items and (
-                        (entry.need.id, product.product_id) not in requested_pairs
-                        and entry.need.id not in requested_needs
-                    ):
-                        continue
-                    targets.append(
-                        AvailabilityTarget(
-                            need_id=entry.need.id,
-                            need_name=entry.need.name,
-                            provider=product.provider,
-                            product_id=product.product_id,
-                            product_name=product.name,
-                            packages=selection.packages,
-                            previous_available=product.available,
-                            previous_price=str(product.price)
-                            if product.price is not None
-                            else None,
-                            search_query=query_by_pair.get((entry.need.id, product.product_id))
-                            or query_by_need.get(entry.need.id)
-                            or product.name,
-                        )
-                    )
-            return await features.basket_jobs.refresh_targets_availability(actor, targets)
+            return await refresh_basket_availability_use_case(
+                basket,
+                features.basket_jobs,
+                start=data.start,
+                end=data.end,
+                actor_id=actor,
+                job_id=data.job_id,
+                items=data.items,
+            )
+        except AvailabilityRefreshValidationError as exc:
+            raise HTTPException(422, str(exc)) from None
         except KeyError:
             raise HTTPException(404, "Product match job not found") from None
         except OdaError as exc:

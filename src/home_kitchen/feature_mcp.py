@@ -13,7 +13,11 @@ from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, Field
 
 from home_kitchen.basket import BasketReview, SelectedProduct
-from home_kitchen.basket.application import BatchSelectionInput, select_basket_products_batch
+from home_kitchen.basket.application import (
+    BatchSelectionInput,
+    select_basket_product,
+    select_basket_products_batch,
+)
 from home_kitchen.basket.jobs import BasketMatchJob
 from home_kitchen.basket.matching import BasketMatchResult
 from home_kitchen.basket.repository import BasketService
@@ -685,7 +689,16 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
         information remains unverified until checked by an authenticated provider adapter.
         Ask before substitutions. Payment is always reviewed in Oda.
         """
-        return basket.select(start, end, selection, channel="mcp")
+        try:
+            return select_basket_product(
+                basket,
+                start=start,
+                end=end,
+                selection=selection,
+                channel="mcp",
+            )
+        except ValueError as exc:
+            raise ToolError(str(exc)) from None
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True})
     def remove_basket_product(

@@ -41,6 +41,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 
 _LOG = logging.getLogger(__name__)
+DEFAULT_PURCHASE_SYNC_INTERVAL_SECONDS = 300.0
 metadata = MetaData()
 provider_order_sources = Table(
     "provider_order_sources",
@@ -886,17 +887,60 @@ class PurchaseHistorySyncService:
                 )
         return merged
 
-    def _default_provider_metadata(self, provider: str) -> tuple[str, str | None, int | None]:
+    def _connected_store_auth_mode(
+        self, provider: str, account_id: str | None = None
+    ) -> str | None:
+        if (
+            self.connector_store is None
+            or self.household_id is None
+            or provider not in ("rema1000", "coop", "trumf")
+        ):
+            return None
+        store_accounts = self.connector_store.list_credentials(self.household_id, provider)
+        if not store_accounts:
+            return None
+        if account_id is not None:
+            for acc in store_accounts:
+                if acc.account_id == account_id and not acc.is_expired and acc.auth_mode:
+                    return acc.auth_mode
+            for acc in store_accounts:
+                if acc.account_id == account_id and acc.auth_mode:
+                    return acc.auth_mode
+        active = [acc for acc in store_accounts if not acc.is_expired and acc.auth_mode]
+        if active:
+            return active[0].auth_mode
+        return store_accounts[0].auth_mode or None
+
+    def _default_provider_metadata(
+        self, provider: str, account_id: str | None = None
+    ) -> tuple[str, str | None, int | None]:
+        store_auth_mode = self._connected_store_auth_mode(provider, account_id=account_id)
         if provider == "trumf":
-            return (
-                "manual_session_cookie",
-                "Trumf retains at most the last 12 months of purchase history. "
-                "Authentication requires a manual browser session cookie.",
-                12,
-            )
+            auth_mode = store_auth_mode or "manual_session_cookie"
+            if auth_mode == "oauth_pkce":
+                limitations = (
+                    "Trumf retains at most the last 12 months of purchase history. "
+                    "Authenticated via OAuth PKCE."
+                )
+            elif auth_mode == "interactive_otp":
+                limitations = (
+                    "Trumf retains at most the last 12 months of purchase history. "
+                    "Authenticated via interactive OTP."
+                )
+            elif store_auth_mode is not None:
+                limitations = (
+                    "Trumf retains at most the last 12 months of purchase history. "
+                    "Authentication uses a browser session cookie."
+                )
+            else:
+                limitations = (
+                    "Trumf retains at most the last 12 months of purchase history. "
+                    "Authentication requires a manual browser session cookie."
+                )
+            return (auth_mode, limitations, 12)
         if provider == "coop":
             return (
-                "oidc_pkce",
+                store_auth_mode or "oidc_pkce",
                 "Coop purchase history is derived from Android APK 4.17.3 OpenAPI reverse engineering. "
                 "Continuation response schema is undocumented.",
                 None,
@@ -908,18 +952,32 @@ class PurchaseHistorySyncService:
                 None,
             )
         if provider == "rema1000":
-            return (
-                "manual_session_token",
-                "Rema 1000 retains at most the last 24 months of purchase history. "
-                "Authentication requires a manual session token.",
-                24,
-            )
+            auth_mode = store_auth_mode or "manual_session_token"
+            if auth_mode == "oauth_pkce":
+                limitations = (
+                    "Rema 1000 retains at most the last 24 months of purchase history. "
+                    "Authenticated via OAuth PKCE."
+                )
+            elif store_auth_mode is not None:
+                limitations = (
+                    "Rema 1000 retains at most the last 24 months of purchase history. "
+                    "Authentication uses a session token."
+                )
+            else:
+                limitations = (
+                    "Rema 1000 retains at most the last 24 months of purchase history. "
+                    "Authentication requires a manual session token."
+                )
+            return (auth_mode, limitations, 24)
         return ("unknown", None, None)
 
     def get_provider_status(self, provider: str, account_id: str = "default") -> ProviderStatusInfo:
         """Report honest connection, freshness, delays, and coverage for one provider."""
         p = provider.strip().lower()
-        auth_method, default_limitations, retained_months = self._default_provider_metadata(p)
+        store_auth_mode = self._connected_store_auth_mode(p, account_id=account_id)
+        auth_method, default_limitations, retained_months = self._default_provider_metadata(
+            p, account_id=account_id
+        )
         targets = self._resolve_accounts_for_provider(p, account_id)
         store_accounts = (
             self.connector_store.list_credentials(self.household_id, p)
@@ -943,9 +1001,9 @@ class PurchaseHistorySyncService:
             status_fn = getattr(adapter, "status", None)
             if callable(status_fn):
                 adapter_stat = status_fn()
-                if hasattr(adapter_stat, "limitations"):
+                if store_auth_mode is None and hasattr(adapter_stat, "limitations"):
                     limitations = adapter_stat.limitations
-                if hasattr(adapter_stat, "auth_method"):
+                if store_auth_mode is None and hasattr(adapter_stat, "auth_method"):
                     auth_method = str(adapter_stat.auth_method)
                 if hasattr(adapter_stat, "history_window_months"):
                     retained_months = adapter_stat.history_window_months
@@ -1256,3 +1314,32 @@ class PurchaseHistorySyncService:
             total_records_synced=total_synced,
             completed_at=datetime.now(UTC),
         )
+
+    async def sync_forever(
+        self,
+        interval_seconds: float = DEFAULT_PURCHASE_SYNC_INTERVAL_SECONDS,
+        *,
+        account_id: str = "default",
+        max_pages: int = 50,
+    ) -> None:
+        """Periodically sync connected grocery purchase providers in the background."""
+        if interval_seconds <= 0:
+            raise ValueError("interval_seconds must be positive")
+        while True:
+            try:
+                task = asyncio.create_task(
+                    asyncio.to_thread(self.sync, account_id=account_id, max_pages=max_pages)
+                )
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    try:
+                        await task
+                    except Exception:
+                        pass
+                    raise
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _LOG.warning("Background purchase history sync failed; will retry on next run")
+            await asyncio.sleep(interval_seconds)

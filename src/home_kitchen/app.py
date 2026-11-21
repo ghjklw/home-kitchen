@@ -46,6 +46,10 @@ from home_kitchen.models import (
     WeekShopping,
 )
 from home_kitchen.oda_api import oda_router
+from home_kitchen.purchase_sync import (
+    DEFAULT_PURCHASE_SYNC_INTERVAL_SECONDS,
+    PurchaseHistorySyncService,
+)
 from home_kitchen.recipes import RecipeDraftRequest
 from home_kitchen.recommendations import PlanDraft
 from home_kitchen.service import KitchenService
@@ -115,10 +119,25 @@ def create_app(
             refresh_task = asyncio.create_task(
                 connector_auth.refresh_forever(interval=DEFAULT_REFRESH_INTERVAL_SECONDS)
             )
+        purchase_sync = getattr(features, "purchase_sync", None)
+        purchase_sync_task: asyncio.Task[None] | None = None
+        if isinstance(purchase_sync, PurchaseHistorySyncService) and not _is_test_env():
+            sync_interval = getattr(
+                settings,
+                "purchase_sync_interval_seconds",
+                DEFAULT_PURCHASE_SYNC_INTERVAL_SECONDS,
+            )
+            purchase_sync_task = asyncio.create_task(
+                purchase_sync.sync_forever(interval_seconds=sync_interval)
+            )
         try:
             async with mcp_app.lifespan(app):
                 yield
         finally:
+            if purchase_sync_task is not None:
+                purchase_sync_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await purchase_sync_task
             if refresh_task is not None:
                 refresh_task.cancel()
                 with suppress(asyncio.CancelledError):

@@ -13,62 +13,20 @@ import logging
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from datetime import time as dt_time
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, Literal, Protocol
-from uuid import UUID, uuid4
+from uuid import UUID
 
 if TYPE_CHECKING:
-    from home_kitchen.connector_store import ConnectorStore
+    from home_kitchen.connector_ports import ConnectorCredentialPort
     from home_kitchen.context import PurchaseHistoryContext
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
-from sqlalchemy import (
-    JSON,
-    Column,
-    DateTime,
-    MetaData,
-    String,
-    Table,
-    UniqueConstraint,
-    Uuid,
-    and_,
-    inspect,
-    select,
-    update,
-)
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.engine import Engine
 
 _LOG = logging.getLogger(__name__)
 DEFAULT_PURCHASE_SYNC_INTERVAL_SECONDS = 300.0
-metadata = MetaData()
-provider_order_sources = Table(
-    "provider_order_sources",
-    metadata,
-    Column("id", Uuid, primary_key=True),
-    Column("provider", String(100), nullable=False),
-    Column("account_id", String(255), nullable=False),
-    Column("external_id", String(512), nullable=False),
-    Column("revision_id", String(512), nullable=False),
-    Column("source_updated_at", DateTime(timezone=True), nullable=True),
-    Column("observed_at", DateTime(timezone=True), nullable=False),
-    Column("payload", JSON().with_variant(JSONB, "postgresql"), nullable=False),
-    UniqueConstraint(
-        "provider", "account_id", "external_id", "revision_id", name="uq_provider_order_revision"
-    ),
-)
-provider_order_checkpoints = Table(
-    "provider_order_checkpoints",
-    metadata,
-    Column("provider", String(100), primary_key=True),
-    Column("account_id", String(255), primary_key=True),
-    Column("cursor", String(2048), nullable=False),
-    Column("updated_at", DateTime(timezone=True), nullable=False),
-)
 
 
 class CheckpointConflict(RuntimeError):
@@ -161,31 +119,36 @@ class ReceiptMappingPort(Protocol):
     ) -> dict[str, int]: ...
 
 
+class PurchaseOrderStore(Protocol):
+    """Port for durable provider order staging and checkpoint persistence."""
+
+    def get_checkpoint(self, provider: str, account_id: str) -> str | None: ...
+
+    def persist_page(
+        self,
+        provider: str,
+        account_id: str,
+        page: ProviderPage,
+        *,
+        expected_cursor: str | None,
+    ) -> None: ...
+
+    def list_records(self, provider: str | None = None) -> list[dict[str, Any]]: ...
+
+    def list_effective_source_rows(
+        self, provider: str | None = None
+    ) -> Sequence[Mapping[str, Any]]: ...
+
+    def get_provider_freshness_rows(
+        self, provider: str, account_ids: Sequence[str]
+    ) -> tuple[list[datetime | None], Sequence[Mapping[str, Any]]]: ...
+
+
 def _identity(provider: str, account_id: str) -> tuple[str, str]:
     provider, account_id = provider.strip(), account_id.strip()
     if not provider or not account_id:
         raise ValueError("provider and account_id must be non-empty")
     return provider, account_id
-
-
-def _insert(table, dialect: str):
-    if dialect == "postgresql":
-        return pg_insert(table)
-    if dialect == "sqlite":
-        return sqlite_insert(table)
-    raise ValueError(f"unsupported database dialect: {dialect}")
-
-
-def checkpoint(engine: Engine, provider: str, account_id: str) -> str | None:
-    provider, account_id = _identity(provider, account_id)
-    with engine.connect() as connection:
-        row = connection.execute(
-            select(provider_order_checkpoints.c.cursor).where(
-                provider_order_checkpoints.c.provider == provider,
-                provider_order_checkpoints.c.account_id == account_id,
-            )
-        ).first()
-    return row[0] if row else None
 
 
 def _utc(value: datetime | None) -> datetime | None:
@@ -194,43 +157,14 @@ def _utc(value: datetime | None) -> datetime | None:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
-def _persist_record(
-    connection, provider: str, account_id: str, record, observed_at: datetime
-) -> None:
-    payload = record.model_dump(mode="json")["payload"]
-    values = {
-        "id": uuid4(),
-        "provider": provider,
-        "account_id": account_id,
-        "external_id": record.external_id,
-        "revision_id": record.revision_id,
-        "source_updated_at": record.source_updated_at,
-        "observed_at": observed_at,
-        "payload": payload,
-    }
-    identity = [
-        provider_order_sources.c.provider,
-        provider_order_sources.c.account_id,
-        provider_order_sources.c.external_id,
-        provider_order_sources.c.revision_id,
-    ]
-    connection.execute(
-        _insert(provider_order_sources, connection.dialect.name)
-        .values(**values)
-        .on_conflict_do_nothing(index_elements=identity)
-    )
-    existing = connection.execute(
-        select(provider_order_sources.c.source_updated_at, provider_order_sources.c.payload).where(
-            provider_order_sources.c.provider == provider,
-            provider_order_sources.c.account_id == account_id,
-            provider_order_sources.c.external_id == record.external_id,
-            provider_order_sources.c.revision_id == record.revision_id,
-        )
-    ).one()
-    if _utc(existing.source_updated_at) != record.source_updated_at or existing.payload != payload:
-        raise RevisionConflict(
-            "provider revision contents changed; corrections require a new revision_id"
-        )
+def _resolve_order_store(engine_or_store: Any) -> PurchaseOrderStore:
+    if callable(getattr(engine_or_store, "get_checkpoint", None)) and callable(
+        getattr(engine_or_store, "persist_page", None)
+    ):
+        return engine_or_store
+    from home_kitchen.bootstrap import create_purchase_order_store
+
+    return create_purchase_order_store(engine_or_store)
 
 
 def extract_receipt_lines(record: ProviderOrderRecord) -> list[dict[str, Any]]:
@@ -386,88 +320,24 @@ def enrich_and_map_receipt_record(
     return unmapped
 
 
-def persist_page(
-    engine: Engine,
-    provider: str,
-    account_id: str,
-    page: ProviderPage,
-    *,
-    expected_cursor: str | None,
-) -> None:
-    """Atomically persist source revisions and CAS the expected account cursor."""
-    provider, account_id = _identity(provider, account_id)
-    now = datetime.now(UTC)
-    with engine.begin() as connection:
-        # Insert-if-absent plus row lock serializes first use and later updates. The
-        # transaction rollback removes this provisional row if any source write fails.
-        connection.execute(
-            _insert(provider_order_checkpoints, connection.dialect.name)
-            .values(
-                provider=provider,
-                account_id=account_id,
-                cursor=expected_cursor or "",
-                updated_at=now,
-            )
-            .on_conflict_do_nothing(
-                index_elements=[
-                    provider_order_checkpoints.c.provider,
-                    provider_order_checkpoints.c.account_id,
-                ]
-            )
-        )
-        cursor_row = connection.execute(
-            select(provider_order_checkpoints.c.cursor)
-            .where(
-                provider_order_checkpoints.c.provider == provider,
-                provider_order_checkpoints.c.account_id == account_id,
-            )
-            .with_for_update()
-        ).one()
-        if cursor_row.cursor != (expected_cursor or ""):
-            raise CheckpointConflict(
-                "account checkpoint advanced while provider page was in flight"
-            )
-
-        for idx, record in enumerate(page.records):
-            _persist_record(
-                connection,
-                provider,
-                account_id,
-                record,
-                now + timedelta(microseconds=idx),
-            )
-
-        result = connection.execute(
-            update(provider_order_checkpoints)
-            .where(
-                and_(
-                    provider_order_checkpoints.c.provider == provider,
-                    provider_order_checkpoints.c.account_id == account_id,
-                    provider_order_checkpoints.c.cursor == (expected_cursor or ""),
-                )
-            )
-            .values(cursor=page.next_cursor, updated_at=now)
-        )
-        if result.rowcount != 1:
-            raise CheckpointConflict("account checkpoint changed before page commit")
-
-
 def sync_account(
-    engine: Engine,
+    engine_or_store: PurchaseOrderStore | Any,
     provider: str,
     account_id: str,
     adapter: ProviderAdapter,
     *,
     kassal_client: Any | None = None,
+    kassal_client_factory: Callable[[str], Any] | None = None,
     identity_service: ReceiptIdentityResolver | None = None,
     settings: Any | None = None,
-    connector_store: ConnectorStore | None = None,
+    connector_store: ConnectorCredentialPort | None = None,
     household_id: UUID | None = None,
     on_unmapped_lines: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> int:
     """Fetch pages; terminal-page cursor is saved for the next provider poll."""
     provider, account_id = _identity(provider, account_id)
-    cursor = checkpoint(engine, provider, account_id)
+    order_store = _resolve_order_store(engine_or_store)
+    cursor = order_store.get_checkpoint(provider, account_id)
     seen: set[str | None] = set()
     count = 0
     while cursor not in seen:
@@ -485,14 +355,13 @@ def sync_account(
         if has_eans:
             active_kassal = kassal_client
             if active_kassal is None:
+                api_key: str | None = None
                 if connector_store is not None and household_id is not None:
                     creds = connector_store.get_credentials(household_id, "kassal")
                     if creds and isinstance(creds, dict) and creds.get("api_key"):
-                        from home_kitchen.kassal import KassalClient
-
-                        active_kassal = KassalClient(creds["api_key"])
+                        api_key = str(creds["api_key"])
                 if (
-                    active_kassal is None
+                    api_key is None
                     and settings is not None
                     and getattr(settings, "kassal_api_key", None)
                 ):
@@ -503,13 +372,18 @@ def sync_account(
                         else str(s_key)
                     )
                     if clean_k.strip():
-                        from home_kitchen.kassal import KassalClient
+                        api_key = clean_k.strip()
+                if api_key is not None:
+                    if kassal_client_factory is not None:
+                        active_kassal = kassal_client_factory(api_key)
+                    else:
+                        from home_kitchen.bootstrap import create_kassal_client
 
-                        active_kassal = KassalClient(clean_k.strip())
+                        active_kassal = create_kassal_client(api_key)
             if active_kassal is None:
-                from home_kitchen.kassal import KASSAL_MISSING_KEY_ERROR
+                from home_kitchen.bootstrap import missing_kassal_key_error
 
-                raise ValueError(KASSAL_MISSING_KEY_ERROR)
+                raise ValueError(missing_kassal_key_error())
             kassal_client = active_kassal
 
         all_unmapped: list[dict[str, Any]] = []
@@ -518,7 +392,7 @@ def sync_account(
             if unmapped:
                 all_unmapped.extend(unmapped)
 
-        persist_page(engine, provider, account_id, page, expected_cursor=cursor)
+        order_store.persist_page(provider, account_id, page, expected_cursor=cursor)
         count += len(page.records)
 
         if all_unmapped and callable(on_unmapped_lines):
@@ -1251,25 +1125,35 @@ class PurchaseHistorySyncService:
 
     def __init__(
         self,
-        engine: Engine | None = None,
+        engine: Any = None,
         settings: Any = None,
         oda_service: Any = None,
         adapters: dict[str, ProviderAdapter] | None = None,
         *,
-        connector_store: ConnectorStore | None = None,
+        order_store: PurchaseOrderStore | None = None,
+        connector_store: ConnectorCredentialPort | None = None,
         household_id: UUID | None = None,
         adapter_factory: Callable[[str, str, dict[str, Any]], ProviderAdapter | None] | None = None,
+        oda_adapter_factory: Callable[[Any, str], ProviderAdapter] | None = None,
+        kassal_client_factory: Callable[[str], Any] | None = None,
         connector_auth: Any | None = None,
         identity_service: ReceiptIdentityResolver | None = None,
         receipt_mapper: ReceiptMappingPort | None = None,
         kassal_client: Any | None = None,
     ) -> None:
         self.engine = engine
+        self._order_store: PurchaseOrderStore | None = (
+            order_store
+            if order_store is not None
+            else (_resolve_order_store(engine) if engine is not None else None)
+        )
         self.settings = settings
         self.oda_service = oda_service
         self.connector_store = connector_store
         self.household_id = household_id
         self.adapter_factory = adapter_factory
+        self.oda_adapter_factory = oda_adapter_factory
+        self.kassal_client_factory = kassal_client_factory
         self.connector_auth = connector_auth
         self._adapters: dict[str, ProviderAdapter] = dict(adapters or {})
         self._account_adapters: dict[tuple[str, str], ProviderAdapter] = {}
@@ -1450,9 +1334,11 @@ class PurchaseHistorySyncService:
             if getattr(self.oda_service, "configured", False):
                 repo = getattr(self.oda_service, "repository", None)
                 if repo is not None and repo.has_connection(account_id):
-                    from home_kitchen.oda.purchase_history import OdaPurchaseHistoryAdapter
+                    if self.oda_adapter_factory is not None:
+                        return self.oda_adapter_factory(self.oda_service, account_id)
+                    from home_kitchen.bootstrap import create_oda_purchase_adapter
 
-                    return OdaPurchaseHistoryAdapter(self.oda_service, account_id)
+                    return create_oda_purchase_adapter(self.oda_service, account_id)
         return None
 
     def _connected_account_ids(self, provider: str, default_account_id: str) -> list[str]:
@@ -1522,55 +1408,36 @@ class PurchaseHistorySyncService:
         deduplicate_by_external_id: bool = False,
     ) -> list[dict[str, Any]]:
         """Return merged purchase records across all household accounts, deduplicated."""
-        if self.engine is None:
+        if self._order_store is None:
             return []
 
-        query = select(
-            provider_order_sources.c.provider,
-            provider_order_sources.c.account_id,
-            provider_order_sources.c.external_id,
-            provider_order_sources.c.revision_id,
-            provider_order_sources.c.source_updated_at,
-            provider_order_sources.c.observed_at,
-            provider_order_sources.c.payload,
-        )
-        if provider is not None:
-            query = query.where(provider_order_sources.c.provider == provider.strip().lower())
-        query = query.order_by(
-            provider_order_sources.c.observed_at.desc(),
-            provider_order_sources.c.source_updated_at.desc(),
-        )
-
+        rows = self._order_store.list_records(provider=provider)
         merged: list[dict[str, Any]] = []
         seen: set[tuple[str, ...]] = set()
-        with self.engine.connect() as connection:
-            if not inspect(connection).has_table("provider_order_sources"):
-                return []
-            rows = connection.execute(query).mappings().all()
-            for row in rows:
-                key = (
-                    (str(row["provider"]), str(row["external_id"]))
-                    if deduplicate_by_external_id
-                    else (
-                        str(row["provider"]),
-                        str(row["external_id"]),
-                        str(row["revision_id"]),
-                    )
+        for row in rows:
+            key = (
+                (str(row["provider"]), str(row["external_id"]))
+                if deduplicate_by_external_id
+                else (
+                    str(row["provider"]),
+                    str(row["external_id"]),
+                    str(row["revision_id"]),
                 )
-                if key in seen:
-                    continue
-                seen.add(key)
-                merged.append(
-                    {
-                        "provider": str(row["provider"]),
-                        "account_id": str(row["account_id"]),
-                        "external_id": str(row["external_id"]),
-                        "revision_id": str(row["revision_id"]),
-                        "source_updated_at": _utc(row["source_updated_at"]),
-                        "observed_at": _utc(row["observed_at"]),
-                        "payload": row["payload"],
-                    }
-                )
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(
+                {
+                    "provider": str(row["provider"]),
+                    "account_id": str(row["account_id"]),
+                    "external_id": str(row["external_id"]),
+                    "revision_id": str(row["revision_id"]),
+                    "source_updated_at": _utc(row["source_updated_at"]),
+                    "observed_at": _utc(row["observed_at"]),
+                    "payload": row["payload"],
+                }
+            )
         return merged
 
     def get_effective_orders(
@@ -1580,25 +1447,10 @@ class PurchaseHistorySyncService:
         include_inactive: bool = True,
     ) -> list[EffectiveProviderOrder]:
         """Return resolved effective orders/receipts after applying corrections and returns."""
-        if self.engine is None:
+        if self._order_store is None:
             return []
 
-        query = select(
-            provider_order_sources.c.provider,
-            provider_order_sources.c.account_id,
-            provider_order_sources.c.external_id,
-            provider_order_sources.c.revision_id,
-            provider_order_sources.c.source_updated_at,
-            provider_order_sources.c.observed_at,
-            provider_order_sources.c.payload,
-        )
-        if provider is not None:
-            query = query.where(provider_order_sources.c.provider == provider.strip().lower())
-
-        with self.engine.connect() as connection:
-            if not inspect(connection).has_table("provider_order_sources"):
-                return []
-            rows = connection.execute(query).mappings().all()
+        rows = self._order_store.list_effective_source_rows(provider=provider)
         effective = resolve_effective_orders(rows, provider=provider)
         if include_inactive:
             return effective
@@ -1813,112 +1665,87 @@ class PurchaseHistorySyncService:
         else:
             query_account_ids = [account_id]
 
-        if self.engine is not None:
+        if self._order_store is not None:
             try:
-                with self.engine.connect() as connection:
-                    cp_rows = connection.execute(
-                        select(provider_order_checkpoints.c.updated_at).where(
-                            provider_order_checkpoints.c.provider == p,
-                            provider_order_checkpoints.c.account_id.in_(query_account_ids),
-                        )
-                    ).all()
-                    for cp_row in cp_rows:
-                        if cp_row[0]:
-                            cp_time = _utc(cp_row[0])
-                            if last_sync is None or (cp_time and cp_time > last_sync):
-                                last_sync = cp_time
+                cp_times, all_source_rows = self._order_store.get_provider_freshness_rows(
+                    p, query_account_ids
+                )
+                for cp_time in cp_times:
+                    if cp_time is not None:
+                        norm_cp = _utc(cp_time)
+                        if last_sync is None or (norm_cp and norm_cp > last_sync):
+                            last_sync = norm_cp
 
-                    all_source_rows = (
-                        connection.execute(
-                            select(
-                                provider_order_sources.c.provider,
-                                provider_order_sources.c.account_id,
-                                provider_order_sources.c.external_id,
-                                provider_order_sources.c.revision_id,
-                                provider_order_sources.c.source_updated_at,
-                                provider_order_sources.c.observed_at,
-                                provider_order_sources.c.payload,
-                            )
-                            .where(
-                                provider_order_sources.c.provider == p,
-                                provider_order_sources.c.account_id.in_(query_account_ids),
-                            )
-                            .order_by(provider_order_sources.c.observed_at.desc())
-                        )
-                        .mappings()
-                        .all()
+                effective_orders = resolve_effective_orders(all_source_rows, provider=p)
+                total_records = len(effective_orders)
+                correction_count = sum(1 for o in effective_orders if o.is_correction)
+                return_count = sum(1 for o in effective_orders if o.is_return)
+                cancellation_count = sum(1 for o in effective_orders if o.is_cancellation)
+
+                if total_records > 0:
+                    recent_orders = effective_orders[:100]
+
+                    tx_times = [
+                        o.transaction_at for o in recent_orders if o.transaction_at is not None
+                    ]
+
+                    start_tx = min(tx_times) if tx_times else None
+                    end_tx = max(tx_times) if tx_times else None
+                    coverage_window = CoverageWindow(
+                        start=_utc(start_tx),
+                        end=_utc(end_tx),
+                        total_records=total_records,
+                        correction_count=correction_count,
+                        return_count=return_count,
+                        cancellation_count=cancellation_count,
+                        retained_months=retained_months,
+                        description=(
+                            f"Historical coverage for {total_records} {p} order/receipt records."
+                        ),
                     )
 
-                    effective_orders = resolve_effective_orders(all_source_rows, provider=p)
-                    total_records = len(effective_orders)
-                    correction_count = sum(1 for o in effective_orders if o.is_correction)
-                    return_count = sum(1 for o in effective_orders if o.is_return)
-                    cancellation_count = sum(1 for o in effective_orders if o.is_cancellation)
+                    latest_rec = recent_orders[0]
+                    latest_obs = _utc(latest_rec.observed_at)
+                    latest_src = _utc(latest_rec.source_updated_at)
+                    latest_tx = latest_rec.transaction_at
 
-                    if total_records > 0:
-                        recent_orders = effective_orders[:100]
-
-                        tx_times = [
-                            o.transaction_at for o in recent_orders if o.transaction_at is not None
-                        ]
-
-                        start_tx = min(tx_times) if tx_times else None
-                        end_tx = max(tx_times) if tx_times else None
-                        coverage_window = CoverageWindow(
-                            start=_utc(start_tx),
-                            end=_utc(end_tx),
-                            total_records=total_records,
-                            correction_count=correction_count,
-                            return_count=return_count,
-                            cancellation_count=cancellation_count,
-                            retained_months=retained_months,
-                            description=(
-                                f"Historical coverage for {total_records} {p} order/receipt records."
-                            ),
+                    if latest_src is not None and latest_tx is not None:
+                        p_delay = max(0.0, (latest_src - latest_tx).total_seconds())
+                        posting_delay = PostingDelayInfo(
+                            tracked=True,
+                            latest_delay_seconds=round(p_delay, 1),
+                            description=f"Provider posted record {p_delay / 60:.1f} minutes after purchase event.",
+                        )
+                    else:
+                        posting_delay = PostingDelayInfo(
+                            tracked=False,
+                            latest_delay_seconds=None,
+                            description=f"{p.capitalize()} does not report a separate source posting timestamp; posting delay is untracked by provider.",
                         )
 
-                        latest_rec = recent_orders[0]
-                        latest_obs = _utc(latest_rec.observed_at)
-                        latest_src = _utc(latest_rec.source_updated_at)
-                        latest_tx = latest_rec.transaction_at
-
-                        if latest_src is not None and latest_tx is not None:
-                            p_delay = max(0.0, (latest_src - latest_tx).total_seconds())
-                            posting_delay = PostingDelayInfo(
-                                tracked=True,
-                                latest_delay_seconds=round(p_delay, 1),
-                                description=f"Provider posted record {p_delay / 60:.1f} minutes after purchase event.",
-                            )
-                        else:
-                            posting_delay = PostingDelayInfo(
-                                tracked=False,
-                                latest_delay_seconds=None,
-                                description=f"{p.capitalize()} does not report a separate source posting timestamp; posting delay is untracked by provider.",
-                            )
-
-                        if latest_src is not None and latest_obs is not None:
-                            i_delay = max(0.0, (latest_obs - latest_src).total_seconds())
-                            ingestion_delay = IngestionDelayInfo(
-                                tracked=True,
-                                latest_delay_seconds=round(i_delay, 1),
-                                target_latency_minutes=15,
-                                description=f"Kitchen ingested record {i_delay / 60:.1f} minutes after provider record availability.",
-                            )
-                        elif latest_tx is not None and latest_obs is not None:
-                            i_delay = max(0.0, (latest_obs - latest_tx).total_seconds())
-                            ingestion_delay = IngestionDelayInfo(
-                                tracked=True,
-                                latest_delay_seconds=round(i_delay, 1),
-                                target_latency_minutes=15,
-                                description=f"Kitchen ingested record {i_delay / 60:.1f} minutes after purchase event (provider lacks separate posting timestamp).",
-                            )
-                        else:
-                            ingestion_delay = IngestionDelayInfo(
-                                tracked=True,
-                                latest_delay_seconds=None,
-                                target_latency_minutes=15,
-                                description="Ingestion latency tracked via periodic polling.",
-                            )
+                    if latest_src is not None and latest_obs is not None:
+                        i_delay = max(0.0, (latest_obs - latest_src).total_seconds())
+                        ingestion_delay = IngestionDelayInfo(
+                            tracked=True,
+                            latest_delay_seconds=round(i_delay, 1),
+                            target_latency_minutes=15,
+                            description=f"Kitchen ingested record {i_delay / 60:.1f} minutes after provider record availability.",
+                        )
+                    elif latest_tx is not None and latest_obs is not None:
+                        i_delay = max(0.0, (latest_obs - latest_tx).total_seconds())
+                        ingestion_delay = IngestionDelayInfo(
+                            tracked=True,
+                            latest_delay_seconds=round(i_delay, 1),
+                            target_latency_minutes=15,
+                            description=f"Kitchen ingested record {i_delay / 60:.1f} minutes after purchase event (provider lacks separate posting timestamp).",
+                        )
+                    else:
+                        ingestion_delay = IngestionDelayInfo(
+                            tracked=True,
+                            latest_delay_seconds=None,
+                            target_latency_minutes=15,
+                            description="Ingestion latency tracked via periodic polling.",
+                        )
             except Exception as exc:
                 last_error = f"Database read failure: {exc}"
                 status = "error"
@@ -1965,7 +1792,7 @@ class PurchaseHistorySyncService:
             return ProviderSyncResult(
                 provider=p, status="failed", error=f"Unsupported provider: {provider}"
             )
-        if self.engine is None:
+        if self._order_store is None:
             return ProviderSyncResult(
                 provider=p, status="skipped", error="Database engine unavailable"
             )
@@ -1986,16 +1813,16 @@ class PurchaseHistorySyncService:
         had_failure = False
         had_auth_failure = False
 
-        assert self.engine is not None
-        engine = self.engine
+        order_store = self._order_store
 
         def _run_sync(target_account_id: str, active_adapter: ProviderAdapter) -> int:
             return sync_account(
-                engine,
+                order_store,
                 p,
                 target_account_id,
                 active_adapter,
                 kassal_client=self.kassal_client,
+                kassal_client_factory=self.kassal_client_factory,
                 identity_service=self.identity_service,
                 settings=self.settings,
                 connector_store=self.connector_store,
@@ -2034,7 +1861,7 @@ class PurchaseHistorySyncService:
                             active_adapter = rebuilt
                 except Exception as exc:
                     had_failure = True
-                    last_checkpoint = checkpoint(engine, p, target_account_id)
+                    last_checkpoint = order_store.get_checkpoint(p, target_account_id)
                     safe_msg = self._sanitize_account_error(p, target_account_id, exc)
                     errors.append(safe_msg)
                     if self._is_auth_exception(exc):
@@ -2047,13 +1874,13 @@ class PurchaseHistorySyncService:
                 count = _run_sync(target_account_id, active_adapter)
                 total_records += count
                 accounts_synced += 1
-                last_checkpoint = checkpoint(engine, p, target_account_id)
+                last_checkpoint = order_store.get_checkpoint(p, target_account_id)
                 self._clear_account_auth_error(p, target_account_id)
             except IncompleteScanError as exc:
                 had_incomplete = True
                 total_records += getattr(exc, "records_synced", 0)
                 accounts_synced += 1
-                last_checkpoint = checkpoint(engine, p, target_account_id)
+                last_checkpoint = order_store.get_checkpoint(p, target_account_id)
                 errors.append(self._sanitize_account_error(p, target_account_id, exc))
             except Exception as exc:
                 if (
@@ -2075,21 +1902,21 @@ class PurchaseHistorySyncService:
                         count = _run_sync(target_account_id, rebuilt)
                         total_records += count
                         accounts_synced += 1
-                        last_checkpoint = checkpoint(engine, p, target_account_id)
+                        last_checkpoint = order_store.get_checkpoint(p, target_account_id)
                         self._clear_account_auth_error(p, target_account_id)
                         continue
                     except IncompleteScanError as retry_exc:
                         had_incomplete = True
                         total_records += getattr(retry_exc, "records_synced", 0)
                         accounts_synced += 1
-                        last_checkpoint = checkpoint(engine, p, target_account_id)
+                        last_checkpoint = order_store.get_checkpoint(p, target_account_id)
                         errors.append(self._sanitize_account_error(p, target_account_id, retry_exc))
                         continue
                     except Exception as retry_exc:
                         exc = retry_exc
 
                 had_failure = True
-                last_checkpoint = checkpoint(engine, p, target_account_id)
+                last_checkpoint = order_store.get_checkpoint(p, target_account_id)
                 safe_msg = self._sanitize_account_error(p, target_account_id, exc)
                 errors.append(safe_msg)
                 if self._is_auth_exception(exc):
@@ -2179,3 +2006,17 @@ class PurchaseHistorySyncService:
             except Exception:
                 _LOG.warning("Background purchase history sync failed; will retry on next run")
             await asyncio.sleep(interval_seconds)
+
+
+def __getattr__(name: str) -> Any:
+    if name in {
+        "metadata",
+        "provider_order_sources",
+        "provider_order_checkpoints",
+        "checkpoint",
+        "persist_page",
+    }:
+        from home_kitchen import purchase_sync_adapters
+
+        return getattr(purchase_sync_adapters, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

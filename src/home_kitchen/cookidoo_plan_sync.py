@@ -4,28 +4,104 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import AbstractContextManager
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
-from sqlalchemy import insert, select, update
 
-from home_kitchen.connector_store import ConnectorStore
+from home_kitchen.connector_ports import ConnectorCredentialPort
 from home_kitchen.cookidoo_recipes import (
     CookidooCollectionProvider,
     CookidooMyWeekEntry,
-    CookidooRecipeService,
 )
-from home_kitchen.history import HistoryEntryCreate, HistoryRepository
 from home_kitchen.models import Meal, RecipeSource
-from home_kitchen.recipes.adapters.postgres import source_links
 from home_kitchen.recipes.collections import CollectionEntry
-from home_kitchen.service import KitchenService
-from home_kitchen.store import entity_values, meals, recipes
+from home_kitchen.recipes.ports import ExtractedRecipeDraft, GenerationLockableProvider
 
 SyncDirection = Literal["cookidoo_to_kitchen", "kitchen_to_cookidoo"]
+
+
+class CookidooMyWeekProviderPort(GenerationLockableProvider, Protocol):
+    """Port for reading and writing Cookidoo My Week entries with generation fencing."""
+
+    def generation(self, actor_id: str) -> object: ...
+
+    async def get_my_week_plan(
+        self, start: date, end: date, *, resolve_custom_recipes: bool = True
+    ) -> list[CookidooMyWeekEntry]: ...
+
+    async def extract_entry(self, entry: CollectionEntry) -> ExtractedRecipeDraft: ...
+
+    async def add_to_my_week(
+        self,
+        cookidoo_recipe_id: str,
+        scheduled_date: date,
+        *,
+        servings: int = 4,
+        label: str | None = None,
+        entry_id: str | None = None,
+        read_before_write: bool = True,
+    ) -> CookidooMyWeekEntry: ...
+
+
+class CookidooRecipeImporterPort(Protocol):
+    """Port for deduplicating and atomically importing Cookidoo recipes."""
+
+    def check_duplicate(
+        self, entry: CollectionEntry, session: Any = None
+    ) -> tuple[UUID | None, bool]: ...
+
+    def import_recipe_atomic(
+        self, actor_id: str, entry: CollectionEntry, reviewed: bool
+    ) -> tuple[UUID, bool]: ...
+
+
+class CookidooPlanSyncSession(Protocol):
+    """Transactional session for Cookidoo plan sync writes and history recording."""
+
+    def lock_provider_generation(
+        self, provider: GenerationLockableProvider, actor_id: str, generation: object
+    ) -> None: ...
+
+    def add_meal(self, meal: Meal) -> None: ...
+
+    def get_meal(self, meal_id: UUID) -> Meal | None: ...
+
+    def update_meal(self, meal: Meal) -> None: ...
+
+    def record_sync_history(
+        self,
+        *,
+        actor_id: str,
+        direction: str,
+        action: str,
+        meal_id: UUID | None,
+        recipe_id: UUID | None,
+        cookidoo_recipe_id: str,
+        source_url: str,
+        scheduled_date: date,
+        message: str,
+        external_entry_id: str | None = None,
+        include_external_entry_id: bool = False,
+    ) -> None: ...
+
+
+class CookidooPlanSyncUnitOfWork(Protocol):
+    """Port for reading kitchen meal/recipe state and committing Cookidoo sync updates."""
+
+    def load_kitchen_state(
+        self, start: date, end: date
+    ) -> tuple[
+        list[Meal],
+        dict[UUID, dict[str, Any]],
+        dict[UUID, tuple[str, str]],
+        dict[str, UUID],
+    ]: ...
+
+    def session(self) -> AbstractContextManager[CookidooPlanSyncSession]: ...
 
 
 class SyncEditTarget(BaseModel):
@@ -142,28 +218,51 @@ class CookidooPlanSyncService:
 
     def __init__(
         self,
-        kitchen: KitchenService | Any,
-        history: HistoryRepository | Any,
-        store: ConnectorStore,
-        household_id: UUID,
+        uow_or_kitchen: CookidooPlanSyncUnitOfWork | Any,
+        history: Any = None,
+        store: ConnectorCredentialPort | Any | None = None,
+        household_id: UUID | None = None,
         *,
-        provider: CookidooCollectionProvider | None = None,
-        recipe_service: CookidooRecipeService | None = None,
+        provider: CookidooMyWeekProviderPort | Any | None = None,
+        recipe_service: CookidooRecipeImporterPort | Any | None = None,
     ):
-        self.kitchen = kitchen
         self.history = history
         self.store = store
         self.household_id = household_id
-        self.provider = provider or CookidooCollectionProvider(
-            store=store, household_id=household_id
-        )
-        self.recipe_service = recipe_service or CookidooRecipeService(
-            kitchen=kitchen,
-            history=history,
-            store=store,
-            household_id=household_id,
-            collection_provider=self.provider,
-        )
+        if callable(getattr(uow_or_kitchen, "session", None)) and callable(
+            getattr(uow_or_kitchen, "load_kitchen_state", None)
+        ):
+            self._uow: CookidooPlanSyncUnitOfWork = uow_or_kitchen
+            self.kitchen: Any = None
+            if provider is not None:
+                self.provider: CookidooMyWeekProviderPort | Any = provider
+            else:
+                if store is None or household_id is None:
+                    raise ValueError("store and household_id are required when provider is omitted")
+                self.provider = CookidooCollectionProvider(store=store, household_id=household_id)
+            if recipe_service is None:
+                raise ValueError(
+                    "recipe_service is required when bootstrapping CookidooPlanSyncService with a UoW"
+                )
+            self.recipe_service: CookidooRecipeImporterPort | Any = recipe_service
+        else:
+            from home_kitchen.bootstrap import create_cookidoo_plan_sync_deps
+
+            self.kitchen = uow_or_kitchen
+            if store is None or household_id is None:
+                raise ValueError(
+                    "store and household_id are required for legacy CookidooPlanSyncService wiring"
+                )
+            self._uow, default_provider, default_recipe_service = create_cookidoo_plan_sync_deps(
+                uow_or_kitchen,
+                history,
+                store,
+                household_id,
+                provider=provider,
+                recipe_service=recipe_service,
+            )
+            self.provider = default_provider
+            self.recipe_service = default_recipe_service
         self._previews: dict[UUID, _SyncJob] = {}
 
     def _prune(self) -> None:
@@ -195,41 +294,7 @@ class CookidooPlanSyncService:
         dict[UUID, tuple[str, str]],
         dict[str, UUID],
     ]:
-        with self.kitchen.store.engine.connect() as conn:
-            meal_rows = (
-                conn.execute(
-                    select(meals)
-                    .where(meals.c.date >= start, meals.c.date <= end)
-                    .order_by(meals.c.date, meals.c.position)
-                )
-                .mappings()
-                .all()
-            )
-            kitchen_meals = [Meal.model_validate(dict(row)) for row in meal_rows]
-
-            recipe_rows = conn.execute(select(recipes)).mappings().all()
-            recipes_by_id: dict[UUID, dict[str, Any]] = {}
-            for row in recipe_rows:
-                rid = row["id"]
-                rid_uuid = rid if isinstance(rid, UUID) else UUID(str(rid))
-                recipes_by_id[rid_uuid] = dict(row)
-
-            link_rows = (
-                conn.execute(select(source_links).where(source_links.c.provider == "cookidoo"))
-                .mappings()
-                .all()
-            )
-            links_by_recipe: dict[UUID, tuple[str, str]] = {}
-            links_by_ext_id: dict[str, UUID] = {}
-            for row in link_rows:
-                rid = row["recipe_id"]
-                rid_uuid = rid if isinstance(rid, UUID) else UUID(str(rid))
-                ext_id = str(row["external_recipe_id"])
-                src_url = str(row["source_url"])
-                links_by_recipe[rid_uuid] = (ext_id, src_url)
-                links_by_ext_id[ext_id] = rid_uuid
-
-        return kitchen_meals, recipes_by_id, links_by_recipe, links_by_ext_id
+        return self._uow.load_kitchen_state(start, end)
 
     @staticmethod
     def _validate_range(start: date, end: date) -> None:
@@ -687,8 +752,8 @@ class CookidooPlanSyncService:
             ] = await self._resolve_or_import_cookidoo_recipe(actor_id, job, item)
 
         def _commit() -> None:
-            with self.kitchen.store.engine.begin() as connection:
-                self.provider.lock_generation(connection, actor_id, job.generation)
+            with self._uow.session() as session:
+                session.lock_provider_generation(self.provider, actor_id, job.generation)
                 for item in selected_items:
                     recipe_id = resolved_recipes[item.cookidoo_recipe_id]
                     if item.action == "addition":
@@ -699,42 +764,28 @@ class CookidooPlanSyncService:
                             servings=item.servings,
                             label=item.label,
                         )
-                        connection.execute(insert(meals).values(**entity_values(new_meal)))
+                        session.add_meal(new_meal)
                         item.status = "applied"
                         item.applied_meal_id = new_meal.id
                         item.kitchen_recipe_id = recipe_id
-                        self.history.record(
-                            HistoryEntryCreate(
-                                kind="planning",
-                                message="Synkroniserte måltid fra Cookidoo Min uke",
-                                recipe_id=recipe_id,
-                                structured={
-                                    "provider": "cookidoo",
-                                    "direction": "cookidoo_to_kitchen",
-                                    "action": "addition",
-                                    "meal_id": str(new_meal.id),
-                                    "cookidoo_recipe_id": item.cookidoo_recipe_id,
-                                    "source_url": item.source_url,
-                                    "date": item.date.isoformat(),
-                                },
-                            ),
+                        session.record_sync_history(
                             actor_id=actor_id,
-                            connection=connection,
+                            direction="cookidoo_to_kitchen",
+                            action="addition",
+                            meal_id=new_meal.id,
+                            recipe_id=recipe_id,
+                            cookidoo_recipe_id=item.cookidoo_recipe_id,
+                            source_url=item.source_url,
+                            scheduled_date=item.date,
+                            message="Synkroniserte måltid fra Cookidoo Min uke",
                         )
                     else:
                         assert item.kitchen_meal_id is not None
-                        row = (
-                            connection.execute(
-                                select(meals).where(meals.c.id == item.kitchen_meal_id)
-                            )
-                            .mappings()
-                            .first()
-                        )
-                        if row is None:
+                        current = session.get_meal(item.kitchen_meal_id)
+                        if current is None:
                             raise ValueError(
                                 "Måltidet som skulle oppdateres ble fjernet; forhåndsvis på nytt."
                             )
-                        current = Meal.model_validate(dict(row))
                         before = item.before or {}
                         if (
                             current.date.isoformat() != before.get("date")
@@ -752,31 +803,20 @@ class CookidooPlanSyncService:
                             servings=item.servings,
                             label=item.label,
                         )
-                        values = entity_values(updated_meal)
-                        values.pop("id")
-                        connection.execute(
-                            update(meals).where(meals.c.id == item.kitchen_meal_id).values(**values)
-                        )
+                        session.update_meal(updated_meal)
                         item.status = "applied"
                         item.applied_meal_id = item.kitchen_meal_id
                         item.kitchen_recipe_id = recipe_id
-                        self.history.record(
-                            HistoryEntryCreate(
-                                kind="planning",
-                                message="Oppdaterte måltid fra Cookidoo Min uke",
-                                recipe_id=recipe_id,
-                                structured={
-                                    "provider": "cookidoo",
-                                    "direction": "cookidoo_to_kitchen",
-                                    "action": "edit",
-                                    "meal_id": str(item.kitchen_meal_id),
-                                    "cookidoo_recipe_id": item.cookidoo_recipe_id,
-                                    "source_url": item.source_url,
-                                    "date": item.date.isoformat(),
-                                },
-                            ),
+                        session.record_sync_history(
                             actor_id=actor_id,
-                            connection=connection,
+                            direction="cookidoo_to_kitchen",
+                            action="edit",
+                            meal_id=item.kitchen_meal_id,
+                            recipe_id=recipe_id,
+                            cookidoo_recipe_id=item.cookidoo_recipe_id,
+                            source_url=item.source_url,
+                            scheduled_date=item.date,
+                            message="Oppdaterte måltid fra Cookidoo Min uke",
                         )
 
         await asyncio.to_thread(_commit)
@@ -811,29 +851,21 @@ class CookidooPlanSyncService:
             item.applied_external_entry_id = written.external_entry_id
 
         def _record_history() -> None:
-            with self.kitchen.store.engine.begin() as connection:
-                self.provider.lock_generation(connection, actor_id, job.generation)
+            with self._uow.session() as session:
+                session.lock_provider_generation(self.provider, actor_id, job.generation)
                 for item in selected_items:
-                    self.history.record(
-                        HistoryEntryCreate(
-                            kind="planning",
-                            message="Synkroniserte måltid til Cookidoo Min uke",
-                            recipe_id=item.kitchen_recipe_id,
-                            structured={
-                                "provider": "cookidoo",
-                                "direction": "kitchen_to_cookidoo",
-                                "action": item.action,
-                                "meal_id": str(item.kitchen_meal_id)
-                                if item.kitchen_meal_id
-                                else None,
-                                "cookidoo_recipe_id": item.cookidoo_recipe_id,
-                                "source_url": item.source_url,
-                                "date": item.date.isoformat(),
-                                "external_entry_id": item.applied_external_entry_id,
-                            },
-                        ),
+                    session.record_sync_history(
                         actor_id=actor_id,
-                        connection=connection,
+                        direction="kitchen_to_cookidoo",
+                        action=item.action,
+                        meal_id=item.kitchen_meal_id,
+                        recipe_id=item.kitchen_recipe_id,
+                        cookidoo_recipe_id=item.cookidoo_recipe_id,
+                        source_url=item.source_url,
+                        scheduled_date=item.date,
+                        external_entry_id=item.applied_external_entry_id,
+                        include_external_entry_id=True,
+                        message="Synkroniserte måltid til Cookidoo Min uke",
                     )
 
         await asyncio.to_thread(_record_history)

@@ -3,17 +3,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import Any, Literal, Protocol
 from uuid import UUID
 
 from cryptography.fernet import InvalidToken
 from pydantic import BaseModel, Field, model_serializer
 
-from home_kitchen.oda.service import OdaService
-from home_kitchen.settings import Settings
-
-if TYPE_CHECKING:
-    from home_kitchen.connector_store import ConnectorStore
+from home_kitchen.connector_ports import ConnectorCredentialReader, OdaStatusPort
 
 _REFRESHABLE_PROVIDERS = frozenset({"rema1000", "coop", "cookidoo", "trumf"})
 _OAUTH_REFRESH_MODES = frozenset({"oauth_pkce", "oauth_password"})
@@ -104,7 +100,7 @@ class IntegrationRegistry:
 
 
 class OdaIntegration:
-    def __init__(self, oda: OdaService):
+    def __init__(self, oda: OdaStatusPort):
         self.oda = oda
 
     def describe(self, actor_id: str | None) -> IntegrationInfo:
@@ -155,7 +151,7 @@ class OdaIntegration:
 
 
 class AIIntegration:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Any):
         self.settings = settings
 
     def describe(self, actor_id: str | None) -> IntegrationInfo:
@@ -193,7 +189,7 @@ class StoredConnectorIntegration:
         supported_auth_modes: list[str],
         capabilities: list[str],
         detail: str,
-        store: ConnectorStore | None = None,
+        store: ConnectorCredentialReader | None = None,
         household_id: UUID | None = None,
         default_expiry_prompt: str | None = None,
     ):
@@ -388,7 +384,7 @@ class StoredConnectorIntegration:
 class Rema1000Integration(StoredConnectorIntegration):
     def __init__(
         self,
-        store: ConnectorStore | None = None,
+        store: ConnectorCredentialReader | None = None,
         household_id: UUID | None = None,
     ):
         super().__init__(
@@ -406,7 +402,7 @@ class Rema1000Integration(StoredConnectorIntegration):
 class CoopIntegration(StoredConnectorIntegration):
     def __init__(
         self,
-        store: ConnectorStore | None = None,
+        store: ConnectorCredentialReader | None = None,
         household_id: UUID | None = None,
     ):
         super().__init__(
@@ -424,7 +420,7 @@ class CoopIntegration(StoredConnectorIntegration):
 class TrumfIntegration(StoredConnectorIntegration):
     def __init__(
         self,
-        store: ConnectorStore | None = None,
+        store: ConnectorCredentialReader | None = None,
         household_id: UUID | None = None,
     ):
         super().__init__(
@@ -442,7 +438,7 @@ class TrumfIntegration(StoredConnectorIntegration):
 class CookidooIntegration(StoredConnectorIntegration):
     def __init__(
         self,
-        store: ConnectorStore | None = None,
+        store: ConnectorCredentialReader | None = None,
         household_id: UUID | None = None,
     ):
         super().__init__(
@@ -460,9 +456,9 @@ class CookidooIntegration(StoredConnectorIntegration):
 class KassalIntegration(StoredConnectorIntegration):
     def __init__(
         self,
-        store: ConnectorStore | None = None,
+        store: ConnectorCredentialReader | None = None,
         household_id: UUID | None = None,
-        settings: Settings | None = None,
+        settings: Any | None = None,
     ):
         super().__init__(
             provider_id="kassal",
@@ -498,9 +494,9 @@ class KassalIntegration(StoredConnectorIntegration):
 class HomeAssistantIntegration(StoredConnectorIntegration):
     def __init__(
         self,
-        store: ConnectorStore | None = None,
+        store: ConnectorCredentialReader | None = None,
         household_id: UUID | None = None,
-        settings: Settings | None = None,
+        settings: Any | None = None,
     ):
         super().__init__(
             provider_id="home_assistant",

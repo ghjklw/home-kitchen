@@ -15,7 +15,7 @@ from fastmcp import Client
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
 from sqlalchemy.engine import Engine
 
-from home_kitchen.crypto import build_multi_fernet
+from home_kitchen.crypto import FernetCipher, build_multi_fernet, resolve_oda_cipher
 from home_kitchen.settings import Settings
 
 from .models import OdaSearchResponse
@@ -87,18 +87,32 @@ class OdaRecipeCollectionResponse(BaseModel):
 
 class OdaService:
     def __init__(
-        self, engine: Engine, settings: Settings, *, http_client: httpx.Client | None = None
+        self,
+        engine: Engine | None,
+        settings: Settings,
+        *,
+        http_client: httpx.Client | None = None,
+        repository: OdaRepository | None = None,
+        cipher: FernetCipher | str | None = None,
     ):
         self.settings = settings
         self.http = http_client or httpx.Client(timeout=20, follow_redirects=False)
         self._owns_http = http_client is None
-        self.repository = (
-            OdaRepository(
-                engine, build_multi_fernet(settings.oda_encryption_key.get_secret_value())
+        if repository is not None:
+            self.repository: OdaRepository | None = repository
+        elif engine is not None:
+            resolved_cipher = (
+                build_multi_fernet(cipher)
+                if isinstance(cipher, str)
+                else cipher
+                if cipher is not None
+                else resolve_oda_cipher(settings)
             )
-            if settings.oda_encryption_key is not None
-            else None
-        )
+            self.repository = (
+                OdaRepository(engine, resolved_cipher) if resolved_cipher is not None else None
+            )
+        else:
+            self.repository = None
 
     def close(self) -> None:
         if self._owns_http:

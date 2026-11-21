@@ -67,7 +67,10 @@ class AiWorkflowService(AiWorkflowPort):
 
     def purchase_history_context(self, *, limit: int = 25) -> PurchaseHistoryContext:
         sync_svc = getattr(self, "purchase_sync", None)
-        if sync_svc is None or getattr(sync_svc, "engine", None) is None:
+        if sync_svc is None or (
+            getattr(sync_svc, "engine", None) is None
+            and getattr(sync_svc, "_order_store", None) is None
+        ):
             return PurchaseHistoryContext()
         get_ctx = getattr(sync_svc, "get_bought_before_context", None)
         if callable(get_ctx):

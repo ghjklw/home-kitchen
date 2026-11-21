@@ -251,3 +251,82 @@ def create_in_memory_recipe_service(
         household_id=household_id,
     )
     return service, repo
+
+
+def create_collection_uow_for_kitchen(
+    kitchen: Any,
+    history: HistoryRecordPort | None = None,
+    *,
+    identity_resolver: RecipeIdentityResolver | None = None,
+) -> tuple[PostgresCollectionUnitOfWork, RecipeIdentityResolver | None]:
+    """Build a PostgreSQL collection UoW and identity resolver from a legacy KitchenService."""
+    from home_kitchen.history import HistoryRepository
+
+    engine = kitchen.store.engine
+    resolved_history: HistoryRecordPort = history or HistoryRepository(engine)
+    uow = PostgresCollectionUnitOfWork(engine, resolved_history)
+    resolved_identity: RecipeIdentityResolver | None = identity_resolver
+    if resolved_identity is None and callable(getattr(kitchen, "resolve_recipe_identities", None)):
+        resolved_identity = kitchen
+    return uow, resolved_identity
+
+
+def create_cookidoo_recipe_service(
+    kitchen: Any,
+    history: HistoryRecordPort | None,
+    store: Any,
+    household_id: UUID,
+    *,
+    collection_provider: Any | None = None,
+    identity_resolver: RecipeIdentityResolver | None = None,
+    transport: Any | None = None,
+    base_url: str | None = None,
+) -> Any:
+    """Bootstrap a production `CookidooRecipeService` backed by PostgreSQL/SQLAlchemy."""
+    from home_kitchen.cookidoo_recipes import CookidooRecipeService
+
+    uow, resolved_identity = create_collection_uow_for_kitchen(
+        kitchen, history, identity_resolver=identity_resolver
+    )
+    return CookidooRecipeService(
+        uow,
+        history,
+        store,
+        household_id,
+        collection_provider=collection_provider,
+        identity_resolver=resolved_identity,
+        transport=transport,
+        base_url=base_url,
+    )
+
+
+def create_in_memory_cookidoo_recipe_service(
+    uow: MemoryCollectionUnitOfWork | None = None,
+    *,
+    store: Any | None = None,
+    household_id: UUID | None = None,
+    collection_provider: Any | None = None,
+    identity_resolver: RecipeIdentityResolver | None = None,
+    transport: Any | None = None,
+    base_url: str | None = None,
+) -> tuple[Any, MemoryCollectionUnitOfWork, Any]:
+    """Bootstrap an in-memory `CookidooRecipeService` for unit tests without a database."""
+    from uuid import uuid4
+
+    from home_kitchen.connector_store import MemoryConnectorStore
+    from home_kitchen.cookidoo_recipes import CookidooRecipeService
+
+    resolved_uow = uow if uow is not None else MemoryCollectionUnitOfWork()
+    resolved_store = store if store is not None else MemoryConnectorStore()
+    resolved_hid = household_id if household_id is not None else uuid4()
+    service = CookidooRecipeService(
+        resolved_uow,
+        None,
+        resolved_store,
+        resolved_hid,
+        collection_provider=collection_provider,
+        identity_resolver=identity_resolver,
+        transport=transport,
+        base_url=base_url,
+    )
+    return service, resolved_uow, resolved_store

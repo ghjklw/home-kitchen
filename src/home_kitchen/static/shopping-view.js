@@ -1,5 +1,19 @@
 "use strict";
 (function (root) {
+  function resolveLanguage(locale = "nb") {
+    const code = String(locale ?? "").trim().toLowerCase().split(/[-_]/u)[0];
+    if (code === "en" || code === "fr") return code;
+    return "nb";
+  }
+
+  function resolveIntlLocale(locale = "nb") {
+    const raw = String(locale ?? "").trim();
+    const lower = raw.toLowerCase();
+    if (!lower || lower === "nb" || lower === "nb-no" || lower === "und") return "nb-NO";
+    if (lower === "en" || lower === "fr") return lower;
+    return raw;
+  }
+
   function hasSelectedProducts(basket) {
     return Boolean(
       basket &&
@@ -11,18 +25,18 @@
     );
   }
 
-  function basketPriceSummary(basket) {
+  function basketPriceSummary(basket, locale = "nb") {
     if (!hasSelectedProducts(basket)) return null;
     if (basket.total_cost == null)
       return { label: "Prisene for de valgte varene er ufullstendige.", complete: false };
     const exactAmount = normalizeDecimalText(String(basket.total_cost)) || String(basket.total_cost);
-    const amount = formatQuantityForDisplay(exactAmount);
+    const amount = formatQuantityForDisplay(exactAmount, locale);
     const currency = String(basket.currency || "").trim();
     if (basket.price_complete === true)
       return {
         label: "Sum for valgte varer: " + amount + (currency ? " " + currency : ""),
         accessibleLabel:
-          "Nøyaktig sum for valgte varer: " + formatQuantityForDisplay(exactAmount) + (currency ? " " + currency : ""),
+          "Nøyaktig sum for valgte varer: " + formatQuantityForDisplay(exactAmount, locale) + (currency ? " " + currency : ""),
         complete: true,
       };
     if (isPositiveDecimal(exactAmount))
@@ -34,7 +48,7 @@
           " · noen priser er ukjente",
         accessibleLabel:
           "Nøyaktig kjent delsum: " +
-          formatQuantityForDisplay(exactAmount) +
+          formatQuantityForDisplay(exactAmount, locale) +
           (currency ? " " + currency : "") +
           "; noen priser er ukjente",
         complete: false,
@@ -42,17 +56,18 @@
     return { label: "Prisene for de valgte varene er ufullstendige.", complete: false };
   }
 
-  function pickupProgress(checked, total) {
+  function pickupProgress(checked, total, locale = "nb") {
     const count = (value) =>
       Number.isFinite(Number(value)) ? Math.max(0, Math.floor(Number(value))) : 0;
     const totalCount = count(total);
     const checkedCount = Math.min(totalCount, count(checked));
+    const intlLocale = resolveIntlLocale(locale);
     return {
       checked: checkedCount,
       total: totalCount,
       percent: totalCount ? Math.round((checkedCount / totalCount) * 100) : 0,
       label: totalCount
-        ? new Intl.NumberFormat("nb-NO").format(checkedCount) + " av " + new Intl.NumberFormat("nb-NO").format(totalCount) + " varer plukket"
+        ? new Intl.NumberFormat(intlLocale).format(checkedCount) + " av " + new Intl.NumberFormat(intlLocale).format(totalCount) + " varer plukket"
         : "Ingen varer å plukke",
     };
   }
@@ -81,64 +96,124 @@
     return digits.slice(0, position) + "." + digits.slice(position);
   }
 
-  function formatQuantityForDisplay(value) {
+  function formatQuantityForDisplay(value, locale = "nb") {
     if (typeof value !== "string" && typeof value !== "number") return "";
     const exact = normalizeDecimalText(value);
     if (exact == null) return String(value);
+    const decimalSeparator = resolveLanguage(locale) === "en" ? "." : ",";
     const [wholeText, fraction = ""] = exact.split(".");
     const whole = BigInt(wholeText);
     const scale = 100n;
     let rounded = whole * scale + BigInt(fraction.slice(0, 2).padEnd(2, "0") || "0");
     if (fraction.length > 2 && fraction[2] >= "5") rounded += 1n;
-    if (rounded === 0n && /[1-9]/u.test(exact)) return "<0,01";
+    if (rounded === 0n && /[1-9]/u.test(exact)) return "<0" + decimalSeparator + "01";
     const wholePart = rounded / scale;
     const decimalPart = String(rounded % scale).padStart(2, "0").replace(/0+$/u, "");
-    return String(wholePart) + (decimalPart ? "," + decimalPart : "");
+    return String(wholePart) + (decimalPart ? decimalSeparator + decimalPart : "");
   }
 
-  function formatQuantityForAccessibility(value) {
-    return formatQuantityForDisplay(value);
+  function formatQuantityForAccessibility(value, locale = "nb") {
+    return formatQuantityForDisplay(value, locale);
   }
 
   function unitIsOne(quantity) {
     return /^1(?:\.0+)?$/u.test(normalizeDecimalText(String(quantity ?? "")) || "");
   }
 
-  function displayUnit(unit, accessible = false, quantity = "") {
+  function displayUnit(unit, accessible = false, quantity = "", locale = "nb") {
     const value = String(unit ?? "").trim();
     const key = value.toLowerCase();
+    const lang = resolveLanguage(locale);
+    const hasQuantity = String(quantity ?? "").trim() !== "";
     const singular = unitIsOne(quantity);
-    const display = {
-      item: ["stk.", "stykk"],
-      items: ["stk.", "stykk"],
-      pc: ["stk.", "stykk"],
-      pcs: ["stk.", "stykk"],
-      stk: ["stk.", "stykk"],
-      "stk.": ["stk.", "stykk"],
-      tsp: ["ts", singular ? "teskje" : "teskjeer"],
-      teaspoon: ["ts", singular ? "teskje" : "teskjeer"],
-      teaspoons: ["ts", "teskjeer"],
-      tbsp: ["ss", singular ? "spiseskje" : "spiseskjeer"],
-      tablespoon: ["ss", singular ? "spiseskje" : "spiseskjeer"],
-      tablespoons: ["ss", "spiseskjeer"],
-      pack: [singular ? "pakke" : "pakker", singular ? "pakke" : "pakker"],
-      packs: ["pakker", "pakker"],
-      g: ["g", "gram"],
-      kg: ["kg", "kilogram"],
-      mg: ["mg", "milligram"],
-      ml: ["ml", "milliliter"],
-      cl: ["cl", "centiliter"],
-      dl: ["dl", "desiliter"],
-      l: ["l", "liter"],
-    }[key];
+    const countPlural = hasQuantity ? !singular : (key === "items" || key === "pcs");
+    const metricSingular = !hasQuantity || singular;
+    const tables = {
+      nb: {
+        item: ["stk.", "stykk"],
+        items: ["stk.", "stykk"],
+        pc: ["stk.", "stykk"],
+        pcs: ["stk.", "stykk"],
+        stk: ["stk.", "stykk"],
+        "stk.": ["stk.", "stykk"],
+        tsp: ["ts", singular ? "teskje" : "teskjeer"],
+        teaspoon: ["ts", singular ? "teskje" : "teskjeer"],
+        teaspoons: ["ts", "teskjeer"],
+        tbsp: ["ss", singular ? "spiseskje" : "spiseskjeer"],
+        tablespoon: ["ss", singular ? "spiseskje" : "spiseskjeer"],
+        tablespoons: ["ss", "spiseskjeer"],
+        pack: [singular ? "pakke" : "pakker", singular ? "pakke" : "pakker"],
+        packs: ["pakker", "pakker"],
+        pinch: [singular ? "klype" : "klyper", singular ? "klype" : "klyper"],
+        pinches: ["klyper", "klyper"],
+        g: ["g", "gram"],
+        kg: ["kg", "kilogram"],
+        mg: ["mg", "milligram"],
+        ml: ["ml", "milliliter"],
+        cl: ["cl", "centiliter"],
+        dl: ["dl", "desiliter"],
+        l: ["l", "liter"],
+      },
+      en: {
+        item: [countPlural ? "pcs" : "pc", countPlural ? "pieces" : "piece"],
+        items: [countPlural ? "pcs" : "pc", countPlural ? "pieces" : "piece"],
+        pc: [countPlural ? "pcs" : "pc", countPlural ? "pieces" : "piece"],
+        pcs: [countPlural ? "pcs" : "pc", countPlural ? "pieces" : "piece"],
+        stk: [countPlural ? "pcs" : "pc", countPlural ? "pieces" : "piece"],
+        "stk.": [countPlural ? "pcs" : "pc", countPlural ? "pieces" : "piece"],
+        tsp: ["tsp", metricSingular ? "teaspoon" : "teaspoons"],
+        teaspoon: ["tsp", metricSingular ? "teaspoon" : "teaspoons"],
+        teaspoons: ["tsp", "teaspoons"],
+        tbsp: ["tbsp", metricSingular ? "tablespoon" : "tablespoons"],
+        tablespoon: ["tbsp", metricSingular ? "tablespoon" : "tablespoons"],
+        tablespoons: ["tbsp", "tablespoons"],
+        pack: [metricSingular ? "pack" : "packs", metricSingular ? "pack" : "packs"],
+        packs: ["packs", "packs"],
+        pinch: [metricSingular ? "pinch" : "pinches", metricSingular ? "pinch" : "pinches"],
+        pinches: ["pinches", "pinches"],
+        g: ["g", metricSingular ? "gram" : "grams"],
+        kg: ["kg", metricSingular ? "kilogram" : "kilograms"],
+        mg: ["mg", metricSingular ? "milligram" : "milligrams"],
+        ml: ["ml", metricSingular ? "milliliter" : "milliliters"],
+        cl: ["cl", metricSingular ? "centiliter" : "centiliters"],
+        dl: ["dl", metricSingular ? "deciliter" : "deciliters"],
+        l: ["l", metricSingular ? "liter" : "liters"],
+      },
+      fr: {
+        item: [countPlural ? "pièces" : "pièce", countPlural ? "pièces" : "pièce"],
+        items: [countPlural ? "pièces" : "pièce", countPlural ? "pièces" : "pièce"],
+        pc: [countPlural ? "pièces" : "pièce", countPlural ? "pièces" : "pièce"],
+        pcs: [countPlural ? "pièces" : "pièce", countPlural ? "pièces" : "pièce"],
+        stk: [countPlural ? "pièces" : "pièce", countPlural ? "pièces" : "pièce"],
+        "stk.": [countPlural ? "pièces" : "pièce", countPlural ? "pièces" : "pièce"],
+        tsp: ["c. à c.", metricSingular ? "cuillère à café" : "cuillères à café"],
+        teaspoon: ["c. à c.", metricSingular ? "cuillère à café" : "cuillères à café"],
+        teaspoons: ["c. à c.", "cuillères à café"],
+        tbsp: ["c. à s.", metricSingular ? "cuillère à soupe" : "cuillères à soupe"],
+        tablespoon: ["c. à s.", metricSingular ? "cuillère à soupe" : "cuillères à soupe"],
+        tablespoons: ["c. à s.", "cuillères à soupe"],
+        pack: [metricSingular ? "paquet" : "paquets", metricSingular ? "paquet" : "paquets"],
+        packs: ["paquets", "paquets"],
+        pinch: [metricSingular ? "pincée" : "pincées", metricSingular ? "pincée" : "pincées"],
+        pinches: ["pincées", "pincées"],
+        g: ["g", metricSingular ? "gramme" : "grammes"],
+        kg: ["kg", metricSingular ? "kilogramme" : "kilogrammes"],
+        mg: ["mg", metricSingular ? "milligramme" : "milligrammes"],
+        ml: ["ml", metricSingular ? "millilitre" : "millilitres"],
+        cl: ["cl", metricSingular ? "centilitre" : "centilitres"],
+        dl: ["dl", metricSingular ? "décilitre" : "décilitres"],
+        l: ["l", metricSingular ? "litre" : "litres"],
+      },
+    };
+    const display = (tables[lang] || tables.nb)[key];
     return display ? display[accessible ? 1 : 0] : value;
   }
 
-  function formatNeedQuantity(quantity, unit, accessible = false, approximate = false) {
+  function formatNeedQuantity(quantity, unit, accessible = false, approximate = false, locale = "nb") {
     const formatter = accessible ? formatQuantityForAccessibility : formatQuantityForDisplay;
-    const amount = quantity == null || quantity === "" ? "" : formatter(String(quantity));
-    const prefix = approximate ? "ca. " : "";
-    return [amount ? prefix + amount : "", displayUnit(unit, accessible, quantity)]
+    const amount = quantity == null || quantity === "" ? "" : formatter(String(quantity), locale);
+    const prefix = approximate ? ({ en: "approx. ", fr: "env. " }[resolveLanguage(locale)] || "ca. ") : "";
+    return [amount ? prefix + amount : "", displayUnit(unit, accessible, quantity, locale)]
       .filter(Boolean)
       .join(" ");
   }
@@ -169,14 +244,14 @@
     return text != null && /[1-9]/u.test(text.replace(".", ""));
   }
 
-  function formatQuantityMentions(value) {
+  function formatQuantityMentions(value, locale = "nb") {
     return String(value ?? "").replace(
       /\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/gu,
-      (number) => (/[.eE]/u.test(number) ? formatQuantityForDisplay(number) : number),
+      (number) => (/[.eE]/u.test(number) ? formatQuantityForDisplay(number, locale) : number),
     );
   }
 
-  function formatBasketIssue(issue) {
+  function formatBasketIssue(issue, locale = "nb") {
     const text = typeof issue === "string" ? issue : issue?.message || String(issue ?? "");
     const trimmed = text.trim();
     if (!trimmed) return "";
@@ -195,8 +270,8 @@
       const name = match[1];
       const quantity = match[2];
       const unit = match[3];
-      const amount = formatQuantityForDisplay(quantity);
-      const u = displayUnit(unit, false, quantity);
+      const amount = formatQuantityForDisplay(quantity, locale);
+      const u = displayUnit(unit, false, quantity, locale);
       return `${name}: ${amount}${u ? " " + u : ""} gjenstår`;
     }
 
@@ -205,8 +280,8 @@
       const name = match[1];
       const quantity = match[2];
       const unit = match[3];
-      const amount = formatQuantityForDisplay(quantity);
-      const u = displayUnit(unit, false, quantity);
+      const amount = formatQuantityForDisplay(quantity, locale);
+      const u = displayUnit(unit, false, quantity, locale);
       return `${name}: ${amount}${u ? " " + u : ""} til overs`;
     }
 
@@ -225,7 +300,7 @@
         : `${count} lagrede produktvalg passer ikke lenger med nåværende handlebehov`;
     }
 
-    return formatQuantityMentions(text);
+    return formatQuantityMentions(text, locale);
   }
 
   function groupedByCategory(lines, categoryOrder = []) {
@@ -266,7 +341,7 @@
     }));
   }
 
-  function actionableGroups(lines, categoryOrder = [], meals = [], groupBy = "category", recipes = []) {
+  function actionableGroups(lines, categoryOrder = [], meals = [], groupBy = "category", recipes = [], locale = "nb") {
     if (groupBy !== "meal") {
       const wrapped = (Array.isArray(lines) ? lines : []).map((entry) => ({
         ...entry,
@@ -293,7 +368,8 @@
       if (!groups.has(title)) groups.set(title, []);
       groups.get(title).push(entry);
     });
-    return new Map([...groups.entries()].sort(([left], [right]) => left.localeCompare(right, "nb")));
+    const sortLocale = resolveLanguage(locale);
+    return new Map([...groups.entries()].sort(([left], [right]) => left.localeCompare(right, sortLocale)));
   }
 
   function mealOriginNames(origins = [], meals = [], recipes = []) {

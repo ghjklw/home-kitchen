@@ -549,33 +549,77 @@ function syncPlannerUrl() {
   else url.searchParams.set("day", iso(state.selectedDate));
   history.replaceState(null, "", url.pathname + url.search + url.hash);
 }
+function uiLanguage(language = typeof state !== "undefined" ? state?.household?.language : null) {
+  const code = String(language ?? "").trim().toLowerCase().split(/[-_]/u)[0];
+  if (code === "en" || code === "fr") return code;
+  return "nb";
+}
+function uiLocale(language = typeof state !== "undefined" ? state?.household?.language : null) {
+  const raw = String(language ?? "").trim();
+  const lower = raw.toLowerCase();
+  if (!lower || lower === "nb" || lower === "nb-no" || lower === "und") return "nb-NO";
+  if (lower === "en" || lower === "fr") return lower;
+  return raw;
+}
 function dateLabel(date, options) {
-  return date.toLocaleDateString("nb-NO", options);
+  const locale = typeof uiLocale === "function"
+    ? uiLocale()
+    : (typeof state !== "undefined" && state?.household?.language === "en"
+      ? "en"
+      : typeof state !== "undefined" && state?.household?.language === "fr"
+        ? "fr"
+        : "nb-NO");
+  return date.toLocaleDateString(locale, options);
 }
 function formatUiCount(value) {
-  return new Intl.NumberFormat("nb-NO").format(value);
+  const locale = typeof uiLocale === "function"
+    ? uiLocale()
+    : (typeof state !== "undefined" && state?.household?.language === "en"
+      ? "en"
+      : typeof state !== "undefined" && state?.household?.language === "fr"
+        ? "fr"
+        : "nb-NO");
+  return new Intl.NumberFormat(locale).format(value);
 }
 function formatServings(value) {
   return formatUiCount(value) + (Number(value) === 1 ? " porsjon" : " porsjoner");
 }
 function formatUiQuantity(value) {
-  return window.KitchenShoppingView.formatQuantityForDisplay(String(value ?? ""));
+  const lang = typeof uiLanguage === "function" ? uiLanguage() : (typeof state !== "undefined" ? state?.household?.language : "nb");
+  return window.KitchenShoppingView.formatQuantityForDisplay(String(value ?? ""), lang);
 }
 function formatUiAccessibleQuantity(value) {
-  return window.KitchenShoppingView.formatQuantityForAccessibility(String(value ?? ""));
+  const lang = typeof uiLanguage === "function" ? uiLanguage() : (typeof state !== "undefined" ? state?.household?.language : "nb");
+  return window.KitchenShoppingView.formatQuantityForAccessibility(String(value ?? ""), lang);
 }
 function formatUiNeedQuantity(need, accessible = false) {
+  const lang = typeof uiLanguage === "function" ? uiLanguage() : (typeof state !== "undefined" ? state?.household?.language : "nb");
   return window.KitchenShoppingView.formatNeedQuantity(
     need?.quantity,
     need?.unit,
     accessible,
     need?.approximate === true,
+    lang,
   );
 }
 function formatUiTime(value) {
   if (typeof value !== "string") return "";
-  const match = /^(\d{2}:\d{2})(?::00)?$/u.exec(value);
-  return match ? match[1] : value;
+  const match = /^(\d{2}):(\d{2})(?::(\d{2}))?$/u.exec(value);
+  if (!match) return value;
+  const locale = typeof uiLocale === "function"
+    ? uiLocale()
+    : (typeof state !== "undefined" && state?.household?.language === "en"
+      ? "en"
+      : typeof state !== "undefined" && state?.household?.language === "fr"
+        ? "fr"
+        : "nb-NO");
+  if (locale !== "nb-NO") {
+    return new Intl.DateTimeFormat(locale, {
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(new Date(2000, 0, 1, Number(match[1]), Number(match[2])));
+  }
+  return match[1] + ":" + match[2];
 }
 function recipeOriginLabel(value) {
   return ({
@@ -587,10 +631,13 @@ function recipeOriginLabel(value) {
   })[value] || value;
 }
 function ingredientQuantityText(item) {
+  const lang = typeof uiLanguage === "function" ? uiLanguage() : (typeof state !== "undefined" ? state?.household?.language : "nb");
   const quantity = window.KitchenShoppingView.formatNeedQuantity(
     item.quantity,
     item.unit,
     false,
+    false,
+    lang,
   );
   return [quantity, item.name].filter(Boolean).join(" ");
 }
@@ -983,7 +1030,14 @@ function isCurrentWeekLoad(view, activeSequence, requestSequence, currentPeriod,
 function shoppingRefreshLabel() {
   if (state.shoppingRefreshInFlight) return "Oppdaterer …";
   if (!state.shoppingLastRefreshedAt) return "Ikke oppdatert ennå";
-  const time = new Intl.DateTimeFormat("nb-NO", {
+  const locale = typeof uiLocale === "function"
+    ? uiLocale()
+    : (typeof state !== "undefined" && state?.household?.language === "en"
+      ? "en"
+      : typeof state !== "undefined" && state?.household?.language === "fr"
+        ? "fr"
+        : "nb-NO");
+  const time = new Intl.DateTimeFormat(locale, {
     hour: "numeric",
     minute: "2-digit",
   }).format(new Date(state.shoppingLastRefreshedAt));
@@ -4519,9 +4573,11 @@ function plannedMealView(view) {
   );
   const ingredients = el("ul");
   view.ingredients.forEach((item) => {
+    const lang = state?.household?.language;
     const presentation = window.KitchenPlannedCooking.formatPlannedIngredient(
       item,
-      (quantity) => window.KitchenShoppingView.formatQuantityForDisplay(quantity),
+      (quantity) => window.KitchenShoppingView.formatQuantityForDisplay(quantity, lang),
+      lang,
     );
     const row = el("li");
     add(row, el("span", presentation.text));
@@ -4557,9 +4613,11 @@ function plannedMealView(view) {
   );
   add(body, ingredients, el("h3", "Fremgangsmåte"), steps);
   const shareIngredients = button("Del ingrediensene", async () => {
+    const lang = state?.household?.language;
     const text = window.KitchenPlannedCooking.formatPlannedIngredientList(
       view,
-      (quantity) => window.KitchenShoppingView.formatQuantityForDisplay(quantity),
+      (quantity) => window.KitchenShoppingView.formatQuantityForDisplay(quantity, lang),
+      lang,
     );
     if (typeof navigator.share === "function") {
       try {
@@ -4704,6 +4762,7 @@ function renderInStore(main) {
       shareTitle,
       remaining,
       state.household.shopping_category_order || [],
+      state?.household?.language,
     );
   const copyDialog = (text, explanation) => {
     const root = openDialog("Kopier handlelisten");
@@ -4764,6 +4823,7 @@ function renderInStore(main) {
   const progressData = window.KitchenShoppingView.pickupProgress(
     trip.checked_count,
     trip.total_count,
+    state?.household?.language,
   );
   const progress = el("progress");
   progress.max = 100;
@@ -4848,11 +4908,12 @@ function renderInStore(main) {
       const detail = add(el("div", null, "detail"), el("strong", line.name));
       const exactQuantity = String(line.to_buy_quantity ?? "0");
       const unit = line.unit || "";
-      const displayUnitText = unit ? window.KitchenShoppingView.displayUnit(unit, false, exactQuantity) : "";
-      const accessibleUnitText = unit ? window.KitchenShoppingView.displayUnit(unit, true, exactQuantity) : "";
+      const lang = state?.household?.language;
+      const displayUnitText = unit ? window.KitchenShoppingView.displayUnit(unit, false, exactQuantity, lang) : "";
+      const accessibleUnitText = unit ? window.KitchenShoppingView.displayUnit(unit, true, exactQuantity, lang) : "";
       const quantity = el(
         "small",
-        window.KitchenShoppingView.formatQuantityForDisplay(exactQuantity) +
+        window.KitchenShoppingView.formatQuantityForDisplay(exactQuantity, lang) +
           (displayUnitText ? " " + displayUnitText : "") +
           " å plukke" +
           (line.origins?.length ? " · " + shoppingOrigins(line.origins) : ""),
@@ -4910,7 +4971,7 @@ function renderTripCompletion(main) {
       : [];
     const line = { ...reviewLine, selected_products: selectedProducts };
     const section = add(el("section", null, "panel trip-completion-line"), el("h3", line.name));
-    const plannedUnit = line.unit ? window.KitchenShoppingView.displayUnit(line.unit, false, line.to_buy_quantity) : "";
+    const plannedUnit = line.unit ? window.KitchenShoppingView.displayUnit(line.unit, false, line.to_buy_quantity, state?.household?.language) : "";
     add(section, el("p", `Planlagt behov: ${formatUiQuantity(line.to_buy_quantity)}${plannedUnit ? " " + plannedUnit : ""} · kontekst, ikke faktisk kjøp.`, "muted"));
     const bought = el("input"); bought.type = "checkbox"; bought.setAttribute("aria-label", `Registrer faktisk kjøp: ${line.name}`);
     add(section, add(el("label"), bought, el("span", "Jeg kjøpte denne varen")));
@@ -4971,7 +5032,7 @@ function renderTripCompletion(main) {
         } else {
           context = "Fast vare";
         }
-        const sourceUnit = source.unit ? window.KitchenShoppingView.displayUnit(source.unit, false, source.quantity) : "";
+        const sourceUnit = source.unit ? window.KitchenShoppingView.displayUnit(source.unit, false, source.quantity, state?.household?.language) : "";
         const formattedQty = `${formatUiQuantity(source.quantity)}${sourceUnit ? " " + sourceUnit : ""}`;
         const detailLabel = `${kindLabel} · ${context} · ${formattedQty}`;
         input.setAttribute("aria-label", `${kindLabel}: ${context} (${formattedQty})`);
@@ -5815,7 +5876,7 @@ function renderCompactShoppingMatch(line, match) {
 function renderSingleShoppingList(main) {
   const trip = state.storeTrip || { lines: [], checked_count: 0, total_count: 0, unquantified: [] };
   const lines = trip.lines || [];
-  const progressData = window.KitchenShoppingView.pickupProgress(trip.checked_count, trip.total_count);
+  const progressData = window.KitchenShoppingView.pickupProgress(trip.checked_count, trip.total_count, state?.household?.language);
   const progress = el("progress");
   progress.max = 100;
   progress.value = progressData.percent;
@@ -5827,6 +5888,7 @@ function renderSingleShoppingList(main) {
       "Handleliste · " + dateLabel(day(0), { month: "short", day: "numeric" }) + " – " + dateLabel(day(6), { month: "short", day: "numeric", year: "numeric" }),
       lines,
       state.household.shopping_category_order || [],
+      state?.household?.language,
     );
     try {
       if (typeof navigator.clipboard?.writeText !== "function") throw new Error("clipboard-unavailable");
@@ -5890,6 +5952,7 @@ function renderSingleShoppingList(main) {
     state.meals,
     state.shoppingGrouping,
     state.recipes,
+    state?.household?.language,
   );
   for (const [groupName, entries] of groups) {
     const section = add(el("section", null, "panel category-section actionable-shopping-group"), el("h2", categoryLabel(groupName)));
@@ -6029,7 +6092,7 @@ function renderShopping(main) {
         "small",
         formatUiNeedQuantity({ quantity: required, unit, approximate: item.approximate === true }) +
           (available != null
-            ? " · " + formatUiQuantity(available) + " " + window.KitchenShoppingView.displayUnit(unit, false, available) + " hjemme"
+            ? " · " + formatUiQuantity(available) + " " + window.KitchenShoppingView.displayUnit(unit, false, available, state?.household?.language) + " hjemme"
             : "") +
           " · " +
           (window.KitchenShoppingView.isPositiveDecimal(toBuy)
@@ -6043,7 +6106,7 @@ function renderShopping(main) {
         "aria-label",
         formatUiNeedQuantity({ quantity: required, unit, approximate: item.approximate === true }, true) +
           " nødvendig" +
-          (available != null ? "; " + formatUiAccessibleQuantity(available) + " " + window.KitchenShoppingView.displayUnit(unit, true, available) + " hjemme" : "") +
+          (available != null ? "; " + formatUiAccessibleQuantity(available) + " " + window.KitchenShoppingView.displayUnit(unit, true, available, state?.household?.language) + " hjemme" : "") +
           "; " +
           formatUiNeedQuantity({ quantity: toBuy, unit, approximate: item.approximate === true }, true) +
           " å kjøpe",
@@ -6101,7 +6164,7 @@ function renderShopping(main) {
         el(
           "small",
           formatUiQuantity(item.quantity) +
-            (item.unit ? " " + window.KitchenShoppingView.displayUnit(item.unit, false, item.quantity) : ""),
+            (item.unit ? " " + window.KitchenShoppingView.displayUnit(item.unit, false, item.quantity, state?.household?.language) : ""),
         ),
       ),
       button(
@@ -6144,7 +6207,7 @@ function renderShopping(main) {
             el(
               "small",
               formatUiQuantity(item.quantity) +
-                (item.unit ? " " + window.KitchenShoppingView.displayUnit(item.unit, false, item.quantity) : "") +
+                (item.unit ? " " + window.KitchenShoppingView.displayUnit(item.unit, false, item.quantity, state?.household?.language) : "") +
                 " · Forslag",
             ),
           ),
@@ -6310,7 +6373,7 @@ function basketProduct(product, packages, alternatives = false) {
           ? " · Kontrollert " +
             (Number.isNaN(Date.parse(product.observed_at))
               ? product.observed_at
-              : new Date(product.observed_at).toLocaleString("nb-NO"))
+              : new Date(product.observed_at).toLocaleString(typeof uiLocale === "function" ? uiLocale() : (({ en: "en", fr: "fr" }[String(typeof state !== "undefined" ? state?.household?.language || "" : "").trim().toLowerCase()]) || "nb-NO")))
           : ""),
       "muted",
     ),
@@ -6361,7 +6424,7 @@ function chooseOdaProduct(product, need) {
     return;
   }
   const root = openDialog("Bekreft produkt og pakningsstørrelse");
-  const unitText = need.unit ? window.KitchenShoppingView.displayUnit(need.unit, false) : "";
+  const unitText = need.unit ? window.KitchenShoppingView.displayUnit(need.unit, false, "", state?.household?.language) : "";
   add(
     root,
     el(
@@ -6807,7 +6870,7 @@ function proposalExpiryText(value) {
   const timestamp = Date.parse(value);
   return Number.isNaN(timestamp)
     ? ""
-    : "Forslaget utløper " + new Date(timestamp).toLocaleString("nb-NO") + ".";
+    : "Forslaget utløper " + new Date(timestamp).toLocaleString(typeof uiLocale === "function" ? uiLocale() : (({ en: "en", fr: "fr" }[String(typeof state !== "undefined" ? state?.household?.language || "" : "").trim().toLowerCase()]) || "nb-NO")) + ".";
 }
 function renderProposalOutcome(
   proposal,
@@ -7469,19 +7532,20 @@ function renderBasketMatchCandidate(candidate, need) {
   const details = add(el("div", null, "product-details"), el("strong", candidate.name));
   if (candidate.brand) add(details, el("small", candidate.brand, "muted"));
   if (candidate.recommended_packages != null && candidate.recommended_fulfillment_quantity != null) {
+    const lang = state?.household?.language;
     add(
       details,
       el(
         "small",
         "Foreslått " + formatUiCount(candidate.recommended_packages) + " pakker · " +
-          window.KitchenShoppingView.formatQuantityForDisplay(String(candidate.recommended_fulfillment_quantity)) +
-          " " + window.KitchenShoppingView.displayUnit(need.unit, false, candidate.recommended_fulfillment_quantity) + " totalt",
+          window.KitchenShoppingView.formatQuantityForDisplay(String(candidate.recommended_fulfillment_quantity), lang) +
+          " " + window.KitchenShoppingView.displayUnit(need.unit, false, candidate.recommended_fulfillment_quantity, lang) + " totalt",
         "muted",
       ),
     );
   } else {
     const packUnit = candidate.pack_unit
-      ? window.KitchenShoppingView.displayUnit(candidate.pack_unit, false, candidate.pack_quantity)
+      ? window.KitchenShoppingView.displayUnit(candidate.pack_unit, false, candidate.pack_quantity, state?.household?.language)
       : "";
     const pack = candidate.pack_quantity != null && candidate.pack_unit
       ? "Pakke " + formatUiQuantity(candidate.pack_quantity) + (packUnit ? " " + packUnit : "") + " · antall er ikke beregnet"
@@ -8254,7 +8318,7 @@ function renderBasket(main) {
           : "Velg et produkt for hvert behov",
       "basket-status" + (basket.ready_for_review ? "" : " needs-attention"),
     );
-    const priceSummary = window.KitchenShoppingView.basketPriceSummary(basket);
+    const priceSummary = window.KitchenShoppingView.basketPriceSummary(basket, state?.household?.language);
     if (priceSummary) {
       const summary = el("span", priceSummary.label, "basket-price-summary");
       if (priceSummary.accessibleLabel)
@@ -8271,7 +8335,7 @@ function renderBasket(main) {
       (() => {
         const exact =
           typeof issue === "string" ? issue : issue.message || JSON.stringify(issue);
-        const item = el("li", window.KitchenShoppingView.formatBasketIssue(exact));
+        const item = el("li", window.KitchenShoppingView.formatBasketIssue(exact, state?.household?.language));
         item.title = exact;
         return add(list, item);
       })(),
@@ -8334,35 +8398,36 @@ function renderBasket(main) {
       const remaining = String(entry.remaining_quantity ?? "unknown");
       const overbuy = String(entry.overbuy_quantity ?? "unknown");
       const unit = need.unit || "";
-      const allocatedDisplayUnit = unit ? window.KitchenShoppingView.displayUnit(unit, false, allocated) : "";
-      const remainingDisplayUnit = unit ? window.KitchenShoppingView.displayUnit(unit, false, remaining) : "";
-      const overbuyDisplayUnit = unit ? window.KitchenShoppingView.displayUnit(unit, false, overbuy) : "";
-      const allocatedA11yUnit = unit ? window.KitchenShoppingView.displayUnit(unit, true, allocated) : "";
-      const remainingA11yUnit = unit ? window.KitchenShoppingView.displayUnit(unit, true, remaining) : "";
-      const overbuyA11yUnit = unit ? window.KitchenShoppingView.displayUnit(unit, true, overbuy) : "";
+      const lang = typeof state !== "undefined" ? state?.household?.language : "nb";
+      const allocatedDisplayUnit = unit ? window.KitchenShoppingView.displayUnit(unit, false, allocated, lang) : "";
+      const remainingDisplayUnit = unit ? window.KitchenShoppingView.displayUnit(unit, false, remaining, lang) : "";
+      const overbuyDisplayUnit = unit ? window.KitchenShoppingView.displayUnit(unit, false, overbuy, lang) : "";
+      const allocatedA11yUnit = unit ? window.KitchenShoppingView.displayUnit(unit, true, allocated, lang) : "";
+      const remainingA11yUnit = unit ? window.KitchenShoppingView.displayUnit(unit, true, remaining, lang) : "";
+      const overbuyA11yUnit = unit ? window.KitchenShoppingView.displayUnit(unit, true, overbuy, lang) : "";
       const allocation = el(
         "p",
         "Dekket av valgte pakker: " +
-          window.KitchenShoppingView.formatQuantityForDisplay(allocated) +
+          window.KitchenShoppingView.formatQuantityForDisplay(allocated, lang) +
           (allocatedDisplayUnit ? " " + allocatedDisplayUnit : "") +
           " · Gjenstår: " +
-          window.KitchenShoppingView.formatQuantityForDisplay(remaining) +
+          window.KitchenShoppingView.formatQuantityForDisplay(remaining, lang) +
           (remainingDisplayUnit ? " " + remainingDisplayUnit : "") +
           " · Til overs fra valgte pakker: " +
-          window.KitchenShoppingView.formatQuantityForDisplay(overbuy) +
+          window.KitchenShoppingView.formatQuantityForDisplay(overbuy, lang) +
           (overbuyDisplayUnit ? " " + overbuyDisplayUnit : ""),
         "muted",
       );
       allocation.setAttribute(
         "aria-label",
         "Nøyaktige mengder: dekket av valgte pakker " +
-          window.KitchenShoppingView.formatQuantityForAccessibility(allocated) +
+          window.KitchenShoppingView.formatQuantityForAccessibility(allocated, lang) +
           (allocatedA11yUnit ? " " + allocatedA11yUnit : "") +
           "; gjenstår " +
-          window.KitchenShoppingView.formatQuantityForAccessibility(remaining) +
+          window.KitchenShoppingView.formatQuantityForAccessibility(remaining, lang) +
           (remainingA11yUnit ? " " + remainingA11yUnit : "") +
           "; til overs fra valgte pakker " +
-          window.KitchenShoppingView.formatQuantityForAccessibility(overbuy) +
+          window.KitchenShoppingView.formatQuantityForAccessibility(overbuy, lang) +
           (overbuyA11yUnit ? " " + overbuyA11yUnit : ""),
       );
       add(section, allocation);
@@ -8763,7 +8828,7 @@ function renderConnectionSettings() {
       section,
       el(
         "p",
-        `Bakgrunnssøk etter Oda-produkter sist fullført: ${new Date(health.background_matching.last_completed_at).toLocaleString("nb-NO")}.`,
+        `Bakgrunnssøk etter Oda-produkter sist fullført: ${new Date(health.background_matching.last_completed_at).toLocaleString(typeof uiLocale === "function" ? uiLocale() : (({ en: "en", fr: "fr" }[String(typeof state !== "undefined" ? state?.household?.language || "" : "").trim().toLowerCase()]) || "nb-NO"))}.`,
         "muted connection-health-freshness",
       ),
     );
@@ -8841,7 +8906,7 @@ function renderConnectionSettings() {
       const syncedCount = syncInfo.coverage_window?.total_records ?? 0;
       const syncParts = [`Kvitteringer lagret: ${syncedCount}`];
       if (syncInfo.last_successful_sync) {
-        syncParts.push(`Sist synkronisert: ${new Date(syncInfo.last_successful_sync).toLocaleString("nb-NO")}`);
+        syncParts.push(`Sist synkronisert: ${new Date(syncInfo.last_successful_sync).toLocaleString(typeof uiLocale === "function" ? uiLocale() : (({ en: "en", fr: "fr" }[String(typeof state !== "undefined" ? state?.household?.language || "" : "").trim().toLowerCase()]) || "nb-NO"))}`);
       }
       add(row, el("p", syncParts.join(" · "), "muted connection-sync-status"));
       if (syncInfo.last_sync_error) {
@@ -8912,7 +8977,7 @@ function renderConnectionSettings() {
             metaParts.push(`Koblet til av ${account.connected_by_actor_id}`);
           }
           const formattedExpiry = window.KitchenSettingsView?.formatAccountExpiry
-            ? window.KitchenSettingsView.formatAccountExpiry(account)
+            ? window.KitchenSettingsView.formatAccountExpiry(account, state?.household?.language)
             : null;
           if (formattedExpiry) {
             metaParts.push(`Utløper: ${formattedExpiry}`);

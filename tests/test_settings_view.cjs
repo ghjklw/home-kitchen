@@ -939,7 +939,24 @@ test("settings view helpers format multi-account display names, auth labels, and
   assert.equal(accountDisplayName({ account_id: "default", account_label: "Malo" }), "Malo");
   assert.equal(accountDisplayName({ account_id: "default", account_label: null }), "Standardkonto");
   assert.equal(accountDisplayName({ account_id: "acc_12345678", account_label: "" }), "acc_12345678");
-  assert.ok(formatAccountExpiry({ token_expires_at: "2026-12-31T12:00:00Z" }));
+  const sampleExpiry = { token_expires_at: "2026-12-31T12:00:00Z" };
+  const sampleDate = new Date("2026-12-31T12:00:00Z");
+  assert.equal(
+    formatAccountExpiry(sampleExpiry),
+    sampleDate.toLocaleDateString("nb-NO", { year: "numeric", month: "short", day: "numeric" }),
+  );
+  assert.equal(
+    formatAccountExpiry(sampleExpiry, "nb"),
+    sampleDate.toLocaleDateString("nb-NO", { year: "numeric", month: "short", day: "numeric" }),
+  );
+  assert.equal(
+    formatAccountExpiry(sampleExpiry, "en"),
+    sampleDate.toLocaleDateString("en", { year: "numeric", month: "short", day: "numeric" }),
+  );
+  assert.equal(
+    formatAccountExpiry(sampleExpiry, "fr"),
+    sampleDate.toLocaleDateString("fr", { year: "numeric", month: "short", day: "numeric" }),
+  );
   assert.equal(formatAccountExpiry({}), null);
   assert.equal(integrationAuthLabel("oauth_pkce", true), "OAuth-innlogging er lagret (hemmeligheten er skjult)");
   assert.equal(integrationAuthLabel("interactive_otp", true), "SMS-innlogging er lagret (hemmeligheten er skjult)");

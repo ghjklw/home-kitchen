@@ -144,13 +144,25 @@
       : String(account.account_id);
   }
 
-  function formatAccountExpiry(account) {
+  function resolveIntlLocale(locale = "nb") {
+    const raw = String(locale ?? "").trim();
+    const lower = raw.toLowerCase();
+    if (!lower || lower === "nb" || lower === "nb-no" || lower === "und") return "nb-NO";
+    if (lower === "en" || lower === "fr") return lower;
+    return raw;
+  }
+
+  function formatAccountExpiry(account, locale = "nb") {
     const raw = account?.token_expires_at || account?.expires_at;
     if (!raw) return null;
     const date = new Date(raw);
     if (isNaN(date.getTime())) return null;
     try {
-      return date.toLocaleDateString("nb-NO", { year: "numeric", month: "short", day: "numeric" });
+      return date.toLocaleDateString(resolveIntlLocale(locale), {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+      });
     } catch {
       return date.toISOString().slice(0, 10);
     }

@@ -35,7 +35,7 @@
     );
   }
 
-  function formatRemainingShoppingText(title, lines, categoryOrder = []) {
+  function formatRemainingShoppingText(title, lines, categoryOrder = [], locale = "nb") {
     const eligible = [];
     (Array.isArray(lines) ? lines : []).forEach((line) => {
       if (!isRemainingShoppingLine(line)) return;
@@ -72,9 +72,9 @@
         return `${categoryLabel}:\n${items
           .map(({ name, to_buy_quantity, unit }) => {
             const quantity =
-              root.KitchenShoppingView?.formatQuantityForDisplay?.(to_buy_quantity) ||
+              root.KitchenShoppingView?.formatQuantityForDisplay?.(to_buy_quantity, locale) ||
               to_buy_quantity;
-            const displayUnit = root.KitchenShoppingView?.displayUnit?.(unit, false, to_buy_quantity) || unit;
+            const displayUnit = root.KitchenShoppingView?.displayUnit?.(unit, false, to_buy_quantity, locale) || unit;
             return `  - ${name} — ${quantity}${displayUnit ? ` ${displayUnit}` : ""}`;
           })
           .join("\n")}`;

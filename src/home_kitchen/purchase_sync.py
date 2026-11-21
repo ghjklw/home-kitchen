@@ -9,6 +9,7 @@ for the next sync. Revision IDs are immutable: corrections need a new revision I
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import re
 import time
@@ -18,6 +19,8 @@ from datetime import time as dt_time
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import UUID
+
+import httpx
 
 if TYPE_CHECKING:
     from home_kitchen.connector_ports import ConnectorCredentialPort
@@ -226,6 +229,98 @@ def extract_line_unit(line: dict[str, Any]) -> str | None:
     return None
 
 
+def _exception_has_class_name(exc: Exception, names: set[str]) -> bool:
+    return any(cls.__name__ in names for cls in type(exc).__mro__)
+
+
+def _is_kassal_rate_limit_error(exc: Exception) -> bool:
+    if _exception_has_class_name(exc, {"KassalRateLimitError"}):
+        return True
+    if getattr(exc, "status_code", None) == 429:
+        return True
+    msg = str(exc).casefold()
+    return "http 429" in msg or "too many attempts" in msg or "rate limit" in msg
+
+
+class _KassalLookupSession:
+    """Per-sync EAN lookup cache and circuit breaker for Kassal.app enrichment."""
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+        self._cache: dict[str, Any] = {}
+        self.rate_limited: bool = False
+        self.disabled: bool = False
+
+    def lookup_ean(self, ean: str | None) -> Any | None:
+        if not ean or self.disabled:
+            return None
+        cleaned = re.sub(r"\s+", "", str(ean).strip())
+        if not cleaned:
+            return None
+        if cleaned in self._cache:
+            return self._cache[cleaned]
+
+        try:
+            product = self._client.lookup_ean(cleaned)
+        except Exception as exc:
+            if _is_kassal_rate_limit_error(exc):
+                self.rate_limited = True
+                self.disabled = True
+                _LOG.warning(
+                    "Kassal.app rate limit reached during EAN %s lookup; "
+                    "skipping remaining Kassal lookups for this sync: %s",
+                    cleaned,
+                    exc,
+                )
+                return None
+            if _exception_has_class_name(exc, {"KassalAuthError"}) or getattr(
+                exc, "status_code", None
+            ) in (401, 403):
+                self.disabled = True
+                _LOG.warning(
+                    "Kassal.app authentication failed during EAN %s lookup; "
+                    "skipping remaining Kassal lookups for this sync: %s",
+                    cleaned,
+                    exc,
+                )
+                return None
+            if _exception_has_class_name(exc, {"KassalError"}) or isinstance(exc, httpx.HTTPError):
+                _LOG.warning(
+                    "Kassal.app lookup failed for EAN %s; preserving receipt line data: %s",
+                    cleaned,
+                    exc,
+                )
+                self._cache[cleaned] = None
+                return None
+            raise
+
+        self._cache[cleaned] = product
+        return product
+
+
+def _payload_matches_existing_ignoring_enrichment(
+    incoming: dict[str, Any],
+    existing: dict[str, Any],
+) -> bool:
+    if existing == incoming:
+        return True
+    cleaned_existing = copy.deepcopy(existing)
+    incoming_lines = extract_receipt_lines_from_payload(incoming)
+    existing_lines = extract_receipt_lines_from_payload(cleaned_existing)
+    if len(incoming_lines) != len(existing_lines):
+        return False
+    for inc_line, ext_line in zip(incoming_lines, existing_lines, strict=True):
+        kassal_info = ext_line.pop("kassal", None)
+        ext_line.pop("canonical_product_id", None)
+        ext_line.pop("canonical_unit_id", None)
+        if isinstance(kassal_info, dict) and ext_line.get("unit") == kassal_info.get("weight_unit"):
+            if "unit" not in inc_line:
+                ext_line.pop("unit", None)
+            elif inc_line.get("unit") is None:
+                ext_line["unit"] = None
+    return cleaned_existing == incoming
+
+
 def enrich_and_map_receipt_record(
     record: ProviderOrderRecord,
     kassal_client: Any | None,
@@ -239,13 +334,19 @@ def enrich_and_map_receipt_record(
     if not lines:
         return []
 
+    kassal_session: _KassalLookupSession | None = (
+        kassal_client
+        if isinstance(kassal_client, _KassalLookupSession)
+        else (_KassalLookupSession(kassal_client) if kassal_client is not None else None)
+    )
+
     unmapped: list[dict[str, Any]] = []
 
     for line in lines:
         ean = extract_line_ean(line)
         kassal_prod = None
-        if ean and kassal_client is not None:
-            kassal_prod = kassal_client.lookup_ean(ean)
+        if ean and kassal_session is not None:
+            kassal_prod = kassal_session.lookup_ean(ean)
             if kassal_prod is not None:
                 line["kassal"] = {
                     "ean": kassal_prod.ean,
@@ -337,6 +438,18 @@ def sync_account(
     """Fetch pages; terminal-page cursor is saved for the next provider poll."""
     provider, account_id = _identity(provider, account_id)
     order_store = _resolve_order_store(engine_or_store)
+    existing_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    if callable(getattr(order_store, "list_records", None)):
+        for row in order_store.list_records(provider=provider):
+            if row.get("account_id") == account_id and isinstance(row.get("payload"), dict):
+                existing_by_key[(str(row["external_id"]), str(row["revision_id"]))] = row["payload"]
+
+    kassal_session: _KassalLookupSession | None = (
+        kassal_client
+        if isinstance(kassal_client, _KassalLookupSession)
+        else (_KassalLookupSession(kassal_client) if kassal_client is not None else None)
+    )
+
     cursor = order_store.get_checkpoint(provider, account_id)
     seen: set[str | None] = set()
     count = 0
@@ -348,51 +461,62 @@ def sync_account(
         if page.has_more and page.next_cursor in seen:
             raise ValueError("provider returned a repeated continuation cursor")
 
+        records_to_enrich: list[ProviderOrderRecord] = []
+        for rec in page.records:
+            existing_payload = existing_by_key.get((rec.external_id, rec.revision_id))
+            if existing_payload is not None:
+                incoming_json = rec.model_dump(mode="json")["payload"]
+                if _payload_matches_existing_ignoring_enrichment(incoming_json, existing_payload):
+                    rec.payload = copy.deepcopy(existing_payload)
+                    continue
+            records_to_enrich.append(rec)
+
         has_eans = any(
             any(extract_line_ean(line) for line in extract_receipt_lines(rec))
-            for rec in page.records
+            for rec in records_to_enrich
         )
-        if has_eans:
-            active_kassal = kassal_client
-            if active_kassal is None:
-                api_key: str | None = None
-                if connector_store is not None and household_id is not None:
-                    creds = connector_store.get_credentials(household_id, "kassal")
-                    if creds and isinstance(creds, dict) and creds.get("api_key"):
-                        api_key = str(creds["api_key"])
-                if (
-                    api_key is None
-                    and settings is not None
-                    and getattr(settings, "kassal_api_key", None)
-                ):
-                    s_key = settings.kassal_api_key
-                    clean_k = (
-                        s_key.get_secret_value()
-                        if hasattr(s_key, "get_secret_value")
-                        else str(s_key)
-                    )
-                    if clean_k.strip():
-                        api_key = clean_k.strip()
-                if api_key is not None:
-                    if kassal_client_factory is not None:
-                        active_kassal = kassal_client_factory(api_key)
-                    else:
-                        from home_kitchen.bootstrap import create_kassal_client
+        if has_eans and kassal_session is None:
+            active_kassal = None
+            api_key: str | None = None
+            if connector_store is not None and household_id is not None:
+                creds = connector_store.get_credentials(household_id, "kassal")
+                if creds and isinstance(creds, dict) and creds.get("api_key"):
+                    api_key = str(creds["api_key"])
+            if (
+                api_key is None
+                and settings is not None
+                and getattr(settings, "kassal_api_key", None)
+            ):
+                s_key = settings.kassal_api_key
+                clean_k = (
+                    s_key.get_secret_value() if hasattr(s_key, "get_secret_value") else str(s_key)
+                )
+                if clean_k.strip():
+                    api_key = clean_k.strip()
+            if api_key is not None:
+                if kassal_client_factory is not None:
+                    active_kassal = kassal_client_factory(api_key)
+                else:
+                    from home_kitchen.bootstrap import create_kassal_client
 
-                        active_kassal = create_kassal_client(api_key)
+                    active_kassal = create_kassal_client(api_key)
             if active_kassal is None:
                 from home_kitchen.bootstrap import missing_kassal_key_error
 
                 raise ValueError(missing_kassal_key_error())
-            kassal_client = active_kassal
+            kassal_session = _KassalLookupSession(active_kassal)
 
         all_unmapped: list[dict[str, Any]] = []
-        for rec in page.records:
-            unmapped = enrich_and_map_receipt_record(rec, kassal_client, identity_service)
+        for rec in records_to_enrich:
+            unmapped = enrich_and_map_receipt_record(rec, kassal_session, identity_service)
             if unmapped:
                 all_unmapped.extend(unmapped)
 
         order_store.persist_page(provider, account_id, page, expected_cursor=cursor)
+        for rec in page.records:
+            existing_by_key[(rec.external_id, rec.revision_id)] = rec.model_dump(mode="json")[
+                "payload"
+            ]
         count += len(page.records)
 
         if all_unmapped and callable(on_unmapped_lines):
@@ -1164,6 +1288,7 @@ class PurchaseHistorySyncService:
         self.identity_service: ReceiptIdentityResolver | None = identity_service
         self.receipt_mapper: ReceiptMappingPort | None = receipt_mapper
         self.kassal_client: Any = kassal_client
+        self._kassal_clients_by_key: dict[str, tuple[Any, Any]] = {}
 
     @staticmethod
     def _is_auth_exception(exc: Exception) -> bool:
@@ -1805,6 +1930,20 @@ class PurchaseHistorySyncService:
 
         order_store = self._order_store
 
+        def _cached_kassal_factory(api_key: str) -> Any:
+            factory = self.kassal_client_factory
+            cached = self._kassal_clients_by_key.get(api_key)
+            if cached is not None and cached[0] == factory:
+                return cached[1]
+            if factory is not None:
+                client = factory(api_key)
+            else:
+                from home_kitchen.bootstrap import create_kassal_client
+
+                client = create_kassal_client(api_key)
+            self._kassal_clients_by_key[api_key] = (factory, client)
+            return client
+
         def _run_sync(target_account_id: str, active_adapter: ProviderAdapter) -> int:
             return sync_account(
                 order_store,
@@ -1812,7 +1951,7 @@ class PurchaseHistorySyncService:
                 target_account_id,
                 active_adapter,
                 kassal_client=self.kassal_client,
-                kassal_client_factory=self.kassal_client_factory,
+                kassal_client_factory=_cached_kassal_factory,
                 identity_service=self.identity_service,
                 settings=self.settings,
                 connector_store=self.connector_store,

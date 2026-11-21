@@ -601,8 +601,10 @@ def test_line_item_ean_normalization_and_nullable_barcode():
 
 
 @pytest.fixture(autouse=True)
-def _no_kassal_enrichment(monkeypatch):
+def _no_kassal_enrichment(monkeypatch, request):
     """These fixtures predate the Kassal requirement; barcode enrichment is tested separately."""
+    if "kassal" in request.node.name:
+        return
     monkeypatch.setattr("home_kitchen.purchase_sync.extract_line_ean", lambda line: None)
 
 
@@ -785,3 +787,244 @@ def test_parse_receipt_skips_non_item_rows_missing_name():
     assert len(normalized) == 2
     assert normalized[0].name == "NORVEGIA 1KG"
     assert normalized[1].amount == Decimal("24.50")
+
+
+def test_rema1000_sync_graceful_on_kassal_429_and_caches_repeated_eans(memory_engine):
+    from home_kitchen.kassal import KassalClient
+
+    txs = [
+        Rema1000Transaction.model_validate(
+            {
+                "receiptId": "rema-429-rec-1",
+                "storeName": "REMA 1000 Vulkan",
+                "totalAmount": "299.80",
+                "timestamp": "2026-11-21T10:00:00Z",
+                "hasReceipt": True,
+            }
+        ),
+        Rema1000Transaction.model_validate(
+            {
+                "receiptId": "rema-429-rec-2",
+                "storeName": "REMA 1000 Vulkan",
+                "totalAmount": "69.80",
+                "timestamp": "2026-11-21T11:00:00Z",
+                "hasReceipt": True,
+            }
+        ),
+        Rema1000Transaction.model_validate(
+            {
+                "receiptId": "rema-429-rec-3",
+                "storeName": "REMA 1000 Torggata",
+                "totalAmount": "22.50",
+                "timestamp": "2026-11-21T12:00:00Z",
+                "hasReceipt": True,
+            }
+        ),
+    ]
+    receipts = {
+        "rema-429-rec-1": {
+            "rows": [
+                {"prodtxt1": "NORVEGIA 1KG", "prodtxt3": "7038010009457", "amount": "149.90"},
+                {"prodtxt1": "NORVEGIA 1KG", "prodtxt3": "7038010009457", "amount": "149.90"},
+            ]
+        },
+        "rema-429-rec-2": {
+            "rows": [
+                {"prodtxt1": "KVIKK LUNSJ 4PK", "prodtxt3": "7032069101520", "amount": "39.90"},
+                {"prodtxt1": "APPELSIN 1KG", "prodtxt3": "7032069101537", "amount": "29.90"},
+            ]
+        },
+        "rema-429-rec-3": {
+            "rows": [
+                {"prodtxt1": "HAVREGRØT 500G", "prodtxt3": "7032069101544", "amount": "22.50"},
+            ]
+        },
+    }
+    source = Rema1000FixtureSource(txs, receipts=receipts)
+    adapter = Rema1000PurchaseHistoryAdapter(source, "alice", page_size=2)
+
+    kassal_calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        ean = request.url.path.rsplit("/", 1)[-1]
+        kassal_calls.append(ean)
+        if ean == "7038010009457":
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "products": [
+                            {
+                                "name": "Norvegia Original 1kg",
+                                "brand": "Tine",
+                                "weight": 1.0,
+                                "weight_unit": "kg",
+                            }
+                        ]
+                    }
+                },
+            )
+        if ean == "7032069101520":
+            return httpx.Response(
+                429,
+                headers={"Retry-After": "60"},
+                json={"message": "Too Many Attempts."},
+            )
+        return httpx.Response(500, text="Should not have been called after 429")
+
+    kassal_client = KassalClient("kassal-key", transport=httpx.MockTransport(handler))
+    synced_count = sync_account(
+        memory_engine,
+        "rema1000",
+        "alice",
+        adapter,
+        kassal_client=kassal_client,
+    )
+    assert synced_count == 3
+    # Repeated EAN 7038010009457 is cached; after 429 on 7032069101520, Kassal is not hit again
+    assert kassal_calls == ["7038010009457", "7032069101520"]
+
+    with memory_engine.connect() as connection:
+        rows = (
+            connection.execute(
+                select(provider_order_sources).where(
+                    provider_order_sources.c.provider == "rema1000"
+                )
+            )
+            .mappings()
+            .all()
+        )
+    assert len(rows) == 3
+    by_id = {row["external_id"]: row["payload"] for row in rows}
+
+    lines_1 = extract_normalized_lines("rema1000", by_id["rema-429-rec-1"])
+    assert [line.name for line in lines_1] == ["Norvegia Original 1kg", "Norvegia Original 1kg"]
+    assert [line.amount for line in lines_1] == [Decimal("149.90"), Decimal("149.90")]
+
+    lines_2 = extract_normalized_lines("rema1000", by_id["rema-429-rec-2"])
+    assert [(line.name, line.amount, line.ean) for line in lines_2] == [
+        ("KVIKK LUNSJ 4PK", Decimal("39.90"), "7032069101520"),
+        ("APPELSIN 1KG", Decimal("29.90"), "7032069101537"),
+    ]
+
+    lines_3 = extract_normalized_lines("rema1000", by_id["rema-429-rec-3"])
+    assert [(line.name, line.amount, line.ean) for line in lines_3] == [
+        ("HAVREGRØT 500G", Decimal("22.50"), "7032069101544"),
+    ]
+
+    # Re-syncing when Kassal is healthy again must not hit RevisionConflict on prior receipts
+    replay_calls: list[str] = []
+
+    def healthy_handler(request: httpx.Request) -> httpx.Response:
+        replay_calls.append(request.url.path.rsplit("/", 1)[-1])
+        return httpx.Response(
+            200, json={"data": {"products": [{"name": "Enriched Later", "weight_unit": "stk"}]}}
+        )
+
+    healthy_client = KassalClient("kassal-key", transport=httpx.MockTransport(healthy_handler))
+    replayed_count = sync_account(
+        memory_engine,
+        "rema1000",
+        "alice",
+        adapter,
+        kassal_client=healthy_client,
+    )
+    assert replayed_count == 3
+    assert replay_calls == []
+
+
+def test_rema1000_service_sync_provider_succeeds_when_kassal_returns_429(memory_engine):
+    from uuid import uuid4
+
+    from home_kitchen.connector_store import MemoryConnectorStore
+    from home_kitchen.kassal import KassalClient
+    from home_kitchen.purchase_sync import PurchaseHistorySyncService
+
+    hid = uuid4()
+    connector_store = MemoryConnectorStore()
+    connector_store.save_connection(hid, "kassal", "api_key", {"api_key": "kassal-test-key"})
+
+    txs = [
+        Rema1000Transaction.model_validate(
+            {
+                "receiptId": "rema-svc-429-1",
+                "storeName": "REMA 1000 Majorstuen",
+                "totalAmount": "54.90",
+                "timestamp": "2026-11-21T13:00:00Z",
+                "hasReceipt": True,
+            }
+        ),
+        Rema1000Transaction.model_validate(
+            {
+                "receiptId": "rema-svc-429-2",
+                "storeName": "REMA 1000 Majorstuen",
+                "totalAmount": "19.90",
+                "timestamp": "2026-11-21T14:00:00Z",
+                "hasReceipt": True,
+            }
+        ),
+    ]
+    receipts = {
+        "rema-svc-429-1": {
+            "rows": [
+                {"prodtxt1": "KVIKK LUNSJ 4PK", "prodtxt3": "7032069101520", "amount": "39.90"},
+                {"prodtxt1": "BANANER", "prodtxt3": "7032069101599", "amount": "15.00"},
+            ]
+        },
+        "rema-svc-429-2": {
+            "rows": [
+                {"prodtxt1": "EPLE", "prodtxt3": "7032069101600", "amount": "19.90"},
+            ]
+        },
+    }
+    source = Rema1000FixtureSource(txs, receipts=receipts)
+    adapter = Rema1000PurchaseHistoryAdapter(source, "alice")
+
+    factory_calls = 0
+    kassal_requests: list[str] = []
+
+    def _kassal_factory(api_key: str) -> KassalClient:
+        nonlocal factory_calls
+        factory_calls += 1
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            kassal_requests.append(request.url.path.rsplit("/", 1)[-1])
+            return httpx.Response(429, json={"message": "Too Many Attempts."})
+
+        return KassalClient(api_key, transport=httpx.MockTransport(handler))
+
+    service = PurchaseHistorySyncService(
+        engine=memory_engine,
+        connector_store=connector_store,
+        household_id=hid,
+        kassal_client_factory=_kassal_factory,
+    )
+    service.register_adapter("rema1000", adapter, account_id="alice")
+
+    result = service.sync_provider("rema1000", account_id="alice")
+    assert result.status == "success"
+    assert result.records_synced == 2
+    assert result.error is None
+    assert factory_calls == 1
+    assert kassal_requests == ["7032069101520"]
+
+    # Subsequent poll with a new receipt reuses the cached KassalClient instance from factory
+    source._transactions.append(
+        Rema1000Transaction.model_validate(
+            {
+                "receiptId": "rema-svc-429-3",
+                "storeName": "REMA 1000 Majorstuen",
+                "totalAmount": "12.00",
+                "timestamp": "2026-11-21T15:00:00Z",
+                "hasReceipt": True,
+            }
+        )
+    )
+    receipts["rema-svc-429-3"] = {
+        "rows": [{"prodtxt1": "GULROT", "prodtxt3": "7032069101611", "amount": "12.00"}]
+    }
+    second_result = service.sync_provider("rema1000", account_id="alice")
+    assert second_result.status == "success"
+    assert second_result.records_synced == 3
+    assert factory_calls == 1
+    assert kassal_requests == ["7032069101520", "7032069101611"]

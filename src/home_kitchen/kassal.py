@@ -39,9 +39,37 @@ class KassalProduct(BaseModel):
 class KassalError(Exception):
     """Base exception for Kassal.app API errors."""
 
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
 
 class KassalAuthError(KassalError):
     """Authentication failure (401/403) from Kassal.app."""
+
+
+class KassalRateLimitError(KassalError):
+    """Rate limit (HTTP 429) response from Kassal.app."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int = 429,
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(message, status_code=status_code)
+        self.retry_after = retry_after
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        parsed = float(value.strip())
+    except ValueError:
+        return None
+    return parsed if parsed >= 0 else None
 
 
 class KassalClient:
@@ -111,16 +139,25 @@ class KassalClient:
 
         if resp.status_code in (401, 403):
             raise KassalAuthError(
-                "Ugyldig eller utløpt Kassal.app API-nøkkel. Vennligst sjekk API-nøkkelen i Innstillinger."
+                "Ugyldig eller utløpt Kassal.app API-nøkkel. Vennligst sjekk API-nøkkelen i Innstillinger.",
+                status_code=resp.status_code,
             )
         if resp.status_code == 404:
             with self._lock:
                 self._cache[cleaned_ean] = None
             return None
+        if resp.status_code == 429:
+            safe_text = self._redact_secret(resp.text)
+            retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
+            raise KassalRateLimitError(
+                f"Kassal.app svarte med HTTP 429 for EAN {cleaned_ean}: {safe_text}",
+                retry_after=retry_after,
+            )
         if resp.status_code >= 400:
             safe_text = self._redact_secret(resp.text)
             raise KassalError(
-                f"Kassal.app svarte med HTTP {resp.status_code} for EAN {cleaned_ean}: {safe_text}"
+                f"Kassal.app svarte med HTTP {resp.status_code} for EAN {cleaned_ean}: {safe_text}",
+                status_code=resp.status_code,
             )
 
         try:

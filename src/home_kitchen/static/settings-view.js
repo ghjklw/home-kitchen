@@ -125,7 +125,6 @@
         api_key: configured ? "API-nøkkel er satt opp (hemmeligheten er skjult)" : "API-nøkkel",
         oauth_pkce: configured ? "OAuth-innlogging er lagret (hemmeligheten er skjult)" : "OAuth-innlogging (PKCE)",
         oauth_password: configured ? "OAuth-økt er lagret (hemmeligheten er skjult)" : "E-post og passord",
-        interactive_otp: configured ? "SMS-innlogging er lagret (hemmeligheten er skjult)" : "SMS-engangskode",
         session_token: configured ? "Sesjonstoken er lagret (hemmeligheten er skjult)" : "Sesjonstoken",
         session_cookie: configured ? "Sesjonsinformasjonskapsel er lagret (hemmeligheten er skjult)" : "Sesjonsinformasjonskapsel",
         credentials: configured ? "Brukernavn og passord er lagret (hemmeligheten er skjult)" : "Brukernavn og passord",
@@ -380,16 +379,6 @@
     return payload;
   }
 
-  function buildTrumfVerifyPayload(sessionId, otp) {
-    const trimmedSession = String(sessionId || "").trim();
-    const trimmedOtp = String(otp || "").trim();
-    if (!trimmedSession || !trimmedOtp) return null;
-    return {
-      session_id: trimmedSession,
-      otp: trimmedOtp,
-    };
-  }
-
   function buildKassalConnectPayload(apiKey) {
     const trimmed = String(apiKey || "").trim();
     if (!trimmed) return null;
@@ -434,7 +423,6 @@
     formatIntegrationIssueMessage,
     parsePkceCompletionPayload,
     buildCookidooLoginPayload,
-    buildTrumfVerifyPayload,
     buildTrumfSessionCookie,
     buildTrumfConnectPayload,
     buildKassalConnectPayload,

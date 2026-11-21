@@ -1,9 +1,10 @@
-"""Interactive backend authentication flows for Rema 1000, Coop, Trumf, and Cookidoo.
+"""Interactive backend authentication flows for Rema 1000, Coop, Cookidoo, Trumf, and Kassal.
 
 Provides:
 - Guided OIDC PKCE flow for Rema 1000 and Coop (start + complete)
 - Interactive OAuth2 login for Cookidoo / TM6 via Vorwerk / Cidaas
-- Interactive Phone / SMS OTP flow for Trumf (start + verify)
+- Session cookie validation and rolling renewal for Trumf
+- API key validation for Kassal.app
 All flows support injectable HTTP transports and base URLs for offline testing.
 Plaintext secrets and passwords are never returned in responses or persisted in DB.
 """
@@ -36,7 +37,7 @@ _LOG = logging.getLogger(__name__)
 
 REFRESHABLE_PROVIDERS = ("rema1000", "coop", "cookidoo", "trumf")
 OAUTH_REFRESH_MODES = ("oauth_pkce", "oauth_password")
-TRUMF_REFRESH_MODES = ("session_cookie", "interactive_otp", "manual_session_cookie")
+TRUMF_REFRESH_MODES = ("session_cookie", "manual_session_cookie")
 DEFAULT_REFRESH_INTERVAL_SECONDS = 300.0
 TRUMF_SESSION_REFRESH_ERROR = (
     "Trumf-sesjonen kan ikke fornyes automatisk og må kobles til på nytt i nettleseren "
@@ -76,11 +77,6 @@ COOKIDOO_LOGIN_HEADERS = {
 }
 
 DEFAULT_TRUMF_BASE_URL = "https://www.trumf.no"
-DEFAULT_TRUMF_AUTHORIZE_URL = "https://id.trumf.no/connect/authorize"
-DEFAULT_TRUMF_TOKEN_URL = "https://id.trumf.no/connect/token"
-DEFAULT_TRUMF_CLIENT_ID = "trumf"
-DEFAULT_TRUMF_SCOPE = "openid profile offline_access api.rest http://id.trumf.no/scopes/medlem"
-DEFAULT_TRUMF_REDIRECT_URI = "http://localhost:18099/api/integrations/trumf/pkce/callback"
 
 
 class PKCEStartRequest(BaseModel):
@@ -119,28 +115,6 @@ class CookidooLoginRequest(BaseModel):
     add_account: bool = False
 
 
-class TrumfOTPStartRequest(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    phone: str = Field(min_length=3)
-    account_id: str | None = None
-    account_label: str | None = None
-    add_account: bool = False
-
-
-class TrumfOTPStartResponse(BaseModel):
-    session_id: str
-    detail: str
-
-
-class TrumfOTPVerifyRequest(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    session_id: str = Field(min_length=1)
-    otp: str = Field(min_length=1)
-    account_id: str | None = None
-    account_label: str | None = None
-    add_account: bool = False
-
-
 class RefreshRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
     account_id: str | None = None
@@ -154,16 +128,6 @@ class PKCETransaction(BaseModel):
     redirect_uri: str
     client_id: str
     token_endpoint: str
-    created_at: datetime
-    account_id: str | None = None
-    account_label: str | None = None
-    add_account: bool = False
-
-
-class TrumfOTPSession(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    phone: str
-    household_id: UUID
     created_at: datetime
     account_id: str | None = None
     account_label: str | None = None
@@ -325,11 +289,6 @@ class ConnectorAuthService:
         cookidoo_redirect_uri: str = DEFAULT_COOKIDOO_REDIRECT_URI,
         cookidoo_scope: str = DEFAULT_COOKIDOO_SCOPE,
         trumf_base_url: str = DEFAULT_TRUMF_BASE_URL,
-        trumf_authorize_url: str = DEFAULT_TRUMF_AUTHORIZE_URL,
-        trumf_token_url: str = DEFAULT_TRUMF_TOKEN_URL,
-        trumf_redirect_uri: str | None = None,
-        trumf_client_id: str = DEFAULT_TRUMF_CLIENT_ID,
-        trumf_scope: str = DEFAULT_TRUMF_SCOPE,
         settings: Settings | None = None,
     ):
         self.store = store
@@ -357,23 +316,10 @@ class ConnectorAuthService:
         self.cookidoo_redirect_uri = cookidoo_redirect_uri
         self.cookidoo_scope = cookidoo_scope
         self.trumf_base_url = trumf_base_url
-        self.trumf_authorize_url = trumf_authorize_url
-        self.trumf_token_url = trumf_token_url
-        if trumf_redirect_uri is not None:
-            self.trumf_redirect_uri = trumf_redirect_uri
-        elif settings is not None and getattr(settings, "public_url", None):
-            self.trumf_redirect_uri = (
-                f"{str(settings.public_url).rstrip('/')}/api/integrations/trumf/pkce/callback"
-            )
-        else:
-            self.trumf_redirect_uri = DEFAULT_TRUMF_REDIRECT_URI
-        self.trumf_client_id = trumf_client_id
-        self.trumf_scope = trumf_scope
         self.settings = settings
         self._lock = threading.Lock()
         self._refresh_locks: dict[tuple[UUID, str, str], threading.RLock] = {}
         self._pkce_transactions: dict[str, PKCETransaction] = {}
-        self._trumf_sessions: dict[str, TrumfOTPSession] = {}
 
     def _get_http_client(self) -> httpx.Client:
         return httpx.Client(transport=self.transport, timeout=30.0)
@@ -394,14 +340,12 @@ class ConnectorAuthService:
             return self.rema1000_token_url, self.rema1000_client_id
         if provider_id == "coop":
             return self.coop_token_url, self.coop_client_id
-        if provider_id == "trumf":
-            return self.trumf_token_url, self.trumf_client_id
         if provider_id == "cookidoo":
             return (
                 f"{self.cookidoo_base_url.rstrip('/')}/token-srv/token",
                 self.cookidoo_client_id,
             )
-        if provider_id in ("oda", "anthropic"):
+        if provider_id in ("oda", "anthropic", "trumf"):
             raise HTTPException(
                 status_code=400,
                 detail=f"Tokenfornyelse støttes ikke for '{provider_id}'.",
@@ -418,8 +362,8 @@ class ConnectorAuthService:
         account_label: str | None = None,
         add_account: bool = False,
     ) -> PKCEStartResponse:
-        if provider_id not in ("rema1000", "coop", "trumf"):
-            if provider_id in ("cookidoo", "oda", "anthropic"):
+        if provider_id not in ("rema1000", "coop"):
+            if provider_id in ("cookidoo", "oda", "anthropic", "trumf"):
                 raise HTTPException(
                     status_code=400,
                     detail=f"PKCE-flyt støttes ikke for '{provider_id}'.",
@@ -438,16 +382,6 @@ class ConnectorAuthService:
             instructions = (
                 "Logg inn med din Rema 1000 Æ-konto i nettleseren. Etter innlogging, "
                 "kopier fullførings-URL-en eller autorisasjonskoden og lim den inn her."
-            )
-        elif provider_id == "trumf":
-            auth_url = self.trumf_authorize_url
-            tok_url = self.trumf_token_url
-            used_redirect_uri = redirect_uri or self.trumf_redirect_uri
-            client_id = self.trumf_client_id
-            scope = self.trumf_scope
-            instructions = (
-                "Logg inn med din Trumf-konto i nettleseren. Etter innlogging blir du "
-                "sendt automatisk tilbake hit for å fullføre tilkoblingen."
             )
         else:  # coop
             auth_url = self.coop_authorize_url
@@ -520,8 +454,8 @@ class ConnectorAuthService:
         account_label: str | None = None,
         add_account: bool = False,
     ) -> IntegrationInfo:
-        if provider_id not in ("rema1000", "coop", "trumf"):
-            if provider_id in ("cookidoo", "oda", "anthropic"):
+        if provider_id not in ("rema1000", "coop"):
+            if provider_id in ("cookidoo", "oda", "anthropic", "trumf"):
                 raise HTTPException(
                     status_code=400,
                     detail=f"PKCE-flyt støttes ikke for '{provider_id}'.",
@@ -884,170 +818,6 @@ class ConnectorAuthService:
         )
 
         return self.integrations.describe_one("cookidoo", actor_id)
-
-    def start_trumf_otp(
-        self,
-        household_id: UUID,
-        phone: str,
-        *,
-        account_id: str | None = None,
-        account_label: str | None = None,
-        add_account: bool = False,
-    ) -> TrumfOTPStartResponse:
-        cleaned_phone = phone.strip()
-        if not cleaned_phone or len(cleaned_phone) < 3:
-            raise HTTPException(status_code=422, detail="Ugyldig telefonnummer for Trumf.")
-
-        otp_send_url = f"{self.trumf_base_url.rstrip('/')}/api/auth/otp/send"
-        with self._get_http_client() as client:
-            try:
-                response = client.post(
-                    otp_send_url,
-                    json={"phone": cleaned_phone},
-                    headers={"Accept": "application/json"},
-                )
-            except httpx.HTTPError as exc:
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"Nettverksfeil mot Trumf: {exc}",
-                ) from None
-
-        if response.status_code != 200:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Trumf kunne ikke sende engangskode: {response.text}",
-            )
-
-        session_id = secrets.token_urlsafe(32)
-        now = datetime.now(UTC)
-        with self._lock:
-            # Clean up old sessions (> 10 min)
-            expired_keys = [
-                k
-                for k, s in self._trumf_sessions.items()
-                if now - s.created_at > timedelta(minutes=10)
-            ]
-            for k in expired_keys:
-                self._trumf_sessions.pop(k, None)
-
-            self._trumf_sessions[session_id] = TrumfOTPSession(
-                phone=cleaned_phone,
-                household_id=household_id,
-                created_at=now,
-                account_id=account_id,
-                account_label=account_label,
-                add_account=add_account,
-            )
-
-        return TrumfOTPStartResponse(
-            session_id=session_id,
-            detail="Engangskode er sendt på SMS til ditt telefonnummer.",
-        )
-
-    def verify_trumf_otp(
-        self,
-        household_id: UUID,
-        actor_id: str | None,
-        session_id: str,
-        otp: str,
-        *,
-        account_id: str | None = None,
-        account_label: str | None = None,
-        add_account: bool = False,
-    ) -> IntegrationInfo:
-        cleaned_otp = otp.strip()
-        if not cleaned_otp:
-            raise HTTPException(status_code=422, detail="Engangskode (otp) må oppgis.")
-
-        with self._lock:
-            session = self._trumf_sessions.pop(session_id, None)
-
-        if session is None:
-            raise HTTPException(
-                status_code=400,
-                detail="Ugyldig eller utløpt sesjon for engangskode.",
-            )
-
-        if session.household_id != household_id:
-            raise HTTPException(
-                status_code=403,
-                detail="Sesjonen tilhører ikke denne husholdningen.",
-            )
-
-        if datetime.now(UTC) - session.created_at > timedelta(minutes=10):
-            raise HTTPException(
-                status_code=400,
-                detail="Engangskoden har utløpt. Start på nytt.",
-            )
-
-        otp_verify_url = f"{self.trumf_base_url.rstrip('/')}/api/auth/otp/verify"
-        with self._get_http_client() as client:
-            try:
-                response = client.post(
-                    otp_verify_url,
-                    json={
-                        "session_id": session_id,
-                        "phone": session.phone,
-                        "otp": cleaned_otp,
-                    },
-                    headers={"Accept": "application/json"},
-                )
-            except httpx.HTTPError as exc:
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"Nettverksfeil mot Trumf: {exc}",
-                ) from None
-
-        if response.status_code in (400, 401):
-            raise HTTPException(status_code=401, detail="Ugyldig engangskode.")
-        if response.status_code != 200:
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=f"Trumf verifisering feilet: {response.text}",
-            )
-
-        session_cookie = response.cookies.get("trumf_session") or response.cookies.get(
-            "__Secure-authjs.session-token"
-        )
-        if not session_cookie and response.headers.get("set-cookie"):
-            session_cookie = response.headers.get("set-cookie")
-        if not session_cookie:
-            try:
-                data = response.json()
-                session_cookie = (
-                    data.get("session_cookie") or data.get("session_token") or data.get("token")
-                )
-            except Exception:
-                pass
-
-        if not isinstance(session_cookie, str) or not session_cookie.strip():
-            raise ConnectorAuthError(
-                status_code=502,
-                detail="Mottok ingen gyldig sesjonsinformasjonskapsel fra Trumf.",
-            )
-
-        expires_at = datetime.now(UTC) + timedelta(days=365)
-        effective_account_id = account_id if account_id is not None else session.account_id
-        effective_label = account_label if account_label is not None else session.account_label
-        effective_add = add_account or session.add_account
-
-        self.store.save_connection(
-            household_id=household_id,
-            provider_id="trumf",
-            auth_mode="interactive_otp",
-            credentials={
-                "session_cookie": session_cookie,
-                "phone": session.phone,
-            },
-            expires_at=expires_at,
-            actor_id=actor_id,
-            metadata={"phone": session.phone},
-            account_id=effective_account_id,
-            account_label=effective_label,
-            add_account=effective_add,
-        )
-
-        return self.integrations.describe_one("trumf", actor_id)
 
     def _execute_oauth_refresh_request(
         self,
@@ -1526,7 +1296,10 @@ class ConnectorAuthService:
         account_id: str | None = None,
     ) -> IntegrationInfo:
         """Exchange stored refresh_token(s) or renew Trumf session cookie."""
-        token_endpoint, client_id = self._refresh_config(provider_id)
+        token_endpoint: str | None = None
+        client_id: str | None = None
+        if provider_id != "trumf":
+            token_endpoint, client_id = self._refresh_config(provider_id)
 
         def refresh_one(target_account_id: str) -> None:
             if provider_id == "trumf":
@@ -1538,9 +1311,14 @@ class ConnectorAuthService:
                         status_code=404,
                         detail=f"Ingen lagret tilkobling funnet for '{provider_id}' (konto '{target_account_id}').",
                     )
-                if meta.auth_mode in TRUMF_REFRESH_MODES:
-                    self._refresh_trumf_account(household_id, actor_id, target_account_id)
-                    return
+                if meta.auth_mode not in TRUMF_REFRESH_MODES:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Tilkoblingen for 'trumf' mangler sesjonsinformasjonskapsel og må kobles til på nytt.",
+                    )
+                self._refresh_trumf_account(household_id, actor_id, target_account_id)
+                return
+            assert token_endpoint is not None and client_id is not None
             self._refresh_single_account(
                 household_id,
                 actor_id,
@@ -1579,14 +1357,8 @@ class ConnectorAuthService:
         if not refreshable_accounts:
             if last_read_exc is not None:
                 raise last_read_exc
-            if provider_id == "trumf" and all(
-                acc.auth_mode in TRUMF_REFRESH_MODES for acc in accounts
-            ):
+            if provider_id == "trumf":
                 missing_label = "sesjonsinformasjonskapsel"
-            elif provider_id == "trumf" and any(
-                acc.auth_mode in TRUMF_REFRESH_MODES for acc in accounts
-            ):
-                missing_label = "refresh_token eller sesjonsinformasjonskapsel"
             else:
                 missing_label = "refresh_token"
             raise HTTPException(

@@ -716,12 +716,12 @@ def test_provider_status_reports_connector_store_auth_mode_accurately(memory_eng
     assert service._default_provider_metadata("rema1000")[0] == "manual_session_token"
     assert service._default_provider_metadata("coop")[0] == "oidc_pkce"
 
-    # Connected via oauth_pkce for Trumf, Rema 1000, and Coop
+    # Connected via oauth_pkce for Rema 1000 and Coop, and session_cookie for Trumf
     store.save_connection(
         household_id=household_id,
         provider_id="trumf",
-        auth_mode="oauth_pkce",
-        credentials={"access_token": "trumf-pkce-token", "refresh_token": "trumf-ref"},
+        auth_mode="session_cookie",
+        credentials={"session_cookie": "cookie=abc"},
         actor_id="household-a",
         account_id="household-a",
     )
@@ -742,31 +742,25 @@ def test_provider_status_reports_connector_store_auth_mode_accurately(memory_eng
         account_id="household-a",
     )
 
-    assert service._default_provider_metadata("trumf", account_id="household-a")[0] == "oauth_pkce"
+    assert (
+        service._default_provider_metadata("trumf", account_id="household-a")[0] == "session_cookie"
+    )
     assert (
         service._default_provider_metadata("rema1000", account_id="household-a")[0] == "oauth_pkce"
     )
     assert service._default_provider_metadata("coop", account_id="household-a")[0] == "oauth_pkce"
 
     status_pkce = service.get_status(account_id="household-a")
-    assert status_pkce.providers["trumf"].auth_method == "oauth_pkce"
+    assert status_pkce.providers["trumf"].auth_method == "session_cookie"
     assert status_pkce.providers["trumf"].status == "connected"
-    assert "OAuth PKCE" in (status_pkce.providers["trumf"].limitations or "")
+    assert "manual" not in (status_pkce.providers["trumf"].limitations or "").lower()
     assert status_pkce.providers["rema1000"].auth_method == "oauth_pkce"
     assert status_pkce.providers["rema1000"].status == "connected"
     assert "OAuth PKCE" in (status_pkce.providers["rema1000"].limitations or "")
     assert status_pkce.providers["coop"].auth_method == "oauth_pkce"
     assert status_pkce.providers["coop"].status == "connected"
 
-    # Switching Trumf to session_cookie and Rema 1000 to session_token updates metadata accurately
-    store.save_connection(
-        household_id=household_id,
-        provider_id="trumf",
-        auth_mode="session_cookie",
-        credentials={"session_cookie": "cookie=abc"},
-        actor_id="household-a",
-        account_id="household-a",
-    )
+    # Switching Rema 1000 to session_token updates metadata accurately
     store.save_connection(
         household_id=household_id,
         provider_id="rema1000",
@@ -777,16 +771,11 @@ def test_provider_status_reports_connector_store_auth_mode_accurately(memory_eng
     )
 
     assert (
-        service._default_provider_metadata("trumf", account_id="household-a")[0] == "session_cookie"
-    )
-    assert (
         service._default_provider_metadata("rema1000", account_id="household-a")[0]
         == "session_token"
     )
 
     status_session = service.get_status(account_id="household-a")
-    assert status_session.providers["trumf"].auth_method == "session_cookie"
-    assert "manual" not in (status_session.providers["trumf"].limitations or "").lower()
     assert status_session.providers["rema1000"].auth_method == "session_token"
     assert "manual" not in (status_session.providers["rema1000"].limitations or "").lower()
 

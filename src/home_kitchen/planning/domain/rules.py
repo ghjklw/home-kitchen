@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Sequence
+from datetime import date
 from uuid import UUID
 
 from home_kitchen.models import Meal, MealCreate, Recipe
@@ -58,3 +59,9 @@ def validate_service_bounds(
         raise ValueError("Proposal TTL must be between 1 second and 24 hours")
     if not 1 <= max_meals <= 90 or not 1 <= max_range_days <= 366:
         raise ValueError("Proposal bounds must be at most 90 meals and 366 days")
+
+
+def validate_date_range(start: date, end: date) -> None:
+    """Ensure calendar date ranges are valid (end on or after start)."""
+    if end < start:
+        raise ValueError("end must be on or after start")

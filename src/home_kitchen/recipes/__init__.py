@@ -15,6 +15,7 @@ from home_kitchen.recipes.providers import (
     WebRecipeProvider,
     create_recipe_providers,
 )
+from home_kitchen.recipes.service import RecipeService
 
 __all__ = [
     "AIRecipeProvider",
@@ -26,6 +27,7 @@ __all__ = [
     "RecipeProvider",
     "RecipeProviderInfo",
     "RecipeProviderRegistry",
+    "RecipeService",
     "WebRecipeProvider",
     "create_recipe_providers",
 ]

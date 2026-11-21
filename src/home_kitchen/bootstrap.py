@@ -22,14 +22,27 @@ from home_kitchen.purchasing_ports import (
     TripCompletionUnitOfWork,
 )
 from home_kitchen.purchasing_reconciliation import TripCompletionService
+from home_kitchen.shopping import (
+    ShoppingBuilder,
+    ShoppingItemRepository,
+    ShoppingMealReader,
+    ShoppingRecipeReader,
+    ShoppingService,
+)
+from home_kitchen.shopping_adapters import (
+    MemoryShoppingItemRepository,
+    PostgresShoppingItemRepository,
+)
 
 __all__ = [
     "_build_purchase_adapter",
     "create_basket_service",
     "create_in_memory_basket_service",
+    "create_in_memory_shopping_service",
     "create_in_memory_store_trip_service",
     "create_in_memory_trip_completion_service",
     "create_inventory_service",
+    "create_shopping_service",
     "create_store_trip_service",
     "create_trip_completion_service",
 ]
@@ -105,6 +118,46 @@ def create_in_memory_trip_completion_service(
         resolved_uow.history = history
     service = TripCompletionService(plan_reader, history, uow=resolved_uow)
     return service, resolved_uow
+
+
+def create_shopping_service(
+    meals: ShoppingMealReader,
+    recipes: ShoppingRecipeReader,
+    history: HistoryRecordPort | None = None,
+    *,
+    engine: Any = None,
+    items: ShoppingItemRepository | None = None,
+    shopping_builder: ShoppingBuilder | None = None,
+) -> ShoppingService:
+    """Bootstrap a production `ShoppingService` backed by PostgreSQL."""
+    resolved_engine = engine if engine is not None else getattr(history, "engine", None)
+    if items is not None:
+        resolved_items: ShoppingItemRepository = items
+    else:
+        if resolved_engine is None:
+            raise ValueError("create_shopping_service requires an engine or items repository")
+        resolved_items = PostgresShoppingItemRepository(resolved_engine, history)
+    return ShoppingService(
+        resolved_items,
+        meals,
+        recipes,
+        shopping_builder=shopping_builder,
+    )
+
+
+def create_in_memory_shopping_service(
+    meals: ShoppingMealReader,
+    recipes: ShoppingRecipeReader,
+    *,
+    items: MemoryShoppingItemRepository | None = None,
+    shopping_builder: ShoppingBuilder | None = None,
+) -> tuple[ShoppingService, MemoryShoppingItemRepository]:
+    """Bootstrap an in-memory `ShoppingService` for unit tests without a database."""
+    resolved_items = items if items is not None else MemoryShoppingItemRepository()
+    return (
+        ShoppingService(resolved_items, meals, recipes, shopping_builder=shopping_builder),
+        resolved_items,
+    )
 
 
 def _build_purchase_adapter(

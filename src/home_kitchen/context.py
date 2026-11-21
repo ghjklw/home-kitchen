@@ -11,11 +11,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+HistoryChannel = Literal["app", "api", "mcp"]
+
 
 @dataclass(frozen=True)
 class HistoryContext:
     actor_id: str | None = None
-    channel: Literal["api", "app", "mcp"] = "api"
+    channel: HistoryChannel = "api"
 
 
 _DEFAULT_CONTEXT = HistoryContext()

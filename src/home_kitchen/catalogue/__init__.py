@@ -56,6 +56,7 @@ from home_kitchen.catalogue.sku_models import (
 )
 from home_kitchen.catalogue.sku_repository import PostgresCatalogueSkuRepository
 from home_kitchen.catalogue.sku_service import CatalogueSkuService
+from home_kitchen.catalogue.unmapped_service import UnmappedIngredientService
 
 __all__ = [
     "REFERENCE_SEED_NAMESPACE",
@@ -93,6 +94,7 @@ __all__ = [
     "SeedResult",
     "SeedVersion",
     "StockItemDetail",
+    "UnmappedIngredientService",
     "compute_purchase_frequency",
     "get_default_walking_order",
     "get_reference_categories",

@@ -60,11 +60,12 @@ from home_kitchen.basket.domain.matching_logic import (
 from home_kitchen.basket.ports import (
     IdentityCorrectionPort,
     IdentityLookupPort,
+    PurchasePlanPort,
     SkuPreferencePort,
 )
 from home_kitchen.catalogue.identity import IdentityCorrectionCitation
-from home_kitchen.inventory import InventoryService, PurchasePlan
 from home_kitchen.oda.media import fetch_product_media
+from home_kitchen.shopping import PurchasePlan
 
 __all__ = [
     "MAX_NEEDS",
@@ -152,7 +153,7 @@ class BasketMatchingService:
 
     def __init__(
         self,
-        inventory: InventoryService,
+        inventory: PurchasePlanPort,
         provider: SearchProvider,
         *,
         media_fetcher: MediaFetcher = fetch_product_media,

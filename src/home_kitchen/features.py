@@ -16,6 +16,11 @@ from home_kitchen.basket.adapters import (
 )
 from home_kitchen.basket.jobs import BasketMatchJobs
 from home_kitchen.basket.matching import BasketMatchingService, OdaSearchAdapter
+from home_kitchen.bootstrap import (
+    create_inventory_service,
+    create_store_trip_service,
+    create_trip_completion_service,
+)
 from home_kitchen.catalogue.adapters import CatalogueReceiptMappingAdapter
 from home_kitchen.catalogue.identity import IdentityCorrectionCitation, IdentityCorrectionEvent
 from home_kitchen.catalogue.overview_repository import (
@@ -53,14 +58,12 @@ from home_kitchen.integrations import (
     Rema1000Integration,
     TrumfIntegration,
 )
-from home_kitchen.inventory import InventoryService
 from home_kitchen.models import RecipeCreate, ShoppingItem, ShoppingItemCreate
 from home_kitchen.oda import OdaService
 from home_kitchen.oda.cart import OdaCartService
 from home_kitchen.planning import create_planning_proposal_service
 from home_kitchen.purchase_sync import ProviderAdapter, PurchaseHistorySyncService
-from home_kitchen.purchasing import InStoreMode, OdaMode, PurchaseModes, StoreTripService
-from home_kitchen.purchasing_reconciliation import TripCompletionService
+from home_kitchen.purchasing import InStoreMode, OdaMode, PurchaseModes
 from home_kitchen.recipe_feedback import RecipeFeedbackService
 from home_kitchen.recipes import (
     EvidenceSnippet,
@@ -178,7 +181,7 @@ class KitchenFeatures:
             household_id=self.household_id,
             settings=settings,
         )
-        self.inventory = InventoryService(kitchen, self.history)
+        self.inventory = create_inventory_service(kitchen, self.history)
         if kitchen.store.engine is not None:
             self.product_overview_repo = PostgresProductOverviewRepository(kitchen.store.engine)
         else:
@@ -207,8 +210,12 @@ class KitchenFeatures:
             self.basket_matching, self.inventory, self.oda.search_cache_context
         )
         self.plan_proposals = create_planning_proposal_service(kitchen, self.history)
-        self.store_trip = StoreTripService(self.inventory, self.history)
-        self.trip_completion = TripCompletionService(self.inventory, self.history)
+        self.store_trip = create_store_trip_service(
+            self.inventory, self.history, engine=kitchen.store.engine
+        )
+        self.trip_completion = create_trip_completion_service(
+            self.inventory, self.history, engine=kitchen.store.engine
+        )
         self.purchase_modes = PurchaseModes([OdaMode(self.oda), InStoreMode()])
         self.purchase_sync = PurchaseHistorySyncService(
             engine=kitchen.store.engine,

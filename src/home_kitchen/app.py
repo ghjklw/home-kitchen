@@ -22,7 +22,7 @@ from starlette.requests import Request
 
 from home_kitchen.ai_credentials import close_ai_clients
 from home_kitchen.auth import AccessControl
-from home_kitchen.basket.repository import BasketService
+from home_kitchen.basket.bootstrap import create_basket_service
 from home_kitchen.connector_auth import DEFAULT_REFRESH_INTERVAL_SECONDS, ConnectorAuthService
 from home_kitchen.feature_api import feature_router
 from home_kitchen.feature_mcp import install_feature_tools
@@ -100,7 +100,9 @@ def create_app(
         return Household.model_validate_json(value) if value else Household()
 
     features = KitchenFeatures(service, settings, load_household, ai)
-    basket = BasketService(service, features.history)
+    basket = create_basket_service(
+        features.inventory, features.history, engine=service.store.engine
+    )
     mcp_auth = (
         HouseholdAzureProvider(settings, service.store.engine)
         if settings.mcp_oauth_enabled

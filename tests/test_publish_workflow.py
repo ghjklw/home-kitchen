@@ -25,7 +25,8 @@ def test_only_successful_main_ci_can_publish():
 
 def test_image_identity_stays_bound_to_main_publish_run():
     assert "sha=$(git rev-parse HEAD)" in WORKFLOW
-    assert '[[ "$sha" =~ ^[0-9a-f]{40}$ ]]' in WORKFLOW
+    assert '[[ "$sha" =~ ^[0-9a-f]{40}$ && "$sha" == "$EXPECTED_SHA" ]]' in WORKFLOW
+    assert "APP_REVISION=${{ steps.source.outputs.sha }}" in WORKFLOW
     assert "org.opencontainers.image.revision=${{ steps.source.outputs.sha }}" in WORKFLOW
     assert "io.home-kitchen.run-id=${{ github.run_id }}" in WORKFLOW
     assert "io.home-kitchen.run-attempt=${{ github.run_attempt }}" in WORKFLOW

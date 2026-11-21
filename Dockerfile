@@ -8,11 +8,12 @@ ENV UV_DYNAMIC_VERSIONING_BYPASS=${APP_VERSION}
 RUN uv sync --frozen --no-dev --no-editable --compile-bytecode
 
 FROM python:3.12-slim
+ARG APP_REVISION=""
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY alembic.ini ./
 COPY migrations ./migrations
-ENV PATH="/app/.venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+ENV PATH="/app/.venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 KITCHEN_BUILD_REVISION=${APP_REVISION}
 USER 10001:10001
 EXPOSE 8000
 # Proxy addresses are read from the real socket peer, never X-Forwarded-For.

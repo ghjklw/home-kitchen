@@ -2,7 +2,7 @@
 
 from ipaddress import ip_network
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -120,6 +120,24 @@ class Settings(BaseSettings):
     home_assistant_token: SecretStr | None = None
     home_assistant_todo_entity: str | None = None
     purchase_sync_interval_seconds: float = Field(default=300.0, gt=0)
+    build_revision: str | None = None
+    release_channel: Literal["local", "beta", "uat", "production", "release"] | None = None
+
+    @field_validator("build_revision", mode="before")
+    @classmethod
+    def normalize_build_revision(cls, value):
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        return value
+
+    @field_validator("release_channel", mode="before")
+    @classmethod
+    def normalize_release_channel(cls, value):
+        if isinstance(value, str):
+            stripped = value.strip().lower()
+            return stripped or None
+        return value
 
     @property
     def ai_configured(self) -> bool:

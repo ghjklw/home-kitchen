@@ -48,10 +48,12 @@ jobs:
       - name: Validate main source
         id: source
         shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
           sha=$(git rev-parse HEAD)
-          [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$sha" =~ ^[0-9a-f]{40}$ && "$sha" == "$EXPECTED_SHA" ]]
           channel=main
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
@@ -97,7 +99,9 @@ jobs:
         with:
           context: .
           push: true
-          build-args: APP_VERSION=${{ steps.version.outputs.value }}
+          build-args: |
+            APP_VERSION=${{ steps.version.outputs.value }}
+            APP_REVISION=${{ steps.source.outputs.sha }}
           tags: |
             ghcr.io/ghjklw/home-kitchen:sha-${{ steps.source.outputs.sha }}
             ghcr.io/ghjklw/home-kitchen:beta
@@ -130,3 +134,21 @@ jobs:
           name: image-metadata
           path: image-metadata.json
           retention-days: 90
+      - name: Summarize immutable UAT candidate identity
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+          APP_VERSION: ${{ steps.version.outputs.value }}
+          BUILD_TAG: build-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          {
+            echo "### Published UAT Candidate Image"
+            echo ""
+            echo "- **Immutable reference**: \`ghcr.io/ghjklw/home-kitchen@${DIGEST}\`"
+            echo "- **Source SHA (\`source_sha\`)**: \`${SOURCE_SHA}\`"
+            echo "- **Image digest (\`source_digest\`)**: \`${DIGEST}\`"
+            echo "- **App version**: \`${APP_VERSION}\`"
+            echo "- **Build tag**: \`${BUILD_TAG}\`"
+            echo "- **Next step**: Deploy \`@${DIGEST}\` to isolated UAT, verify \`/healthz\`, \`/readyz\`, \`/api/version\`, migrations, backup/restore, and consumer behavior before running \`Promote release image\`."
+          } >> "$GITHUB_STEP_SUMMARY"

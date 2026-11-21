@@ -54,7 +54,7 @@ from home_kitchen.recipes import RecipeDraftRequest
 from home_kitchen.recommendations import PlanDraft
 from home_kitchen.service import KitchenService
 from home_kitchen.settings import Household, Settings
-from home_kitchen.store import MealIDConflict
+from home_kitchen.store import MealIDConflict, get_expected_alembic_head
 
 
 class Completion(BaseModel):
@@ -161,12 +161,23 @@ def create_app(
     app.state.features = features
     app.state.service = service
     app.include_router(feature_router(features, basket))
+
+    def version_info():
+        channel = settings.release_channel or ("beta" if ".dev" in app_version else "release")
+        try:
+            alembic_head, head_count = get_expected_alembic_head()
+        except Exception:
+            alembic_head, head_count = None, 0
+        return {
+            "version": app_version,
+            "channel": channel,
+            "revision": settings.build_revision,
+            "alembic_head": alembic_head if head_count == 1 else None,
+        }
+
     app.add_api_route(
         "/api/version",
-        lambda: {
-            "version": app_version,
-            "channel": "beta" if ".dev" in app_version else "release",
-        },
+        version_info,
         methods=["GET"],
         include_in_schema=False,
     )
@@ -199,6 +210,55 @@ def create_app(
         except SQLAlchemyError:
             raise HTTPException(503, "Storage unavailable") from None
         return {"status": "ok"}
+
+    @app.get("/readyz", include_in_schema=False)
+    def readiness():
+        try:
+            expected_head, head_count = get_expected_alembic_head()
+        except Exception:
+            return JSONResponse(
+                {"status": "not_ready", "database": "unknown", "migrations": "error"},
+                status_code=503,
+            )
+        if head_count != 1 or expected_head is None:
+            return JSONResponse(
+                {
+                    "status": "not_ready",
+                    "database": "unknown",
+                    "migrations": "multiple_or_missing_heads",
+                },
+                status_code=503,
+            )
+        migration_check = getattr(service.store, "migration_status", None)
+        if not callable(migration_check):
+            return JSONResponse(
+                {"status": "not_ready", "database": "unknown", "migrations": "unavailable"},
+                status_code=503,
+            )
+        try:
+            is_current, current_heads = migration_check(expected_head)
+        except SQLAlchemyError:
+            return JSONResponse(
+                {"status": "not_ready", "database": "unavailable", "migrations": "unknown"},
+                status_code=503,
+            )
+        if not is_current:
+            return JSONResponse(
+                {
+                    "status": "not_ready",
+                    "database": "ok",
+                    "migrations": "pending_or_divergent",
+                    "expected_head": expected_head,
+                    "current_heads": list(current_heads),
+                },
+                status_code=503,
+            )
+        return {
+            "status": "ready",
+            "database": "ok",
+            "migrations": "current",
+            "alembic_head": expected_head,
+        }
 
     @app.get("/api/household")
     def get_household() -> Household:

@@ -523,7 +523,9 @@ async def test_full_recipe_to_shopping_journey_through_mcp_with_oauth(
                     }
                 },
             )
-            pasta_basket = next(n for n in basket_review["needs"] if n["id"] == pasta_need_id)
+            pasta_basket = next(
+                n for n in basket_review["needs"] if n["need"]["id"] == pasta_need_id
+            )
             assert pasta_basket["selections"][0]["product"]["product_id"] == "1001"
             assert pasta_basket["selections"][0]["product"]["evidence_status"] == "unverified"
 

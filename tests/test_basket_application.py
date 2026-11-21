@@ -14,13 +14,34 @@ from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
 from home_kitchen.basket.application import (
+    AvailabilityRefreshItemInput,
+    AvailabilityRefreshValidationError,
     BatchSelectionInput,
     BatchSelectionValidationError,
+    refresh_basket_availability,
+    select_basket_product,
     select_basket_products_batch,
 )
-from home_kitchen.basket.jobs import BasketMatchJob, BasketMatchJobs, _Job
-from home_kitchen.basket.matching import BasketCandidate, NeedMatchResult
-from home_kitchen.basket.models import BasketReview, SelectedProduct
+from home_kitchen.basket.jobs import (
+    BasketAvailabilityRefreshResult,
+    BasketMatchJob,
+    BasketMatchJobs,
+    SelectionAvailabilityItem,
+    _Job,
+)
+from home_kitchen.basket.matching import (
+    AvailabilityCheckOutcome,
+    AvailabilityTarget,
+    BasketCandidate,
+    NeedMatchResult,
+)
+from home_kitchen.basket.models import (
+    BasketNeedStatus,
+    BasketReview,
+    ProductSnapshot,
+    PurchaseNeed,
+    SelectedProduct,
+)
 from home_kitchen.context import HistoryContext, history_context
 from home_kitchen.feature_api import feature_router
 from home_kitchen.feature_mcp import install_feature_tools
@@ -40,17 +61,59 @@ class _DummyInventory:
 
 
 class _DummyMatching:
+    def __init__(self) -> None:
+        self.availability_calls: list[tuple[str, list[AvailabilityTarget]]] = []
+
     async def find_products(self, *args, **kwargs):  # pragma: no cover - unused by seeded jobs
         raise NotImplementedError
+
+    async def check_products_availability(
+        self, actor: str, targets: list[AvailabilityTarget]
+    ) -> list[AvailabilityCheckOutcome]:
+        self.availability_calls.append((actor, targets))
+        return [
+            AvailabilityCheckOutcome(
+                target=target,
+                availability_status="available",
+                available=True,
+                current_price=target.previous_price,
+            )
+            for target in targets
+        ]
 
 
 class RecordingBasketService:
     """In-memory BasketService stub recording calls and channel audit attribution."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, review_result: BasketReview | None = None) -> None:
         self.calls: list[
             tuple[date, date, list[SelectedProduct], dict[UUID, NeedMatchResult], HistoryChannel]
         ] = []
+        self.single_calls: list[tuple[date, date, SelectedProduct, HistoryChannel]] = []
+        self.review_calls: list[tuple[date, date]] = []
+        self._review_result = review_result or BasketReview(
+            needs=[],
+            total_cost=Decimal("0"),
+            price_complete=True,
+            currency="NOK",
+            ready_for_review=True,
+            issues=[],
+        )
+
+    def review(self, start: date, end: date) -> BasketReview:
+        self.review_calls.append((start, end))
+        return self._review_result
+
+    def select(
+        self,
+        start: date,
+        end: date,
+        selection: SelectedProduct,
+        *,
+        channel: HistoryChannel = "api",
+    ) -> BasketReview:
+        self.single_calls.append((start, end, selection, channel))
+        return self._review_result
 
     def select_batch(
         self,
@@ -62,14 +125,7 @@ class RecordingBasketService:
         channel: HistoryChannel = "api",
     ) -> BasketReview:
         self.calls.append((start, end, selections, evidence, channel))
-        return BasketReview(
-            needs=[],
-            total_cost=Decimal("0"),
-            price_complete=True,
-            currency="NOK",
-            ready_for_review=True,
-            issues=[],
-        )
+        return self._review_result
 
 
 def _candidate(
@@ -527,3 +583,334 @@ async def test_rest_and_mcp_parity_require_authenticated_actor():
             await mcp_client.call_tool("select_basket_products", {"data": payload})
 
     assert basket.calls == []
+
+
+def _single_selection() -> SelectedProduct:
+    return SelectedProduct(
+        need_id=NEED_ID_1,
+        product=ProductSnapshot(
+            provider="oda",
+            product_id="milk-1",
+            name="Whole Milk",
+            brand="Tine",
+            url="https://oda.com/no/products/milk-1",
+            pack_quantity=Decimal("1"),
+            pack_unit="l",
+            price=Decimal("24.90"),
+            currency="NOK",
+            available=True,
+            observed_at=OBSERVED_AT,
+        ),
+        packages=2,
+    )
+
+
+def test_select_basket_product_validates_range_and_delegates():
+    basket = RecordingBasketService()
+    selection = _single_selection()
+
+    with pytest.raises(ValueError, match="end must be on or after start"):
+        select_basket_product(
+            basket,
+            start=END,
+            end=START,
+            selection=selection,
+            channel="api",
+        )
+
+    review = select_basket_product(
+        basket,
+        start=START,
+        end=END,
+        selection=selection,
+        channel="mcp",
+    )
+    assert review.ready_for_review is True
+    assert basket.single_calls == [(START, END, selection, "mcp")]
+
+
+@pytest.mark.asyncio
+async def test_rest_and_mcp_parity_single_item_selection_and_validation():
+    _, basket, app, mcp, _, _ = _harness()
+    selection_payload = _single_selection().model_dump(mode="json")
+
+    with TestClient(app) as rest_client:
+        ok_rest = rest_client.put(
+            "/api/basket/selections",
+            json={"start": str(START), "end": str(END), "selection": selection_payload},
+        )
+        assert ok_rest.status_code == 200, ok_rest.text
+
+        bad_rest = rest_client.put(
+            "/api/basket/selections",
+            json={"start": str(END), "end": str(START), "selection": selection_payload},
+        )
+        assert bad_rest.status_code == 422
+        assert "end must be on or after start" in bad_rest.json()["detail"]
+
+    async with Client(mcp) as mcp_client:
+        ok_mcp = await mcp_client.call_tool(
+            "propose_basket_product",
+            {"start": str(START), "end": str(END), "selection": selection_payload},
+        )
+        assert not ok_mcp.is_error
+
+        with pytest.raises(ToolError, match="end must be on or after start"):
+            await mcp_client.call_tool(
+                "propose_basket_product",
+                {"start": str(END), "end": str(START), "selection": selection_payload},
+            )
+
+    assert len(basket.single_calls) == 2
+    api_call, mcp_call = basket.single_calls
+    assert api_call[0:3] == mcp_call[0:3]
+    assert api_call[3] == "api"
+    assert mcp_call[3] == "mcp"
+
+
+def _review_for_availability() -> BasketReview:
+    oda_milk = SelectedProduct(
+        need_id=NEED_ID_1,
+        product=ProductSnapshot(
+            provider="oda",
+            product_id="milk-1",
+            name="Tine Whole Milk",
+            pack_quantity=Decimal("1"),
+            pack_unit="l",
+            price=Decimal("24.90"),
+            currency="NOK",
+            available=True,
+            observed_at=OBSERVED_AT,
+        ),
+        packages=2,
+    )
+    other_provider = SelectedProduct(
+        need_id=NEED_ID_1,
+        product=ProductSnapshot(
+            provider="local",
+            product_id="farm-1",
+            name="Farm Milk",
+            pack_quantity=Decimal("1"),
+            pack_unit="l",
+            price=None,
+            currency="NOK",
+            available=True,
+            observed_at=OBSERVED_AT,
+        ),
+        packages=1,
+    )
+    oda_oats = SelectedProduct(
+        need_id=NEED_ID_2,
+        product=ProductSnapshot(
+            provider="oda",
+            product_id="oats-2",
+            name="Oat Milk",
+            pack_quantity=Decimal("1"),
+            pack_unit="l",
+            price=None,
+            currency="NOK",
+            available=None,
+            observed_at=OBSERVED_AT,
+        ),
+        packages=1,
+    )
+    return BasketReview(
+        needs=[
+            BasketNeedStatus(
+                need=PurchaseNeed(id=NEED_ID_1, name="Whole Milk", quantity=Decimal("2"), unit="l"),
+                selections=[oda_milk, other_provider],
+                allocated_quantity=Decimal("2"),
+                remaining_quantity=Decimal("0"),
+                overbuy_quantity=Decimal("0"),
+                ready=True,
+            ),
+            BasketNeedStatus(
+                need=PurchaseNeed(id=NEED_ID_2, name="Oat Milk", quantity=Decimal("1"), unit="l"),
+                selections=[oda_oats],
+                allocated_quantity=Decimal("1"),
+                remaining_quantity=Decimal("0"),
+                overbuy_quantity=Decimal("0"),
+                ready=True,
+            ),
+        ],
+        total_cost=Decimal("49.80"),
+        price_complete=False,
+        currency="NOK",
+        ready_for_review=True,
+        issues=[],
+    )
+
+
+class _RecordingAvailabilityJobs:
+    def __init__(self) -> None:
+        self.candidate_calls: list[tuple[str, str, date, date, list[tuple[UUID, str]]]] = []
+        self.target_calls: list[tuple[str, list[AvailabilityTarget]]] = []
+
+    async def refresh_candidate_availability(
+        self,
+        actor: str,
+        job_id: str,
+        start: date,
+        end: date,
+        references: list[tuple[UUID, str]],
+    ) -> BasketAvailabilityRefreshResult:
+        self.candidate_calls.append((actor, job_id, start, end, references))
+        return BasketAvailabilityRefreshResult(checked_at=OBSERVED_AT, all_available=True)
+
+    async def refresh_targets_availability(
+        self,
+        actor: str,
+        targets: list[AvailabilityTarget],
+    ) -> BasketAvailabilityRefreshResult:
+        self.target_calls.append((actor, targets))
+        return BasketAvailabilityRefreshResult(
+            checked_at=OBSERVED_AT,
+            all_available=True,
+            items=[
+                SelectionAvailabilityItem(
+                    need_id=target.need_id,
+                    need_name=target.need_name,
+                    provider=target.provider,
+                    product_id=target.product_id,
+                    product_name=target.product_name,
+                    packages=target.packages,
+                    available=True,
+                    previous_available=target.previous_available,
+                    availability_status="available",
+                    previous_price=target.previous_price,
+                    current_price=target.previous_price,
+                    search_query=target.search_query,
+                )
+                for target in targets
+            ],
+        )
+
+
+@pytest.mark.asyncio
+async def test_refresh_basket_availability_application_use_case():
+    basket = RecordingBasketService(review_result=_review_for_availability())
+    jobs = _RecordingAvailabilityJobs()
+
+    with pytest.raises(ValueError, match="authenticated actor"):
+        await refresh_basket_availability(
+            basket,
+            jobs,
+            start=START,
+            end=END,
+            actor_id="  ",
+        )
+
+    with pytest.raises(AvailabilityRefreshValidationError, match="end date"):
+        await refresh_basket_availability(
+            basket,
+            jobs,
+            start=END,
+            end=START,
+            actor_id=ACTOR,
+        )
+
+    with pytest.raises(AvailabilityRefreshValidationError, match="at least one candidate"):
+        await refresh_basket_availability(
+            basket,
+            jobs,
+            start=START,
+            end=END,
+            actor_id=ACTOR,
+            job_id="job-1",
+            items=[AvailabilityRefreshItemInput(need_id=NEED_ID_1)],
+        )
+
+    await refresh_basket_availability(
+        basket,
+        jobs,
+        start=START,
+        end=END,
+        actor_id=ACTOR,
+        job_id="job-1",
+        items=[AvailabilityRefreshItemInput(need_id=NEED_ID_1, candidate_id="oda:milk-1")],
+    )
+    assert jobs.candidate_calls == [(ACTOR, "job-1", START, END, [(NEED_ID_1, "oda:milk-1")])]
+
+    result = await refresh_basket_availability(
+        basket,
+        jobs,
+        start=START,
+        end=END,
+        actor_id=ACTOR,
+        items=[
+            AvailabilityRefreshItemInput(need_id=NEED_ID_1, product_id="milk-1", query="Helmelk"),
+            AvailabilityRefreshItemInput(need_id=NEED_ID_2, query="Havredrikk"),
+        ],
+    )
+    assert basket.review_calls == [(START, END)]
+    assert len(jobs.target_calls) == 1
+    called_actor, targets = jobs.target_calls[0]
+    assert called_actor == ACTOR
+    assert [(t.need_id, t.product_id, t.search_query, t.previous_price) for t in targets] == [
+        (NEED_ID_1, "milk-1", "Helmelk", "24.90"),
+        (NEED_ID_2, "oats-2", "Havredrikk", None),
+    ]
+    assert len(result.items) == 2
+
+
+@pytest.mark.asyncio
+async def test_refresh_basket_availability_rest_errors_and_paths():
+    jobs, _, app, _, _, _ = _harness()
+    job_id = _seed_job(jobs)
+    incomplete_job_id = _seed_job(jobs, job_id="incomplete-job", status="running")
+
+    with TestClient(app) as rest_client:
+        bad_range = rest_client.post(
+            "/api/basket/availability-refresh",
+            json={"start": str(END), "end": str(START)},
+        )
+        assert bad_range.status_code == 422
+        assert "end date must be on or after start date" in bad_range.json()["detail"]
+
+        no_candidates = rest_client.post(
+            "/api/basket/availability-refresh",
+            json={
+                "start": str(START),
+                "end": str(END),
+                "job_id": job_id,
+                "items": [{"need_id": str(NEED_ID_1)}],
+            },
+        )
+        assert no_candidates.status_code == 422
+        assert "Select at least one candidate" in no_candidates.json()["detail"]
+
+        missing_job = rest_client.post(
+            "/api/basket/availability-refresh",
+            json={
+                "start": str(START),
+                "end": str(END),
+                "job_id": "missing-job",
+                "items": [{"need_id": str(NEED_ID_1), "candidate_id": "oda:milk-1"}],
+            },
+        )
+        assert missing_job.status_code == 404
+        assert missing_job.json()["detail"] == "Product match job not found"
+
+        incomplete = rest_client.post(
+            "/api/basket/availability-refresh",
+            json={
+                "start": str(START),
+                "end": str(END),
+                "job_id": incomplete_job_id,
+                "items": [{"need_id": str(NEED_ID_1), "candidate_id": "oda:milk-1"}],
+            },
+        )
+        assert incomplete.status_code == 409
+
+        refreshed = rest_client.post(
+            "/api/basket/availability-refresh",
+            json={
+                "start": str(START),
+                "end": str(END),
+                "job_id": job_id,
+                "items": [{"need_id": str(NEED_ID_1), "candidate_id": "oda:milk-1"}],
+            },
+        )
+        assert refreshed.status_code == 200, refreshed.text
+        assert refreshed.headers["cache-control"] == "no-store"
+        assert refreshed.json()["all_available"] is True

@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Hashable, Sequence
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 from uuid import UUID
@@ -157,7 +157,7 @@ class BasketMatchingService:
         *,
         media_fetcher: MediaFetcher = fetch_product_media,
         media_cache: _MediaCache | None = None,
-        clock: Callable[[], datetime] = lambda: datetime.now(datetime.timezone.utc) if hasattr(datetime, "timezone") else datetime.utcnow(),
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         sku_preferences: SkuPreferencePort | None = None,
         identity_lookup: IdentityLookupPort | None = None,
         identity_corrections: IdentityCorrectionPort | None = None,

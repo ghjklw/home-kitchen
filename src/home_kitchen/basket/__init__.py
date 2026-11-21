@@ -8,15 +8,19 @@ from .models import (
     PurchaseNeed,
     SelectedProduct,
 )
+from .ports import IdentityCorrectionPort, IdentityLookupPort, SkuPreferencePort
 from .providers import ProductProvider, ProviderRegistry
 
 __all__ = [
     "BasketNeedStatus",
     "BasketReview",
+    "IdentityCorrectionPort",
+    "IdentityLookupPort",
     "ProductProvider",
     "ProductSnapshot",
     "ProviderRegistry",
     "PurchaseNeed",
     "SelectedProduct",
+    "SkuPreferencePort",
     "evaluate_basket",
 ]

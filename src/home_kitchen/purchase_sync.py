@@ -144,6 +144,23 @@ class ProviderAdapter(Protocol):
     def fetch_page(self, account_id: str, cursor: str | None) -> ProviderPage: ...
 
 
+class ReceiptIdentityResolver(Protocol):
+    """Port for resolving canonical product and unit aliases on receipt lines."""
+
+    def resolve(self, kind: str, locale: str, context: str, alias: str) -> Any: ...
+
+
+class ReceiptMappingPort(Protocol):
+    """Port for asynchronous mapping of unmapped receipt line items."""
+
+    async def map_unmapped_items(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        settings: Any,
+    ) -> dict[str, int]: ...
+
+
 def _identity(provider: str, account_id: str) -> tuple[str, str]:
     provider, account_id = provider.strip(), account_id.strip()
     if not provider or not account_id:
@@ -278,7 +295,7 @@ def extract_line_unit(line: dict[str, Any]) -> str | None:
 def enrich_and_map_receipt_record(
     record: ProviderOrderRecord,
     kassal_client: Any | None,
-    identity_service: Any | None = None,
+    identity_service: ReceiptIdentityResolver | None = None,
 ) -> list[dict[str, Any]]:
     """Enrich barcode lines via Kassal.app and resolve canonical product/unit identities.
 
@@ -442,7 +459,7 @@ def sync_account(
     adapter: ProviderAdapter,
     *,
     kassal_client: Any | None = None,
-    identity_service: Any | None = None,
+    identity_service: ReceiptIdentityResolver | None = None,
     settings: Any | None = None,
     connector_store: ConnectorStore | None = None,
     household_id: UUID | None = None,
@@ -1249,6 +1266,9 @@ class PurchaseHistorySyncService:
         household_id: UUID | None = None,
         adapter_factory: Callable[[str, str, dict[str, Any]], ProviderAdapter | None] | None = None,
         connector_auth: Any | None = None,
+        identity_service: ReceiptIdentityResolver | None = None,
+        receipt_mapper: ReceiptMappingPort | None = None,
+        kassal_client: Any | None = None,
     ) -> None:
         self.engine = engine
         self.settings = settings
@@ -1263,9 +1283,9 @@ class PurchaseHistorySyncService:
         self._last_sync_error: dict[str, str | None] = {}
         self._last_auth_error: dict[str, str | None] = {}
         self._partial_auth_failure: dict[str, bool] = {}
-        self.identity_service: Any = None
-        self.mapping_store: Any = None
-        self.kassal_client: Any = None
+        self.identity_service: ReceiptIdentityResolver | None = identity_service
+        self.receipt_mapper: ReceiptMappingPort | None = receipt_mapper
+        self.kassal_client: Any = kassal_client
 
     @staticmethod
     def _is_auth_exception(exc: Exception) -> bool:
@@ -1358,18 +1378,18 @@ class PurchaseHistorySyncService:
     def _dispatch_background_mapping(self, items: list[dict[str, Any]]) -> None:
         """Run AI/variant mapping for unmapped receipt lines without blocking sync."""
         settings = self.settings
-        if not items or settings is None or not getattr(settings, "ai_configured", False):
+        mapper = self.receipt_mapper
+        if (
+            not items
+            or mapper is None
+            or settings is None
+            or not getattr(settings, "ai_configured", False)
+        ):
             return
-        identity_service = getattr(self, "identity_service", None)
-        store = getattr(self, "mapping_store", None)
 
         async def _run() -> None:
             try:
-                from home_kitchen.catalogue.ai_mapper import auto_map_unmapped_receipt_items_async
-
-                await auto_map_unmapped_receipt_items_async(
-                    store, settings, items, identity_service=identity_service
-                )
+                await mapper.map_unmapped_items(items, settings=settings)
             except Exception:
                 _LOG.warning("Background receipt mapping failed", exc_info=True)
 
@@ -1979,8 +1999,8 @@ class PurchaseHistorySyncService:
                 p,
                 target_account_id,
                 active_adapter,
-                kassal_client=getattr(self, "kassal_client", None),
-                identity_service=getattr(self, "identity_service", None),
+                kassal_client=self.kassal_client,
+                identity_service=self.identity_service,
                 settings=self.settings,
                 connector_store=self.connector_store,
                 household_id=self.household_id,

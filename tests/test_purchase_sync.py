@@ -243,7 +243,9 @@ def test_same_page_corrections_preserve_order_and_resolve_latest(engine):
             "order": {
                 "orderNumber": "order-1",
                 "deliveryDate": "2026-04-10",
-                "products": [{"product": {"id": 1, "name": "Melk", "unitName": "l"}, "quantity": 1}],
+                "products": [
+                    {"product": {"id": 1, "name": "Melk", "unitName": "l"}, "quantity": 1}
+                ],
             },
             "tracking": {"orderNumber": "order-1", "status": "delivered"},
         },
@@ -256,7 +258,9 @@ def test_same_page_corrections_preserve_order_and_resolve_latest(engine):
             "order": {
                 "orderNumber": "order-1",
                 "deliveryDate": "2026-04-10",
-                "products": [{"product": {"id": 1, "name": "Melk", "unitName": "l"}, "quantity": 1}],
+                "products": [
+                    {"product": {"id": 1, "name": "Melk", "unitName": "l"}, "quantity": 1}
+                ],
             },
             "tracking": {"orderNumber": "order-1", "status": "cancelled"},
         },

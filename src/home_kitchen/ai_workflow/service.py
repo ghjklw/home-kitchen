@@ -192,6 +192,7 @@ class AiWorkflowService(AiWorkflowPort):
                     seen_ids.add(entry_id)
                     evidence.append(self._history_snippet(entry))
         from home_kitchen.recipes.discovery import build_discovery_context
+
         return build_discovery_context(self.household(), evidence)
 
     async def discover_recipes(

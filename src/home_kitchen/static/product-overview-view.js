@@ -965,40 +965,156 @@
         const mergeBtn = document.createElement("button");
         mergeBtn.type = "submit";
         mergeBtn.className = "quiet merge-product-btn";
-        mergeBtn.textContent = "Slå sammen inn i valgt råvare";
+        mergeBtn.textContent = "Forhåndsvis sammenslåing";
         mergeBtn.disabled = candidates.length === 0;
 
+        const mergePreviewHost = document.createElement("div");
+        mergePreviewHost.className = "merge-preview-host";
+
+        let loadingPreview = false;
         let merging = false;
-        async function submitMerge(e) {
+
+        function clearMergePreview() {
+          mergePreviewHost.replaceChildren();
+        }
+
+        function renderMergePreview(targetId, preview) {
+          clearMergePreview();
+
+          const box = document.createElement("div");
+          box.className = "callout merge-preview-box";
+          box.setAttribute("role", "region");
+          box.setAttribute("aria-label", "Forhåndsvisning av sammenslåing");
+
+          const summary = document.createElement("p");
+          summary.className = "merge-preview-summary";
+          const sourceLabel = preview.source_display_name || currentProduct.display_name;
+          const targetLabel = preview.target_display_name || targetId;
+          summary.textContent = `Forhåndsvisning av sammenslåing: «${sourceLabel}» → «${targetLabel}»`;
+          box.append(summary);
+
+          const impactList = document.createElement("ul");
+          impactList.className = "merge-impact-list";
+          const impactItems = [
+            `Kallenavn som flyttes: ${preview.aliases_to_move ?? 0}`,
+            `Lagerlinjer som flyttes: ${preview.stock_rows_to_move ?? 0}`,
+            `Oppskriftskoblinger som flyttes: ${preview.recipe_links_to_move ?? 0}`,
+            `Oda-preferanser som flyttes: ${preview.preferences_to_move ?? 0}`,
+            `Oda-ekskluderinger som flyttes: ${preview.exclusions_to_move ?? 0}`,
+            `Kjøpshistorikkrader som flyttes: ${preview.purchase_history_rows_to_move ?? 0}`,
+          ];
+          impactItems.forEach((line) => {
+            const li = document.createElement("li");
+            li.textContent = line;
+            impactList.append(li);
+          });
+          box.append(impactList);
+
+          let variantConfirmCheckbox = null;
+          if (preview.variant_mismatch) {
+            const warning = document.createElement("div");
+            warning.className = "callout warning merge-variant-warning";
+            warning.setAttribute("role", "alert");
+            const srcVar = preview.source_variant || "uten variant";
+            const tgtVar = preview.target_variant || "uten variant";
+            warning.textContent = `Advarsel: Variantene er ulike («${srcVar}» vs. «${tgtVar}»). Kontroller at dette ikke er to ulike råvarevarianter før du slår dem sammen.`;
+            box.append(warning);
+
+            const confirmLabel = document.createElement("label");
+            confirmLabel.className = "merge-variant-confirm-label";
+            variantConfirmCheckbox = document.createElement("input");
+            variantConfirmCheckbox.type = "checkbox";
+            variantConfirmCheckbox.className = "merge-variant-confirm-checkbox";
+            variantConfirmCheckbox.checked = false;
+            const confirmText = document.createElement("span");
+            confirmText.textContent = "Jeg bekrefter at ulike varianter skal slås sammen";
+            confirmLabel.append(variantConfirmCheckbox, " ", confirmText);
+            box.append(confirmLabel);
+          }
+
+          const actions = document.createElement("div");
+          actions.className = "actions merge-preview-actions";
+
+          const confirmMergeBtn = document.createElement("button");
+          confirmMergeBtn.type = "button";
+          confirmMergeBtn.className = "primary confirm-merge-btn";
+          confirmMergeBtn.textContent = "Bekreft sammenslåing";
+          confirmMergeBtn.disabled = Boolean(preview.variant_mismatch);
+
+          if (variantConfirmCheckbox) {
+            variantConfirmCheckbox.addEventListener("change", () => {
+              confirmMergeBtn.disabled = !variantConfirmCheckbox.checked;
+            });
+          }
+
+          confirmMergeBtn.addEventListener("click", async () => {
+            if (merging) return;
+            if (preview.variant_mismatch && !variantConfirmCheckbox?.checked) return;
+            merging = true;
+            confirmMergeBtn.disabled = true;
+            mergeBtn.disabled = true;
+            try {
+              const mergedTarget = await api(
+                `/catalogue/products/${encodeURIComponent(targetId)}/merge`,
+                "POST",
+                { source_product_id: currentProduct.id },
+              );
+              notify(
+                `Råvaren «${currentProduct.display_name}» ble slått sammen inn i «${mergedTarget?.display_name || targetId}».`,
+              );
+              onMerged(mergedTarget, currentProduct.id);
+            } catch (err) {
+              notify(`Kunne ikke slå sammen råvare: ${err.message || "Ukjent feil"}`, true);
+              confirmMergeBtn.disabled = Boolean(
+                preview.variant_mismatch && !variantConfirmCheckbox?.checked,
+              );
+              mergeBtn.disabled = false;
+            } finally {
+              merging = false;
+            }
+          });
+
+          const cancelMergeBtn = document.createElement("button");
+          cancelMergeBtn.type = "button";
+          cancelMergeBtn.className = "quiet cancel-merge-btn";
+          cancelMergeBtn.textContent = "Avbryt";
+          cancelMergeBtn.addEventListener("click", clearMergePreview);
+
+          actions.append(confirmMergeBtn, cancelMergeBtn);
+          box.append(actions);
+          mergePreviewHost.append(box);
+        }
+
+        async function requestMergePreview(e) {
           if (e && typeof e.preventDefault === "function") e.preventDefault();
-          if (merging) return;
+          if (loadingPreview || merging) return;
           const targetId = String(mergeSelect.value || "").trim();
           if (!targetId || targetId === currentProduct.id) return;
-          merging = true;
+          loadingPreview = true;
           mergeBtn.disabled = true;
           try {
-            const mergedTarget = await api(
-              `/catalogue/products/${encodeURIComponent(targetId)}/merge`,
-              "POST",
-              { source_product_id: currentProduct.id },
+            const preview = await api(
+              `/catalogue/products/${encodeURIComponent(targetId)}/merge-preview?source_id=${encodeURIComponent(currentProduct.id)}`,
             );
-            notify(
-              `Råvaren «${currentProduct.display_name}» ble slått sammen inn i «${mergedTarget?.display_name || targetId}».`,
-            );
-            onMerged(mergedTarget, currentProduct.id);
+            renderMergePreview(targetId, preview || {});
           } catch (err) {
-            notify(`Kunne ikke slå sammen råvare: ${err.message || "Ukjent feil"}`, true);
-            mergeBtn.disabled = false;
+            clearMergePreview();
+            notify(
+              `Kunne ikke hente forhåndsvisning for sammenslåing: ${err.message || "Ukjent feil"}`,
+              true,
+            );
           } finally {
-            merging = false;
+            loadingPreview = false;
+            mergeBtn.disabled = candidates.length === 0;
           }
         }
 
-        mergeForm.addEventListener("submit", submitMerge);
-        mergeBtn.addEventListener("click", submitMerge);
+        mergeSelect.addEventListener("change", clearMergePreview);
+        mergeForm.addEventListener("submit", requestMergePreview);
+        mergeBtn.addEventListener("click", requestMergePreview);
 
         mergeForm.append(mergeSelect, mergeBtn);
-        mergeSection.append(mergeForm);
+        mergeSection.append(mergeForm, mergePreviewHost);
         card.append(mergeSection);
       }
     }

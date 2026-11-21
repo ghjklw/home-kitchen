@@ -1277,6 +1277,8 @@ class BasketMatchingService:
                             f"'{group.query}'."
                         ),
                         identity_status=product.identity_status,
+                        is_preferred=product.product_id in preferred_rank,
+                        preference_rank=preferred_rank.get(product.product_id),
                     )
                     for product in filtered_products[:size]
                 ]

@@ -717,6 +717,9 @@ async def test_oda_adapter_rejects_tonic_as_hot_water_but_keeps_original_query()
         ("caster sugar", "Dr. Oetker Unicorn Sugar Faces", False),
         ("vanilla extract", "Mövenpick vanilla ice cream", False),
         ("cocoa powder, for dusting", "Gluten-free spaghetti", False),
+        ("Baking powder", "Den Gode Baker Glutenfri Pepperkakedeig", False),
+        ("Baking powder", "Freia Bakepulver", True),
+        ("Vegetable oil", "Nivea Hawaii Flower & Oil Shower", False),
     ],
 )
 def test_ingredient_identity_handles_bokmal_compounds_and_product_classes(
@@ -837,6 +840,7 @@ def test_semantic_forms_do_not_collapse_to_generic_family(query, product_name, e
         ("coffee", "kaffe", "Filterkaffe"),
         ("vanilla extract", "vaniljeekstrakt", "Vaniljeekstrakt"),
         ("cocoa powder", "kakaopulver", "Kakaopulver"),
+        ("baking powder", "bakepulver", "Freia Bakepulver"),
         ("hot water", "varmt vann", "Varmt vann"),
         ("chicken breast", "kyllingfilet", "Kyllingfilet"),
         ("creme fraiche", "crème fraîche", "Crème fraîche 300 g"),
@@ -1066,6 +1070,35 @@ async def test_offline_synthetic_uat_failure_regression_pack():
     assert non_food_results["dish soap"] == ["Dish soap"]
     assert non_food_results["olive oil shower gel"] == ["Olive Oil Shower Gel"]
     assert all(p.identity_status == "unverified" for g in non_food_groups for p in g.products)
+
+
+def test_issue_135_baking_powder_and_flower_oil_shower_suppression():
+    pepperkakedeig = ProviderProduct(
+        provider="oda",
+        product_id="dough-1",
+        name="Den Gode Baker Glutenfri Pepperkakedeig",
+        description="Glutenfri pepperkakedeig",
+    )
+    bakepulver = ProviderProduct(
+        provider="oda",
+        product_id="bp-1",
+        name="Freia Bakepulver",
+        description="Bakepulver",
+    )
+    flower_oil_shower = ProviderProduct(
+        provider="oda",
+        product_id="shower-1",
+        name="Nivea Hawaii Flower & Oil Shower",
+        description="Dusjsåpe",
+    )
+
+    assert _bokmal_ingredient_query("Baking powder") == "bakepulver"
+    assert _query_expansions("Baking powder") == ("Baking powder", "bakepulver")
+    assert _identity_status("Baking powder", pepperkakedeig) is None
+    assert _identity_status("Baking powder", bakepulver) == "compatible"
+    assert _identity_status("bakepulver", pepperkakedeig) is None
+    assert _identity_status("bakepulver", bakepulver) == "compatible"
+    assert _identity_status("Vegetable oil", flower_oil_shower) is None
 
 
 @pytest.mark.asyncio

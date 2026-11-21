@@ -60,6 +60,7 @@ _LEGACY_SEARCH_EXPANSIONS = {
     "vanilla extract": "vaniljeekstrakt",
     "vanilla essence": "vaniljeessens",
     "cocoa powder": "kakaopulver",
+    "baking powder": "bakepulver",
     "hot water": "varmt vann",
     "chicken breast": "kyllingfilet",
     "chicken breasts": "kyllingfilet",
@@ -125,6 +126,7 @@ _LEGACY_SEARCH_EXPANSIONS = {
     "ris": "ris",
     "basmatiris": "basmatiris",
     "olivenolje": "olivenolje",
+    "bakepulver": "bakepulver",
 }
 _BOKMAL_QUALIFIERS = {
     "fresh": "ferske",
@@ -380,6 +382,16 @@ _IDENTITY_FAMILIES = (
         20,
     ),
     _IdentityFamily(
+        "baking-powder",
+        (
+            ("baking powder", "powder", "bakepulver"),
+            ("bakepulver", "powder", None),
+        ),
+        (("powder", r"\b(?:baking powder|bakepulver)\b"),),
+        ("powder",),
+        20,
+    ),
+    _IdentityFamily(
         "hot-water",
         (
             ("hot water", "hot", "varmt vann"),
@@ -429,7 +441,7 @@ _IDENTITY_FAMILIES = (
         (
             (
                 "unspecified",
-                r"\b(?:shower\s+(?:gel|oil)|dusj(?:gel[eé]|olje)|body\s+wash|shampoo|såpe|soap|lotion)\b",
+                r"\b(?:shower\s+(?:gel|oil|cream|wash)|oil\s+shower|dusj(?:gel[eé]|olje|såpe)|body\s+wash|shampoo|såpe|soap|lotion|nivea)\b|(?=.*\bshower\b)(?=.*\b(?:oil|gel|wash|body|bath|care|nivea)\b)",
             ),
         ),
         (),
@@ -504,6 +516,18 @@ _IDENTITY_FAMILIES = (
         "flour-mix",
         (),
         (("unspecified", r"\b(?:pancake mix|cake mix|pannekakeblanding|kakemiks|baking mix)\b"),),
+        (),
+        100,
+    ),
+    _IdentityFamily(
+        "dough",
+        (),
+        (
+            (
+                "unspecified",
+                r"\b(?:pepperkakedeig|cookie\s+dough|gingerbread\s+dough|deig)\b",
+            ),
+        ),
         (),
         100,
     ),

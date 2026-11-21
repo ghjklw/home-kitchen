@@ -658,6 +658,15 @@ def normalize_cookidoo_recipe(
                 if cand:
                     raw_image = cand
                     break
+    if not raw_image and isinstance(raw.get("assets"), dict):
+        assets_images = raw["assets"].get("images")
+        if isinstance(assets_images, dict):
+            raw_image = (
+                assets_images.get("square")
+                or assets_images.get("landscape")
+                or assets_images.get("portrait")
+                or assets_images.get("url")
+            )
     if not raw_image:
         raw_image = raw.get("listThumbnail") or raw.get("landscapeImage")
     image_url = _sanitize_cookidoo_image_url(raw_image, domain)
@@ -1489,9 +1498,9 @@ class CookidooCollectionProvider:
 
         def _consume_day(day_obj: dict[str, Any]) -> None:
             day_date = self._parse_calendar_date(
-                day_obj.get("date")
+                day_obj.get("dayKey")
+                or day_obj.get("date")
                 or day_obj.get("id")
-                or day_obj.get("dayKey")
                 or day_obj.get("day")
             )
             day_items = (
@@ -1502,8 +1511,23 @@ class CookidooCollectionProvider:
                 or []
             )
             _consume_item_list(day_items, fallback_date=day_date, is_custom=False)
-            custom_items = day_obj.get("customRecipes") or day_obj.get("custom_recipes") or []
+            custom_items = (
+                day_obj.get("customerRecipes")
+                or day_obj.get("customRecipes")
+                or day_obj.get("custom_recipes")
+                or []
+            )
+            before_count = len(entries)
             _consume_item_list(custom_items, fallback_date=day_date, is_custom=True)
+            seen_custom_ids = {entry.cookidoo_recipe_id for entry in entries[before_count:]}
+            customer_recipe_ids = day_obj.get("customerRecipeIds") or []
+            if isinstance(customer_recipe_ids, list):
+                missing_custom_ids = [
+                    cid
+                    for cid in customer_recipe_ids
+                    if isinstance(cid, str) and cid.strip() and cid.strip() not in seen_custom_ids
+                ]
+                _consume_item_list(missing_custom_ids, fallback_date=day_date, is_custom=True)
 
         if isinstance(payload, list):
             _consume_item_list(payload, fallback_date=None, is_custom=False)
@@ -1511,6 +1535,14 @@ class CookidooCollectionProvider:
 
         if not isinstance(payload, dict):
             return entries
+
+        if isinstance(payload.get("content"), dict):
+            payload = payload["content"]
+
+        if isinstance(payload.get("myDays"), list):
+            for day_obj in payload["myDays"]:
+                if isinstance(day_obj, dict):
+                    _consume_day(day_obj)
 
         if isinstance(payload.get("weeks"), list):
             for week in payload["weeks"]:
@@ -1526,7 +1558,16 @@ class CookidooCollectionProvider:
 
         if any(
             k in payload
-            for k in ("recipes", "entries", "meals", "items", "customRecipes", "custom_recipes")
+            for k in (
+                "recipes",
+                "entries",
+                "meals",
+                "items",
+                "customerRecipes",
+                "customRecipes",
+                "custom_recipes",
+                "customerRecipeIds",
+            )
         ):
             _consume_day(payload)
 
@@ -1615,25 +1656,62 @@ class CookidooCollectionProvider:
             raise ValueError("Sluttdato må være på eller etter startdato.")
 
         headers, base_url, country, locale = self._build_request_context()
-        params = {
-            "startDate": start.isoformat(),
-            "endDate": effective_end.isoformat(),
-            "date": start.isoformat(),
-        }
-        candidate_paths = [
-            "/planner/en/api/my-week",
-            "/planner/en/api/calendar",
-            f"/planner/en/api/v2/calendar/week/{start.isoformat()}",
-        ]
-        data = await self._fetch_from_api(candidate_paths, params, headers, base_url)
-        entries = self._extract_my_week_entries(
-            data, start=start, end=effective_end, country=country, locale=locale
-        )
+        week_query_dates: list[date] = [start]
+        next_monday = start - timedelta(days=start.weekday()) + timedelta(days=7)
+        while next_monday <= effective_end:
+            week_query_dates.append(next_monday)
+            next_monday += timedelta(days=7)
+
+        entries: list[CookidooMyWeekEntry] = []
+        seen_days: set[date] = set()
+        for week_day in week_query_dates:
+            candidate_paths = [
+                f"/planning/en/api/my-week/{week_day.isoformat()}",
+                "/planning/en/api/my-week",
+            ]
+            data = await self._fetch_from_api(candidate_paths, {}, headers, base_url)
+            week_entries = self._extract_my_week_entries(
+                data, start=start, end=effective_end, country=country, locale=locale
+            )
+            batch_days: set[date] = set()
+            for entry in week_entries:
+                if entry.date in seen_days:
+                    continue
+                entries.append(entry)
+                batch_days.add(entry.date)
+            seen_days.update(batch_days)
+
         if resolve_custom_recipes:
             entries = await self._resolve_custom_my_week_entries(
                 entries, headers, base_url, country
             )
         return entries
+
+    async def remove_from_my_week(
+        self,
+        recipe_id: str,
+        planned_date: date,
+        *,
+        is_custom: bool = False,
+    ) -> None:
+        """Remove a planned recipe from a Cookidoo My Week day."""
+        recipe_id_clean = str(recipe_id or "").strip()
+        if not recipe_id_clean:
+            raise ValueError("Cookidoo oppskrifts-ID mangler.")
+
+        headers, base_url, _country, _locale = self._build_request_context()
+        params = {"recipeSource": "CUSTOMER"} if is_custom else None
+        path = f"/planning/en/api/my-day/{planned_date.isoformat()}/recipes/{recipe_id_clean}"
+        async with httpx.AsyncClient(transport=self.transport, timeout=15.0) as client:
+            await self._request_json(
+                client,
+                "DELETE",
+                path,
+                headers,
+                base_url,
+                params=params,
+                allow_not_found=True,
+            )
 
     async def add_to_my_week(
         self,
@@ -1644,6 +1722,10 @@ class CookidooCollectionProvider:
         label: str | None = None,
         entry_id: str | None = None,
         read_before_write: bool = True,
+        is_custom: bool = False,
+        previous_recipe_id: str | None = None,
+        previous_date: date | None = None,
+        previous_is_custom: bool = False,
     ) -> CookidooMyWeekEntry:
         """Add a recipe (or explicitly update an identified entry) in Cookidoo My Week."""
         recipe_id_clean = str(recipe_id or "").strip()
@@ -1654,109 +1736,122 @@ class CookidooCollectionProvider:
         domain = _cookidoo_domain_for_country(country)
 
         if read_before_write:
-            existing = await self.get_my_week_plan(planned_date, planned_date)
+            read_start = min(planned_date, previous_date) if previous_date else planned_date
+            read_end = max(planned_date, previous_date) if previous_date else planned_date
+            existing = await self.get_my_week_plan(read_start, read_end)
             if entry_id is not None and existing:
-                if not any(item.external_entry_id == entry_id for item in existing):
+                matched_existing = next(
+                    (item for item in existing if item.external_entry_id == entry_id),
+                    None,
+                )
+                if matched_existing is None:
                     raise CookidooError(
                         status_code=409,
                         detail="Fant ikke den valgte oppføringen i Cookidoo Min uke; forhåndsvis på nytt.",
                     )
+                if previous_recipe_id is None:
+                    previous_recipe_id = matched_existing.cookidoo_recipe_id
+                if previous_date is None:
+                    previous_date = matched_existing.date
+                if not previous_is_custom:
+                    previous_is_custom = matched_existing.is_custom
+
+        if (
+            entry_id is not None
+            and previous_recipe_id
+            and previous_date is not None
+            and (previous_date, previous_recipe_id) != (planned_date, recipe_id_clean)
+        ):
+            await self.remove_from_my_week(
+                previous_recipe_id,
+                previous_date,
+                is_custom=previous_is_custom,
+            )
 
         payload: dict[str, Any] = {
-            "recipeId": recipe_id_clean,
-            "date": planned_date.isoformat(),
+            "dayKey": planned_date.isoformat(),
+            "recipeIds": [recipe_id_clean],
         }
-        if servings is not None:
-            payload["servings"] = servings
-        if label:
-            payload["label"] = label
-        if entry_id is not None:
-            payload["entryId"] = entry_id
-
-        if entry_id is not None:
-            method = "PUT"
-            candidate_paths = [
-                f"/planner/en/api/my-week/{entry_id}",
-                f"/planner/en/api/calendar/{entry_id}",
-            ]
-        else:
-            method = "POST"
-            candidate_paths = [
-                "/planner/en/api/my-week",
-                "/planner/en/api/calendar/recipes",
-                f"/planner/en/api/v2/calendar/day/{planned_date.isoformat()}",
-            ]
+        if is_custom:
+            payload["recipeSource"] = "CUSTOMER"
 
         response_data: dict[str, Any] | list[Any] | None = None
         async with httpx.AsyncClient(transport=self.transport, timeout=15.0) as client:
-            last_error: CookidooError | None = None
-            for path in candidate_paths:
-                try:
-                    response_data = await self._request_json(
-                        client,
-                        method,
-                        path,
-                        headers,
-                        base_url,
-                        json_body=payload,
-                        allow_not_found=True,
-                    )
-                except CookidooError as exc:
-                    if exc.status_code == 401:
-                        raise
-                    if exc.status_code == 502:
-                        last_error = exc
-                        continue
-                    raise
-                if response_data is not None:
-                    break
+            response_data = await self._request_json(
+                client,
+                "PUT",
+                "/planning/en/api/my-day",
+                headers,
+                base_url,
+                json_body=payload,
+                allow_not_found=True,
+            )
             if response_data is None:
-                if last_error is not None:
-                    raise last_error
                 raise CookidooError(
                     status_code=502,
                     detail="Cookidoo Min uke-endepunktet svarte ikke.",
                 )
 
         if isinstance(response_data, dict):
+            day_payload = (
+                response_data["content"]
+                if isinstance(response_data.get("content"), dict)
+                else response_data
+            )
             if any(
-                k in response_data
+                k in day_payload
                 for k in (
+                    "myDays",
                     "weeks",
                     "days",
                     "recipes",
                     "entries",
                     "meals",
                     "items",
+                    "customerRecipes",
                     "customRecipes",
                     "custom_recipes",
+                    "customerRecipeIds",
                 )
             ):
                 day_entries = self._extract_my_week_entries(
-                    response_data,
+                    day_payload,
                     start=planned_date,
                     end=planned_date,
                     country=country,
                     locale=locale,
                 )
-                matching = [
-                    e
-                    for e in day_entries
-                    if e.cookidoo_recipe_id == recipe_id_clean
-                    and (entry_id is None or e.external_entry_id == entry_id)
-                ]
+                matching = [e for e in day_entries if e.cookidoo_recipe_id == recipe_id_clean]
+                if entry_id is not None:
+                    exact = [e for e in matching if e.external_entry_id == entry_id]
+                    if exact:
+                        matching = exact
                 if matching:
                     chosen = matching[-1]
+                    updates: dict[str, Any] = {}
                     if entry_id is not None and not chosen.external_entry_id:
-                        chosen = chosen.model_copy(update={"external_entry_id": entry_id})
+                        updates["external_entry_id"] = entry_id
+                    if label and chosen.label is None:
+                        updates["label"] = label
+                    if updates:
+                        chosen = chosen.model_copy(update=updates)
                     return chosen
 
             parsed = self._normalize_my_week_item(
-                response_data, fallback_date=planned_date, country=country, locale=locale
+                day_payload,
+                fallback_date=planned_date,
+                country=country,
+                locale=locale,
+                is_custom=is_custom,
             )
             if parsed is not None:
+                updates = {}
                 if entry_id is not None and not parsed.external_entry_id:
-                    parsed = parsed.model_copy(update={"external_entry_id": entry_id})
+                    updates["external_entry_id"] = entry_id
+                if label and parsed.label is None:
+                    updates["label"] = label
+                if updates:
+                    parsed = parsed.model_copy(update=updates)
                 return parsed
 
         returned_entry_id = (
@@ -1770,6 +1865,11 @@ class CookidooCollectionProvider:
             if isinstance(response_data, dict)
             else entry_id
         ) or None
+        fallback_source_url = (
+            f"https://{domain}/created-recipes/en/{recipe_id_clean}"
+            if is_custom
+            else f"https://{domain}/recipes/recipe/{locale}/{recipe_id_clean}"
+        )
         return CookidooMyWeekEntry(
             external_entry_id=returned_entry_id,
             cookidoo_recipe_id=recipe_id_clean,
@@ -1779,8 +1879,9 @@ class CookidooCollectionProvider:
             ),
             date=planned_date,
             servings=servings or 4,
-            source_url=f"https://{domain}/recipes/recipe/{locale}/{recipe_id_clean}",
+            source_url=fallback_source_url,
             label=label,
+            is_custom=is_custom,
         )
 
     @staticmethod

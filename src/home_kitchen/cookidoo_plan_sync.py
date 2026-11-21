@@ -40,10 +40,14 @@ class CookidooMyWeekProviderPort(GenerationLockableProvider, Protocol):
         cookidoo_recipe_id: str,
         scheduled_date: date,
         *,
-        servings: int = 4,
+        servings: int | None = None,
         label: str | None = None,
         entry_id: str | None = None,
         read_before_write: bool = True,
+        is_custom: bool = False,
+        previous_recipe_id: str | None = None,
+        previous_date: date | None = None,
+        previous_is_custom: bool = False,
     ) -> CookidooMyWeekEntry: ...
 
 
@@ -830,15 +834,20 @@ class CookidooPlanSyncService:
     ) -> None:
         del selected_set
         live_mw = await self.provider.get_my_week_plan(job.preview.start, job.preview.end)
-        live_entry_ids = {entry.external_entry_id for entry in live_mw if entry.external_entry_id}
+        live_mw_by_id = {
+            entry.external_entry_id: entry for entry in live_mw if entry.external_entry_id
+        }
         for item in selected_items:
             if item.action == "edit":
-                if not item.external_entry_id or item.external_entry_id not in live_entry_ids:
+                if not item.external_entry_id or item.external_entry_id not in live_mw_by_id:
                     raise ValueError(
                         "Cookidoo-oppføringen ble endret eller fjernet før bekreftelse; forhåndsvis på nytt."
                     )
 
         for item in selected_items:
+            target_mw = (
+                live_mw_by_id.get(item.external_entry_id or "") if item.action == "edit" else None
+            )
             written = await self.provider.add_to_my_week(
                 item.cookidoo_recipe_id,
                 item.date,
@@ -846,6 +855,10 @@ class CookidooPlanSyncService:
                 label=item.label,
                 entry_id=item.external_entry_id if item.action == "edit" else None,
                 read_before_write=False,
+                is_custom="/created-recipes/" in (item.source_url or ""),
+                previous_recipe_id=target_mw.cookidoo_recipe_id if target_mw else None,
+                previous_date=target_mw.date if target_mw else None,
+                previous_is_custom=target_mw.is_custom if target_mw else False,
             )
             item.status = "applied"
             item.applied_external_entry_id = written.external_entry_id

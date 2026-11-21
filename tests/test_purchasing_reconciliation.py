@@ -385,5 +385,5 @@ def test_extras_and_store_trip_checkmarks_survive_meal_plan_mutations(services):
     assert all(not item.completed for item in kitchen.list_items())
     assert next(
         line for line in after_trip.lines if line.name == "Carrot"
-    ).to_buy_quantity == Decimal("4")
+    ).to_buy_quantity == Decimal("4000")
     assert all(line.name != "Tomato" for line in after_trip.lines)

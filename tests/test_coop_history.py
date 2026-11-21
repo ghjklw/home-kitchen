@@ -154,12 +154,18 @@ def test_coop_http_source_defaults_and_falls_back_from_list_404_to_search():
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append((request.url.host, request.url.path, request.url.query.decode()))
+        assert request.headers.get("accept") == "application/json;charset=UTF-8"
+        assert request.headers.get("content-type") == "application/json; charset=utf-8"
         assert request.headers.get("user-agent") == DEFAULT_COOP_USER_AGENT
-        assert request.headers.get("x-locale") == "nb-NO"
+        assert request.headers.get("x-gltlocale") == "nb_NO"
+        assert request.headers.get("x-token") == "coop-token"
+        assert request.headers.get("authorization") is None
+        assert request.headers.get("x-deviceid") == source.device_id
         if request.url.path == "/user/pay/history/list":
+            assert request.url.params.get("n") == "50"
             return httpx.Response(404)
         if request.url.path == "/user/pay/history/search":
-            assert request.url.params.get("searchText") == ""
+            assert request.url.params.get("text") == ""
             return httpx.Response(
                 200,
                 json={
@@ -177,45 +183,48 @@ def test_coop_http_source_defaults_and_falls_back_from_list_404_to_search():
 
     source = CoopHttpSource(access_token="coop-token", transport=httpx.MockTransport(handler))
     assert source.base_url == DEFAULT_COOP_BASE_URL == "https://coopay.coop.no"
+    assert len(source.device_id) == 16
     purchases = source.get_purchases("user-1")
     assert [p.summary_id for p in purchases] == ["coop-search-1"]
     assert purchases[0].amount == Decimal("210.00")
     assert calls == [
-        ("coopay.coop.no", "/user/pay/history/list", ""),
-        ("coopay.coop.no", "/user/pay/history/search", "searchText="),
+        ("coopay.coop.no", "/user/pay/history/list", "n=50"),
+        ("coopay.coop.no", "/user/pay/history/search", "text="),
     ]
 
 
-def test_coop_http_source_retries_list_with_number_of_purchases_on_400():
+def test_coop_http_source_fetches_list_with_n_param_and_custom_device_id():
     calls: list[tuple[str, str]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append((request.url.path, request.url.query.decode()))
+        assert request.headers.get("x-deviceid") == "custom-device-id"
+        assert request.headers.get("x-token") == "coop-token"
         if request.url.path == "/user/pay/history/list":
-            if request.url.params.get("numberOfPurchases") == "50":
-                return httpx.Response(
-                    200,
-                    json={
-                        "purchases": [
-                            {
-                                "summaryId": "coop-list-50",
-                                "storeName": "Coop Extra",
-                                "purchaseDate": "2026-11-19T12:00:00Z",
-                                "amount": "120.00",
-                            }
-                        ]
-                    },
-                )
-            return httpx.Response(400)
+            assert request.url.params.get("n") == "50"
+            return httpx.Response(
+                200,
+                json={
+                    "purchases": [
+                        {
+                            "summaryId": "coop-list-50",
+                            "storeName": "Coop Extra",
+                            "purchaseDate": "2026-11-19T12:00:00Z",
+                            "amount": "120.00",
+                        }
+                    ]
+                },
+            )
         return httpx.Response(404)
 
-    source = CoopHttpSource(access_token="coop-token", transport=httpx.MockTransport(handler))
+    source = CoopHttpSource(
+        access_token="coop-token",
+        device_id="custom-device-id",
+        transport=httpx.MockTransport(handler),
+    )
     purchases = source.get_purchases("user-1")
     assert [p.summary_id for p in purchases] == ["coop-list-50"]
-    assert calls == [
-        ("/user/pay/history/list", ""),
-        ("/user/pay/history/list", "numberOfPurchases=50"),
-    ]
+    assert calls == [("/user/pay/history/list", "n=50")]
 
 
 def test_coop_http_source_falls_back_to_month_and_dashboard_on_404():

@@ -34,11 +34,11 @@ from home_kitchen.models import (
     SourceIngredient,
     infer_recipe_metadata,
 )
+from home_kitchen.recipes.adapters.postgres import source_links
 from home_kitchen.recipes.collections import (
     CollectionEntry,
     CollectionPage,
     source_ingredient,
-    source_links,
 )
 from home_kitchen.service import KitchenService
 from home_kitchen.store import entity_values, recipes

@@ -32,7 +32,8 @@ from home_kitchen.cookidoo_recipes import CookidooRecipeService
 from home_kitchen.feature_api import feature_router
 from home_kitchen.imports import ImportedDraft
 from home_kitchen.models import Ingredient, Recipe, RecipeCreate
-from home_kitchen.recipes.collections import CollectionEntry, CollectionJob, CollectionService
+from home_kitchen.recipes.bootstrap import create_collection_service
+from home_kitchen.recipes.collections import CollectionEntry, CollectionJob
 from home_kitchen.service import KitchenService
 from home_kitchen.settings import Settings
 
@@ -464,7 +465,7 @@ def test_collection_save_and_cookidoo_import_skip_per_recipe_ai_and_run_sql_reso
             generation=lambda _actor: 1,
             lock_generation=lambda *a, **kw: None,
         )
-        collections = CollectionService(
+        collections = create_collection_service(
             kitchen,
             fake_history,  # type: ignore[arg-type]
             providers={"oda": collection_provider},  # type: ignore[dict-item]
@@ -580,7 +581,7 @@ async def test_bulk_collection_import_runs_batched_ai_mapping_once_with_failure_
             lock_generation=lambda *a, **kw: None,
             validate_source=lambda _entry: None,
         )
-        collections = CollectionService(
+        collections = create_collection_service(
             kitchen,
             fake_history,  # type: ignore[arg-type]
             providers={"cookidoo": collection_provider},  # type: ignore[dict-item]
@@ -695,7 +696,7 @@ async def test_bulk_collection_import_deduplicates_and_maps_end_to_end(tmp_path)
             lock_generation=lambda *a, **kw: None,
             validate_source=lambda _entry: None,
         )
-        collections = CollectionService(
+        collections = create_collection_service(
             kitchen,
             fake_history,  # type: ignore[arg-type]
             providers={"cookidoo": collection_provider},  # type: ignore[dict-item]

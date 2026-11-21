@@ -39,10 +39,10 @@ from home_kitchen.feature_mcp import install_feature_tools
 from home_kitchen.integrations import CookidooIntegration, IntegrationRegistry, OdaIntegration
 from home_kitchen.mcp_server import build_mcp
 from home_kitchen.models import RecipeSource
+from home_kitchen.recipes.bootstrap import create_collection_service
 from home_kitchen.recipes.collections import (
     CollectionEntry,
     CollectionPage,
-    CollectionService,
     source_links,
 )
 from home_kitchen.settings import Household, Settings
@@ -225,7 +225,7 @@ def _offline_app(
     cookidoo_provider = CookidooCollectionProvider(
         store, household_id, transport=cookidoo_transport
     )
-    collection_service = CollectionService(
+    collection_service = create_collection_service(
         kitchen,
         history,
         providers={

@@ -12,10 +12,10 @@ from home_kitchen.history import HistoryRepository
 from home_kitchen.imports import ImportedDraft
 from home_kitchen.inventory import InventoryService
 from home_kitchen.models import MealCreate, PrepCategory, RecipeCreate, RecipeType
+from home_kitchen.recipes.bootstrap import create_collection_service
 from home_kitchen.recipes.collections import (
     CollectionEntry,
     CollectionPage,
-    CollectionService,
     OdaCollectionProvider,
     source_ingredient,
     source_links,
@@ -88,8 +88,11 @@ def make_service(kitchen, provider, extractor=None):
     async def extract(url):
         return draft(url)
 
-    return CollectionService(
-        kitchen, HistoryRepository(kitchen.store.engine), provider, extractor or extract
+    return create_collection_service(
+        kitchen,
+        HistoryRepository(kitchen.store.engine),
+        provider=provider,
+        extractor=extractor or extract,
     )
 
 

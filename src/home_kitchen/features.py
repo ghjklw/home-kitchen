@@ -69,18 +69,18 @@ from home_kitchen.recipes import (
     RecipeDraftRequest,
     create_recipe_providers,
 )
-from home_kitchen.recipes.collections import CollectionService, OdaCollectionProvider
+from home_kitchen.recipes.adapters.oda import OdaCollectionProvider
+from home_kitchen.recipes.bootstrap import (
+    create_collection_service,
+    create_recipe_discovery_registry,
+    create_recipe_image_service,
+)
 from home_kitchen.recipes.discovery import (
     DiscoveryContext,
-    MarmitonDiscoveryProvider,
-    MatpratDiscoveryProvider,
-    OdaDiscoveryProvider,
-    RecipeDiscoveryRegistry,
     RecipeDiscoveryRequest,
     RecipeDiscoveryResponse,
     build_discovery_context,
 )
-from home_kitchen.recipes.images import RecipeImageService
 from home_kitchen.recipes.models import EditableRecipeDraft
 from home_kitchen.recipes.photo_storage import PhotoRecipeService
 from home_kitchen.recommendations import PlanDraft, build_planner, recommend_plan
@@ -227,9 +227,9 @@ class KitchenFeatures:
         self.recipe_photos = PhotoRecipeService(
             settings, self.household_id, kitchen.store.engine, household
         )
-        self.recipe_images = RecipeImageService(kitchen)
+        self.recipe_images = create_recipe_image_service(kitchen, self.history)
         cookidoo_provider = CookidooCollectionProvider(self.connector_store, self.household_id)
-        self.recipe_collections = CollectionService(
+        self.recipe_collections = create_collection_service(
             kitchen,
             self.history,
             providers={
@@ -244,12 +244,8 @@ class KitchenFeatures:
             self.household_id,
             provider=cookidoo_provider,
         )
-        self.recipe_discovery = RecipeDiscoveryRegistry(
-            [
-                OdaDiscoveryProvider(self.oda),
-                MarmitonDiscoveryProvider(),
-                MatpratDiscoveryProvider(),
-            ],
+        self.recipe_discovery = create_recipe_discovery_registry(
+            self.oda,
             context_provider=self.discovery_context,
         )
 

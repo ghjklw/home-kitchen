@@ -20,7 +20,8 @@ from home_kitchen.cookidoo_recipes import (
 )
 from home_kitchen.history import HistoryEntryCreate, HistoryRepository
 from home_kitchen.models import Meal, RecipeSource
-from home_kitchen.recipes.collections import CollectionEntry, source_links
+from home_kitchen.recipes.adapters.postgres import source_links
+from home_kitchen.recipes.collections import CollectionEntry
 from home_kitchen.service import KitchenService
 from home_kitchen.store import entity_values, meals, recipes
 

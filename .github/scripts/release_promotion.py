@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 import dataclasses
 import datetime as dt
@@ -28,6 +29,8 @@ DIGITS_RE = re.compile(r"^[0-9]+$")
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 CONFIRMATION_PHRASE = "PROMOTE TO PRODUCTION"
+PROMOTION_ACTIONS = frozenset({"promote", "rollback"})
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 MANIFEST_ACCEPT_HEADER = ", ".join(
     [
         "application/vnd.oci.image.index.v1+json",
@@ -50,6 +53,9 @@ class PromotionRequest:
     uat_consumer_verified: bool
     uat_evidence_ref: str
     confirm_production_promotion: str
+    promotion_action: str = "promote"
+    uat_url: str = ""
+    dry_run: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -63,22 +69,43 @@ class OciImageIdentity:
     content_type: str
 
 
-def _parse_required_true(value: str | bool | None, field_name: str) -> bool:
+def _parse_bool(value: str | bool | None, field_name: str) -> bool:
     if isinstance(value, bool):
-        parsed = value
-    elif isinstance(value, str):
+        return value
+    if isinstance(value, str):
         normalized = value.strip().lower()
         if normalized == "true":
-            parsed = True
-        elif normalized == "false":
-            parsed = False
-        else:
-            raise ValueError(f"{field_name} must be 'true' or 'false'")
-    else:
-        raise ValueError(f"{field_name} must be 'true'")
-    if not parsed:
+            return True
+        if normalized == "false":
+            return False
+    raise ValueError(f"{field_name} must be 'true' or 'false'")
+
+
+def _parse_required_true(value: str | bool | None, field_name: str) -> bool:
+    if not _parse_bool(value, field_name):
         raise ValueError(f"{field_name} must be explicitly verified (true) before promotion")
     return True
+
+
+def normalize_uat_url(uat_url: str) -> str:
+    """Validate and normalize an optional UAT base URL (HTTPS, or loopback HTTP for local tests)."""
+    cleaned = uat_url.strip().rstrip("/")
+    if not cleaned:
+        return ""
+    parsed = urllib.parse.urlsplit(cleaned)
+    is_loopback_http = parsed.scheme == "http" and (parsed.hostname or "") in LOOPBACK_HOSTS
+    if parsed.scheme != "https" and not is_loopback_http:
+        raise ValueError("uat_url must be an https:// origin (or http:// loopback for local tests)")
+    if (
+        not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in ("", "/")
+    ):
+        raise ValueError("uat_url must be a clean origin URL without credentials, path, or query")
+    return cleaned
 
 
 def validate_promotion_inputs(
@@ -93,11 +120,23 @@ def validate_promotion_inputs(
     uat_consumer_verified: str | bool,
     uat_evidence_ref: str,
     confirm_production_promotion: str,
+    promotion_action: str = "promote",
+    uat_url: str = "",
+    dry_run: str | bool = False,
 ) -> PromotionRequest:
     """Validate release inputs, UAT verification gates, and explicit production confirmation."""
     repo = repository.strip()
     if not REPO_RE.fullmatch(repo):
         raise ValueError(f"Invalid repository identifier: {repository!r}")
+
+    action = (promotion_action or "promote").strip().lower()
+    if action not in PROMOTION_ACTIONS:
+        raise ValueError(
+            f"Invalid promotion_action {promotion_action!r}; expected one of {sorted(PROMOTION_ACTIONS)}"
+        )
+
+    is_dry_run = _parse_bool(dry_run if dry_run != "" else False, "dry_run")
+    normalized_uat_url = normalize_uat_url(uat_url)
 
     tag = release_tag.strip()
     if not RELEASE_TAG_RE.fullmatch(tag):
@@ -125,9 +164,13 @@ def validate_promotion_inputs(
         raise ValueError("uat_evidence_ref must reference UAT verification evidence")
 
     confirmation = confirm_production_promotion.strip()
-    if confirmation != CONFIRMATION_PHRASE:
+    if not is_dry_run and confirmation != CONFIRMATION_PHRASE:
         raise ValueError(
             f"confirm_production_promotion must equal {CONFIRMATION_PHRASE!r} for cutover"
+        )
+    if is_dry_run and confirmation and confirmation != CONFIRMATION_PHRASE:
+        raise ValueError(
+            f"confirm_production_promotion must be blank or {CONFIRMATION_PHRASE!r} in dry_run"
         )
 
     return PromotionRequest(
@@ -141,24 +184,36 @@ def validate_promotion_inputs(
         uat_consumer_verified=consumer_ok,
         uat_evidence_ref=evidence,
         confirm_production_promotion=confirmation,
+        promotion_action=action,
+        uat_url=normalized_uat_url,
+        dry_run=is_dry_run,
     )
 
 
-def compute_release_tags(release_tag: str, source_sha: str) -> list[str]:
-    """Compute immutable-digest target tags; move :latest only for stable semver tags."""
+def split_release_tags(release_tag: str, source_sha: str) -> tuple[list[str], list[str]]:
+    """Split target tags into immutable version/SHA tags and moving pointer tags."""
     if not RELEASE_TAG_RE.fullmatch(release_tag):
         raise ValueError(f"Invalid release tag: {release_tag!r}")
     if not SHA40_RE.fullmatch(source_sha):
         raise ValueError(f"Invalid source_sha: {source_sha!r}")
 
-    tags = [
-        release_tag,
-        f"release-{release_tag}",
-        f"release-sha-{source_sha}",
-    ]
-    if STABLE_SEMVER_RE.fullmatch(release_tag):
-        tags.append("latest")
-    return list(dict.fromkeys(tags))
+    immutable_tags = list(
+        dict.fromkeys(
+            [
+                release_tag,
+                f"release-{release_tag}",
+                f"release-sha-{source_sha}",
+            ]
+        )
+    )
+    moving_tags = ["latest"] if STABLE_SEMVER_RE.fullmatch(release_tag) else []
+    return immutable_tags, moving_tags
+
+
+def compute_release_tags(release_tag: str, source_sha: str) -> list[str]:
+    """Compute immutable-digest target tags; move :latest only for stable semver tags."""
+    immutable_tags, moving_tags = split_release_tags(release_tag, source_sha)
+    return list(dict.fromkeys([*immutable_tags, *moving_tags]))
 
 
 def verify_sha256_digest(payload: bytes, expected_digest: str, label: str) -> None:
@@ -283,6 +338,14 @@ def extract_oci_identity(
     )
 
 
+class GhcrHttpError(RuntimeError):
+    """HTTP error raised by GhcrClient without leaking registry credentials."""
+
+    def __init__(self, status_code: int, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
 class GhcrClient:
     """Minimal OCI Distribution v2 client for GHCR digest verification and immutable tagging."""
 
@@ -312,7 +375,9 @@ class GhcrClient:
             with urllib.request.urlopen(request, timeout=30) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            raise RuntimeError(f"GHCR token exchange failed with HTTP {exc.code}") from None
+            raise GhcrHttpError(
+                exc.code, f"GHCR token exchange failed with HTTP {exc.code}"
+            ) from None
         bearer = payload.get("token")
         if not isinstance(bearer, str) or not bearer:
             raise RuntimeError("GHCR token exchange returned an empty token")
@@ -342,8 +407,8 @@ class GhcrClient:
                 resp_headers = {k.lower(): v for k, v in response.headers.items()}
                 return response.status, resp_headers, response.read()
         except urllib.error.HTTPError as exc:
-            raise RuntimeError(
-                f"GHCR {method} {path} failed with HTTP {exc.code}: {exc.reason}"
+            raise GhcrHttpError(
+                exc.code, f"GHCR {method} {path} failed with HTTP {exc.code}: {exc.reason}"
             ) from None
 
     def get_manifest(self, reference: str) -> tuple[bytes, str]:
@@ -352,13 +417,23 @@ class GhcrClient:
             f"/v2/{self.repository}/manifests/{urllib.parse.quote(reference, safe=':')}",
             headers={"Accept": MANIFEST_ACCEPT_HEADER},
         )
-        content_type = headers.get("content-type", "application/vnd.oci.image.manifest.v1+json")
+        raw_content_type = headers.get("content-type", "application/vnd.oci.image.manifest.v1+json")
+        content_type = raw_content_type.split(";", 1)[0].strip()
         header_digest = headers.get("docker-content-digest")
         if header_digest and reference.startswith("sha256:") and header_digest != reference:
             raise ValueError(
                 f"GHCR Docker-Content-Digest {header_digest!r} != requested {reference!r}"
             )
         return body, content_type
+
+    def get_manifest_digest_if_exists(self, reference: str) -> str | None:
+        try:
+            manifest_bytes, _ = self.get_manifest(reference)
+        except GhcrHttpError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
+        return f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
 
     def get_blob(self, digest: str) -> bytes:
         _, _, body = self._request(
@@ -370,10 +445,11 @@ class GhcrClient:
     def put_manifest(
         self, tag: str, manifest_bytes: bytes, content_type: str, expected_digest: str
     ) -> str:
+        clean_content_type = content_type.split(";", 1)[0].strip()
         _, headers, _ = self._request(
             "PUT",
             f"/v2/{self.repository}/manifests/{urllib.parse.quote(tag, safe='')}",
-            headers={"Content-Type": content_type},
+            headers={"Content-Type": clean_content_type},
             data=manifest_bytes,
         )
         returned_digest = headers.get("docker-content-digest")
@@ -384,6 +460,212 @@ class GhcrClient:
         verified_bytes, _ = self.get_manifest(tag)
         verify_sha256_digest(verified_bytes, expected_digest, f"Promoted tag {tag!r}")
         return expected_digest
+
+
+def _lookup_tag_digest(ghcr: Any, tag: str) -> str | None:
+    if hasattr(ghcr, "get_manifest_digest_if_exists"):
+        return ghcr.get_manifest_digest_if_exists(tag)
+    try:
+        manifest_bytes, _ = ghcr.get_manifest(tag)
+    except KeyError:
+        return None
+    except GhcrHttpError as exc:
+        if exc.status_code == 404:
+            return None
+        raise
+    return f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
+
+
+def verify_immutable_tag_continuity(
+    ghcr: Any,
+    *,
+    release_tag: str,
+    source_sha: str,
+    source_digest: str,
+    promotion_action: str = "promote",
+) -> dict[str, Any]:
+    """Ensure immutable version/SHA tags never move to a different digest and record :latest prior."""
+    immutable_tags, moving_tags = split_release_tags(release_tag, source_sha)
+    existing_immutable: dict[str, str | None] = {}
+    for tag in immutable_tags:
+        existing_digest = _lookup_tag_digest(ghcr, tag)
+        if existing_digest is not None and existing_digest != source_digest:
+            raise ValueError(
+                f"Immutable release tag {tag!r} already points to {existing_digest}; "
+                f"refusing to substitute {source_digest}"
+            )
+        existing_immutable[tag] = existing_digest
+
+    all_immutable_match = bool(immutable_tags) and all(
+        digest == source_digest for digest in existing_immutable.values()
+    )
+    if promotion_action == "rollback" and not existing_immutable.get(f"release-sha-{source_sha}"):
+        raise ValueError(
+            f"Rollback target {source_digest} does not have an existing promoted "
+            f"release-sha-{source_sha} tag in GHCR"
+        )
+
+    previous_latest_digest = _lookup_tag_digest(ghcr, "latest") if "latest" in moving_tags else None
+    return {
+        "immutable_tags": immutable_tags,
+        "moving_tags": moving_tags,
+        "all_immutable_tags_match": all_immutable_match,
+        "previous_latest_digest": previous_latest_digest,
+    }
+
+
+def _extract_alembic_revision_from_source(source: str) -> tuple[str | None, tuple[str, ...]]:
+    tree = ast.parse(source)
+    revision: str | None = None
+    down_revs: tuple[str, ...] = ()
+    for node in tree.body:
+        target_name: str | None = None
+        value_node: ast.AST | None = None
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        ):
+            target_name = node.targets[0].id
+            value_node = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            target_name = node.target.id
+            value_node = node.value
+        if target_name is None or value_node is None:
+            continue
+        if target_name == "revision":
+            val = ast.literal_eval(value_node)
+            if isinstance(val, str):
+                revision = val
+        elif target_name == "down_revision":
+            val = ast.literal_eval(value_node)
+            if isinstance(val, str):
+                down_revs = (val,)
+            elif isinstance(val, (tuple, list)):
+                down_revs = tuple(str(item) for item in val if item)
+    return revision, down_revs
+
+
+def resolve_alembic_head(source_sha: str | None = None) -> str | None:
+    """Resolve the single Alembic head revision using Python stdlib only."""
+    rev_map: dict[str, tuple[str, ...]] = {}
+    if source_sha and SHA40_RE.fullmatch(source_sha):
+        listed = subprocess.run(
+            ["git", "ls-tree", "-r", "--name-only", source_sha, "migrations/versions"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if listed.returncode == 0:
+            for rel_path in listed.stdout.splitlines():
+                if not rel_path.endswith(".py") or rel_path.endswith("__init__.py"):
+                    continue
+                shown = subprocess.run(
+                    ["git", "show", f"{source_sha}:{rel_path}"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if shown.returncode == 0:
+                    rev, downs = _extract_alembic_revision_from_source(shown.stdout)
+                    if rev:
+                        rev_map[rev] = downs
+
+    if not rev_map:
+        versions_dir = pathlib.Path(__file__).resolve().parents[2] / "migrations" / "versions"
+        if not versions_dir.is_dir():
+            versions_dir = pathlib.Path.cwd() / "migrations" / "versions"
+        if versions_dir.is_dir():
+            for file_path in sorted(versions_dir.glob("*.py")):
+                if file_path.name == "__init__.py":
+                    continue
+                rev, downs = _extract_alembic_revision_from_source(
+                    file_path.read_text(encoding="utf-8")
+                )
+                if rev:
+                    rev_map[rev] = downs
+
+    if not rev_map:
+        return None
+    referenced = {down for downs in rev_map.values() for down in downs}
+    heads = sorted(set(rev_map) - referenced)
+    if len(heads) != 1:
+        raise ValueError(f"Expected a single Alembic head, found {heads!r}")
+    return heads[0]
+
+
+def verify_uat_endpoint(
+    uat_url: str,
+    *,
+    expected_sha: str | None = None,
+    expected_alembic_head: str | None = None,
+    bearer_token: str = "",
+    urlopen: Callable[..., Any] = urllib.request.urlopen,
+) -> dict[str, Any]:
+    """Verify UAT /healthz, /readyz migration state, and optionally /api/version."""
+    base_url = normalize_uat_url(uat_url)
+    if not base_url:
+        raise ValueError("uat_url is required for UAT verification")
+
+    def _get_json(path: str, *, token: str = "") -> dict[str, Any]:
+        headers = {"Accept": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        request = urllib.request.Request(f"{base_url}{path}", headers=headers, method="GET")
+        try:
+            with urlopen(request, timeout=15) as response:
+                status = getattr(response, "status", 200)
+                if status != 200:
+                    raise RuntimeError(f"UAT {path} returned HTTP {status}")
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(f"UAT {path} failed with HTTP {exc.code}") from None
+
+    health_doc = _get_json("/healthz")
+    if health_doc.get("status") != "ok":
+        raise ValueError(f"UAT /healthz reported unexpected status: {health_doc!r}")
+
+    ready_doc = _get_json("/readyz")
+    if (
+        ready_doc.get("status") != "ready"
+        or ready_doc.get("database") != "ok"
+        or ready_doc.get("migrations") != "current"
+    ):
+        raise ValueError(f"UAT /readyz is not ready: {ready_doc!r}")
+
+    observed_head = ready_doc.get("alembic_head")
+    if expected_alembic_head and observed_head != expected_alembic_head:
+        raise ValueError(
+            f"UAT /readyz alembic_head {observed_head!r} != expected {expected_alembic_head!r}"
+        )
+
+    result: dict[str, Any] = {
+        "url": base_url,
+        "healthz": health_doc.get("status"),
+        "readyz": ready_doc.get("status"),
+        "alembic_head": observed_head,
+        "version_checked": False,
+    }
+
+    clean_token = bearer_token.strip()
+    if clean_token:
+        version_doc = _get_json("/api/version", token=clean_token)
+        observed_rev = version_doc.get("revision")
+        if expected_sha and observed_rev and observed_rev != expected_sha:
+            raise ValueError(
+                f"UAT /api/version revision {observed_rev!r} != expected {expected_sha!r}"
+            )
+        if expected_alembic_head and version_doc.get("alembic_head") != expected_alembic_head:
+            raise ValueError(
+                f"UAT /api/version alembic_head {version_doc.get('alembic_head')!r} "
+                f"!= expected {expected_alembic_head!r}"
+            )
+        result["version_checked"] = True
+        result["version"] = version_doc.get("version")
+        result["channel"] = version_doc.get("channel")
+        result["revision"] = observed_rev
+
+    return result
 
 
 def _run_command(cmd: list[str], *, env: dict[str, str] | None = None) -> str:
@@ -423,7 +705,11 @@ def verify_git_and_ci(repository: str, source_sha: str, release_tag: str) -> Non
     successful_main_ci = [
         run
         for run in ci_runs
-        if run.get("conclusion") == "success" and run.get("head_branch") == "main"
+        if run.get("conclusion") == "success"
+        and run.get("head_branch") == "main"
+        and run.get("head_sha") == source_sha
+        and (run.get("head_repository") or {}).get("full_name") == repository
+        and run.get("event") in {"push", "workflow_dispatch"}
     ]
     if not successful_main_ci:
         raise ValueError(f"No successful Kitchen CI run found on main for {source_sha}")
@@ -436,35 +722,61 @@ def verify_publisher_run(
     run_attempt: str,
     source_sha: str,
     source_digest: str,
+    allow_expired_artifact_for_rollback: bool = False,
 ) -> dict[str, Any]:
-    run_json = _run_command(["gh", "api", f"repos/{repository}/actions/runs/{run_id}"])
+    run_json = _run_command(
+        ["gh", "api", f"repos/{repository}/actions/runs/{run_id}/attempts/{run_attempt}"]
+    )
     run = json.loads(run_json)
     if run.get("path") != ".github/workflows/publish.yml":
         raise ValueError(
             f"Run {run_id} belongs to {run.get('path')!r}, expected '.github/workflows/publish.yml'"
         )
     if run.get("conclusion") != "success":
-        raise ValueError(f"Publish run {run_id} conclusion is {run.get('conclusion')!r}")
+        raise ValueError(
+            f"Publish run {run_id} attempt {run_attempt} conclusion is {run.get('conclusion')!r}"
+        )
     if run.get("head_branch") != "main":
         raise ValueError(f"Publish run {run_id} head_branch is {run.get('head_branch')!r}")
+    if run.get("head_sha") != source_sha:
+        raise ValueError(f"Publish run {run_id} head_sha {run.get('head_sha')!r} != {source_sha!r}")
+    if str(run.get("run_attempt", "")) != run_attempt:
+        raise ValueError(
+            f"Publish run {run_id} run_attempt {run.get('run_attempt')!r} != {run_attempt!r}"
+        )
     if (run.get("repository") or {}).get("full_name") != repository:
         raise ValueError(f"Publish run {run_id} repository does not match {repository!r}")
+    if (run.get("head_repository") or {}).get("full_name") != repository:
+        raise ValueError(f"Publish run {run_id} head_repository does not match {repository!r}")
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        _run_command(
-            [
-                "gh",
-                "run",
-                "download",
-                run_id,
-                "--repo",
-                repository,
-                "--name",
-                "image-metadata",
-                "--dir",
-                tmpdir,
-            ]
-        )
+        try:
+            _run_command(
+                [
+                    "gh",
+                    "run",
+                    "download",
+                    run_id,
+                    "--repo",
+                    repository,
+                    "--name",
+                    "image-metadata",
+                    "--dir",
+                    tmpdir,
+                ]
+            )
+        except RuntimeError:
+            if not allow_expired_artifact_for_rollback:
+                raise
+            return {
+                "source_sha": source_sha,
+                "event": "main",
+                "image": f"ghcr.io/{repository.lower()}",
+                "digest": source_digest,
+                "version": None,
+                "tag": f"build-{run_id}-{run_attempt}",
+                "artifact_expired": True,
+            }
         metadata_path = pathlib.Path(tmpdir) / "image-metadata.json"
         if not metadata_path.is_file():
             raise ValueError(f"Publish run {run_id} did not provide image-metadata.json")
@@ -492,7 +804,10 @@ def _request_from_env() -> PromotionRequest:
         uat_backup_recovery_verified=os.environ["INPUT_UAT_BACKUP_RECOVERY_VERIFIED"],
         uat_consumer_verified=os.environ["INPUT_UAT_CONSUMER_VERIFIED"],
         uat_evidence_ref=os.environ["INPUT_UAT_EVIDENCE_REF"],
-        confirm_production_promotion=os.environ["INPUT_CONFIRM_PRODUCTION_PROMOTION"],
+        confirm_production_promotion=os.environ.get("INPUT_CONFIRM_PRODUCTION_PROMOTION", ""),
+        promotion_action=os.environ.get("INPUT_PROMOTION_ACTION", "promote"),
+        uat_url=os.environ.get("INPUT_UAT_URL", ""),
+        dry_run=os.environ.get("INPUT_DRY_RUN", "false"),
     )
 
 
@@ -517,9 +832,25 @@ def _append_summary(markdown: str) -> None:
             handle.write("\n")
 
 
+def _rollout_and_recovery_contract(*, previous_latest_digest: str | None) -> dict[str, Any]:
+    return {
+        "immutable_digest_enforced": True,
+        "environment_isolation": "separate UAT and production databases/credentials",
+        "migration_compatibility": "forward-compatible Alembic upgrade verified in UAT",
+        "health_probes": {
+            "liveness": "/healthz",
+            "readiness": "/readyz",
+            "version": "/api/version",
+        },
+        "previous_latest_digest": previous_latest_digest,
+        "rollback_policy": "re-promote prior verified source_digest; restore backup if needed",
+    }
+
+
 def handle_verify() -> int:
     req = _request_from_env()
     verify_git_and_ci(req.repository, req.source_sha, req.release_tag)
+    alembic_head = resolve_alembic_head(req.source_sha)
 
     ghcr = GhcrClient(
         repository=req.repository,
@@ -537,14 +868,56 @@ def handle_verify() -> int:
         fetch_manifest=ghcr.get_manifest,
         fetch_blob=ghcr.get_blob,
     )
+    continuity = verify_immutable_tag_continuity(
+        ghcr,
+        release_tag=req.release_tag,
+        source_sha=req.source_sha,
+        source_digest=req.source_digest,
+        promotion_action=req.promotion_action,
+    )
     metadata = verify_publisher_run(
         req.repository,
         run_id=identity.run_id,
         run_attempt=identity.run_attempt,
         source_sha=req.source_sha,
         source_digest=req.source_digest,
+        allow_expired_artifact_for_rollback=(
+            req.promotion_action == "rollback" and continuity["all_immutable_tags_match"]
+        ),
     )
+
+    uat_probe: dict[str, Any] | None = None
+    if req.uat_url:
+        uat_probe = verify_uat_endpoint(
+            req.uat_url,
+            expected_sha=req.source_sha,
+            expected_alembic_head=alembic_head,
+            bearer_token=os.environ.get("UAT_API_TOKEN", ""),
+        )
+
     planned_tags = compute_release_tags(req.release_tag, req.source_sha)
+    verification_record = {
+        "image": f"ghcr.io/{req.repository.lower()}",
+        "image_ref": f"ghcr.io/{req.repository.lower()}@{req.source_digest}",
+        "release_tag": req.release_tag,
+        "source_sha": req.source_sha,
+        "digest": req.source_digest,
+        "source_build_tag": str(metadata["tag"]),
+        "publish_run_id": identity.run_id,
+        "publish_run_attempt": identity.run_attempt,
+        "promotion_action": req.promotion_action,
+        "dry_run": req.dry_run,
+        "alembic_head": alembic_head,
+        "planned_tags": planned_tags,
+        "previous_latest_digest": continuity["previous_latest_digest"],
+        "uat_probe": uat_probe,
+        "rollout_and_recovery": _rollout_and_recovery_contract(
+            previous_latest_digest=continuity["previous_latest_digest"]
+        ),
+    }
+    pathlib.Path("verification-metadata.json").write_text(
+        json.dumps(verification_record, indent=2) + "\n", encoding="utf-8"
+    )
 
     _write_github_output(
         {
@@ -555,20 +928,31 @@ def handle_verify() -> int:
             "publish_run_id": identity.run_id,
             "publish_run_attempt": identity.run_attempt,
             "uat_evidence_ref": req.uat_evidence_ref,
+            "promotion_action": req.promotion_action,
+            "alembic_head": alembic_head or "",
+            "previous_latest_digest": continuity["previous_latest_digest"] or "",
         }
     )
     _append_summary(
         "\n".join(
             [
                 "### UAT Candidate Verification Passed",
+                f"- **Action**: `{req.promotion_action}` (`dry_run={str(req.dry_run).lower()}`)",
                 f"- **Release tag**: `{req.release_tag}`",
                 f"- **Source SHA**: `{req.source_sha}`",
                 f"- **Immutable digest**: `{req.source_digest}`",
+                f"- **Alembic head**: `{alembic_head or 'unknown'}`",
                 f"- **Publish run**: `{identity.run_id}` (attempt `{identity.run_attempt}`, "
                 f"tag `{metadata['tag']}`)",
+                f"- **Previous `:latest` digest**: `{continuity['previous_latest_digest'] or 'none'}`",
                 f"- **UAT evidence**: {req.uat_evidence_ref}",
                 f"- **Planned production tags**: {', '.join(f'`{t}`' for t in planned_tags)}",
-                "- **Next gate**: Explicit human approval required in `production` environment.",
+                "- **Next gate**: "
+                + (
+                    "Dry run complete; production promotion skipped."
+                    if req.dry_run
+                    else "Explicit human approval required in `production` environment."
+                ),
             ]
         )
     )
@@ -577,8 +961,12 @@ def handle_verify() -> int:
 
 def handle_promote() -> int:
     req = _request_from_env()
+    if req.dry_run:
+        raise ValueError("Refusing to execute production promotion during a dry_run")
+
     expected_run_id = os.environ["PUBLISH_RUN_ID"].strip()
     expected_run_attempt = os.environ["PUBLISH_RUN_ATTEMPT"].strip()
+    alembic_head = resolve_alembic_head(req.source_sha)
 
     ghcr = GhcrClient(
         repository=req.repository,
@@ -601,18 +989,30 @@ def handle_promote() -> int:
             "Image run labels changed between verify and promote; aborting without tagging"
         )
 
+    continuity = verify_immutable_tag_continuity(
+        ghcr,
+        release_tag=req.release_tag,
+        source_sha=req.source_sha,
+        source_digest=req.source_digest,
+        promotion_action=req.promotion_action,
+    )
+
     promoted_tags = compute_release_tags(req.release_tag, req.source_sha)
     for tag in promoted_tags:
         ghcr.put_manifest(tag, identity.manifest_bytes, identity.content_type, req.source_digest)
 
     promotion_record = {
         "image": f"ghcr.io/{req.repository.lower()}",
+        "image_ref": f"ghcr.io/{req.repository.lower()}@{req.source_digest}",
         "release_tag": req.release_tag,
         "source_sha": req.source_sha,
         "digest": req.source_digest,
         "source_build_tag": f"build-{identity.run_id}-{identity.run_attempt}",
         "publish_run_id": identity.run_id,
         "publish_run_attempt": identity.run_attempt,
+        "promotion_action": req.promotion_action,
+        "alembic_head": alembic_head,
+        "previous_latest_digest": continuity["previous_latest_digest"],
         "promoted_tags": promoted_tags,
         "environment": "production",
         "requested_by": os.environ["GITHUB_ACTOR"],
@@ -625,12 +1025,9 @@ def handle_promote() -> int:
             "consumer_verified": req.uat_consumer_verified,
             "evidence_ref": req.uat_evidence_ref,
         },
-        "rollout_and_recovery": {
-            "immutable_digest_enforced": True,
-            "environment_isolation": "separate UAT and production databases/credentials",
-            "migration_compatibility": "forward-compatible Alembic upgrade verified in UAT",
-            "rollback_policy": "re-promote prior verified source_digest; restore backup if needed",
-        },
+        "rollout_and_recovery": _rollout_and_recovery_contract(
+            previous_latest_digest=continuity["previous_latest_digest"]
+        ),
     }
     pathlib.Path("promotion-metadata.json").write_text(
         json.dumps(promotion_record, indent=2) + "\n", encoding="utf-8"
@@ -638,27 +1035,51 @@ def handle_promote() -> int:
     _append_summary(
         "\n".join(
             [
-                "### Production Image Promotion Completed",
+                f"### Production Image {req.promotion_action.capitalize()} Completed",
                 f"- **Image**: `ghcr.io/{req.repository.lower()}@{req.source_digest}`",
                 f"- **Source SHA**: `{req.source_sha}`",
+                f"- **Alembic head**: `{alembic_head or 'unknown'}`",
                 f"- **Promoted tags**: {', '.join(f'`{t}`' for t in promoted_tags)}",
+                f"- **Previous `:latest` digest**: `{continuity['previous_latest_digest'] or 'none'}`",
                 f"- **UAT evidence**: {req.uat_evidence_ref}",
-                "- **Rollback**: Re-promote the previous verified `source_digest` via this workflow "
-                "(and restore DB backup if schema changes are not backward-compatible).",
+                "- **Rollback**: Re-run this workflow with `promotion_action=rollback` and the previous verified "
+                "`source_digest` (and restore DB backup if schema changes are not backward-compatible).",
             ]
         )
     )
     return 0
 
 
+def handle_verify_uat(args: argparse.Namespace) -> int:
+    alembic_head = (
+        resolve_alembic_head(args.expected_sha) if args.expected_sha else resolve_alembic_head()
+    )
+    report = verify_uat_endpoint(
+        args.uat_url,
+        expected_sha=args.expected_sha,
+        expected_alembic_head=args.expected_alembic_head or alembic_head,
+        bearer_token=os.environ.get("UAT_API_TOKEN", ""),
+    )
+    print(json.dumps(report, indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Promote immutable Home Kitchen release images.")
-    parser.add_argument("command", choices=["verify", "promote"])
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("verify")
+    subparsers.add_parser("promote")
+    uat_parser = subparsers.add_parser("verify-uat")
+    uat_parser.add_argument("--uat-url", required=True)
+    uat_parser.add_argument("--expected-sha", default=None)
+    uat_parser.add_argument("--expected-alembic-head", default=None)
     args = parser.parse_args(argv)
     try:
         if args.command == "verify":
             return handle_verify()
-        return handle_promote()
+        if args.command == "promote":
+            return handle_promote()
+        return handle_verify_uat(args)
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

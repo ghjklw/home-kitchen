@@ -45,6 +45,24 @@ on:
         required: true
         type: string
         default: ''
+      promotion_action:
+        description: 'Promotion action (promote new release or rollback to prior verified release)'
+        required: false
+        type: choice
+        options:
+          - promote
+          - rollback
+        default: promote
+      uat_url:
+        description: 'Optional UAT HTTPS origin to verify /healthz and /readyz before cutover'
+        required: false
+        type: string
+        default: ''
+      dry_run:
+        description: 'Exercise verification gates without tagging production'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -70,6 +88,9 @@ jobs:
       publish_run_id: ${{ steps.verify.outputs.publish_run_id }}
       publish_run_attempt: ${{ steps.verify.outputs.publish_run_attempt }}
       uat_evidence_ref: ${{ steps.verify.outputs.uat_evidence_ref }}
+      promotion_action: ${{ steps.verify.outputs.promotion_action }}
+      alembic_head: ${{ steps.verify.outputs.alembic_head }}
+      previous_latest_digest: ${{ steps.verify.outputs.previous_latest_digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -89,10 +110,18 @@ jobs:
           INPUT_UAT_CONSUMER_VERIFIED: ${{ github.event.inputs.uat_consumer_verified }}
           INPUT_UAT_EVIDENCE_REF: ${{ github.event.inputs.uat_evidence_ref }}
           INPUT_CONFIRM_PRODUCTION_PROMOTION: ${{ github.event.inputs.confirm_production_promotion }}
+          INPUT_PROMOTION_ACTION: ${{ github.event.inputs.promotion_action }}
+          INPUT_UAT_URL: ${{ github.event.inputs.uat_url }}
+          INPUT_DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: python3 .github/scripts/release_promotion.py verify
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-verification-metadata
+          path: verification-metadata.json
+          retention-days: 90
 
   promote:
-    if: github.repository == 'ghjklw/home-kitchen' && github.event_name == 'workflow_dispatch'
+    if: github.repository == 'ghjklw/home-kitchen' && github.event_name == 'workflow_dispatch' && inputs.dry_run != true
     needs: [verify]
     environment: production
     runs-on: ubuntu-24.04
@@ -103,6 +132,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Promote exact immutable image digest to production tags
         env:
@@ -116,6 +146,9 @@ jobs:
           INPUT_UAT_CONSUMER_VERIFIED: ${{ github.event.inputs.uat_consumer_verified }}
           INPUT_UAT_EVIDENCE_REF: ${{ needs.verify.outputs.uat_evidence_ref }}
           INPUT_CONFIRM_PRODUCTION_PROMOTION: ${{ github.event.inputs.confirm_production_promotion }}
+          INPUT_PROMOTION_ACTION: ${{ needs.verify.outputs.promotion_action }}
+          INPUT_UAT_URL: ${{ github.event.inputs.uat_url }}
+          INPUT_DRY_RUN: ${{ github.event.inputs.dry_run }}
           PUBLISH_RUN_ID: ${{ needs.verify.outputs.publish_run_id }}
           PUBLISH_RUN_ATTEMPT: ${{ needs.verify.outputs.publish_run_attempt }}
         run: python3 .github/scripts/release_promotion.py promote

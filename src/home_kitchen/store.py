@@ -7,9 +7,13 @@ import json
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TypeVar
 from uuid import UUID
 
+from alembic.config import Config as AlembicConfig
+from alembic.runtime.migration import MigrationContext
+from alembic.script import ScriptDirectory
 from pydantic import BaseModel
 from sqlalchemy import (
     JSON,
@@ -171,6 +175,16 @@ def entity_values(entity: BaseModel) -> dict:
     return values
 
 
+def get_expected_alembic_head() -> tuple[str | None, int]:
+    """Return (single_head_revision, head_count) from the packaged Alembic script directory."""
+    package_ini = Path(__file__).resolve().parents[2] / "alembic.ini"
+    ini_path = package_ini if package_ini.is_file() else Path.cwd() / "alembic.ini"
+    config = AlembicConfig(str(ini_path))
+    script = ScriptDirectory.from_config(config)
+    heads = script.get_heads()
+    return (heads[0] if len(heads) == 1 else None), len(heads)
+
+
 class Store:
     def __init__(self, database_url: str):
         if make_url(database_url).drivername != "postgresql+psycopg":
@@ -188,6 +202,16 @@ class Store:
     def health(self) -> None:
         with self.connection() as connection:
             connection.execute(text("SELECT 1"))
+
+    def migration_status(self, expected_head: str | None) -> tuple[bool, tuple[str, ...]]:
+        """Check database reachability and whether Alembic schema matches expected_head."""
+        with self.connection() as connection:
+            connection.execute(text("SELECT 1"))
+            current_heads = tuple(
+                sorted(MigrationContext.configure(connection).get_current_heads())
+            )
+        is_current = expected_head is not None and current_heads == (expected_head,)
+        return is_current, current_heads
 
     def save(self, kind: str, entity: Recipe | Meal | RegularItem | ShoppingItem) -> None:
         table = TABLES[kind]

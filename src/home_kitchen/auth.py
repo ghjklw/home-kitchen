@@ -62,7 +62,7 @@ class AccessControl:
             history_context.reset(token)
 
     async def middleware(self, request: Request, call_next):
-        if request.url.path == "/healthz":
+        if request.url.path in {"/healthz", "/readyz"}:
             return await call_next(request)
         if self.settings.mcp_oauth_enabled and (
             request.url.path == "/mcp"

@@ -10,6 +10,7 @@ from pydantic import HttpUrl
 from sqlalchemy import select
 
 from home_kitchen.imports import validate_url
+from home_kitchen.oda.service import OdaError
 from home_kitchen.recipes.adapters.discovery import _safe_url
 from home_kitchen.recipes.collections import (
     LABELS,
@@ -128,7 +129,14 @@ class OdaDiscoveryProvider:
                 status="connection_required",
                 detail="Connect your Oda account to search Oda recipes.",
             )
-        payload = await self.service.search_recipes(actor_id, query, page=1, size=min(limit, 20))
+        try:
+            payload = await self.service.search_recipes(
+                actor_id, query, page=1, size=min(limit, 20)
+            )
+        except OdaError as exc:
+            if exc.status_code == 409:
+                return ProviderSearch(status="connection_required", detail=exc.detail)
+            raise
         results = []
         for recipe in payload.get("recipes", []):
             title = recipe.get("title")

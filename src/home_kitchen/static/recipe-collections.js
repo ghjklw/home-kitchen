@@ -75,6 +75,8 @@
   }
 
   function connectionGuidance(statusOrIntegration, error, needsReconnect = () => false) {
+    const errorMessage = error?.detail || error?.message || "";
+    if (needsReconnect(errorMessage)) return "reconnect_required";
     if (error?.status === 401 || error?.status === 403) return null;
     if (statusOrIntegration && typeof statusOrIntegration.status === "string") {
       if (statusOrIntegration.status === "not_configured") return "setup_required";
@@ -83,7 +85,6 @@
     }
     if (statusOrIntegration?.configured === false) return "setup_required";
     if (statusOrIntegration?.configured === true && statusOrIntegration.connected === false) return "connect_required";
-    if (needsReconnect(error?.detail || error?.message || "")) return "reconnect_required";
     return null;
   }
 

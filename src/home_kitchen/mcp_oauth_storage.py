@@ -4,10 +4,21 @@ import json
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 
-from cryptography.fernet import InvalidToken
+from cryptography.fernet import InvalidToken, MultiFernet
 from key_value.aio._utils.managed_entry import ManagedEntry
 from key_value.aio.stores.base import BaseStore
-from sqlalchemy import Column, DateTime, MetaData, Table, Text, delete, func, or_, select
+from sqlalchemy import (
+    Column,
+    DateTime,
+    MetaData,
+    Table,
+    Text,
+    delete,
+    func,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import Engine
 from starlette.concurrency import run_in_threadpool
@@ -199,3 +210,37 @@ class PostgresOAuthStore(BaseStore):
                 return None
 
         return await run_in_threadpool(consume)
+
+    def rotate_encrypted_records(self) -> int:
+        """Re-encrypt non-expired OAuth records using the active primary key."""
+        now = datetime.now(UTC)
+        rotated = 0
+        with self.engine.begin() as connection:
+            rows = connection.execute(
+                select(
+                    oauth_records.c.collection,
+                    oauth_records.c.key,
+                    oauth_records.c.encrypted_payload,
+                ).where(
+                    or_(
+                        oauth_records.c.expires_at.is_(None),
+                        oauth_records.c.expires_at > now,
+                    )
+                )
+            ).all()
+            for row in rows:
+                token = str(row.encrypted_payload).encode()
+                if isinstance(self.fernet, MultiFernet):
+                    rotated_token = self.fernet.rotate(token).decode()
+                else:
+                    rotated_token = self.fernet.encrypt(self.fernet.decrypt(token)).decode()
+                connection.execute(
+                    update(oauth_records)
+                    .where(
+                        oauth_records.c.collection == row.collection,
+                        oauth_records.c.key == row.key,
+                    )
+                    .values(encrypted_payload=rotated_token)
+                )
+                rotated += 1
+        return rotated

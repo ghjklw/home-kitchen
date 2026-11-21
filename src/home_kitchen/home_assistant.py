@@ -170,6 +170,11 @@ class HomeAssistantTodoClient:
         self.entity_id = clean_entity
         self.transport = transport
 
+    def _redact_secret(self, text: str) -> str:
+        if self.token and self.token in text:
+            return text.replace(self.token, "[REDACTED]")
+        return text
+
     def _get_client(self) -> httpx.Client:
         return httpx.Client(
             transport=self.transport,
@@ -182,15 +187,15 @@ class HomeAssistantTodoClient:
             },
         )
 
-    @staticmethod
-    def _raise_for_status(resp: httpx.Response, context: str) -> None:
+    def _raise_for_status(self, resp: httpx.Response, context: str) -> None:
         if resp.status_code in (401, 403):
             raise HomeAssistantAuthError(
                 "Ugyldig eller utløpt Home Assistant-token. Vennligst sjekk tilkoblingen i Innstillinger."
             )
         if resp.status_code >= 400:
+            safe_text = self._redact_secret(resp.text)
             raise HomeAssistantError(
-                f"Home Assistant svarte med HTTP {resp.status_code} ved {context}: {resp.text}"
+                f"Home Assistant svarte med HTTP {resp.status_code} ved {context}: {safe_text}"
             )
 
     @staticmethod
@@ -205,8 +210,9 @@ class HomeAssistantTodoClient:
         try:
             resp = client.post(url, json={"entity_id": self.entity_id})
         except httpx.HTTPError as exc:
-            _LOG.warning("Home Assistant network failure during todo/get_items: %s", exc)
-            raise HomeAssistantError(f"Nettverksfeil mot Home Assistant: {exc}") from exc
+            safe_exc = self._redact_secret(str(exc))
+            _LOG.warning("Home Assistant network failure during todo/get_items: %s", safe_exc)
+            raise HomeAssistantError(f"Nettverksfeil mot Home Assistant: {safe_exc}") from exc
 
         if resp.status_code in (401, 403):
             self._raise_for_status(resp, "todo/get_items")
@@ -216,8 +222,9 @@ class HomeAssistantTodoClient:
             try:
                 state_resp = client.get(state_url)
             except httpx.HTTPError as exc:
-                _LOG.warning("Home Assistant network failure during state fallback: %s", exc)
-                raise HomeAssistantError(f"Nettverksfeil mot Home Assistant: {exc}") from exc
+                safe_exc = self._redact_secret(str(exc))
+                _LOG.warning("Home Assistant network failure during state fallback: %s", safe_exc)
+                raise HomeAssistantError(f"Nettverksfeil mot Home Assistant: {safe_exc}") from exc
             self._raise_for_status(state_resp, f"states/{self.entity_id}")
             return _extract_todo_items(self._parse_json(state_resp), self.entity_id)
 
@@ -276,13 +283,14 @@ class HomeAssistantTodoClient:
                             json={"entity_id": self.entity_id, "item": item_text},
                         )
                     except httpx.HTTPError as exc:
+                        safe_exc = self._redact_secret(str(exc))
                         _LOG.warning(
                             "Home Assistant network failure during todo/add_item for %s: %s",
                             item_text,
-                            exc,
+                            safe_exc,
                         )
                         raise HomeAssistantError(
-                            f"Nettverksfeil mot Home Assistant ved eksport av '{item_text}': {exc}"
+                            f"Nettverksfeil mot Home Assistant ved eksport av '{item_text}': {safe_exc}"
                         ) from exc
                     self._raise_for_status(resp, "todo/add_item")
                 existing_keys.add(item_text.casefold())

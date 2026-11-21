@@ -240,6 +240,8 @@
       [/^(?:Sync failed|Receipt sync failed)(?:\s*[:;-]\s*(.*))?$/i, "Synkronisering feilet"],
       [/^Refresh failed(?:\s*[:;-]\s*(.*))?$/i, "Fornying av tilkobling feilet"],
       [/^Rate limited(?:\s*[:;-]\s*(.*))?$/i, "For mange forespørsler"],
+      [/^Your Oda connection (?:expired|cannot be read).*$/i, "Oda-tilkoblingen har utløpt eller kan ikke leses. Koble til på nytt."],
+      [/^Connect your Oda account first$/i, "Koble til Oda-kontoen din først."],
     ];
 
     for (const [pattern, localizedPrefix] of prefixMap) {
@@ -310,6 +312,10 @@
     return /connect (?:your )?oda|oda (?:connection|authorization).*(?:expired|invalid|cannot be read)|authorization.*connect|connection requires review/iu.test(
       message || "",
     );
+  }
+
+  function cookidooNeedsReconnect(message) {
+    return /cookidoo.*(?:utløpt|ikke tilkoblet|ugyldig|koble til)/iu.test(message || "");
   }
 
   function parsePkceCompletionPayload(input) {
@@ -421,6 +427,7 @@
     normalizeIntegrationResponse,
     connectionStatusSnapshot,
     odaNeedsReconnect,
+    cookidooNeedsReconnect,
     integrationExpiryNotice,
     providerDisplayName,
     formatSyncErrorMessage,

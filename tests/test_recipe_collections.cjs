@@ -445,3 +445,26 @@ test("DOM: recipeCollectionForm toggles Velg alle / Fjern alle for selectable en
   assert.equal(importBtn.disabled, true);
   assert.equal(toolbar.querySelector("p").textContent, "0 valgte oppskrifter");
 });
+
+test("shows Settings guidance when Cookidoo fails with a 401 expired-session error", () => {
+  const { cookidooNeedsReconnect } = require("../src/home_kitchen/static/settings-view.js");
+  assert.equal(
+    connectionGuidance(
+      { status: "connected" },
+      Object.assign(new Error("Tilkoblingen til Cookidoo har utløpt. Koble til på nytt under Innstillinger."), {
+        status: 401,
+      }),
+      cookidooNeedsReconnect,
+    ),
+    "reconnect_required",
+  );
+  // Household Entra 401 still returns null so generic household login errors do not claim Cookidoo reconnect.
+  assert.equal(
+    connectionGuidance(
+      { status: "connected" },
+      Object.assign(new Error("Login required"), { status: 401 }),
+      cookidooNeedsReconnect,
+    ),
+    null,
+  );
+});

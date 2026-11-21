@@ -175,8 +175,12 @@ async function api(path, method = "GET", body) {
       }
     } catch {}
     const isIntegration = path.startsWith("/integrations") || path.startsWith("/api/integrations");
+    const isProviderCollectionAuth =
+      path.startsWith("/recipe-collections") &&
+      typeof detail === "string" &&
+      /cookidoo|oda/i.test(detail);
     const error = new Error(
-      (response.status === 401 || response.status === 403) && !isIntegration
+      (response.status === 401 || response.status === 403) && !isIntegration && !isProviderCollectionAuth
         ? "Logg inn via husholdningens godkjente tilgangslenke, og prøv igjen."
         : response.status === 409 && path === "/meals"
           ? "Dette måltidstidspunktet er allerede brukt. Velg et annet tidspunkt, eller fjern det eksisterende måltidet først. Skjemaet er fortsatt åpent."
@@ -2462,6 +2466,19 @@ function renderRecipes(main) {
       ),
     );
   }
+  if (typeof integrationById === "function" && integrationById("cookidoo")?.status === "expired") {
+    add(
+      main,
+      add(
+        el("section", null, "callout connection-prompt"),
+        el(
+          "p",
+          "Tilkoblingen til Cookidoo har utløpt. Koble til på nytt i innstillingene for å importere oppskrifter eller synkronisere ukeplanen.",
+        ),
+        connectionSettingsButton("Åpne Cookidoo-innstillinger"),
+      ),
+    );
+  }
   const collectionStatus = el("section", null, "callout recipe-collection-progress");
   collectionStatus.hidden = true;
   const collectionSummary = el("p", "", "muted");
@@ -4238,7 +4255,9 @@ function recipeCollectionForm(resumeJobId = null, initialProvider = null) {
       const guidance = window.KitchenRecipeCollections.connectionGuidance(
         statusObj,
         error,
-        activeProvider === "cookidoo" ? () => false : window.KitchenSettingsView.odaNeedsReconnect,
+        activeProvider === "cookidoo"
+          ? (window.KitchenSettingsView?.cookidooNeedsReconnect || (() => false))
+          : window.KitchenSettingsView.odaNeedsReconnect,
       );
       if (guidance) {
         add(connectionNotice, add(
@@ -4474,6 +4493,22 @@ function discoveryForm() {
         list.append(line);
       });
       add(statuses, list);
+      if (
+        view.sources.some(
+          (source) =>
+            source.status === "Koble til kilden for å søke" ||
+            window.KitchenSettingsView?.odaNeedsReconnect?.(source.detail),
+        )
+      ) {
+        add(
+          statuses,
+          add(
+            el("section", null, "callout connection-prompt"),
+            el("p", "Oda-oppskriftsøk krever en aktiv Oda-tilkobling i innstillingene."),
+            connectionSettingsButton("Åpne Oda-innstillinger"),
+          ),
+        );
+      }
       nextContent.append(statuses);
     }
     if (!view.results.length) {
@@ -6287,20 +6322,52 @@ function renderShopping(main) {
     button("+ Legg til fast vare", () => itemForm(true), "quiet"),
     button("Gi tilbakemelding", () => feedbackForm(), "quiet"),
   );
-  const oda = add(
-    el("section", null, "panel"),
-    el("h2", "Oda"),
-    el(
-      "p",
-      "Koble til Oda-kontoen din under Oda-fanen. Handlelisten for butikken fungerer også uten Oda.",
-      "muted",
-    ),
-  );
-  add(
-    oda,
-    button("Sett opp Oda i Kjøkken", () => navigate("basket"), "quiet"),
-  );
-  add(right, regular, oda);
+  const odaIssue = typeof odaConnectionIssue === "function" && state.oda?.connected
+    ? odaConnectionIssue()
+    : null;
+  const odaIntegration = typeof integrationById === "function" ? integrationById("oda") : null;
+  const odaExpired = odaIntegration?.status === "expired";
+  const odaConfigured = Boolean(state.oda?.configured);
+  let odaCard;
+  if (odaIssue || odaExpired) {
+    odaCard = add(
+      el("section", null, "panel callout connection-prompt"),
+      el("h2", "Oda"),
+      el(
+        "p",
+        odaIssue ||
+          "Oda-tilkoblingen har utløpt eller trenger ny godkjenning. Handlelisten for butikken fungerer også uten Oda.",
+      ),
+      connectionSettingsButton("Koble til Oda på nytt i innstillingene"),
+    );
+  } else if (state.oda?.connected) {
+    odaCard = add(
+      el("section", null, "panel"),
+      el("h2", "Oda"),
+      el(
+        "p",
+        "Oda-kontoen er tilkoblet. Se over valgte produkter under Oda-produkter.",
+        "muted",
+      ),
+      button("Gå til Oda-produkter", () => {
+        state.shoppingPanel = "oda";
+        render();
+      }, "quiet"),
+    );
+  } else {
+    odaCard = add(
+      el("section", null, "panel callout connection-prompt"),
+      el("h2", "Oda"),
+      el(
+        "p",
+        odaConfigured
+          ? "Koble til Oda-kontoen din i innstillingene for å søke etter Oda-produkter. Handlelisten for butikken fungerer også uten Oda."
+          : "Oda-produkttreff krever oppsett i innstillingene. Handlelisten for butikken fungerer også uten Oda.",
+      ),
+      connectionSettingsButton(),
+    );
+  }
+  add(right, regular, odaCard);
   add(columns, left, right);
   add(main, columns);
 }
@@ -8313,7 +8380,14 @@ function odaConnectionIssue() {
   );
 }
 function renderShoppingConnectionPrompt(main) {
-  const connectionIssue = state.oda?.connected ? odaConnectionIssue() : null;
+  const odaIntegration = typeof integrationById === "function" ? integrationById("oda") : null;
+  const odaExpired = odaIntegration?.status === "expired";
+  const connectionIssue =
+    (state.oda?.connected ? odaConnectionIssue() : null) ||
+    (odaExpired
+      ? odaIntegration?.expiry_prompt ||
+        "Oda-tilkoblingen har utløpt. Koble til Oda på nytt i innstillingene."
+      : null);
   if (connectionIssue) {
     add(
       main,

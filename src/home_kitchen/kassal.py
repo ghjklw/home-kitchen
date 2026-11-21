@@ -70,6 +70,11 @@ class KassalClient:
         self._cache: dict[str, KassalProduct | None] = {}
         self._lock = threading.Lock()
 
+    def _redact_secret(self, text: str) -> str:
+        if self.api_key and self.api_key in text:
+            return text.replace(self.api_key, "[REDACTED]")
+        return text
+
     def _get_client(self) -> httpx.Client:
         return httpx.Client(
             transport=self.transport,
@@ -98,8 +103,11 @@ class KassalClient:
             with self._get_client() as client:
                 resp = client.get(url)
         except httpx.HTTPError as exc:
-            _LOG.warning("Kassal.app network failure for EAN %s: %s", cleaned_ean, exc)
-            raise KassalError(f"Nettverksfeil mot Kassal.app for EAN {cleaned_ean}: {exc}") from exc
+            safe_exc = self._redact_secret(str(exc))
+            _LOG.warning("Kassal.app network failure for EAN %s: %s", cleaned_ean, safe_exc)
+            raise KassalError(
+                f"Nettverksfeil mot Kassal.app for EAN {cleaned_ean}: {safe_exc}"
+            ) from exc
 
         if resp.status_code in (401, 403):
             raise KassalAuthError(
@@ -110,8 +118,9 @@ class KassalClient:
                 self._cache[cleaned_ean] = None
             return None
         if resp.status_code >= 400:
+            safe_text = self._redact_secret(resp.text)
             raise KassalError(
-                f"Kassal.app svarte med HTTP {resp.status_code} for EAN {cleaned_ean}: {resp.text}"
+                f"Kassal.app svarte med HTTP {resp.status_code} for EAN {cleaned_ean}: {safe_text}"
             )
 
         try:

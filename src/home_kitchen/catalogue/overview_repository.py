@@ -31,6 +31,11 @@ from home_kitchen.catalogue.overview_models import (
     RememberedOdaSku,
     StockItemDetail,
 )
+from home_kitchen.purchase_frequency import (
+    PROVIDER_RETENTION_MONTHS,
+    ProviderObservationWindow,
+    normalize_provider_key,
+)
 from home_kitchen.shopping import normalize_need_text
 from home_kitchen.units import add_exact, canonicalize_quantity, compatible_units, normalize_unit
 
@@ -751,6 +756,10 @@ class PostgresProductOverviewRepository:
                                     purchased_at=p_at,
                                     provenance=prov,
                                     evidence_source=r["evidence_kind"],
+                                    provider=str(r["provider"] or "oda").casefold(),
+                                    store_name="Oda"
+                                    if str(r["provider"]).lower() == "oda"
+                                    else None,
                                     evidence_ref=r["evidence_ref"],
                                     quantity=Decimal(str(r["quantity"]))
                                     if r["quantity"] is not None
@@ -810,6 +819,8 @@ class PostgresProductOverviewRepository:
                                     purchased_at=occurred_at,
                                     provenance="user_confirmed",
                                     evidence_source="kitchen_history",
+                                    provider=str(provider).casefold(),
+                                    store_name="Oda" if str(provider).lower() == "oda" else None,
                                     evidence_ref=structured.get("trip_id"),
                                     quantity=Decimal(str(qty)) if qty is not None else None,
                                     unit=unit,
@@ -889,6 +900,8 @@ class PostgresProductOverviewRepository:
                                     purchased_at=purchased_at,
                                     provenance=eff.provenance,
                                     evidence_source=eff.provider,
+                                    provider=eff.provider,
+                                    store_name=eff.store_name,
                                     evidence_ref=eff.evidence_ref,
                                     quantity=line.quantity,
                                     unit=line.unit or default_unit,
@@ -936,6 +949,119 @@ class PostgresProductOverviewRepository:
     ) -> list[PurchaseEvidenceRecord]:
         evidence, _ = self._collect_purchase_records(product, aliases, preferred_skus, household_id)
         return evidence
+
+    def get_provider_coverage_windows(
+        self, household_id: UUID
+    ) -> dict[str, ProviderObservationWindow]:
+        """Compute per-provider observation windows from synced receipts and purchase history."""
+        windows: dict[str, ProviderObservationWindow] = {}
+
+        def _acc(
+            provider: str,
+            tx_at: datetime | None,
+            *,
+            stub: bool = False,
+        ) -> None:
+            if tx_at is None:
+                return
+            prov = normalize_provider_key(provider)
+            existing = windows.get(prov)
+            retained = PROVIDER_RETENTION_MONTHS.get(prov)
+            if existing is None:
+                windows[prov] = ProviderObservationWindow(
+                    provider=prov,
+                    start=tx_at,
+                    end=tx_at,
+                    total_records=1,
+                    retained_months=retained,
+                    non_receipt_stub_count=1 if stub else 0,
+                    incomplete_history=True,
+                )
+            else:
+                windows[prov] = existing.model_copy(
+                    update={
+                        "start": min(existing.start, tx_at) if existing.start else tx_at,
+                        "end": max(existing.end, tx_at) if existing.end else tx_at,
+                        "total_records": existing.total_records + 1,
+                        "non_receipt_stub_count": existing.non_receipt_stub_count
+                        + (1 if stub else 0),
+                    }
+                )
+
+        with self.engine.connect() as connection:
+            inspector = inspect(connection)
+
+            if inspector.has_table("kitchen_catalogue_sku_purchases") and inspector.has_table(
+                "kitchen_catalogue_sku_options"
+            ):
+                sku_rows = connection.execute(
+                    text(
+                        "SELECT o.provider, p.purchased_at "
+                        "FROM kitchen_catalogue_sku_purchases p "
+                        "JOIN kitchen_catalogue_sku_options o ON o.id = p.option_id "
+                        "WHERE p.household_id = :hid"
+                    ),
+                    {"hid": household_id},
+                ).mappings()
+                for row in sku_rows:
+                    _acc(str(row["provider"] or "oda"), _parse_dt(row["purchased_at"]))
+
+            if inspector.has_table("kitchen_history"):
+                hist_rows = connection.execute(
+                    text(
+                        "SELECT occurred_at, structured "
+                        "FROM kitchen_history WHERE kind = 'purchase'"
+                    )
+                ).mappings()
+                for row in hist_rows:
+                    structured = _parse_json(row["structured"]) or {}
+                    snap = structured.get("product_snapshot") or {}
+                    purchase_prod = (structured.get("purchase") or {}).get("product") or {}
+                    prov = (
+                        snap.get("provider") or purchase_prod.get("provider") or "kitchen_history"
+                    )
+                    _acc(str(prov), _parse_dt(row["occurred_at"]))
+
+            if inspector.has_table("provider_order_sources"):
+                from home_kitchen.purchase_sync import resolve_effective_orders
+
+                cols = {c["name"] for c in inspector.get_columns("provider_order_sources")}
+                select_list = ["id", "provider", "payload", "observed_at"]
+                for col in ("external_id", "revision_id", "account_id", "source_updated_at"):
+                    if col in cols:
+                        select_list.append(col)
+                src_rows = list(
+                    connection.execute(
+                        text(
+                            f"SELECT {', '.join(select_list)} "
+                            "FROM provider_order_sources ORDER BY observed_at ASC, id ASC"
+                        )
+                    ).mappings()
+                )
+                normalized_rows = [
+                    {
+                        "id": r["id"],
+                        "provider": str(r["provider"]).casefold(),
+                        "account_id": str(r.get("account_id") or "default"),
+                        "external_id": str(r.get("external_id") or r["id"]),
+                        "revision_id": str(r.get("revision_id") or r["id"]),
+                        "source_updated_at": _parse_dt(r.get("source_updated_at")),
+                        "observed_at": _parse_dt(r["observed_at"]),
+                        "payload": _parse_json(r["payload"]) or {},
+                    }
+                    for r in src_rows
+                ]
+                for eff in resolve_effective_orders(normalized_rows):
+                    if eff.is_cancellation or eff.is_return:
+                        continue
+                    tx_at = eff.transaction_at or eff.observed_at
+                    _acc(
+                        eff.provider,
+                        tx_at,
+                        stub=(eff.lifecycle == "non_receipt_stub"),
+                    )
+
+        return windows
 
     def get_previously_purchased_skus_for_product(
         self,
@@ -1928,6 +2054,7 @@ class MemoryProductOverviewRepository:
         self.exclusions: dict[tuple[UUID, UUID], list[ExcludedOdaSku]] = {}
         self.stock_items: dict[UUID, list[StockItemDetail]] = defaultdict(list)
         self.purchase_evidence: dict[UUID, list[PurchaseEvidenceRecord]] = defaultdict(list)
+        self.provider_windows: dict[str, ProviderObservationWindow] = {}
         self.remembered_skus: dict[UUID, list[RememberedOdaSku]] = defaultdict(list)
         self.previously_purchased_skus: dict[UUID, list[PreviouslyPurchasedSku]] = defaultdict(list)
         self.recipe_links: dict[UUID, int] = defaultdict(int)
@@ -2304,6 +2431,40 @@ class MemoryProductOverviewRepository:
         household_id: UUID,
     ) -> list[PurchaseEvidenceRecord]:
         return deepcopy(self.purchase_evidence.get(product.id, []))
+
+    def get_provider_coverage_windows(
+        self, household_id: UUID
+    ) -> dict[str, ProviderObservationWindow]:
+        if self.provider_windows:
+            return deepcopy(self.provider_windows)
+        derived: dict[str, ProviderObservationWindow] = {}
+        for ev_list in self.purchase_evidence.values():
+            for ev in ev_list:
+                if ev.provenance not in ("provider_verified", "user_confirmed"):
+                    continue
+                prov = normalize_provider_key(ev.provider or ev.evidence_source)
+                p_at = _parse_dt(ev.purchased_at)
+                if p_at is None:
+                    continue
+                existing = derived.get(prov)
+                if existing is None:
+                    derived[prov] = ProviderObservationWindow(
+                        provider=prov,
+                        start=p_at,
+                        end=p_at,
+                        total_records=1,
+                        retained_months=PROVIDER_RETENTION_MONTHS.get(prov),
+                        incomplete_history=True,
+                    )
+                else:
+                    derived[prov] = existing.model_copy(
+                        update={
+                            "start": min(existing.start, p_at) if existing.start else p_at,
+                            "end": max(existing.end, p_at) if existing.end else p_at,
+                            "total_records": existing.total_records + 1,
+                        }
+                    )
+        return derived
 
     def get_remembered_skus_for_product(
         self,

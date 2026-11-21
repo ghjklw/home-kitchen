@@ -280,6 +280,34 @@ class KitchenFeatures:
             return get_ctx(limit=limit)
         return PurchaseHistoryContext()
 
+    def browse_purchase_history(
+        self,
+        *,
+        q: str | None = None,
+        provider: str | None = None,
+        store: str | None = None,
+        category: str | None = None,
+        date_from: date | None = None,
+        date_to: date | None = None,
+        limit: int = 500,
+    ):
+        from home_kitchen.purchase_history_view import PurchaseHistoryBrowseService
+
+        svc = PurchaseHistoryBrowseService(
+            purchase_sync=getattr(self, "purchase_sync", None),
+            history=getattr(self, "history", None),
+            product_overview_repo=getattr(self, "product_overview_repo", None),
+        )
+        return svc.browse(
+            q=q,
+            provider=provider,
+            store=store,
+            category=category,
+            date_from=date_from,
+            date_to=date_to,
+            limit=limit,
+        )
+
     def evidence(self, query: str) -> list[EvidenceSnippet]:
         # Explicit feedback/preferences and actual purchases remain relevant even
         # when their words do not appear in the current recipe request.

@@ -1737,6 +1737,7 @@ function render() {
       week: renderWeek,
       recipes: renderRecipes,
       shopping: renderShopping,
+      purchases: renderPurchases,
       settings: renderSettings,
       catalogue: renderCatalogue,
     })[state.view] || renderWeek
@@ -9522,6 +9523,15 @@ function renderCatalogue(main) {
     });
   }
 }
+function renderPurchases(main) {
+  if (window.KitchenPastPurchasesView) {
+    window.KitchenPastPurchasesView.renderPastPurchasesView(main, {
+      api,
+      notify,
+      onNavigate: (view) => navigate(view),
+    });
+  }
+}
 $("#modal").addEventListener("cancel", (event) => {
   if (state.cartConfirming) event.preventDefault();
 });
@@ -9546,7 +9556,7 @@ window.addEventListener("hashchange", () => {
   if (nextView === "shopping" && view !== "basket" && nextView !== state.view)
     state.shoppingPanel = "single";
   if (
-    ["week", "recipes", "shopping", "settings", "catalogue"].includes(nextView) &&
+    ["week", "recipes", "shopping", "purchases", "settings", "catalogue"].includes(nextView) &&
     (nextView !== state.view || panelChanged)
   ) {
     state.view = nextView;
@@ -9651,7 +9661,7 @@ async function start() {
       ? "settings"
       : odaResult
         ? "shopping"
-        : ["week", "recipes", "shopping", "settings"].includes(requestedView)
+        : ["week", "recipes", "shopping", "purchases", "settings", "catalogue"].includes(requestedView)
           ? requestedView
           : "week";
     syncPlannerUrl();

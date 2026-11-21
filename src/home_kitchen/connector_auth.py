@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 import httpx
+from cryptography.fernet import InvalidToken
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
@@ -1306,6 +1307,26 @@ class ConnectorAuthService:
         )
         return self.integrations.describe_one("kassal", actor_id)
 
+    def _read_credentials_safely(
+        self,
+        household_id: UUID,
+        provider_id: str,
+        account_id: str,
+    ) -> dict[str, Any] | None:
+        try:
+            return self.store.get_credentials(household_id, provider_id, account_id=account_id)
+        except (InvalidToken, ValueError):
+            detail = "Lagrede tilkoblingsdetaljer kan ikke leses. Koble til på nytt."
+            self.store.update_account_metadata(
+                household_id,
+                provider_id,
+                account_id,
+                {"last_error": detail},
+            )
+            raise HTTPException(status_code=409, detail=detail) from None
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from None
+
     def _refresh_single_account(
         self,
         household_id: UUID,
@@ -1319,7 +1340,7 @@ class ConnectorAuthService:
             meta = self.store.get_connection_metadata(
                 household_id, provider_id, account_id=account_id
             )
-            creds = self.store.get_credentials(household_id, provider_id, account_id=account_id)
+            creds = self._read_credentials_safely(household_id, provider_id, account_id)
             if meta is None or creds is None:
                 raise HTTPException(
                     status_code=404,
@@ -1400,7 +1421,7 @@ class ConnectorAuthService:
     ) -> None:
         with self._connection_lock(household_id, "trumf", account_id):
             meta = self.store.get_connection_metadata(household_id, "trumf", account_id=account_id)
-            creds = self.store.get_credentials(household_id, "trumf", account_id=account_id)
+            creds = self._read_credentials_safely(household_id, "trumf", account_id)
             if meta is None or creds is None:
                 raise HTTPException(
                     status_code=404,
@@ -1545,16 +1566,19 @@ class ConnectorAuthService:
             refresh_one(accounts[0].account_id)
             return self.integrations.describe_one(provider_id, actor_id)
 
-        refreshable_accounts = [
-            acc
-            for acc in accounts
-            if self._has_refresh_material(
-                provider_id,
-                acc.auth_mode,
-                self.store.get_credentials(household_id, provider_id, acc.account_id),
-            )
-        ]
+        refreshable_accounts = []
+        last_read_exc: HTTPException | None = None
+        for acc in accounts:
+            try:
+                acc_creds = self._read_credentials_safely(household_id, provider_id, acc.account_id)
+            except HTTPException as exc:
+                last_read_exc = exc
+                continue
+            if self._has_refresh_material(provider_id, acc.auth_mode, acc_creds):
+                refreshable_accounts.append(acc)
         if not refreshable_accounts:
+            if last_read_exc is not None:
+                raise last_read_exc
             if provider_id == "trumf" and all(
                 acc.auth_mode in TRUMF_REFRESH_MODES for acc in accounts
             ):
@@ -1604,9 +1628,7 @@ class ConnectorAuthService:
             meta = self.store.get_connection_metadata(
                 household_id, provider_id, account_id=target_account_id
             )
-            creds = self.store.get_credentials(
-                household_id, provider_id, account_id=target_account_id
-            )
+            creds = self._read_credentials_safely(household_id, provider_id, target_account_id)
             if meta is None or creds is None:
                 raise HTTPException(
                     status_code=404,

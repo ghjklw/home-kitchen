@@ -1489,3 +1489,168 @@ test("formats backend actionable_issues and last_sync_error strings into Bokmål
   assert.match(section.textContent, /Kvitteringssynk \(Rema 1000\): Kunne ikke lese fra databasen: socket closed/);
   assert.match(section.textContent, /Siste synkroniseringsfeil: Sesjonen har utløpt/);
 });
+
+test("Shopping contextual Oda prompts link to Settings when missing or expired without account management", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const appSource = fs.readFileSync(path.join(__dirname, "../src/home_kitchen/static/app.js"), "utf8");
+
+  // Ensure the obsolete Shopping->basket setup prompt is gone
+  assert.doesNotMatch(appSource, /Koble til Oda-kontoen din under Oda-fanen/);
+  assert.doesNotMatch(appSource, /Sett opp Oda i Kjøkken/);
+
+  const navigatedTo = [];
+  const state = {
+    shoppingPanel: "needs",
+    purchasePlan: { lines: [] },
+    items: [],
+    regular: [],
+    shopping: { suggestions: [] },
+    oda: { configured: true, connected: false },
+    integrations: [{ id: "oda", status: "configured" }],
+    basketMatchGlobalError: "",
+    basketMatchErrors: {},
+    basketMatchPages: {},
+  };
+  const fns = [
+    "el",
+    "add",
+    "button",
+    "title",
+    "connectionSettingsButton",
+    "integrationById",
+    "odaConnectionIssue",
+    "renderShoppingConnectionPrompt",
+    "renderShopping",
+  ].map((f) => extractFunction(appSource, f));
+
+  const { renderShopping, renderShoppingConnectionPrompt } = new Function(
+    "state",
+    "window",
+    "document",
+    "location",
+    "$",
+    "navigate",
+    "render",
+    "refreshView",
+    "weekControls",
+    "shoppingSections",
+    "itemForm",
+    "feedbackForm",
+    `
+    ${fns.join("\n")}
+    return { renderShopping, renderShoppingConnectionPrompt };
+    `,
+  )(
+    state,
+    { KitchenSettingsView: require("../src/home_kitchen/static/settings-view.js") },
+    { createElement: (tag) => new MockNode(tag) },
+    { href: "https://kitchen.example/#shopping" },
+    () => ({ open: false }),
+    (target) => navigatedTo.push(target),
+    () => {},
+    async () => {},
+    () => new MockNode("div"),
+    () => new MockNode("div"),
+    () => {},
+    () => {},
+  );
+
+  // 1. Disconnected Oda in Shopping overview prompts to Settings (not basket)
+  const main1 = new MockNode("main");
+  renderShopping(main1);
+  const settingsBtn1 = main1.querySelectorAll("button").find((b) => /innstillinger/i.test(b.textContent));
+  assert.ok(settingsBtn1, "Disconnected Shopping view links to Settings");
+  settingsBtn1.click();
+  assert.deepEqual(navigatedTo, ["settings"]);
+
+  // 2. Expired Oda integration triggers reconnect prompt to Settings
+  state.oda = { configured: true, connected: true };
+  state.integrations = [
+    { id: "oda", status: "expired", expiry_prompt: "Oda-tilkoblingen har utløpt." },
+  ];
+  const main2 = new MockNode("main");
+  renderShoppingConnectionPrompt(main2);
+  assert.match(main2.textContent, /Oda-tilkoblingen trenger oppfølging/);
+  assert.match(main2.textContent, /Oda-tilkoblingen har utløpt/);
+  const settingsBtn2 = main2.querySelectorAll("button").find((b) => /Koble til Oda på nytt i innstillingene/.test(b.textContent));
+  assert.ok(settingsBtn2);
+  settingsBtn2.click();
+  assert.deepEqual(navigatedTo, ["settings", "settings"]);
+
+  // 3. No password or token management inputs in Shopping prompt
+  assert.equal(main1.querySelectorAll("input").filter((i) => i.type === "password").length, 0);
+  assert.equal(main2.querySelectorAll("input").length, 0);
+});
+
+test("renderConnectionSettings renders all 8 authenticated APIs with status, auth method without secrets, and lifecycle actions", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const appSource = fs.readFileSync(path.join(__dirname, "../src/home_kitchen/static/app.js"), "utf8");
+  const fns = [
+    "el",
+    "add",
+    "button",
+    "disconnectConnector",
+    "disconnectConnectorAccount",
+    "refreshConnectorAccount",
+    "renderConnectionSettings",
+  ].map((f) => extractFunction(appSource, f));
+
+  const secretSentinel = "super-secret-must-never-appear-in-dom";
+  const state = {
+    settingsRefreshInFlight: false,
+    oda: { configured: true, connected: true, detail: "Connected" },
+    integrations: [
+      { id: "oda", name: "Oda", status: "connected", auth_mode: "delegated_user_pkce", supported_auth_modes: ["delegated_user_pkce"], detail: "Connected", accounts: [] },
+      { id: "anthropic", name: "Recipe assistant", status: "configured", auth_mode: "api_key", supported_auth_modes: ["federation", "api_key"], detail: "Configured by the operator. Federation is preferred where supported; configuration does not prove a successful model call.", accounts: [] },
+      { id: "rema1000", name: "Rema 1000", status: "connected", auth_mode: "oauth_pkce", supported_auth_modes: ["oauth_pkce", "session_token"], detail: "Rema", accounts: [{ account_id: "default", auth_mode: "oauth_pkce", status: "connected", refresh_available: true }] },
+      { id: "coop", name: "Coop", status: "not_configured", auth_mode: null, supported_auth_modes: ["oauth_pkce", "session_token", "session_cookie"], detail: "Coop", accounts: [] },
+      { id: "trumf", name: "Trumf", status: "expired", auth_mode: "session_cookie", supported_auth_modes: ["session_cookie"], detail: "Trumf", refresh_available: false, accounts: [{ account_id: "default", auth_mode: "session_cookie", status: "expired", refresh_available: false }] },
+      { id: "cookidoo", name: "Cookidoo / Thermomix TM6", status: "connected", auth_mode: "oauth_password", supported_auth_modes: ["oauth_password", "session_cookie", "credentials"], detail: "Cookidoo", refresh_available: true, accounts: [] },
+      { id: "kassal", name: "Kassal.app", status: "configured", auth_mode: "api_key", supported_auth_modes: ["api_key"], detail: "Kassal", accounts: [] },
+      { id: "home_assistant", name: "Home Assistant", status: "connected", auth_mode: "api_key", supported_auth_modes: ["api_key"], detail: "HA", accounts: [] },
+    ],
+  };
+
+  const { renderConnectionSettings } = new Function(
+    "state",
+    "window",
+    "document",
+    "refreshConnectionSettings",
+    "syncPurchaseHistory",
+    "connectOdaAccount",
+    "disconnectOdaAccount",
+    "refreshConnectorAccount",
+    "disconnectConnectorAccount",
+    "disconnectConnector",
+    "openConnectorModal",
+    `
+    ${fns.join("\n")}
+    return { renderConnectionSettings };
+    `,
+  )(
+    state,
+    { KitchenSettingsView: require("../src/home_kitchen/static/settings-view.js") },
+    { createElement: (tag) => new MockNode(tag) },
+    () => {},
+    () => {},
+    () => {},
+    () => {},
+    () => {},
+    () => {},
+    () => {},
+    () => {},
+  );
+
+  const section = renderConnectionSettings();
+  const cards = section.querySelectorAll(".connection-card");
+  assert.equal(cards.length, 8);
+  assert.doesNotMatch(section.textContent, new RegExp(secretSentinel));
+  assert.match(section.textContent, /hemmeligheten er skjult/);
+  assert.match(section.textContent, /Koble fra Oda/);
+  assert.match(section.textContent, /Koble til Oda på nytt/);
+  assert.match(section.textContent, /Oppskriftsassistent/);
+  assert.match(section.textContent, /Kassal\.app/);
+  assert.match(section.textContent, /Home Assistant/);
+});

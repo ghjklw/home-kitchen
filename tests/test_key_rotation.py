@@ -1,11 +1,13 @@
 """Unit tests for MultiFernet key rotation and credential re-encryption."""
 
+from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from uuid import uuid4
 
 import pytest
 from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 from pydantic import SecretStr, ValidationError
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, insert, select
 from sqlalchemy.pool import StaticPool
 
 from home_kitchen.connector_store import (
@@ -17,7 +19,7 @@ from home_kitchen.connector_store import (
     metadata as connector_metadata,
 )
 from home_kitchen.crypto import build_multi_fernet
-from home_kitchen.mcp_oauth_storage import PostgresOAuthStore
+from home_kitchen.mcp_oauth_storage import PostgresOAuthStore, oauth_records
 from home_kitchen.oda.repository import OdaRepository
 from home_kitchen.oda.repository import metadata as oda_metadata
 from home_kitchen.oda.service import OdaService
@@ -358,3 +360,106 @@ def test_postgres_oauth_store_accepts_rotated_keys_and_raw_fernet(oda_engine):
     raw_store = PostgresOAuthStore(oda_engine, Fernet(old_key.encode()))
     assert isinstance(raw_store.fernet, Fernet)
     assert raw_store.fernet.decrypt(old_ciphertext) == b"oauth-old"
+
+
+def test_oda_repository_rotate_encrypted_credentials(oda_engine):
+    old_key = Fernet.generate_key().decode()
+    new_key = Fernet.generate_key().decode()
+
+    legacy_repo = OdaRepository(oda_engine, Fernet(old_key.encode()))
+    gen1 = legacy_repo.begin_connect("actor-1")
+    assert legacy_repo.save_connection("actor-1", {"access_token": "tok-1"}, gen1)
+    gen2 = legacy_repo.begin_connect("actor-2")
+    assert legacy_repo.save_state(
+        "state-actor-2-secret-value",
+        "actor-2",
+        datetime.now(UTC) + timedelta(minutes=10),
+        {"client_id": "cid-2", "verifier": "ver-2"},
+        gen2,
+    )
+
+    multi_repo = OdaRepository(oda_engine, f"{new_key},{old_key}")
+    assert multi_repo.rotate_encrypted_credentials(actor_id="actor-1") == 1
+    assert multi_repo.rotate_encrypted_credentials() == 2
+
+    new_only_repo = OdaRepository(oda_engine, new_key)
+    with new_only_repo.locked_connection("actor-1") as (_, payload):
+        assert payload == {"access_token": "tok-1"}
+    assert new_only_repo.consume_state(
+        "state-actor-2-secret-value", "actor-2", datetime.now(UTC)
+    ) == {"client_id": "cid-2", "verifier": "ver-2"}
+
+    wrong_repo = OdaRepository(oda_engine, Fernet.generate_key().decode())
+    with pytest.raises(InvalidToken):
+        wrong_repo.rotate_encrypted_credentials()
+
+
+def test_postgres_oauth_store_rotate_encrypted_records():
+    import json
+
+    engine = create_engine(
+        "sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
+    oauth_records.metadata.create_all(engine)
+
+    old_key = Fernet.generate_key().decode()
+    new_key = Fernet.generate_key().decode()
+    old_fernet = Fernet(old_key.encode())
+    new_fernet = Fernet(new_key.encode())
+
+    now = datetime.now(UTC)
+    live_key = "live-token-key"
+    expired_key = "expired-token-key"
+    with engine.begin() as conn:
+        conn.execute(
+            insert(oauth_records).values(
+                collection="tokens",
+                key=sha256(live_key.encode()).hexdigest(),
+                encrypted_payload=old_fernet.encrypt(
+                    json.dumps(
+                        {
+                            "collection": "tokens",
+                            "key": live_key,
+                            "value": {"refresh_token": "live-secret"},
+                        }
+                    ).encode()
+                ).decode(),
+                created_at=now,
+                expires_at=now + timedelta(hours=1),
+            )
+        )
+        conn.execute(
+            insert(oauth_records).values(
+                collection="tokens",
+                key=sha256(expired_key.encode()).hexdigest(),
+                encrypted_payload=old_fernet.encrypt(
+                    json.dumps(
+                        {
+                            "collection": "tokens",
+                            "key": expired_key,
+                            "value": {"refresh_token": "expired-secret"},
+                        }
+                    ).encode()
+                ).decode(),
+                created_at=now - timedelta(hours=2),
+                expires_at=now - timedelta(hours=1),
+            )
+        )
+
+    multi_store = PostgresOAuthStore(engine, f"{new_key},{old_key}")
+    assert multi_store.rotate_encrypted_records() == 1
+
+    with engine.connect() as conn:
+        live_cipher = conn.execute(
+            select(oauth_records.c.encrypted_payload).where(
+                oauth_records.c.key == sha256(live_key.encode()).hexdigest()
+            )
+        ).scalar_one()
+
+    assert b"live-secret" in new_fernet.decrypt(live_cipher.encode())
+    with pytest.raises(InvalidToken):
+        old_fernet.decrypt(live_cipher.encode())
+
+    wrong_store = PostgresOAuthStore(engine, Fernet.generate_key().decode())
+    with pytest.raises(InvalidToken):
+        wrong_store.rotate_encrypted_records()

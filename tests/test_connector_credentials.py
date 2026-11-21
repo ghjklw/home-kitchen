@@ -199,7 +199,7 @@ def test_cipher_missing_in_production_returns_none():
 
 
 # API integration tests using app with SQLite engine
-def build_test_app(sqlite_engine, cipher, actor_id="malo"):
+def build_test_app(sqlite_engine, cipher, actor_id="malo", household_id=None):
     from types import SimpleNamespace
 
     import httpx
@@ -216,7 +216,7 @@ def build_test_app(sqlite_engine, cipher, actor_id="malo"):
         TrumfIntegration,
     )
 
-    household_id = uuid4()
+    household_id = household_id or uuid4()
     store = ConnectorStore(sqlite_engine, cipher)
 
     class MockOda:
@@ -451,3 +451,113 @@ def test_api_connect_and_disconnect_require_authentication(sqlite_engine, cipher
             == 401
         )
         assert client.delete("/api/integrations/rema1000/connection").status_code == 401
+
+
+def test_api_unreadable_connector_credentials_fail_safely_without_leaking_secrets(sqlite_engine):
+    old_key = Fernet.generate_key().decode()
+    wrong_key = Fernet.generate_key().decode()
+    secret_token = "ultra-secret-rema-token-123"
+    shared_household_id = uuid4()
+
+    old_app = build_test_app(
+        sqlite_engine, Fernet(old_key.encode()), household_id=shared_household_id
+    )
+    with TestClient(old_app, client=("127.0.0.1", 5000)) as client:
+        resp = client.post(
+            "/api/integrations/rema1000/connect",
+            json={"session_token": secret_token},
+        )
+        assert resp.status_code == 200
+
+    # Simulate rotation where old_key was dropped before credentials were re-encrypted.
+    # Also clear has_refresh_token in metadata to exercise get_credentials() fallback path.
+    from sqlalchemy import update
+
+    with sqlite_engine.begin() as conn:
+        encrypted_val = conn.execute(select(connector_credentials.c.encrypted_credentials)).scalar()
+        conn.execute(update(connector_credentials).values(auth_mode="oauth_pkce", metadata_json={}))
+
+    wrong_app = build_test_app(
+        sqlite_engine, Fernet(wrong_key.encode()), household_id=shared_household_id
+    )
+    with TestClient(wrong_app, client=("127.0.0.1", 5000)) as client:
+        integrations_resp = client.get("/api/integrations")
+        assert integrations_resp.status_code == 200
+        rema = next(item for item in integrations_resp.json() if item["id"] == "rema1000")
+        assert rema["status"] == "expired"
+        assert rema["refresh_available"] is False
+        assert "kan ikke leses" in (rema["last_error"] or "")
+        assert secret_token not in integrations_resp.text
+        assert str(encrypted_val) not in integrations_resp.text
+
+        health_resp = client.get("/api/integrations/health")
+        assert health_resp.status_code == 200
+        assert health_resp.json()["overall_status"] == "attention_needed"
+        assert secret_token not in health_resp.text
+
+        refresh_resp = client.post("/api/integrations/rema1000/refresh")
+        assert refresh_resp.status_code == 409
+        assert "kan ikke leses" in refresh_resp.json()["detail"]
+        assert secret_token not in refresh_resp.text
+        assert str(encrypted_val) not in refresh_resp.text
+
+
+def test_settings_and_connector_validation_errors_hide_secret_inputs(sqlite_engine, cipher):
+    from pydantic import ValidationError
+
+    db_secret = "super-secret-db-password-999"
+    ai_secret = "sk-ant-secret-canary-777"
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(
+            local_dev=True,
+            database_url=SecretStr(f"postgresql+psycopg://u:{db_secret}@localhost/db"),
+            anthropic_api_key=SecretStr(ai_secret),
+            anthropic_workload_identity=True,
+        )
+    err_text = str(exc_info.value)
+    assert db_secret not in err_text
+    assert ai_secret not in err_text
+
+    app = build_test_app(sqlite_engine, cipher)
+    secret_pw = "cookidoo-secret-password-888"
+    with TestClient(app, client=("127.0.0.1", 5000)) as client:
+        # Invalid email type/missing field triggers FastAPI 422 while password must stay hidden
+        resp = client.post(
+            "/api/integrations/cookidoo/login",
+            json={"email": 12345, "password": secret_pw},
+        )
+        assert resp.status_code == 422
+        assert secret_pw not in resp.text
+
+
+def test_kassal_and_home_assistant_redact_secrets_on_http_failure():
+    import httpx
+
+    from home_kitchen.home_assistant import HomeAssistantError, HomeAssistantTodoClient
+    from home_kitchen.kassal import KassalClient, KassalError
+
+    kassal_secret = "kassal-bearer-secret-42"
+    ha_secret = "ha-long-lived-secret-99"
+
+    kassal_client = KassalClient(
+        kassal_secret,
+        transport=httpx.MockTransport(
+            lambda _req: httpx.Response(500, text=f"Upstream rejected key {kassal_secret}")
+        ),
+    )
+    with pytest.raises(KassalError) as kassal_exc:
+        kassal_client.lookup_ean("7038010000188")
+    assert kassal_secret not in str(kassal_exc.value)
+    assert "[REDACTED]" in str(kassal_exc.value)
+
+    ha_client = HomeAssistantTodoClient(
+        "http://ha.local:8123",
+        ha_secret,
+        transport=httpx.MockTransport(
+            lambda _req: httpx.Response(500, text=f"Error with token {ha_secret}")
+        ),
+    )
+    with pytest.raises(HomeAssistantError) as ha_exc:
+        ha_client.list_items()
+    assert ha_secret not in str(ha_exc.value)
+    assert "[REDACTED]" in str(ha_exc.value)

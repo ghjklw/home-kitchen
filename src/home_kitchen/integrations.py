@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import UUID
 
+from cryptography.fernet import InvalidToken
 from pydantic import BaseModel, Field, model_serializer
 
 from home_kitchen.oda.service import OdaService
@@ -233,6 +234,7 @@ class StoredConnectorIntegration:
         if not isinstance(meta, dict):
             meta = {}
         account_id = str(getattr(conn_status, "account_id", "default") or "default")
+        unreadable_error: str | None = None
         if self.provider_id == "trumf" and auth_mode in _TRUMF_REFRESH_MODES:
             can_refresh = False
             if "has_session_cookie" in meta:
@@ -240,11 +242,17 @@ class StoredConnectorIntegration:
             elif self.store is not None and self.household_id is not None:
                 get_creds_fn = getattr(self.store, "get_credentials", None)
                 if callable(get_creds_fn):
-                    creds = get_creds_fn(
-                        self.household_id,
-                        self.provider_id,
-                        account_id=account_id,
-                    )
+                    try:
+                        creds = get_creds_fn(
+                            self.household_id,
+                            self.provider_id,
+                            account_id=account_id,
+                        )
+                    except (InvalidToken, RuntimeError, ValueError):
+                        creds = None
+                        unreadable_error = (
+                            "Lagrede tilkoblingsdetaljer kan ikke leses. Koble til på nytt."
+                        )
                     if isinstance(creds, dict):
                         raw_cookie = creds.get("session_cookie") or creds.get("cookie")
                         can_refresh = isinstance(raw_cookie, str) and bool(raw_cookie.strip())
@@ -258,17 +266,33 @@ class StoredConnectorIntegration:
                 elif self.store is not None and self.household_id is not None:
                     get_creds_fn = getattr(self.store, "get_credentials", None)
                     if callable(get_creds_fn):
-                        creds = get_creds_fn(
-                            self.household_id,
-                            self.provider_id,
-                            account_id=account_id,
-                        )
+                        try:
+                            creds = get_creds_fn(
+                                self.household_id,
+                                self.provider_id,
+                                account_id=account_id,
+                            )
+                        except (InvalidToken, RuntimeError, ValueError):
+                            creds = None
+                            unreadable_error = (
+                                "Lagrede tilkoblingsdetaljer kan ikke leses. Koble til på nytt."
+                            )
                         if isinstance(creds, dict):
                             raw_refresh = creds.get("refresh_token")
                             can_refresh = isinstance(raw_refresh, str) and bool(raw_refresh.strip())
 
+        if unreadable_error is not None:
+            can_refresh = False
+            acc_status = "expired"
+            token_status = "expired"
+            expiry_prompt = expiry_prompt or unreadable_error
+
         last_err_raw = meta.get("last_error")
-        last_error = str(last_err_raw) if isinstance(last_err_raw, str) and last_err_raw else None
+        last_error = (
+            str(last_err_raw)
+            if isinstance(last_err_raw, str) and last_err_raw
+            else unreadable_error
+        )
         connected_by = getattr(conn_status, "connected_by_actor_id", None) or getattr(
             conn_status, "actor_id", None
         )

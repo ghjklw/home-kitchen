@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from hashlib import sha256
 
+from cryptography.fernet import MultiFernet
 from sqlalchemy import Column, DateTime, Integer, MetaData, Table, Text, delete, insert, select
 from sqlalchemy.dialects.postgresql import insert as conflict_insert
 from sqlalchemy.engine import Engine
@@ -185,3 +186,39 @@ class OdaRepository:
             .where(connections.c.actor_id == actor)
             .values(encrypted_payload=self.encrypt(payload))
         )
+
+    def _rotate_token(self, encrypted_payload: str) -> str:
+        token = encrypted_payload.encode()
+        if isinstance(self.cipher, MultiFernet):
+            return self.cipher.rotate(token).decode()
+        return self.cipher.encrypt(self.cipher.decrypt(token)).decode()
+
+    def rotate_encrypted_credentials(self, actor_id: str | None = None) -> int:
+        """Re-encrypt Oda OAuth connections and active states with the active primary key."""
+        rotated = 0
+        now = datetime.now(UTC)
+        with self.engine.begin() as connection:
+            conn_query = select(connections.c.actor_id, connections.c.encrypted_payload)
+            state_query = select(states.c.state_hash, states.c.encrypted_payload).where(
+                states.c.expires_at > now
+            )
+            if actor_id is not None:
+                conn_query = conn_query.where(connections.c.actor_id == actor_id)
+                state_query = state_query.where(states.c.actor_id == actor_id)
+
+            for row in connection.execute(conn_query).all():
+                connection.execute(
+                    connections.update()
+                    .where(connections.c.actor_id == row.actor_id)
+                    .values(encrypted_payload=self._rotate_token(str(row.encrypted_payload)))
+                )
+                rotated += 1
+
+            for row in connection.execute(state_query).all():
+                connection.execute(
+                    states.update()
+                    .where(states.c.state_hash == row.state_hash)
+                    .values(encrypted_payload=self._rotate_token(str(row.encrypted_payload)))
+                )
+                rotated += 1
+        return rotated

@@ -565,3 +565,26 @@ def test_api_recipe_discovery_forwards_household_feedback_and_preferences(monkey
         "Cilantro Soup",
     ]
     assert all(item["source_attribution"] == "Marmiton" for item in body["results"])
+
+
+@pytest.mark.asyncio
+async def test_oda_discovery_reports_connection_required_when_connection_expired():
+    class ExpiredOdaService:
+        def status(self, actor_id):
+            del actor_id
+            return {"configured": True, "connected": True}
+
+        async def search_recipes(self, actor_id, query, page=1, size=10):
+            del actor_id, query, page, size
+            raise OdaError("Your Oda connection expired; connect again", 409)
+
+    registry = RecipeDiscoveryRegistry([OdaDiscoveryProvider(ExpiredOdaService())])
+    result = await registry.search(
+        RecipeDiscoveryRequest(query="suppe", sources=["oda"], limit=5),
+        actor_id="actor-1",
+    )
+    assert result.results == []
+    assert len(result.sources) == 1
+    assert result.sources[0].source == "oda"
+    assert result.sources[0].status == "connection_required"
+    assert "expired" in (result.sources[0].detail or "")

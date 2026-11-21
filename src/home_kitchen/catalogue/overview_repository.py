@@ -20,6 +20,7 @@ from home_kitchen.catalogue.overview_models import (
     PreferredOdaSku,
     PreviouslyPurchasedSku,
     ProductAliasItem,
+    ProductMergePreview,
     ProductStockOverview,
     ProductStockUpdate,
     PurchaseEvidenceRecord,
@@ -105,6 +106,54 @@ def _word_match_names(name: str, match_names: set[str]) -> bool:
     )
 
 
+def _iter_receipt_lines(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    lines: list[dict[str, Any]] = []
+    containers: list[dict[str, Any]] = [payload]
+    for parent_key in ("summary", "receipt", "receiptDetails"):
+        parent = payload.get(parent_key)
+        if isinstance(parent, dict):
+            containers.append(parent)
+    for container in containers:
+        for key in ("lines", "varelinjer", "items", "receiptLines"):
+            raw_list = container.get(key)
+            if isinstance(raw_list, list):
+                for line in raw_list:
+                    if isinstance(line, dict):
+                        lines.append(line)
+    return lines
+
+
+def _receipt_line_candidates(line: dict[str, Any]) -> list[str]:
+    raw_name = (
+        line.get("produktBeskrivelse")
+        or line.get("vareTekst")
+        or line.get("productName")
+        or line.get("sourceName")
+        or line.get("name")
+        or ""
+    )
+    kassal_name = (line.get("kassal") or {}).get("name") or ""
+    return [n for n in (kassal_name, raw_name) if isinstance(n, str)]
+
+
+def _matches_source_only_candidates(
+    candidates: list[str],
+    source_match_names: set[str],
+    target_match_names: set[str],
+) -> bool:
+    matched_src = any(
+        any(pat in normalize_identity_text(n) for pat in source_match_names if pat)
+        for n in candidates
+    )
+    if not matched_src:
+        return False
+    matched_tgt = any(
+        any(pat in normalize_identity_text(n) for pat in target_match_names if pat)
+        for n in candidates
+    )
+    return not matched_tgt
+
+
 class ProductOverviewRepository(Protocol):
     def list_products(self, query: str | None = None) -> list[CanonicalProduct]: ...
     def get_product(self, product_id: UUID) -> CanonicalProduct | None: ...
@@ -154,6 +203,12 @@ class ProductOverviewRepository(Protocol):
         preferred_skus: list[PreferredOdaSku],
         household_id: UUID,
     ) -> list[PreviouslyPurchasedSku]: ...
+    def preview_merge(
+        self,
+        target_product_id: UUID,
+        source_product_id: UUID,
+        household_id: UUID,
+    ) -> ProductMergePreview: ...
     def merge_products(
         self,
         target_product_id: UUID,
@@ -1351,6 +1406,207 @@ class PostgresProductOverviewRepository:
         )
         return result
 
+    def preview_merge(
+        self,
+        target_product_id: UUID,
+        source_product_id: UUID,
+        household_id: UUID,
+    ) -> ProductMergePreview:
+        if target_product_id == source_product_id:
+            raise ValueError("Cannot merge a canonical product into itself")
+
+        with self.engine.connect() as connection:
+            inspector = inspect(connection)
+            target_row = (
+                connection.execute(
+                    text(
+                        "SELECT id, canonical_name, variant FROM kitchen_canonical_products "
+                        "WHERE id = :id"
+                    ),
+                    {"id": target_product_id},
+                )
+                .mappings()
+                .first()
+            )
+            if target_row is None:
+                raise KeyError(f"Canonical product {target_product_id} not found")
+
+            source_row = (
+                connection.execute(
+                    text(
+                        "SELECT id, canonical_name, variant FROM kitchen_canonical_products "
+                        "WHERE id = :id"
+                    ),
+                    {"id": source_product_id},
+                )
+                .mappings()
+                .first()
+            )
+            if source_row is None:
+                raise KeyError(f"Canonical product {source_product_id} not found")
+
+            target = CanonicalProduct.model_validate(dict(target_row))
+            source = CanonicalProduct.model_validate(dict(source_row))
+
+            source_aliases: list[ProductAliasItem] = []
+            target_aliases: list[ProductAliasItem] = []
+            if inspector.has_table("kitchen_product_aliases"):
+                alias_rows = (
+                    connection.execute(
+                        text(
+                            "SELECT locale, context, alias, product_id, reviewed "
+                            "FROM kitchen_product_aliases "
+                            "WHERE product_id IN (:target_id, :source_id)"
+                        ),
+                        {"target_id": target_product_id, "source_id": source_product_id},
+                    )
+                    .mappings()
+                    .all()
+                )
+                for r in alias_rows:
+                    item = ProductAliasItem(
+                        alias=r["alias"],
+                        locale=r["locale"],
+                        context=r["context"],
+                        reviewed=bool(r["reviewed"]),
+                    )
+                    if UUID(str(r["product_id"])) == target_product_id:
+                        target_aliases.append(item)
+                    else:
+                        source_aliases.append(item)
+
+            aliases_to_move = len(source_aliases)
+            source_match_names = _product_match_names(source, source_aliases)
+            target_match_names = _product_match_names(target, target_aliases)
+
+            preferences_to_move = 0
+            if inspector.has_table("kitchen_canonical_product_oda_preferences"):
+                preferences_to_move = int(
+                    connection.execute(
+                        text(
+                            "SELECT COUNT(*) FROM kitchen_canonical_product_oda_preferences "
+                            "WHERE product_id = :sid"
+                        ),
+                        {"sid": source_product_id},
+                    ).scalar_one()
+                )
+
+            exclusions_to_move = 0
+            if inspector.has_table("kitchen_canonical_product_oda_exclusions"):
+                exclusions_to_move = int(
+                    connection.execute(
+                        text(
+                            "SELECT COUNT(*) FROM kitchen_canonical_product_oda_exclusions "
+                            "WHERE product_id = :sid"
+                        ),
+                        {"sid": source_product_id},
+                    ).scalar_one()
+                )
+
+            stock_rows_to_move = 0
+            if inspector.has_table("kitchen_inventory"):
+                inv_rows = connection.execute(text("SELECT name FROM kitchen_inventory")).mappings()
+                for r in inv_rows:
+                    norm = normalize_identity_text(r["name"])
+                    norm_need = normalize_need_text(r["name"])
+                    if (norm in source_match_names or norm_need in source_match_names) and not (
+                        norm in target_match_names or norm_need in target_match_names
+                    ):
+                        stock_rows_to_move += 1
+
+            recipe_links_to_move = 0
+            for recipe_table in ("recipes", "kitchen_recipe_translations"):
+                if not inspector.has_table(recipe_table):
+                    continue
+                rec_rows = connection.execute(
+                    text(f"SELECT ingredients FROM {recipe_table}")
+                ).mappings()
+                for r in rec_rows:
+                    ings = _parse_json(r["ingredients"])
+                    if not isinstance(ings, list):
+                        continue
+                    for ing in ings:
+                        if isinstance(ing, dict) and str(
+                            ing.get("canonical_product_id") or ""
+                        ) == str(source_product_id):
+                            recipe_links_to_move += 1
+
+            purchase_history_rows_to_move = 0
+            if inspector.has_table("provider_order_sources"):
+                src_rows = connection.execute(
+                    text("SELECT payload FROM provider_order_sources")
+                ).mappings()
+                for r in src_rows:
+                    payload = _parse_json(r["payload"])
+                    if not isinstance(payload, dict):
+                        continue
+                    for line in _iter_receipt_lines(payload):
+                        cpid = line.get("canonical_product_id")
+                        if cpid is not None and str(cpid) == str(source_product_id):
+                            purchase_history_rows_to_move += 1
+                        elif cpid is None and _matches_source_only_candidates(
+                            _receipt_line_candidates(line),
+                            source_match_names,
+                            target_match_names,
+                        ):
+                            purchase_history_rows_to_move += 1
+                    order_obj = payload.get("order")
+                    if isinstance(order_obj, dict) and isinstance(order_obj.get("products"), list):
+                        for item in order_obj["products"]:
+                            if not isinstance(item, dict):
+                                continue
+                            prod_obj = item.get("product") or {}
+                            cpid = item.get("canonical_product_id") or prod_obj.get(
+                                "canonical_product_id"
+                            )
+                            if cpid is not None and str(cpid) == str(source_product_id):
+                                purchase_history_rows_to_move += 1
+                            elif cpid is None:
+                                name = str(prod_obj.get("name") or "")
+                                if _matches_source_only_candidates(
+                                    [name], source_match_names, target_match_names
+                                ):
+                                    purchase_history_rows_to_move += 1
+
+            if inspector.has_table("kitchen_history"):
+                hist_rows = connection.execute(
+                    text("SELECT structured FROM kitchen_history WHERE kind = 'purchase'")
+                ).mappings()
+                for r in hist_rows:
+                    structured = _parse_json(r["structured"])
+                    if not isinstance(structured, dict):
+                        continue
+                    cpid = structured.get("canonical_product_id")
+                    if cpid is not None and str(cpid) == str(source_product_id):
+                        purchase_history_rows_to_move += 1
+                    elif cpid is None:
+                        need = structured.get("need") or {}
+                        need_name = need.get("name") or structured.get("product_name") or ""
+                        norm_need = normalize_identity_text(need_name)
+                        if norm_need in source_match_names and norm_need not in target_match_names:
+                            purchase_history_rows_to_move += 1
+
+        variant_mismatch = normalize_identity_text(source.variant) != normalize_identity_text(
+            target.variant
+        )
+        return ProductMergePreview(
+            target_product_id=target.id,
+            source_product_id=source.id,
+            target_canonical_name=target.canonical_name,
+            source_canonical_name=source.canonical_name,
+            target_variant=target.variant,
+            source_variant=source.variant,
+            target_display_name=target.canonical_name,
+            source_display_name=source.canonical_name,
+            variant_mismatch=variant_mismatch,
+            aliases_to_move=aliases_to_move,
+            stock_rows_to_move=stock_rows_to_move,
+            recipe_links_to_move=recipe_links_to_move,
+            preferences_to_move=preferences_to_move,
+            exclusions_to_move=exclusions_to_move,
+            purchase_history_rows_to_move=purchase_history_rows_to_move,
+        )
+
     def merge_products(
         self,
         target_product_id: UUID,
@@ -1745,55 +2001,18 @@ class PostgresProductOverviewRepository:
                         continue
                     changed = False
 
-                    def _repoint_line_list(line_list: Any) -> None:
-                        nonlocal changed
-                        if not isinstance(line_list, list):
-                            return
-                        for line in line_list:
-                            if not isinstance(line, dict):
-                                continue
-                            cpid = line.get("canonical_product_id")
-                            if cpid is not None and str(cpid) == str(source_product_id):
-                                line["canonical_product_id"] = str(target_product_id)
-                                changed = True
-                            elif cpid is None:
-                                raw_name = (
-                                    line.get("produktBeskrivelse")
-                                    or line.get("vareTekst")
-                                    or line.get("productName")
-                                    or line.get("sourceName")
-                                    or line.get("name")
-                                    or ""
-                                )
-                                kassal_name = (line.get("kassal") or {}).get("name") or ""
-                                cands = [n for n in (kassal_name, raw_name) if isinstance(n, str)]
-                                matched_src = any(
-                                    any(
-                                        pat in normalize_identity_text(n)
-                                        for pat in source_match_names
-                                        if pat
-                                    )
-                                    for n in cands
-                                )
-                                matched_tgt = any(
-                                    any(
-                                        pat in normalize_identity_text(n)
-                                        for pat in target_match_names_after
-                                        if pat
-                                    )
-                                    for n in cands
-                                )
-                                if matched_src and not matched_tgt:
-                                    line["canonical_product_id"] = str(target_product_id)
-                                    changed = True
-
-                    for key in ("lines", "varelinjer", "items", "receiptLines"):
-                        _repoint_line_list(payload.get(key))
-                    for parent_key in ("summary", "receipt", "receiptDetails"):
-                        parent = payload.get(parent_key)
-                        if isinstance(parent, dict):
-                            for key in ("lines", "varelinjer", "items", "receiptLines"):
-                                _repoint_line_list(parent.get(key))
+                    for line in _iter_receipt_lines(payload):
+                        cpid = line.get("canonical_product_id")
+                        if cpid is not None and str(cpid) == str(source_product_id):
+                            line["canonical_product_id"] = str(target_product_id)
+                            changed = True
+                        elif cpid is None and _matches_source_only_candidates(
+                            _receipt_line_candidates(line),
+                            source_match_names,
+                            target_match_names_after,
+                        ):
+                            line["canonical_product_id"] = str(target_product_id)
+                            changed = True
                     order_obj = payload.get("order")
                     if isinstance(order_obj, dict) and isinstance(order_obj.get("products"), list):
                         for item in order_obj["products"]:
@@ -1896,6 +2115,7 @@ class MemoryProductOverviewRepository:
         self.purchase_evidence: dict[UUID, list[PurchaseEvidenceRecord]] = defaultdict(list)
         self.remembered_skus: dict[UUID, list[RememberedOdaSku]] = defaultdict(list)
         self.previously_purchased_skus: dict[UUID, list[PreviouslyPurchasedSku]] = defaultdict(list)
+        self.recipe_links: dict[UUID, int] = defaultdict(int)
         self._merged_source_ids: set[UUID] = set()
         self.identity_repo = identity_repo
 
@@ -2285,6 +2505,57 @@ class MemoryProductOverviewRepository:
     ) -> list[PreviouslyPurchasedSku]:
         return deepcopy(self.previously_purchased_skus.get(product.id, []))
 
+    def record_recipe_link(self, product_id: UUID, count: int = 1) -> None:
+        self.recipe_links[product_id] += count
+
+    def preview_merge(
+        self,
+        target_product_id: UUID,
+        source_product_id: UUID,
+        household_id: UUID,
+    ) -> ProductMergePreview:
+        if target_product_id == source_product_id:
+            raise ValueError("Cannot merge a canonical product into itself")
+        if self.identity_repo is not None:
+            self._sync_from_identity_repo()
+        target = self.products.get(target_product_id)
+        if target is None:
+            raise KeyError(f"Canonical product {target_product_id} not found")
+        source = self.products.get(source_product_id)
+        if source is None:
+            raise KeyError(f"Canonical product {source_product_id} not found")
+
+        aliases_to_move = len(self.aliases.get(source_product_id, []))
+        stock_rows_to_move = len(self.stock_items.get(source_product_id, []))
+        recipe_links_to_move = self.recipe_links.get(source_product_id, 0)
+        preferences_to_move = sum(
+            len(v) for (_hid, pid), v in self.preferences.items() if pid == source_product_id
+        )
+        exclusions_to_move = sum(
+            len(v) for (_hid, pid), v in self.exclusions.items() if pid == source_product_id
+        )
+        purchase_history_rows_to_move = len(self.purchase_evidence.get(source_product_id, []))
+        variant_mismatch = normalize_identity_text(source.variant) != normalize_identity_text(
+            target.variant
+        )
+        return ProductMergePreview(
+            target_product_id=target.id,
+            source_product_id=source.id,
+            target_canonical_name=target.canonical_name,
+            source_canonical_name=source.canonical_name,
+            target_variant=target.variant,
+            source_variant=source.variant,
+            target_display_name=target.canonical_name,
+            source_display_name=source.canonical_name,
+            variant_mismatch=variant_mismatch,
+            aliases_to_move=aliases_to_move,
+            stock_rows_to_move=stock_rows_to_move,
+            recipe_links_to_move=recipe_links_to_move,
+            preferences_to_move=preferences_to_move,
+            exclusions_to_move=exclusions_to_move,
+            purchase_history_rows_to_move=purchase_history_rows_to_move,
+        )
+
     def merge_products(
         self,
         target_product_id: UUID,
@@ -2353,9 +2624,10 @@ class MemoryProductOverviewRepository:
         for item in self.stock_items.pop(source_product_id, []):
             self.stock_items[target_product_id].append(deepcopy(item))
 
-        # 4. Merge purchase evidence
+        # 4. Merge purchase evidence & recipe link counts
         for ev in self.purchase_evidence.pop(source_product_id, []):
             self.purchase_evidence[target_product_id].append(deepcopy(ev))
+        self.recipe_links[target_product_id] += self.recipe_links.pop(source_product_id, 0)
 
         # 5. Merge remembered SKUs
         for rem in self.remembered_skus.pop(source_product_id, []):

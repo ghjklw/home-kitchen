@@ -15,6 +15,7 @@ class MockNode {
     this.dataset = {};
     this.disabled = false;
     this.value = "";
+    this.checked = false;
     this.hidden = false;
     this.type = "text";
     this.required = false;
@@ -58,7 +59,14 @@ class MockNode {
   }
 
   async click() {
-    if (!this.disabled && this.listeners.click) {
+    if (this.disabled) return;
+    if (this.type === "checkbox") {
+      this.checked = !this.checked;
+      if (this.listeners.change) {
+        await this.listeners.change({ target: this });
+      }
+    }
+    if (this.listeners.click) {
       await this.listeners.click({ preventDefault: () => {} });
     }
   }
@@ -744,7 +752,7 @@ test("renderProductCard renders remembered Oda SKUs distinctly from previously p
   );
 });
 
-test("renderProductOverview renders merge controls and calls POST /catalogue/products/{target_id}/merge", async () => {
+test("renderProductOverview renders merge controls, fetches merge preview, and confirms before POST /merge", async () => {
   const container = new MockNode("div");
   const calls = [];
   const notifications = [];
@@ -753,6 +761,7 @@ test("renderProductOverview renders merge controls and calls POST /catalogue/pro
   const targetProd = {
     id: "prod-target",
     canonical_name: "carrot",
+    variant: "",
     display_name: "gulrot",
     aliases: [{ alias: "gulrot", locale: "nb", context: "recipe", reviewed: true }],
     stock: { in_stock: true, total_quantity: "2", unit: "kg", items: [], provenance: "kitchen_inventory" },
@@ -765,6 +774,7 @@ test("renderProductOverview renders merge controls and calls POST /catalogue/pro
   const dupProd = {
     id: "prod-dup",
     canonical_name: "gulrøtter",
+    variant: "",
     display_name: "gulrøtter",
     aliases: [{ alias: "gulrøtter", locale: "nb", context: "recipe", reviewed: true }],
     stock: { in_stock: false, total_quantity: "0", unit: null, items: [], provenance: "kitchen_inventory" },
@@ -779,6 +789,25 @@ test("renderProductOverview renders merge controls and calls POST /catalogue/pro
     calls.push({ path, method, body });
     if (method === "GET" && path.startsWith("/catalogue/overview")) {
       return mergedDone ? [targetProd] : [targetProd, dupProd];
+    }
+    if (method === "GET" && path === "/catalogue/products/prod-target/merge-preview?source_id=prod-dup") {
+      return {
+        target_product_id: "prod-target",
+        source_product_id: "prod-dup",
+        target_canonical_name: "carrot",
+        source_canonical_name: "gulrøtter",
+        target_variant: "",
+        source_variant: "",
+        target_display_name: "gulrot",
+        source_display_name: "gulrøtter",
+        variant_mismatch: false,
+        aliases_to_move: 2,
+        stock_rows_to_move: 1,
+        recipe_links_to_move: 3,
+        preferences_to_move: 1,
+        exclusions_to_move: 0,
+        purchase_history_rows_to_move: 4,
+      };
     }
     if (method === "POST" && path === "/catalogue/products/prod-target/merge") {
       mergedDone = true;
@@ -806,12 +835,146 @@ test("renderProductOverview renders merge controls and calls POST /catalogue/pro
   await mergeForm.submit();
   await new Promise((r) => setTimeout(r, 10));
 
+  // Preview fetched first; POST merge NOT executed yet
+  assert.ok(
+    calls.some(
+      (c) =>
+        c.method === "GET" &&
+        c.path === "/catalogue/products/prod-target/merge-preview?source_id=prod-dup",
+    ),
+  );
+  assert.equal(calls.some((c) => c.method === "POST"), false);
+
+  const previewBox = dupCard.querySelector(".merge-preview-box");
+  assert.ok(previewBox);
+  assert.match(previewBox.textContent, /Kallenavn som flyttes: 2/);
+  assert.match(previewBox.textContent, /Lagerlinjer som flyttes: 1/);
+  assert.match(previewBox.textContent, /Oppskriftskoblinger som flyttes: 3/);
+  assert.match(previewBox.textContent, /Oda-preferanser som flyttes: 1/);
+  assert.match(previewBox.textContent, /Oda-ekskluderinger som flyttes: 0/);
+  assert.match(previewBox.textContent, /Kjøpshistorikkrader som flyttes: 4/);
+  assert.equal(dupCard.querySelector(".merge-variant-warning"), null);
+
+  const confirmBtn = dupCard.querySelector(".confirm-merge-btn");
+  assert.ok(confirmBtn);
+  assert.equal(confirmBtn.disabled, false);
+  await confirmBtn.click();
+  await new Promise((r) => setTimeout(r, 10));
+
   const mergeCall = calls.find((c) => c.method === "POST");
   assert.ok(mergeCall);
   assert.equal(mergeCall.path, "/catalogue/products/prod-target/merge");
   assert.deepEqual(mergeCall.body, { source_product_id: "prod-dup" });
   assert.match(notifications[0], /slått sammen inn i «gulrot»/);
   assert.equal(container.querySelectorAll(".product-overview-card").length, 1);
+});
+
+test("renderProductOverview shows Bokmål variant mismatch warning and blocks merge until explicitly confirmed", async () => {
+  const container = new MockNode("div");
+  const calls = [];
+  let mergedDone = false;
+
+  const targetProd = {
+    id: "prod-fresh",
+    canonical_name: "tomato",
+    variant: "fersk",
+    display_name: "tomat (fersk)",
+    aliases: [{ alias: "tomat", locale: "nb", context: "recipe", reviewed: true }],
+    stock: { in_stock: false, total_quantity: "0", unit: null, items: [], provenance: "kitchen_inventory" },
+    purchase_frequency: { status: "unknown", frequency_display: "unknown" },
+    preferred_oda_skus: [],
+    excluded_oda_skus: [],
+    remembered_oda_skus: [],
+    previously_purchased_skus: [],
+  };
+  const dupProd = {
+    id: "prod-tinned",
+    canonical_name: "tomato",
+    variant: "hermetisk",
+    display_name: "tomat (hermetisk)",
+    aliases: [{ alias: "hermetisk tomat", locale: "nb", context: "recipe", reviewed: true }],
+    stock: { in_stock: false, total_quantity: "0", unit: null, items: [], provenance: "kitchen_inventory" },
+    purchase_frequency: { status: "unknown", frequency_display: "unknown" },
+    preferred_oda_skus: [],
+    excluded_oda_skus: [],
+    remembered_oda_skus: [],
+    previously_purchased_skus: [],
+  };
+
+  const mockApi = async (path, method = "GET", body = null) => {
+    calls.push({ path, method, body });
+    if (method === "GET" && path.startsWith("/catalogue/overview")) {
+      return mergedDone ? [targetProd] : [targetProd, dupProd];
+    }
+    if (method === "GET" && path === "/catalogue/products/prod-fresh/merge-preview?source_id=prod-tinned") {
+      return {
+        target_product_id: "prod-fresh",
+        source_product_id: "prod-tinned",
+        target_canonical_name: "tomato",
+        source_canonical_name: "tomato",
+        target_variant: "fersk",
+        source_variant: "hermetisk",
+        target_display_name: "tomat (fersk)",
+        source_display_name: "tomat (hermetisk)",
+        variant_mismatch: true,
+        aliases_to_move: 1,
+        stock_rows_to_move: 0,
+        recipe_links_to_move: 1,
+        preferences_to_move: 0,
+        exclusions_to_move: 0,
+        purchase_history_rows_to_move: 0,
+      };
+    }
+    if (method === "POST" && path === "/catalogue/products/prod-fresh/merge") {
+      mergedDone = true;
+      return targetProd;
+    }
+    throw new Error(`Unexpected call: ${method} ${path}`);
+  };
+
+  const view = overviewView.renderProductOverview(container, {
+    api: mockApi,
+    notify: () => {},
+    locale: "nb",
+  });
+  await view.ready;
+
+  const tinnedCard = container.querySelectorAll(".product-overview-card")[1];
+  tinnedCard.querySelector(".merge-target-select").value = "prod-fresh";
+  await tinnedCard.querySelector(".merge-product-form").submit();
+  await new Promise((r) => setTimeout(r, 10));
+
+  const warning = tinnedCard.querySelector(".merge-variant-warning");
+  assert.ok(warning);
+  assert.match(warning.textContent, /Advarsel: Variantene er ulike/);
+  assert.match(warning.textContent, /hermetisk/);
+  assert.match(warning.textContent, /fersk/);
+
+  const confirmBtn = tinnedCard.querySelector(".confirm-merge-btn");
+  assert.equal(confirmBtn.disabled, true);
+  await confirmBtn.click();
+  assert.equal(calls.some((c) => c.method === "POST"), false);
+
+  // Cancel dismisses preview without merging
+  await tinnedCard.querySelector(".cancel-merge-btn").click();
+  assert.equal(tinnedCard.querySelector(".merge-preview-box"), null);
+
+  // Re-open preview, explicitly confirm variant mismatch, then merge
+  await tinnedCard.querySelector(".merge-product-form").submit();
+  await new Promise((r) => setTimeout(r, 10));
+  const checkbox = tinnedCard.querySelector(".merge-variant-confirm-checkbox");
+  assert.ok(checkbox);
+  await checkbox.click();
+  assert.equal(checkbox.checked, true);
+  assert.equal(tinnedCard.querySelector(".confirm-merge-btn").disabled, false);
+
+  await tinnedCard.querySelector(".confirm-merge-btn").click();
+  await new Promise((r) => setTimeout(r, 10));
+
+  const mergeCall = calls.find((c) => c.method === "POST");
+  assert.ok(mergeCall);
+  assert.equal(mergeCall.path, "/catalogue/products/prod-fresh/merge");
+  assert.deepEqual(mergeCall.body, { source_product_id: "prod-tinned" });
 });
 
 test("renderProductCard translates unknown and every X days badges to Bokmål", () => {

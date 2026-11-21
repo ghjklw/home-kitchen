@@ -766,6 +766,25 @@ test("product-overview-view exposes accessible labels, keyboard alias submit, li
         stock: { in_stock: true, total_quantity: body.quantity, unit: body.unit, items: [], provenance: "kitchen_inventory" },
       };
     }
+    if (endpoint.includes("/merge-preview")) {
+      return {
+        target_product_id: "prod-b",
+        source_product_id: "prod-a",
+        target_canonical_name: "carrots",
+        source_canonical_name: "carrot",
+        target_variant: "",
+        source_variant: "",
+        target_display_name: "gulrøtter",
+        source_display_name: "gulrot",
+        variant_mismatch: false,
+        aliases_to_move: 2,
+        stock_rows_to_move: 1,
+        recipe_links_to_move: 0,
+        preferences_to_move: 2,
+        exclusions_to_move: 1,
+        purchase_history_rows_to_move: 0,
+      };
+    }
     if (endpoint.endsWith("/merge")) return productB;
     throw new Error(`Unexpected ${method} ${endpoint}`);
   };
@@ -825,11 +844,16 @@ test("product-overview-view exposes accessible labels, keyboard alias submit, li
   assert.equal(prefStatus.hidden, false);
   assert.match(prefStatus.textContent, /Oda-preferanser for «gulrot» er lagret/);
 
-  // Merge select has aria-label
+  // Merge select has aria-label and previews impact before confirming
   const mergeSelect = cardA.querySelector(".merge-target-select");
   assert.equal(mergeSelect.getAttribute("aria-label"), "Velg målråvare å slå sammen inn i");
   mergeSelect.value = "prod-b";
   await cardA.querySelector(".merge-product-form").submit();
+  assert.ok(calls.some((c) => c.method === "GET" && c.endpoint.includes("/catalogue/products/prod-b/merge-preview")));
+  const mergePreviewBox = cardA.querySelector(".merge-preview-box");
+  assert.ok(mergePreviewBox);
+  assert.equal(mergePreviewBox.getAttribute("role"), "region");
+  await cardA.querySelector(".confirm-merge-btn").click();
   assert.ok(calls.some((c) => c.method === "POST" && c.endpoint === "/catalogue/products/prod-b/merge"));
 
   // Curated foods section: aria-expanded on product links button, aria-pressed on SKU toggle

@@ -13,6 +13,7 @@ from home_kitchen.catalogue.overview_models import (
     PreferredOdaSku,
     PreferredOdaSkuInput,
     ProductAliasItem,
+    ProductMergePreview,
     ProductOverview,
     ProductPreferencesUpdate,
     ProductStockUpdate,
@@ -314,6 +315,33 @@ class ProductOverviewService:
             self.repository.upsert_stock_for_product(prod, prod_aliases, stock_update)
 
         return self.get_product_overview(product_id, hid, locale=locale)
+
+    def preview_merge(
+        self,
+        target_product_id: UUID,
+        source_product_id: UUID,
+        household_id: UUID | None = None,
+        locale: str = "nb",
+    ) -> ProductMergePreview:
+        hid = household_id or self.household_id
+        preview = self.repository.preview_merge(target_product_id, source_product_id, hid)
+        target = self.repository.get_product(target_product_id)
+        source = self.repository.get_product(source_product_id)
+        if target is not None and source is not None:
+            aliases_map = self.repository.get_aliases_for_products(
+                [target_product_id, source_product_id]
+            )
+            preview = preview.model_copy(
+                update={
+                    "target_display_name": resolve_display_name(
+                        target, aliases_map.get(target_product_id, []), locale=locale
+                    ),
+                    "source_display_name": resolve_display_name(
+                        source, aliases_map.get(source_product_id, []), locale=locale
+                    ),
+                }
+            )
+        return preview
 
     def merge_products(
         self,

@@ -767,6 +767,96 @@ def test_merge_products_via_service_rest_and_mcp(
         assert client.get(f"/api/catalogue/overview/{source_id}").status_code == 404
 
 
+def test_merge_preview_returns_exact_counts_and_variant_mismatch(
+    overview_service: ProductOverviewService,
+    memory_repo: MemoryProductOverviewRepository,
+):
+    """Pre-merge preview reports exact impact counts and variant mismatches without mutating data."""
+    target_same = uuid4()
+    target_diff = uuid4()
+    source_id = uuid4()
+    memory_repo.add_product(
+        CanonicalProduct(id=target_same, canonical_name="tomato", variant="tinned")
+    )
+    memory_repo.add_product(
+        CanonicalProduct(id=target_diff, canonical_name="tomato", variant="fresh")
+    )
+    memory_repo.add_product(
+        CanonicalProduct(id=source_id, canonical_name="hermetisk tomat", variant="tinned")
+    )
+    memory_repo.add_alias(
+        source_id, "hermetisk tomat", locale="nb", context="recipe", reviewed=True
+    )
+    memory_repo.add_alias(source_id, "tomat på boks", locale="nb", context="recipe", reviewed=False)
+    memory_repo.add_stock_item(source_id, "hermetisk tomat", Decimal("4"), "boks")
+    memory_repo.record_recipe_link(source_id, count=2)
+    memory_repo.record_purchase_evidence(
+        source_id,
+        datetime(2026, 11, 10, 12, 0, tzinfo=UTC),
+        "provider_verified",
+        "oda",
+        product_name="Mutti Hakkede Tomater",
+        oda_product_id="oda-mutti",
+    )
+    overview_service.update_preferences(
+        source_id,
+        ProductPreferencesUpdate(
+            preferred_oda_skus=["oda-mutti", "oda-eldorado"],
+            excluded_oda_skus=["oda-bad"],
+        ),
+    )
+
+    class DummyFeatures:
+        def __init__(self, svc):
+            self.product_overview = svc
+
+    app = FastAPI()
+    app.include_router(feature_router(DummyFeatures(overview_service), None))
+
+    with TestClient(app) as client:
+        # Self-preview rejected
+        assert (
+            client.get(
+                f"/api/catalogue/products/{target_same}/merge-preview?source_id={target_same}"
+            ).status_code
+            == 422
+        )
+        # Missing product rejected
+        assert (
+            client.get(
+                f"/api/catalogue/products/{target_same}/merge-preview?source_id={uuid4()}"
+            ).status_code
+            == 404
+        )
+
+        same_res = client.get(
+            f"/api/catalogue/products/{target_same}/merge-preview?source_id={source_id}"
+        )
+        assert same_res.status_code == 200
+        same_data = same_res.json()
+        assert same_data["variant_mismatch"] is False
+        assert same_data["target_variant"] == "tinned"
+        assert same_data["source_variant"] == "tinned"
+        assert same_data["aliases_to_move"] == 2
+        assert same_data["stock_rows_to_move"] == 1
+        assert same_data["recipe_links_to_move"] == 2
+        assert same_data["preferences_to_move"] == 2
+        assert same_data["exclusions_to_move"] == 1
+        assert same_data["purchase_history_rows_to_move"] == 1
+
+        diff_res = client.get(
+            f"/api/catalogue/products/{target_diff}/merge-preview?source_id={source_id}"
+        )
+        assert diff_res.status_code == 200
+        diff_data = diff_res.json()
+        assert diff_data["variant_mismatch"] is True
+        assert diff_data["target_variant"] == "fresh"
+        assert diff_data["source_variant"] == "tinned"
+
+        # Preview is strictly read-only: source still exists
+        assert client.get(f"/api/catalogue/overview/{source_id}").status_code == 200
+
+
 @pytest.mark.asyncio
 async def test_mcp_stock_and_merge_tools(
     overview_service: ProductOverviewService,
@@ -1209,6 +1299,16 @@ def test_postgres_repository_remembered_vs_purchased_skus_stock_edit_and_atomic_
     assert target_after_stock.stock.in_stock is True
     assert target_after_stock.stock.total_quantity == Decimal("5")
 
+    # Preview merge before executing
+    preview = service.preview_merge(target_id, source_id)
+    assert preview.variant_mismatch is False
+    assert preview.aliases_to_move == 3
+    assert preview.stock_rows_to_move == 1
+    assert preview.recipe_links_to_move == 1
+    assert preview.preferences_to_move == 0
+    assert preview.exclusions_to_move == 0
+    assert preview.purchase_history_rows_to_move == 2
+
     # Merge source into target
     merged = service.merge_products(target_id, source_id, actor_id="malo")
     assert merged.id == target_id
@@ -1243,3 +1343,36 @@ def test_postgres_repository_remembered_vs_purchased_skus_stock_edit_and_atomic_
             ).scalar_one()
         )
         assert hist_st["canonical_product_id"] == str(target_id)
+
+
+def test_postgres_repository_merge_preview_detects_variant_mismatch_and_preferences(
+    overview_sqlite_engine,
+):
+    """DB-backed merge preview counts prefs/exclusions and flags differing variants."""
+    hid = UUID("00000000-0000-0000-0000-000000000001")
+    target_id = uuid4()
+    source_id = uuid4()
+    with overview_sqlite_engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO kitchen_canonical_products (id, canonical_name, variant) "
+                "VALUES (:t, 'milk', 'whole'), (:s, 'melk', 'skimmed')"
+            ),
+            {"t": target_id, "s": source_id},
+        )
+    repo = PostgresProductOverviewRepository(overview_sqlite_engine)
+    service = ProductOverviewService(repository=repo, household_id=hid)
+    service.update_preferences(
+        source_id,
+        ProductPreferencesUpdate(
+            preferred_oda_skus=["oda-skummet-1"],
+            excluded_oda_skus=["oda-bad-1", "oda-bad-2"],
+        ),
+    )
+
+    preview = service.preview_merge(target_id, source_id)
+    assert preview.variant_mismatch is True
+    assert preview.target_variant == "whole"
+    assert preview.source_variant == "skimmed"
+    assert preview.preferences_to_move == 1
+    assert preview.exclusions_to_move == 2

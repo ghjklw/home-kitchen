@@ -46,6 +46,7 @@ from home_kitchen.catalogue.identity import (
 )
 from home_kitchen.catalogue.models import FoodCatalogueItem
 from home_kitchen.catalogue.overview_models import (
+    ProductMergePreview,
     ProductMergeRequest,
     ProductOverview,
     ProductPreferencesUpdate,
@@ -1109,6 +1110,23 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
             return features.product_overview.update_stock(product_id, data, locale=locale)
         except KeyError:
             raise HTTPException(404, "Canonical product not found") from None
+        except ValueError as err:
+            raise HTTPException(422, str(err)) from err
+
+    @router.get("/catalogue/products/{target_id}/merge-preview")
+    def preview_catalogue_product_merge(
+        target_id: UUID,
+        source_id: UUID,
+        locale: str = Query(default="nb", min_length=2, max_length=20),
+    ) -> ProductMergePreview:
+        try:
+            return features.product_overview.preview_merge(
+                target_id,
+                source_id,
+                locale=locale,
+            )
+        except KeyError as err:
+            raise HTTPException(404, str(err)) from None
         except ValueError as err:
             raise HTTPException(422, str(err)) from err
 

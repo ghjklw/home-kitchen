@@ -102,3 +102,9 @@ async def test_preferred_and_excluded_oda_skus_shape_candidates_in_rank_order():
     assert "Foretrukket Oda-vare (rang 1)" in candidates[0].match_reason
     assert "Foretrukket Oda-vare (rang 2)" in candidates[1].match_reason
     assert "Foretrukket Oda-vare" not in candidates[2].match_reason
+    assert candidates[0].is_preferred is True
+    assert candidates[0].preference_rank == 1
+    assert candidates[1].is_preferred is True
+    assert candidates[1].preference_rank == 2
+    assert candidates[2].is_preferred is False
+    assert candidates[2].preference_rank is None

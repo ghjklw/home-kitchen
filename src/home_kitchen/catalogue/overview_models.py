@@ -110,6 +110,26 @@ class ProductMergeRequest(BaseModel):
     source_product_id: UUID
 
 
+class ProductMergePreview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_product_id: UUID
+    source_product_id: UUID
+    target_canonical_name: NonBlank
+    source_canonical_name: NonBlank
+    target_variant: str = ""
+    source_variant: str = ""
+    target_display_name: NonBlank
+    source_display_name: NonBlank
+    variant_mismatch: bool
+    aliases_to_move: int = Field(default=0, ge=0)
+    stock_rows_to_move: int = Field(default=0, ge=0)
+    recipe_links_to_move: int = Field(default=0, ge=0)
+    preferences_to_move: int = Field(default=0, ge=0)
+    exclusions_to_move: int = Field(default=0, ge=0)
+    purchase_history_rows_to_move: int = Field(default=0, ge=0)
+
+
 class ProductStockUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

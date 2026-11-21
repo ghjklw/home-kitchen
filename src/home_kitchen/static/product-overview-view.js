@@ -70,7 +70,16 @@
     }
     const sample = frequency.sample_size ? `${frequency.sample_size} kjøp` : "";
     const days = frequency.date_range_days != null ? `over ${frequency.date_range_days} dager` : "";
-    const detailParts = [sample, days].filter(Boolean).join(" ");
+    const baseDetails = [sample, days].filter(Boolean).join(" ");
+    const extraParts = [];
+    if (frequency.weighted_purchases_per_30_days != null) {
+      const per30 = String(frequency.weighted_purchases_per_30_days).replace(".", ",");
+      extraParts.push(`ca. ${per30} per 30 dager (vektet mot nyere kjøp)`);
+    }
+    if (frequency.is_lower_bound) {
+      extraParts.push("nedre grense");
+    }
+    const detailParts = [baseDetails, ...extraParts].filter(Boolean).join(" · ");
     return {
       known: true,
       label: formatFrequencyDisplay(frequency.frequency_display, frequency.average_interval_days),

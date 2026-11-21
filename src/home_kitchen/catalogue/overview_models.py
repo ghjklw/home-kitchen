@@ -10,6 +10,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, StringConstraints, field_validator
 
 from home_kitchen.catalogue.identity import AliasSourceType
+from home_kitchen.purchase_frequency import DEFAULT_HALF_LIFE_DAYS, ProviderCoverageSummary
 from home_kitchen.units import normalize_unit
 
 NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
@@ -184,6 +185,8 @@ class PurchaseEvidenceRecord(BaseModel):
     purchased_at: datetime
     provenance: Literal["provider_verified", "user_confirmed", "uncertain"]
     evidence_source: str
+    provider: str | None = None
+    store_name: str | None = None
     evidence_ref: str | None = None
     quantity: Decimal | None = None
     unit: str | None = None
@@ -196,10 +199,19 @@ class PurchaseFrequencyOverview(BaseModel):
 
     status: Literal["known", "unknown"]
     average_interval_days: float | None = None
+    recency_weighted_interval_days: float | None = None
+    weighted_purchases_per_30_days: float | None = None
+    recency_score: float = 0.0
     sample_size: int = 0
     first_purchased_at: datetime | None = None
     last_purchased_at: datetime | None = None
     date_range_days: int | None = None
+    coverage_days: int | None = None
+    half_life_days: float = DEFAULT_HALF_LIFE_DAYS
+    is_lower_bound: bool = True
+    confidence: Literal["high", "medium", "low", "unknown"] = "unknown"
+    provider_windows: list[ProviderCoverageSummary] = Field(default_factory=list)
+    coverage_note: str | None = None
     frequency_display: str
     counts_by_provenance: ProvenanceCounts = Field(default_factory=ProvenanceCounts)
     evidence_history: list[PurchaseEvidenceRecord] = Field(default_factory=list)

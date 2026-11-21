@@ -7,9 +7,18 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from home_kitchen.purchase_frequency import (
+    DEFAULT_HALF_LIFE_DAYS,
+    PROVIDER_RETENTION_MONTHS,
+    ProviderObservationWindow,
+    compute_recency_weighted_frequency,
+    normalize_provider_key,
+)
 
 HistoryChannel = Literal["app", "api", "mcp"]
 
@@ -26,8 +35,9 @@ history_context: ContextVar[HistoryContext] = ContextVar(
 )
 
 BOUGHT_BEFORE_BOUNDARY_NOTE = (
-    "Synced purchase history shows items bought before only; never assert current stock, "
-    "that a recipe was cooked, or an explicit preference."
+    "Synced purchase history shows items bought before only (recency-weighted lower bounds over "
+    "each provider's observed window); never assert current stock, that a recipe was cooked, "
+    "or an explicit preference."
 )
 
 
@@ -42,6 +52,11 @@ class BoughtBeforeItem(BaseModel):
     store_name: str | None = None
     last_purchased_at: datetime | None = None
     purchase_count: int = Field(default=1, ge=1)
+    recency_score: float | None = None
+    weighted_purchases_per_30_days: float | None = None
+    average_interval_days: float | None = None
+    provider_coverage_days: int | None = None
+    is_lower_bound: bool = True
     last_quantity: str | None = None
     unit: str | None = None
     provenance: Literal["provider_verified", "user_confirmed"] = "provider_verified"
@@ -88,16 +103,51 @@ def _is_positive_decimal(value: Any) -> bool:
 
 
 def build_purchase_history_context(
-    effective_orders: Sequence[Any], *, limit: int = 25
+    effective_orders: Sequence[Any],
+    *,
+    limit: int = 25,
+    as_of: datetime | None = None,
+    half_life_days: float = DEFAULT_HALF_LIFE_DAYS,
 ) -> PurchaseHistoryContext:
     """Build bounded 'bought before' context from active resolved provider orders/receipts."""
     if limit <= 0:
         return PurchaseHistoryContext()
 
     grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    item_events: dict[tuple[str, str], list[SimpleNamespace]] = {}
+    provider_windows: dict[str, ProviderObservationWindow] = {}
     providers_seen: list[str] = []
 
     for order in effective_orders:
+        prov_raw = str(getattr(order, "provider", "") or "").strip().lower()
+        tx_at = _to_utc(
+            getattr(order, "transaction_at", None) or getattr(order, "observed_at", None)
+        )
+        if prov_raw and tx_at is not None:
+            norm_prov = normalize_provider_key(prov_raw)
+            is_stub = getattr(order, "lifecycle", None) == "non_receipt_stub"
+            existing_win = provider_windows.get(norm_prov)
+            if existing_win is None:
+                provider_windows[norm_prov] = ProviderObservationWindow(
+                    provider=norm_prov,
+                    start=tx_at,
+                    end=tx_at,
+                    total_records=1,
+                    retained_months=PROVIDER_RETENTION_MONTHS.get(norm_prov),
+                    non_receipt_stub_count=1 if is_stub else 0,
+                    incomplete_history=True,
+                )
+            else:
+                provider_windows[norm_prov] = existing_win.model_copy(
+                    update={
+                        "start": min(existing_win.start, tx_at) if existing_win.start else tx_at,
+                        "end": max(existing_win.end, tx_at) if existing_win.end else tx_at,
+                        "total_records": existing_win.total_records + 1,
+                        "non_receipt_stub_count": existing_win.non_receipt_stub_count
+                        + (1 if is_stub else 0),
+                    }
+                )
+
         if not getattr(order, "is_active_purchase", False):
             continue
         if getattr(order, "is_return", False) or getattr(order, "is_cancellation", False):
@@ -106,14 +156,12 @@ def build_purchase_history_context(
         if provenance not in ("provider_verified", "user_confirmed"):
             continue
 
-        provider = str(getattr(order, "provider", "")).strip().lower()
+        provider = prov_raw
         if not provider:
             continue
         external_id = str(getattr(order, "external_id", "") or "").strip()
         store_name = getattr(order, "store_name", None)
-        purchased_at = _to_utc(
-            getattr(order, "transaction_at", None) or getattr(order, "observed_at", None)
-        )
+        purchased_at = tx_at
 
         lines = getattr(order, "lines", None) or []
         order_has_active_line = False
@@ -151,6 +199,15 @@ def build_purchase_history_context(
             qty_str = str(qty) if qty is not None else None
             unit_str = str(unit).strip() if isinstance(unit, str) and unit.strip() else None
 
+            if purchased_at is not None:
+                item_events.setdefault(key, []).append(
+                    SimpleNamespace(
+                        purchased_at=purchased_at,
+                        provenance=provenance,
+                        provider=provider,
+                    )
+                )
+
             existing = grouped.get(key)
             if existing is None:
                 grouped[key] = {
@@ -187,9 +244,29 @@ def build_purchase_history_context(
         if order_has_active_line and provider not in providers_seen:
             providers_seen.append(provider)
 
-    items = [BoughtBeforeItem.model_validate(entry) for entry in grouped.values()]
+    items: list[BoughtBeforeItem] = []
+    for key, entry in grouped.items():
+        events = item_events.get(key, [])
+        prov = normalize_provider_key(entry["provider"])
+        win = provider_windows.get(prov)
+        scoped_windows = {prov: win} if win is not None else None
+        if events:
+            analysis = compute_recency_weighted_frequency(
+                events,
+                provider_windows=scoped_windows,
+                as_of=as_of,
+                half_life_days=half_life_days,
+            )
+            entry["recency_score"] = analysis.recency_score
+            entry["weighted_purchases_per_30_days"] = analysis.weighted_purchases_per_30_days
+            entry["average_interval_days"] = analysis.average_interval_days
+            entry["provider_coverage_days"] = analysis.coverage_days
+            entry["is_lower_bound"] = analysis.is_lower_bound
+        items.append(BoughtBeforeItem.model_validate(entry))
+
     items.sort(
         key=lambda item: (
+            -(item.recency_score or 0.0),
             -(item.last_purchased_at.timestamp()) if item.last_purchased_at else 0.0,
             -item.purchase_count,
             item.product_name.casefold(),

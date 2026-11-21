@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -22,6 +23,11 @@ from home_kitchen.catalogue.overview_models import (
     PurchaseFrequencyOverview,
 )
 from home_kitchen.catalogue.overview_repository import ProductOverviewRepository
+from home_kitchen.purchase_frequency import (
+    DEFAULT_HALF_LIFE_DAYS,
+    ProviderObservationWindow,
+    compute_recency_weighted_frequency,
+)
 from home_kitchen.units import compatible_units, normalize_unit
 
 if TYPE_CHECKING:
@@ -36,64 +42,39 @@ DEFAULT_HOUSEHOLD_ID = UUID("00000000-0000-0000-0000-000000000001")
 
 def compute_purchase_frequency(
     evidence_list: list[PurchaseEvidenceRecord],
+    *,
+    provider_windows: Mapping[str, ProviderObservationWindow] | None = None,
+    as_of: datetime | None = None,
+    half_life_days: float = DEFAULT_HALF_LIFE_DAYS,
 ) -> PurchaseFrequencyOverview:
-    provider_verified = sum(1 for e in evidence_list if e.provenance == "provider_verified")
-    user_confirmed = sum(1 for e in evidence_list if e.provenance == "user_confirmed")
-    uncertain = sum(1 for e in evidence_list if e.provenance == "uncertain")
-    counts = ProvenanceCounts(
-        provider_verified=provider_verified,
-        user_confirmed=user_confirmed,
-        uncertain=uncertain,
+    analysis = compute_recency_weighted_frequency(
+        evidence_list,
+        provider_windows=provider_windows,
+        as_of=as_of,
+        half_life_days=half_life_days,
     )
-
-    confirmed = [
-        e for e in evidence_list if e.provenance in ("provider_verified", "user_confirmed")
-    ]
-    confirmed.sort(key=lambda e: e.purchased_at)
-    sample_size = len(confirmed)
-
-    if sample_size < 2:
-        return PurchaseFrequencyOverview(
-            status="unknown",
-            average_interval_days=None,
-            sample_size=sample_size,
-            first_purchased_at=confirmed[0].purchased_at if confirmed else None,
-            last_purchased_at=confirmed[-1].purchased_at if confirmed else None,
-            date_range_days=0 if confirmed else None,
-            frequency_display="unknown",
-            counts_by_provenance=counts,
-            evidence_history=evidence_list,
-        )
-
-    first_at = confirmed[0].purchased_at
-    last_at = confirmed[-1].purchased_at
-    date_range_days = (last_at.date() - first_at.date()).days
-
-    if date_range_days <= 0:
-        return PurchaseFrequencyOverview(
-            status="unknown",
-            average_interval_days=None,
-            sample_size=sample_size,
-            first_purchased_at=first_at,
-            last_purchased_at=last_at,
-            date_range_days=0,
-            frequency_display="unknown",
-            counts_by_provenance=counts,
-            evidence_history=evidence_list,
-        )
-
-    intervals = sample_size - 1
-    avg_days = round(date_range_days / intervals, 1)
-    display = f"every {avg_days:g} days" if avg_days != 1 else "every 1 day"
-
+    counts = ProvenanceCounts(
+        provider_verified=analysis.provider_verified_count,
+        user_confirmed=analysis.user_confirmed_count,
+        uncertain=analysis.uncertain_count,
+    )
     return PurchaseFrequencyOverview(
-        status="known",
-        average_interval_days=avg_days,
-        sample_size=sample_size,
-        first_purchased_at=first_at,
-        last_purchased_at=last_at,
-        date_range_days=date_range_days,
-        frequency_display=display,
+        status=analysis.status,
+        average_interval_days=analysis.average_interval_days,
+        recency_weighted_interval_days=analysis.recency_weighted_interval_days,
+        weighted_purchases_per_30_days=analysis.weighted_purchases_per_30_days,
+        recency_score=analysis.recency_score,
+        sample_size=analysis.sample_size,
+        first_purchased_at=analysis.first_purchased_at,
+        last_purchased_at=analysis.last_purchased_at,
+        date_range_days=analysis.date_range_days,
+        coverage_days=analysis.coverage_days,
+        half_life_days=analysis.half_life_days,
+        is_lower_bound=analysis.is_lower_bound,
+        confidence=analysis.confidence,
+        provider_windows=analysis.provider_windows,
+        coverage_note=analysis.coverage_note,
+        frequency_display=analysis.frequency_display,
         counts_by_provenance=counts,
         evidence_history=evidence_list,
     )
@@ -154,6 +135,14 @@ class ProductOverviewService:
         self.catalogue_skus = catalogue_skus
         self.household_id = household_id or DEFAULT_HOUSEHOLD_ID
 
+    def _get_provider_windows(self, household_id: UUID) -> dict[str, ProviderObservationWindow]:
+        getter = getattr(self.repository, "get_provider_coverage_windows", None)
+        if callable(getter):
+            windows = getter(household_id)
+            if isinstance(windows, dict):
+                return windows
+        return {}
+
     def _build_product_overview(
         self,
         prod: CanonicalProduct,
@@ -162,6 +151,7 @@ class ProductOverviewService:
         excluded: list[ExcludedOdaSku],
         household_id: UUID,
         locale: str,
+        provider_windows: Mapping[str, ProviderObservationWindow] | None = None,
     ) -> ProductOverview:
         stock = self.repository.get_stock_for_product(prod, prod_aliases)
         purchase_evidence = self.repository.get_purchase_evidence_for_product(
@@ -173,7 +163,12 @@ class ProductOverviewService:
         previously_purchased = self.repository.get_previously_purchased_skus_for_product(
             prod, prod_aliases, preferred, household_id
         )
-        freq = compute_purchase_frequency(purchase_evidence)
+        windows = (
+            provider_windows
+            if provider_windows is not None
+            else self._get_provider_windows(household_id)
+        )
+        freq = compute_purchase_frequency(purchase_evidence, provider_windows=windows or None)
         display_name = resolve_display_name(prod, prod_aliases, locale=locale)
         translations = group_translations_by_locale(prod_aliases)
 
@@ -207,13 +202,22 @@ class ProductOverviewService:
         product_ids = [p.id for p in products]
         aliases_map = self.repository.get_aliases_for_products(product_ids)
         prefs_map = self.repository.get_all_preferences(hid)
+        provider_windows = self._get_provider_windows(hid)
 
         overview_list: list[ProductOverview] = []
         for prod in products:
             prod_aliases = aliases_map.get(prod.id, [])
             preferred, excluded = prefs_map.get(prod.id, ([], []))
             overview_list.append(
-                self._build_product_overview(prod, prod_aliases, preferred, excluded, hid, locale)
+                self._build_product_overview(
+                    prod,
+                    prod_aliases,
+                    preferred,
+                    excluded,
+                    hid,
+                    locale,
+                    provider_windows=provider_windows,
+                )
             )
 
         if query:

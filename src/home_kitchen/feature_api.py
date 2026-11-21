@@ -90,6 +90,10 @@ from home_kitchen.inventory import InventoryItem, InventoryItemCreate, PurchaseP
 from home_kitchen.models import MealEntry, Recipe
 from home_kitchen.oda import OdaError
 from home_kitchen.planning_proposals import ProposalConflict, ProposalRead
+from home_kitchen.purchase_history_view import (
+    PurchaseHistoryBrowseResponse,
+    PurchaseHistoryBrowseService,
+)
 from home_kitchen.purchase_sync import (
     PurchaseHistoryStatusResponse,
     PurchaseHistorySyncRequest,
@@ -905,6 +909,44 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
     @router.get("/purchase-modes")
     def purchase_modes() -> list[PurchaseModeInfo]:
         return features.purchase_modes.catalog()
+
+    @router.get("/purchase-history")
+    def purchase_history_browse(
+        q: str | None = Query(default=None, max_length=200),
+        provider: str | None = Query(default=None, max_length=100),
+        store: str | None = Query(default=None, max_length=200),
+        category: str | None = Query(default=None, max_length=100),
+        date_from: date | None = None,
+        date_to: date | None = None,
+        limit: int = Query(default=500, ge=1, le=2000),
+    ) -> PurchaseHistoryBrowseResponse:
+        if date_from is not None and date_to is not None and date_to < date_from:
+            raise HTTPException(422, "date_to must be on or after date_from")
+        browse_fn = getattr(features, "browse_purchase_history", None)
+        if callable(browse_fn):
+            return browse_fn(
+                q=q,
+                provider=provider,
+                store=store,
+                category=category,
+                date_from=date_from,
+                date_to=date_to,
+                limit=limit,
+            )
+        svc = PurchaseHistoryBrowseService(
+            purchase_sync=getattr(features, "purchase_sync", None),
+            history=getattr(features, "history", None),
+            product_overview_repo=getattr(features, "product_overview_repo", None),
+        )
+        return svc.browse(
+            q=q,
+            provider=provider,
+            store=store,
+            category=category,
+            date_from=date_from,
+            date_to=date_to,
+            limit=limit,
+        )
 
     @router.get("/purchase-history/status")
     def purchase_history_status(request: Request) -> PurchaseHistoryStatusResponse:

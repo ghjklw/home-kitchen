@@ -657,6 +657,7 @@ class NormalizedOrderLine(BaseModel):
     canonical_product_id: str | None = None
     canonical_unit_id: str | None = None
     oda_product_id: str | None = None
+    category: str | None = None
     is_return: bool = False
 
 
@@ -848,6 +849,15 @@ def extract_normalized_lines(provider: str, payload: dict[str, Any]) -> list[Nor
             oda_pid = prod_obj.get("id") or item.get("oda_product_id")
             canon_pid = item.get("canonical_product_id") or prod_obj.get("canonical_product_id")
             canon_uid = item.get("canonical_unit_id") or prod_obj.get("canonical_unit_id")
+            raw_cat = prod_obj.get("category") or item.get("category")
+            if (
+                not raw_cat
+                and isinstance(prod_obj.get("categories"), list)
+                and prod_obj["categories"]
+            ):
+                first_cat = prod_obj["categories"][0]
+                raw_cat = first_cat.get("name") if isinstance(first_cat, dict) else first_cat
+            cat_str = str(raw_cat).strip() if isinstance(raw_cat, str) and raw_cat.strip() else None
             normalized.append(
                 NormalizedOrderLine(
                     name=name or (f"Oda SKU {oda_pid}" if oda_pid is not None else "Oda item"),
@@ -860,6 +870,7 @@ def extract_normalized_lines(provider: str, payload: dict[str, Any]) -> list[Nor
                     canonical_product_id=str(canon_pid) if canon_pid else None,
                     canonical_unit_id=str(canon_uid) if canon_uid else None,
                     oda_product_id=str(oda_pid) if oda_pid is not None else None,
+                    category=cat_str,
                     is_return=is_ret,
                 )
             )
@@ -886,6 +897,13 @@ def extract_normalized_lines(provider: str, payload: dict[str, Any]) -> list[Nor
         oda_pid = line.get("oda_product_id") or line.get("product_id") or line.get("sku")
         canon_pid = line.get("canonical_product_id")
         canon_uid = line.get("canonical_unit_id")
+        raw_cat = (
+            kassal.get("category")
+            or line.get("category")
+            or line.get("varegruppe")
+            or line.get("categoryName")
+        )
+        cat_str = str(raw_cat).strip() if isinstance(raw_cat, str) and raw_cat.strip() else None
         line_type = str(line.get("type") or line.get("lineType") or "").strip().casefold()
         is_ret = bool(
             line.get("isReturn")
@@ -906,6 +924,7 @@ def extract_normalized_lines(provider: str, payload: dict[str, Any]) -> list[Nor
                 canonical_product_id=str(canon_pid) if canon_pid else None,
                 canonical_unit_id=str(canon_uid) if canon_uid else None,
                 oda_product_id=str(oda_pid) if oda_pid is not None else None,
+                category=cat_str,
                 is_return=is_ret,
             )
         )

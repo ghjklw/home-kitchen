@@ -581,6 +581,6 @@ async def test_full_recipe_to_shopping_journey_through_mcp_with_oauth(
             evidence = call_mcp(
                 client, 129, "search_household_knowledge", {"query": "Flott via MCP"}
             )
-            assert any(item["evidence_id"] == feedback["id"] for item in evidence)
+            assert any(item["id"] == feedback["id"] for item in evidence)
     finally:
         await discovery_client.aclose()

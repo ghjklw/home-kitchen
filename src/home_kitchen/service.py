@@ -224,7 +224,7 @@ class KitchenService:
         )
         self.meal_agenda = meal_agenda or MealAgendaService(
             meals=meal_adapter,
-            recipes=recipe_adapter,
+            recipes=self.recipe_service,
         )
         self.shopping_service = shopping_service or ShoppingService(
             items=shopping_adapter,

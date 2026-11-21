@@ -373,6 +373,9 @@ class PostgresRecipeRepository:
             raise KeyError(str(recipe_id))
         return Recipe.model_validate(dict(row))
 
+    def get_recipe(self, recipe_id: UUID) -> Recipe:
+        return self.get(recipe_id)
+
     def list_all(self) -> list[Recipe]:
         with self._connection() as connection:
             rows = connection.execute(select(recipes).order_by(recipes.c.position)).mappings().all()

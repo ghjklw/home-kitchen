@@ -515,3 +515,6 @@ def test_in_memory_shopping_service_and_kitchen_facade_composition() -> None:
     assert facade.confirm_suggestion(milk.id).id == capture.id
     facade.complete_item(capture.id, True)
     assert facade.confirm_suggestion(milk.id).id != capture.id
+
+    # Verify MemoryRecipeRepository implements SingleRecipeReader.get_recipe as well
+    assert recipe_repo.get_recipe(soup.id).id == soup.id

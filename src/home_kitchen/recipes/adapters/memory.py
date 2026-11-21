@@ -219,6 +219,9 @@ class MemoryRecipeRepository:
             raise KeyError(str(recipe_id))
         return self.recipes[recipe_id].model_copy(deep=True)
 
+    def get_recipe(self, recipe_id: UUID) -> Recipe:
+        return self.get(recipe_id)
+
     def list_all(self) -> list[Recipe]:
         return [recipe.model_copy(deep=True) for recipe in self.recipes.values()]
 

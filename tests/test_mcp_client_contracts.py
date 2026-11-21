@@ -347,6 +347,8 @@ async def test_full_recipe_to_shopping_journey_through_mcp_with_oauth(
         return {"result": groups}
 
     app.state.features.oda.search_products = AsyncMock(side_effect=fake_oda_search)
+    app.state.features.oda.search_cache_context = lambda _actor_id: 1
+    app.state.features.basket_jobs.scope_provider = lambda _actor_id: 1
 
     auth_headers = {"Authorization": f"Bearer {token}"}
     plan_start = "2026-11-23"

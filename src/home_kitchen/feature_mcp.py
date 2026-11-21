@@ -40,7 +40,11 @@ from home_kitchen.cookidoo_plan_sync import (
 from home_kitchen.cookidoo_recipes import CookidooError
 from home_kitchen.features import KitchenFeatures
 from home_kitchen.history import HistoryEntry, HistoryEntryCreate, RetrievedEvidence
-from home_kitchen.home_assistant import HomeAssistantError, HomeAssistantTodoExportResult
+from home_kitchen.home_assistant import (
+    HomeAssistantError,
+    HomeAssistantQuickCaptureImportResult,
+    HomeAssistantTodoExportResult,
+)
 from home_kitchen.integrations import IntegrationInfo
 from home_kitchen.inventory import InventoryItem, InventoryItemCreate, PurchasePlan
 from home_kitchen.models import MealEntry, Recipe
@@ -380,6 +384,54 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
                 start,
                 end,
                 reviewed=reviewed,
+            )
+        except (HomeAssistantError, ValueError) as exc:
+            raise ToolError(str(exc)) from None
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
+    async def preview_home_assistant_quick_captures(
+        start: date | None = None, end: date | None = None
+    ) -> HomeAssistantQuickCaptureImportResult:
+        """Preview active Home Assistant To-Do items not already in Kitchen quick captures or shopping list."""
+        if start is not None and end is not None and end < start:
+            raise ToolError("end date must be on or after start date")
+        try:
+            return await asyncio.to_thread(
+                features.preview_home_assistant_quick_captures,
+                start=start,
+                end=end,
+            )
+        except (HomeAssistantError, ValueError) as exc:
+            raise ToolError(str(exc)) from None
+
+    @mcp.tool(
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        }
+    )
+    async def import_home_assistant_quick_captures(
+        reviewed: bool = False, start: date | None = None, end: date | None = None
+    ) -> HomeAssistantQuickCaptureImportResult:
+        """Explicitly import active Home Assistant To-Do items as additive Kitchen quick captures.
+
+        Kitchen remains canonical; existing captures, shopping-list items, and store-trip
+        checked state are never overwritten. Requires explicit reviewed=True confirmation.
+        """
+        if not reviewed:
+            raise ToolError(
+                "Explicit confirmation (reviewed=true) is required to import quick captures from Home Assistant."
+            )
+        if start is not None and end is not None and end < start:
+            raise ToolError("end date must be on or after start date")
+        try:
+            return await asyncio.to_thread(
+                features.import_home_assistant_quick_captures,
+                reviewed=reviewed,
+                start=start,
+                end=end,
             )
         except (HomeAssistantError, ValueError) as exc:
             raise ToolError(str(exc)) from None

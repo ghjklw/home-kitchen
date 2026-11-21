@@ -78,6 +78,7 @@ from home_kitchen.home_assistant import (
     HomeAssistantAuthError,
     HomeAssistantError,
     HomeAssistantNotConfiguredError,
+    HomeAssistantQuickCaptureImportResult,
     HomeAssistantTodoExportResult,
 )
 from home_kitchen.integrations import IntegrationInfo
@@ -249,6 +250,17 @@ class TripCheck(BaseModel):
 class StoreTripHomeAssistantExportRequest(BaseModel):
     start: date
     end: date
+    reviewed: bool = False
+
+
+class HomeAssistantQuickCapturePreviewRequest(BaseModel):
+    start: date | None = None
+    end: date | None = None
+
+
+class HomeAssistantQuickCaptureImportRequest(BaseModel):
+    start: date | None = None
+    end: date | None = None
     reviewed: bool = False
 
 
@@ -980,6 +992,59 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
             return features.export_store_trip_to_home_assistant(
                 data.start, data.end, reviewed=data.reviewed
             )
+        except HomeAssistantNotConfiguredError as exc:
+            raise HTTPException(503, str(exc)) from None
+        except HomeAssistantAuthError as exc:
+            raise HTTPException(502, str(exc)) from None
+        except HomeAssistantError as exc:
+            raise HTTPException(502, str(exc)) from None
+
+    @router.post("/captures/import/home-assistant/preview")
+    def preview_home_assistant_quick_captures(
+        request: Request,
+        response: Response,
+        data: HomeAssistantQuickCapturePreviewRequest | None = None,
+    ) -> HomeAssistantQuickCaptureImportResult:
+        authenticated_actor(request)
+        response.headers["Cache-Control"] = "no-store"
+        payload = data or HomeAssistantQuickCapturePreviewRequest()
+        if payload.start is not None and payload.end is not None and payload.end < payload.start:
+            raise HTTPException(422, "end date must be on or after start date")
+        try:
+            return features.preview_home_assistant_quick_captures(
+                start=payload.start, end=payload.end
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        except HomeAssistantNotConfiguredError as exc:
+            raise HTTPException(503, str(exc)) from None
+        except HomeAssistantAuthError as exc:
+            raise HTTPException(502, str(exc)) from None
+        except HomeAssistantError as exc:
+            raise HTTPException(502, str(exc)) from None
+
+    @router.post("/captures/import/home-assistant")
+    def import_home_assistant_quick_captures(
+        request: Request,
+        response: Response,
+        data: HomeAssistantQuickCaptureImportRequest | None = None,
+    ) -> HomeAssistantQuickCaptureImportResult:
+        authenticated_actor(request)
+        response.headers["Cache-Control"] = "no-store"
+        payload = data or HomeAssistantQuickCaptureImportRequest()
+        if not payload.reviewed:
+            raise HTTPException(
+                422,
+                "Explicit confirmation (reviewed=True) is required before importing quick captures from Home Assistant",
+            )
+        if payload.start is not None and payload.end is not None and payload.end < payload.start:
+            raise HTTPException(422, "end date must be on or after start date")
+        try:
+            return features.import_home_assistant_quick_captures(
+                reviewed=payload.reviewed, start=payload.start, end=payload.end
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
         except HomeAssistantNotConfiguredError as exc:
             raise HTTPException(503, str(exc)) from None
         except HomeAssistantAuthError as exc:

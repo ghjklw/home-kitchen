@@ -22,6 +22,7 @@ from sqlalchemy import create_engine, func, select, text
 from home_kitchen.purchase_sync import (
     IncompleteScanError,
     checkpoint,
+    extract_normalized_lines,
     metadata,
     provider_order_sources,
     sync_account,
@@ -717,3 +718,70 @@ def test_rema1000_http_source_custom_subscription_key_and_404_fallback():
     )
     with pytest.raises(UnsupportedRema1000Contract, match="HTTP 404"):
         failing_source.get_transactions("alice")
+
+
+def test_parse_receipt_skips_non_item_rows_missing_name():
+    bonus_row = {
+        "bonusBased": True,
+        "pieceCount": 1,
+        "amount": "0.00",
+        "bonusPointsDecimal": 0,
+    }
+    bonus_row_no_amount = {
+        "bonusBased": True,
+        "bonusPointsDecimal": 0,
+    }
+    blank_name_row = {
+        "prodtxt1": "   ",
+        "amount": "0.00",
+    }
+
+    parsed_bonus = Rema1000ReceiptLine.model_validate(bonus_row_no_amount)
+    assert parsed_bonus.name is None
+    assert parsed_bonus.amount is None
+
+    tx = Rema1000Transaction.model_validate(
+        {
+            "receiptId": "bella-tx-bonus-row",
+            "storeName": "REMA 1000 Vulkan",
+            "totalAmount": "129.90",
+            "timestamp": "2026-11-21T12:00:00Z",
+            "hasReceipt": True,
+        }
+    )
+    receipt = parse_receipt(
+        {
+            "rows": [
+                {
+                    "prodtxt1": "NORVEGIA 1KG",
+                    "prodtxt3": "7038010009457",
+                    "amount": "129.90",
+                },
+                bonus_row,
+                bonus_row_no_amount,
+                blank_name_row,
+                {
+                    "prodtxt3": "7032069704018",
+                    "amount": "24.50",
+                },
+            ]
+        },
+        transaction=tx,
+    )
+
+    assert len(receipt.lines) == 2
+    assert receipt.lines[0].name == "NORVEGIA 1KG"
+    assert receipt.lines[0].ean == "7038010009457"
+    assert receipt.lines[1].name is None
+    assert receipt.lines[1].ean == "7032069704018"
+
+    record = to_provider_order_record(receipt)
+    assert len(record.payload["lines"]) == 2
+    assert record.payload["lines"][0]["name"] == "NORVEGIA 1KG"
+    assert record.payload["lines"][1]["name"] is None
+    assert record.payload["lines"][1]["ean"] == "7032069704018"
+
+    normalized = extract_normalized_lines("rema1000", record.payload)
+    assert len(normalized) == 2
+    assert normalized[0].name == "NORVEGIA 1KG"
+    assert normalized[1].amount == Decimal("24.50")

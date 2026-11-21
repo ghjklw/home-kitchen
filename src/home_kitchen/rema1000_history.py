@@ -108,7 +108,8 @@ class Rema1000ReceiptLine(BaseModel):
 
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
-    name: str = Field(
+    name: str | None = Field(
+        default=None,
         validation_alias=AliasChoices(
             "name",
             "prodtxt1",
@@ -144,7 +145,8 @@ class Rema1000ReceiptLine(BaseModel):
         validation_alias=AliasChoices("unitPrice", "unit_price", "enhetspris", "pris", "price"),
         serialization_alias="unitPrice",
     )
-    amount: Decimal = Field(
+    amount: Decimal | None = Field(
+        default=None,
         validation_alias=AliasChoices(
             "amount", "belop", "total", "linjesum", "linjebelop", "lineAmount"
         ),
@@ -184,10 +186,12 @@ class Rema1000ReceiptLine(BaseModel):
 
     @field_validator("name", mode="before")
     @classmethod
-    def clean_name(cls, value: object) -> str:
-        s = str(value or "").strip()
-        if not s:
-            raise ValueError("name must be non-empty")
+    def clean_name(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        s = str(value).strip()
+        if not s or s == "$undefined":
+            return None
         return s
 
 
@@ -346,6 +350,12 @@ class Rema1000Receipt(BaseModel):
     source_schema_version: str = REMA1000_SCHEMA_VERSION
     source_updated_at: None = None
     revision_id: str
+
+    @field_validator("lines", mode="after")
+    @classmethod
+    def filter_non_item_lines(cls, value: list[Rema1000ReceiptLine]) -> list[Rema1000ReceiptLine]:
+        # Skip non-item bonus/summary rows that lack both product name and barcode.
+        return [line for line in value if line.name is not None or line.ean is not None]
 
 
 def _revision_id(raw: dict[str, Any]) -> str:

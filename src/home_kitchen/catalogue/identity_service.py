@@ -5,6 +5,7 @@ from uuid import UUID
 
 from home_kitchen.catalogue.identity import (
     AliasResolution,
+    AliasSourceType,
     CanonicalProduct,
     CanonicalUnit,
     IdentityCorrectionEvent,
@@ -64,15 +65,47 @@ class CanonicalIdentityService:
             return self.repository.unit(normalize_identity_text(name))
 
     def add_alias(
-        self, kind: str, locale: str, context: str, alias: str, identity_id: UUID
+        self,
+        kind: str,
+        locale: str,
+        context: str,
+        alias: str,
+        identity_id: UUID,
+        *,
+        household_id: UUID | None = None,
+        source_type: AliasSourceType = "automatic_suggestion",
     ) -> None:
-        self.repository.add_alias(
-            kind,
-            normalize_identity_text(locale),
-            normalize_identity_text(context),
-            alias.strip(),
-            identity_id,
-        )
+        norm_locale = normalize_identity_text(locale)
+        norm_context = normalize_identity_text(context)
+        clean_alias = alias.strip()
+        try:
+            self.repository.add_alias(
+                kind,
+                norm_locale,
+                norm_context,
+                clean_alias,
+                identity_id,
+                household_id=household_id,  # ty: ignore[unknown-argument]
+                source_type=source_type,  # ty: ignore[unknown-argument]
+            )
+        except TypeError:
+            try:
+                self.repository.add_alias(
+                    kind,
+                    norm_locale,
+                    norm_context,
+                    clean_alias,
+                    identity_id,
+                    source_type=source_type,  # ty: ignore[unknown-argument]
+                )
+            except TypeError:
+                self.repository.add_alias(
+                    kind,
+                    norm_locale,
+                    norm_context,
+                    clean_alias,
+                    identity_id,
+                )
 
     def correct_alias(
         self,
@@ -85,7 +118,7 @@ class CanonicalIdentityService:
         actor_id: str = "system",
         household_id: UUID | None = None,
         channel: str = "api",
-        source_type: str = "reviewed_correction",
+        source_type: AliasSourceType = "reviewed_correction",
     ) -> IdentityCorrectionEvent | None:
         norm_locale = normalize_identity_text(locale)
         norm_context = normalize_identity_text(context)
@@ -123,12 +156,41 @@ class CanonicalIdentityService:
         lister = getattr(self.repository, "list_correction_events", None)
         if not callable(lister):
             return []
-        return lister(kind=kind, alias=alias, household_id=household_id, limit=limit)
+        result = lister(kind=kind, alias=alias, household_id=household_id, limit=limit)
+        return result if isinstance(result, list) else []
 
-    def resolve(self, kind: str, locale: str, context: str, alias: str) -> AliasResolution:
-        candidates = self.repository.resolve(
-            kind, normalize_identity_text(locale), normalize_identity_text(context), alias
-        )
+    def resolve(
+        self,
+        kind: str,
+        locale: str,
+        context: str,
+        alias: str,
+        *,
+        household_id: UUID | None = None,
+    ) -> AliasResolution:
+        norm_locale = normalize_identity_text(locale)
+        norm_context = normalize_identity_text(context)
+        resolver_with_meta = getattr(self.repository, "resolve_with_metadata", None)
+        if callable(resolver_with_meta):
+            res = resolver_with_meta(
+                kind,
+                norm_locale,
+                norm_context,
+                alias,
+                household_id=household_id,
+            )
+            if isinstance(res, AliasResolution):
+                return res
+        try:
+            candidates = self.repository.resolve(
+                kind,
+                norm_locale,
+                norm_context,
+                alias,
+                household_id=household_id,  # ty: ignore[unknown-argument]
+            )
+        except TypeError:
+            candidates = self.repository.resolve(kind, norm_locale, norm_context, alias)
         status = (
             "unmapped" if not candidates else "resolved" if len(candidates) == 1 else "ambiguous"
         )
@@ -137,15 +199,30 @@ class CanonicalIdentityService:
     def validate_identities(self, kind: str, ids: set[UUID]) -> None:
         self.repository.validate_identities(kind, ids)
 
-    def has_reviewed_alias(self, kind: str, locale: str, context: str, alias: str) -> bool:
+    def has_reviewed_alias(
+        self,
+        kind: str,
+        locale: str,
+        context: str,
+        alias: str,
+        *,
+        household_id: UUID | None = None,
+    ) -> bool:
         checker = getattr(self.repository, "has_reviewed_alias", None)
         if callable(checker):
-            return bool(
-                checker(
-                    kind,
-                    normalize_identity_text(locale),
-                    normalize_identity_text(context),
-                    alias.strip(),
+            norm_locale = normalize_identity_text(locale)
+            norm_context = normalize_identity_text(context)
+            clean_alias = alias.strip()
+            try:
+                return bool(
+                    checker(
+                        kind,
+                        norm_locale,
+                        norm_context,
+                        clean_alias,
+                        household_id=household_id,
+                    )
                 )
-            )
+            except TypeError:
+                return bool(checker(kind, norm_locale, norm_context, clean_alias))
         return False

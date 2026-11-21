@@ -1017,7 +1017,7 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
         return features.catalogue_identities.list_correction_events(
             kind=kind,
             alias=alias,
-            household_id=features.household_id,
+            household_id=getattr(features, "household_id", None),
             limit=limit,
         )
 
@@ -1030,15 +1030,32 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
     ) -> AliasResolution:
         if kind not in {"product", "unit"}:
             raise HTTPException(404, "Unknown identity kind")
-        return features.catalogue_identities.resolve(kind, locale, context, alias)
+        household_id = getattr(features, "household_id", None)
+        try:
+            return features.catalogue_identities.resolve(
+                kind, locale, context, alias, household_id=household_id
+            )
+        except TypeError:
+            return features.catalogue_identities.resolve(kind, locale, context, alias)
 
     @router.post("/catalogue/aliases/{kind}/{identity_id}", status_code=201)
     def add_canonical_alias(kind: str, identity_id: UUID, data: AliasInput) -> Response:
         if kind not in {"product", "unit"}:
             raise HTTPException(404, "Unknown identity kind")
-        features.catalogue_identities.add_alias(
-            kind, data.locale, data.context, data.alias, identity_id
-        )
+        source_type = data.source_type or "automatic_suggestion"
+        try:
+            features.catalogue_identities.add_alias(
+                kind,
+                data.locale,
+                data.context,
+                data.alias,
+                identity_id,
+                source_type=source_type,
+            )
+        except TypeError:
+            features.catalogue_identities.add_alias(
+                kind, data.locale, data.context, data.alias, identity_id
+            )
         return Response(status_code=201)
 
     @router.put("/catalogue/aliases/{kind}/{identity_id}/review")
@@ -1048,6 +1065,7 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
         if kind not in {"product", "unit"}:
             raise HTTPException(404, "Unknown identity kind")
         actor = getattr(request.state, "actor_id", None) or "api"
+        source_type = data.source_type or "reviewed_correction"
         try:
             features.catalogue_identities.correct_alias(
                 kind,
@@ -1056,8 +1074,9 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
                 data.alias,
                 identity_id,
                 actor_id=actor,
-                household_id=features.household_id,
+                household_id=getattr(features, "household_id", None),
                 channel="api",
+                source_type=source_type,
             )
         except ValueError as exc:
             raise HTTPException(404, str(exc)) from None

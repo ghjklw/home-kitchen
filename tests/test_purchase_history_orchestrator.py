@@ -6,12 +6,16 @@ delay tracking (provider posting delay vs kitchen ingestion delay), coverage win
 strict separation from kitchen inventory/history tables, and REST/MCP interfaces.
 """
 
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
+from uuid import uuid4
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from fastmcp import Client, FastMCP
@@ -24,6 +28,9 @@ from fixtures.synthetic_kitchen.purchase_history import (
 from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.pool import StaticPool
 
+from home_kitchen.catalogue.identity_service import CanonicalIdentityService
+from home_kitchen.connector_store import ConnectorStore
+from home_kitchen.connector_store import metadata as connector_metadata
 from home_kitchen.context import HistoryContext, history_context
 from home_kitchen.coop_history import (
     CoopFixtureSource,
@@ -477,3 +484,305 @@ async def test_mcp_tools_status_and_sync(memory_engine, rema_adapter):
 def _no_kassal_enrichment(monkeypatch):
     """These fixtures predate the Kassal requirement; barcode enrichment is tested separately."""
     monkeypatch.setattr("home_kitchen.purchase_sync.extract_line_ean", lambda line: None)
+
+
+@pytest.mark.asyncio
+async def test_sync_forever_executes_bounded_ticks_isolates_errors_and_cancels_cleanly(
+    memory_engine, caplog
+):
+    service = PurchaseHistorySyncService(engine=memory_engine)
+    seen_calls: list[tuple[str, int]] = []
+    second_tick_done = asyncio.Event()
+
+    class _RecordingAdapter:
+        def fetch_page(self, account_id, cursor):
+            return ProviderPage(
+                records=[
+                    ProviderOrderRecord(
+                        external_id="bg-order-1",
+                        revision_id="rev-1",
+                        source_updated_at=datetime(2026, 4, 2, 10, 0, 0, tzinfo=UTC),
+                        payload={"purchaseDate": "2026-04-02T10:00:00Z"},
+                    )
+                ],
+                next_cursor="bg-cur-1",
+                has_more=False,
+            )
+
+    service.register_adapter("rema1000", _RecordingAdapter(), account_id="household-a")
+    real_sync = service.sync
+
+    def flaky_sync(account_id: str = "default", provider: str | None = None, max_pages: int = 50):
+        seen_calls.append((account_id, max_pages))
+        if len(seen_calls) == 1:
+            raise RuntimeError("transient network failure with secret-dsn")
+        result = real_sync(account_id=account_id, provider=provider, max_pages=max_pages)
+        second_tick_done.set()
+        return result
+
+    service.sync = flaky_sync  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="positive"):
+        await service.sync_forever(interval_seconds=0)
+
+    task = asyncio.create_task(
+        service.sync_forever(interval_seconds=0.01, account_id="household-a", max_pages=12)
+    )
+    try:
+        await asyncio.wait_for(second_tick_done.wait(), timeout=2.0)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2.0)
+
+    assert len(seen_calls) >= 2
+    assert seen_calls[0] == ("household-a", 12)
+    assert checkpoint(memory_engine, "rema1000", "household-a") == "bg-cur-1"
+    assert "secret-dsn" not in caplog.text
+    assert "will retry" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_sync_forever_cancellation_waits_for_inflight_thread(memory_engine):
+    service = PurchaseHistorySyncService(engine=memory_engine)
+    started, release = Event(), Event()
+
+    def slow_sync(*, account_id: str = "default", max_pages: int = 50):
+        started.set()
+        assert release.wait(2.0)
+        raise RuntimeError("cancelled-during-shutdown")
+
+    service.sync = slow_sync  # type: ignore[method-assign]
+    task = asyncio.create_task(service.sync_forever(interval_seconds=300.0))
+    try:
+        assert await asyncio.to_thread(started.wait, 2.0)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2.0)
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+
+
+def test_app_lifespan_starts_and_cancels_purchase_sync_when_not_test_env(monkeypatch):
+    from home_kitchen.app import create_app
+    from home_kitchen.service import KitchenService
+    from home_kitchen.settings import Settings
+
+    class MemoryTestStore:
+        def __init__(self):
+            self.settings: dict[str, str] = {}
+            self.photo_household_id = None
+            self.engine = create_engine(
+                "sqlite://",
+                poolclass=StaticPool,
+                connect_args={"check_same_thread": False},
+            )
+            connector_metadata.create_all(self.engine)
+            metadata.create_all(self.engine)
+
+        def get_setting(self, key: str) -> str | None:
+            return self.settings.get(key)
+
+        def set_setting(self, key: str, value: str) -> None:
+            self.settings[key] = value
+
+        def ensure_setting(self, key: str, value: str) -> str:
+            return self.settings.setdefault(key, value)
+
+        def list(self, kind: str, model: type) -> list:
+            return []
+
+    store = MemoryTestStore()
+    kitchen = KitchenService(store=store)
+    kitchen.identities = Mock(spec=CanonicalIdentityService)
+    settings = Settings(
+        local_dev=True,
+        entra_allowed_group=uuid4(),
+        database_url="postgresql+psycopg://user:pass@localhost/db",
+        purchase_sync_interval_seconds=120.0,
+    )
+
+    started = Event()
+    cancelled = Event()
+    observed_intervals: list[float] = []
+
+    async def fake_sync_forever(
+        self, interval_seconds: float = 300.0, *, account_id: str = "default", max_pages: int = 50
+    ) -> None:
+        observed_intervals.append(interval_seconds)
+        started.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    async def fake_refresh_forever(self, interval: float = 300.0) -> None:
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr("home_kitchen.app._is_test_env", lambda: False)
+    monkeypatch.setattr(PurchaseHistorySyncService, "sync_forever", fake_sync_forever)
+    monkeypatch.setattr(
+        "home_kitchen.app.ConnectorAuthService.refresh_forever", fake_refresh_forever
+    )
+
+    app = create_app(settings, service=kitchen)
+    with TestClient(app, client=("127.0.0.1", 5000)):
+        assert started.wait(2.0)
+
+    assert cancelled.wait(2.0)
+    assert observed_intervals == [120.0]
+
+
+def test_app_lifespan_skips_purchase_sync_in_test_env(monkeypatch):
+    from home_kitchen.app import create_app
+    from home_kitchen.service import KitchenService
+    from home_kitchen.settings import Settings
+
+    class MemoryTestStore:
+        def __init__(self):
+            self.settings: dict[str, str] = {}
+            self.photo_household_id = None
+            self.engine = create_engine(
+                "sqlite://",
+                poolclass=StaticPool,
+                connect_args={"check_same_thread": False},
+            )
+            connector_metadata.create_all(self.engine)
+            metadata.create_all(self.engine)
+
+        def get_setting(self, key: str) -> str | None:
+            return self.settings.get(key)
+
+        def set_setting(self, key: str, value: str) -> None:
+            self.settings[key] = value
+
+        def ensure_setting(self, key: str, value: str) -> str:
+            return self.settings.setdefault(key, value)
+
+        def list(self, kind: str, model: type) -> list:
+            return []
+
+    store = MemoryTestStore()
+    kitchen = KitchenService(store=store)
+    kitchen.identities = Mock(spec=CanonicalIdentityService)
+    settings = Settings(
+        local_dev=True,
+        entra_allowed_group=uuid4(),
+        database_url="postgresql+psycopg://user:pass@localhost/db",
+    )
+
+    sync_forever_spy = AsyncMock()
+    monkeypatch.setattr(PurchaseHistorySyncService, "sync_forever", sync_forever_spy)
+
+    app = create_app(settings, service=kitchen)
+    with TestClient(app, client=("127.0.0.1", 5000)):
+        pass
+
+    sync_forever_spy.assert_not_called()
+
+
+def test_provider_status_reports_connector_store_auth_mode_accurately(memory_engine):
+    connector_metadata.create_all(memory_engine)
+    store = ConnectorStore(memory_engine, Fernet(Fernet.generate_key()))
+    household_id = uuid4()
+
+    def build_adapter(provider: str, account_id: str, creds: dict):
+        if provider == "rema1000":
+            return Rema1000PurchaseHistoryAdapter(Rema1000FixtureSource([]), account_id=account_id)
+        if provider == "coop":
+            return CoopPurchaseHistoryAdapter(
+                CoopFixtureSource(purchases=[], receipts={}), account_id=account_id
+            )
+        if provider == "trumf":
+            return TrumfPurchaseHistoryAdapter(TrumfFixtureSource([]), account_id=account_id)
+        return None
+
+    service = PurchaseHistorySyncService(
+        engine=memory_engine,
+        connector_store=store,
+        household_id=household_id,
+        adapter_factory=build_adapter,
+    )
+
+    # Unconfigured defaults retain legacy manual/provider fallback descriptions
+    assert service._default_provider_metadata("trumf")[0] == "manual_session_cookie"
+    assert service._default_provider_metadata("rema1000")[0] == "manual_session_token"
+    assert service._default_provider_metadata("coop")[0] == "oidc_pkce"
+
+    # Connected via oauth_pkce for Trumf, Rema 1000, and Coop
+    store.save_connection(
+        household_id=household_id,
+        provider_id="trumf",
+        auth_mode="oauth_pkce",
+        credentials={"access_token": "trumf-pkce-token", "refresh_token": "trumf-ref"},
+        actor_id="household-a",
+        account_id="household-a",
+    )
+    store.save_connection(
+        household_id=household_id,
+        provider_id="rema1000",
+        auth_mode="oauth_pkce",
+        credentials={"access_token": "rema-pkce-token", "refresh_token": "rema-ref"},
+        actor_id="household-a",
+        account_id="household-a",
+    )
+    store.save_connection(
+        household_id=household_id,
+        provider_id="coop",
+        auth_mode="oauth_pkce",
+        credentials={"access_token": "coop-pkce-token", "refresh_token": "coop-ref"},
+        actor_id="household-a",
+        account_id="household-a",
+    )
+
+    assert service._default_provider_metadata("trumf", account_id="household-a")[0] == "oauth_pkce"
+    assert (
+        service._default_provider_metadata("rema1000", account_id="household-a")[0] == "oauth_pkce"
+    )
+    assert service._default_provider_metadata("coop", account_id="household-a")[0] == "oauth_pkce"
+
+    status_pkce = service.get_status(account_id="household-a")
+    assert status_pkce.providers["trumf"].auth_method == "oauth_pkce"
+    assert status_pkce.providers["trumf"].status == "connected"
+    assert "OAuth PKCE" in (status_pkce.providers["trumf"].limitations or "")
+    assert status_pkce.providers["rema1000"].auth_method == "oauth_pkce"
+    assert status_pkce.providers["rema1000"].status == "connected"
+    assert "OAuth PKCE" in (status_pkce.providers["rema1000"].limitations or "")
+    assert status_pkce.providers["coop"].auth_method == "oauth_pkce"
+    assert status_pkce.providers["coop"].status == "connected"
+
+    # Switching Trumf to session_cookie and Rema 1000 to session_token updates metadata accurately
+    store.save_connection(
+        household_id=household_id,
+        provider_id="trumf",
+        auth_mode="session_cookie",
+        credentials={"session_cookie": "cookie=abc"},
+        actor_id="household-a",
+        account_id="household-a",
+    )
+    store.save_connection(
+        household_id=household_id,
+        provider_id="rema1000",
+        auth_mode="session_token",
+        credentials={"session_token": "rema-session-tok"},
+        actor_id="household-a",
+        account_id="household-a",
+    )
+
+    assert (
+        service._default_provider_metadata("trumf", account_id="household-a")[0] == "session_cookie"
+    )
+    assert (
+        service._default_provider_metadata("rema1000", account_id="household-a")[0]
+        == "session_token"
+    )
+
+    status_session = service.get_status(account_id="household-a")
+    assert status_session.providers["trumf"].auth_method == "session_cookie"
+    assert "manual" not in (status_session.providers["trumf"].limitations or "").lower()
+    assert status_session.providers["rema1000"].auth_method == "session_token"
+    assert "manual" not in (status_session.providers["rema1000"].limitations or "").lower()

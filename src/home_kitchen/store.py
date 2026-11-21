@@ -6,7 +6,6 @@ import builtins
 import json
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 from uuid import UUID
@@ -42,6 +41,9 @@ from sqlalchemy.engine import Connection, Engine, make_url
 
 if TYPE_CHECKING:
     from home_kitchen.catalogue.identity_service import IdentityRepository
+    from home_kitchen.planning.adapters.postgres import PostgresMealAgendaRepository
+    from home_kitchen.recipes.adapters.postgres import PostgresRecipeRepository
+    from home_kitchen.shopping_adapters import PostgresShoppingItemRepository
 
 from .context import history_context
 from .history import HistoryEntryCreate, HistoryRepository
@@ -216,163 +218,92 @@ class Store:
         is_current = expected_head is not None and current_heads == (expected_head,)
         return is_current, current_heads
 
-    def save(self, kind: str, entity: Recipe | Meal | RegularItem | ShoppingItem) -> None:
-        table = TABLES[kind]
-        values = entity_values(entity)
-        statement = insert(table).values(**values)
-        conflict = [table.c.id]
-        with self.connection() as connection:
-            if isinstance(entity, Recipe) and entity.photo_source is not None:
-                from .recipes.photo_storage import recipe_photos
+    def _recipes_repo(self) -> PostgresRecipeRepository:
+        from home_kitchen.recipes.adapters.postgres import PostgresRecipeRepository
 
-                # Serialize reference creation with discard/expiry by locking
-                # the photo row in this transaction before saving the recipe.
-                query = select(recipe_photos.c.id).where(
-                    recipe_photos.c.id == entity.photo_source.id
-                )
-                if self.photo_household_id is not None:
-                    query = query.where(recipe_photos.c.household_id == self.photo_household_id)
-                photo_id = connection.execute(query.with_for_update()).scalar_one_or_none()
-                if photo_id is None:
-                    raise ValueError("Photo source was not found")
-                connection.execute(
-                    recipe_photos.update()
-                    .where(
-                        recipe_photos.c.id == photo_id,
-                        recipe_photos.c.retained_at.is_(None),
-                    )
-                    .values(retained_at=datetime.now(UTC))
-                )
-            previous = None
-            if isinstance(entity, RegularItem):
-                previous = connection.execute(
-                    select(regulars.c.last_purchased).where(regulars.c.id == entity.id)
-                ).first()
-            if kind == "meal":
-                inserted = connection.execute(
-                    statement.on_conflict_do_nothing(index_elements=conflict).returning(table.c.id)
-                ).scalar_one_or_none()
-                if inserted is None:
-                    raise MealIDConflict("A meal with this ID already exists")
-            else:
-                connection.execute(
-                    statement.on_conflict_do_update(index_elements=conflict, set_=values)
-                )
-            purchased = (
-                isinstance(entity, RegularItem)
-                and entity.last_purchased is not None
-                and (previous is None or previous[0] != entity.last_purchased)
-            )
-            HistoryRepository(self.engine).record(
-                HistoryEntryCreate(
-                    channel=history_context.get().channel,
-                    kind="purchase"
-                    if purchased
-                    else "planning"
-                    if kind == "meal"
-                    else "domain_event",
-                    message=f"Purchased {entity.name}" if purchased else f"Saved {kind}",
-                    structured={
-                        "entity_type": kind,
-                        "entity_id": str(entity.id),
-                        "data": entity.model_dump(mode="json"),
-                    },
-                    recipe_id=entity.id
-                    if isinstance(entity, Recipe)
-                    else entity.recipe_id
-                    if isinstance(entity, Meal)
-                    else None,
-                ),
-                connection=connection,
-            )
+        return PostgresRecipeRepository(
+            self.engine,
+            photo_household_id_provider=lambda: self.photo_household_id,
+            connection_provider=self.connection,
+        )
+
+    def _meals_repo(self) -> PostgresMealAgendaRepository:
+        from home_kitchen.planning.adapters.postgres import PostgresMealAgendaRepository
+
+        return PostgresMealAgendaRepository(self.engine)
+
+    def _shopping_repo(self) -> PostgresShoppingItemRepository:
+        from home_kitchen.shopping_adapters import PostgresShoppingItemRepository
+
+        return PostgresShoppingItemRepository(self.engine)
+
+    def save(self, kind: str, entity: Recipe | Meal | RegularItem | ShoppingItem) -> None:
+        if isinstance(entity, Recipe):
+            self._recipes_repo().save(entity)
+        elif isinstance(entity, Meal):
+            self._meals_repo().save_meal(entity)
+        elif isinstance(entity, ShoppingItem):
+            self._shopping_repo().save_item(entity)
+        elif isinstance(entity, RegularItem):
+            self._shopping_repo().save_regular(entity)
+        else:
+            raise KeyError(kind)
 
     def update_meal(self, entity: Meal) -> None:
-        values = entity_values(entity)
-        values.pop("id")
-        with self.connection() as connection:
-            result = connection.execute(
-                update(meals).where(meals.c.id == entity.id).values(**values)
-            )
-            if result.rowcount == 0:
-                raise KeyError(str(entity.id))
-            HistoryRepository(self.engine).record(
-                HistoryEntryCreate(
-                    channel=history_context.get().channel,
-                    kind="planning",
-                    message="Updated planned meal",
-                    recipe_id=entity.recipe_id,
-                    structured={
-                        "entity_type": "meal",
-                        "entity_id": str(entity.id),
-                        "data": entity.model_dump(mode="json"),
-                    },
-                ),
-                connection=connection,
-            )
+        self._meals_repo().update_meal(entity)
 
     def get(self, kind: str, entity_id: UUID, model: type[Model]) -> Model:
-        table = TABLES[kind]
-        with self.connection() as connection:
-            row = (
-                connection.execute(select(table).where(table.c.id == entity_id)).mappings().first()
-            )
-        if row is None:
-            raise KeyError(str(entity_id))
-        return model.model_validate(dict(row))
+        if kind == "recipe":
+            result: BaseModel = self._recipes_repo().get(entity_id)
+        elif kind == "meal":
+            result = self._meals_repo().get_meal(entity_id)
+        elif kind == "item":
+            result = self._shopping_repo().get_item(entity_id)
+        elif kind == "regular":
+            result = self._shopping_repo().get_regular(entity_id)
+        else:
+            raise KeyError(kind)
+        if isinstance(result, model):
+            return result
+        return model.model_validate(result.model_dump())
 
     def list(self, kind: str, model: type[Model]) -> builtins.list[Model]:
-        with self.connection() as connection:
-            rows = (
-                connection.execute(select(TABLES[kind]).order_by(TABLES[kind].c.position))
-                .mappings()
-                .all()
-            )
-        return [model.model_validate(dict(row)) for row in rows]
+        if kind == "recipe":
+            rows: Sequence[BaseModel] = self._recipes_repo().list_all()
+        elif kind == "meal":
+            rows = self._meals_repo().list_meals()
+        elif kind == "item":
+            rows = self._shopping_repo().list_items()
+        elif kind == "regular":
+            rows = self._shopping_repo().list_regulars()
+        else:
+            raise KeyError(kind)
+        return [
+            item if isinstance(item, model) else model.model_validate(item.model_dump())
+            for item in rows
+        ]
 
     def delete(self, kind: str, entity_id: UUID) -> None:
-        table = TABLES[kind]
-        with self.connection() as connection:
-            result = connection.execute(table.delete().where(table.c.id == entity_id))
-            if result.rowcount == 0:
-                raise KeyError(str(entity_id))
+        if kind == "recipe":
+            self._recipes_repo().delete(entity_id)
+        elif kind == "meal":
+            self._meals_repo().delete_meal(entity_id)
+        elif kind == "item":
+            self._shopping_repo().delete_item(entity_id)
+        elif kind == "regular":
+            with self.connection() as connection:
+                result = connection.execute(regulars.delete().where(regulars.c.id == entity_id))
+                if result.rowcount == 0:
+                    raise KeyError(str(entity_id))
+        else:
+            raise KeyError(kind)
 
     def active_confirmations(self) -> set[UUID]:
-        with self.connection() as connection:
-            return set(
-                connection.execute(
-                    select(confirmations.c.regular_id)
-                    .join(items)
-                    .where(items.c.completed.is_(False))
-                ).scalars()
-            )
+        return self._shopping_repo().active_confirmations()
 
     def confirm(self, regular_id: UUID, item: ShoppingItem) -> ShoppingItem:
         """Lock the regular record so concurrent requests reuse its active capture."""
-        with self.connection() as connection:
-            regular = connection.execute(
-                select(regulars.c.id).where(regulars.c.id == regular_id).with_for_update()
-            ).first()
-            if regular is None:
-                raise KeyError(str(regular_id))
-            row = (
-                connection.execute(
-                    select(items)
-                    .join(confirmations)
-                    .where(confirmations.c.regular_id == regular_id)
-                )
-                .mappings()
-                .first()
-            )
-            if row is not None and not row["completed"]:
-                return ShoppingItem.model_validate(dict(row))
-            connection.execute(insert(items).values(**entity_values(item)))
-            statement = insert(confirmations).values(regular_id=regular_id, item_id=item.id)
-            connection.execute(
-                statement.on_conflict_do_update(
-                    index_elements=[confirmations.c.regular_id], set_={"item_id": item.id}
-                )
-            )
-        return item
+        return self._shopping_repo().confirm_regular(regular_id, item)
 
     def get_setting(self, key: str) -> str | None:
         with self.connection() as connection:
@@ -402,244 +333,23 @@ class Store:
             )
 
     def save_recipe_translation(self, translation: RecipeTranslation) -> None:
-        values = translation.model_dump()
-        values["ingredients"] = [ing.model_dump(mode="json") for ing in translation.ingredients]
-        values.pop("is_stale", None)
-        statement = insert(recipe_translations).values(**values)
-        conflict = [
-            recipe_translations.c.recipe_id,
-            recipe_translations.c.target_locale,
-            recipe_translations.c.recipe_version,
-        ]
-        update_set = {
-            "title": values["title"],
-            "instructions": values["instructions"],
-            "ingredients": values["ingredients"],
-            "provider": values["provider"],
-            "model": values["model"],
-            "created_at": values["created_at"],
-        }
-        with self.connection() as connection:
-            connection.execute(
-                statement.on_conflict_do_update(index_elements=conflict, set_=update_set)
-            )
-            HistoryRepository(self.engine).record(
-                HistoryEntryCreate(
-                    channel=history_context.get().channel,
-                    kind="domain_event",
-                    message=f"Saved {translation.target_locale} translation for recipe",
-                    recipe_id=translation.recipe_id,
-                    structured={
-                        "entity_type": "recipe_translation",
-                        "entity_id": str(translation.id),
-                        "target_locale": translation.target_locale,
-                        "recipe_version": translation.recipe_version,
-                        "provider": translation.provider,
-                        "model": translation.model,
-                    },
-                ),
-                connection=connection,
-            )
+        self._recipes_repo().save_translation(translation)
 
     def get_recipe_translation(
         self, recipe_id: UUID, target_locale: str, recipe_version: str | None = None
     ) -> RecipeTranslation | None:
-        query = select(recipe_translations).where(
-            recipe_translations.c.recipe_id == recipe_id,
-            recipe_translations.c.target_locale == target_locale,
-        )
-        if recipe_version is not None:
-            query = query.where(recipe_translations.c.recipe_version == recipe_version)
-        query = query.order_by(recipe_translations.c.created_at.desc())
-        with self.connection() as connection:
-            row = connection.execute(query).mappings().first()
-        if row is None:
-            return None
-        return RecipeTranslation.model_validate(dict(row))
+        return self._recipes_repo().get_translation(recipe_id, target_locale, recipe_version)
 
     def list_recipe_translations(self, recipe_id: UUID) -> builtins.list[RecipeTranslation]:
-        query = (
-            select(recipe_translations)
-            .where(recipe_translations.c.recipe_id == recipe_id)
-            .order_by(recipe_translations.c.created_at.desc())
-        )
-        with self.connection() as connection:
-            rows = connection.execute(query).mappings().all()
-        return [RecipeTranslation.model_validate(dict(row)) for row in rows]
+        return self._recipes_repo().list_translations(recipe_id)
 
     def get_recipe_activity_stats(self, recipe_id: UUID) -> RecipeActivityStats:
-        stats = self.get_recipes_activity_stats([recipe_id])
-        return stats.get(recipe_id, RecipeActivityStats())
+        return self._recipes_repo().get_recipe_activity_stats(recipe_id)
 
     def get_recipes_activity_stats(
         self, recipe_ids: builtins.list[UUID] | None = None
     ) -> dict[UUID, RecipeActivityStats]:
-        target_id_filter = set(recipe_ids) if recipe_ids is not None else None
-        unique_ids = list(dict.fromkeys(recipe_ids)) if recipe_ids is not None else None
-        with self.connection() as connection:
-            planned_counts: dict[UUID, int] = {}
-            if unique_ids is not None:
-                if unique_ids:
-                    meal_rows = (
-                        connection.execute(
-                            text(
-                                "SELECT recipe_id, count(*) AS count "
-                                "FROM meals "
-                                "WHERE recipe_id = ANY(:ids) "
-                                "GROUP BY recipe_id"
-                            ),
-                            {"ids": unique_ids},
-                        )
-                        .mappings()
-                        .all()
-                    )
-                else:
-                    meal_rows = []
-            else:
-                meal_rows = (
-                    connection.execute(
-                        text("SELECT recipe_id, count(*) AS count FROM meals GROUP BY recipe_id")
-                    )
-                    .mappings()
-                    .all()
-                )
-
-            for row in meal_rows:
-                r_id = row["recipe_id"]
-                if isinstance(r_id, str):
-                    r_id = UUID(r_id)
-                planned_counts[r_id] = int(row["count"])
-
-            if unique_ids is not None:
-                if unique_ids:
-                    id_strs = [str(i) for i in unique_ids]
-                    history_rows = (
-                        connection.execute(
-                            text(
-                                "SELECT id, occurred_at, kind, recipe_id, structured "
-                                "FROM kitchen_history "
-                                "WHERE recipe_id = ANY(:ids) OR structured->>'recipe_id' = ANY(:id_strs) "
-                                "ORDER BY occurred_at DESC, id DESC"
-                            ),
-                            {"ids": unique_ids, "id_strs": id_strs},
-                        )
-                        .mappings()
-                        .all()
-                    )
-                else:
-                    history_rows = []
-            else:
-                history_rows = (
-                    connection.execute(
-                        text(
-                            "SELECT id, occurred_at, kind, recipe_id, structured "
-                            "FROM kitchen_history "
-                            "WHERE recipe_id IS NOT NULL OR structured->>'recipe_id' IS NOT NULL "
-                            "ORDER BY occurred_at DESC, id DESC"
-                        )
-                    )
-                    .mappings()
-                    .all()
-                )
-
-            cooked_counts: dict[UUID, int] = {}
-            ordered_counts: dict[UUID, int] = {}
-            feedback_counts: dict[UUID, int] = {}
-            ratings_by_recipe: dict[UUID, list[int]] = {}
-            latest_rating_by_recipe: dict[UUID, int] = {}
-            would_make_by_recipe: dict[UUID, bool] = {}
-
-            for row in history_rows:
-                r_id = row["recipe_id"]
-                structured = row["structured"] or {}
-                if isinstance(structured, str):
-                    try:
-                        structured = json.loads(structured)
-                    except Exception:
-                        structured = {}
-                if r_id is None and "recipe_id" in structured:
-                    try:
-                        r_id = UUID(str(structured["recipe_id"]))
-                    except (ValueError, TypeError):
-                        r_id = None
-                if r_id is None:
-                    continue
-                if isinstance(r_id, str):
-                    r_id = UUID(r_id)
-                if target_id_filter is not None and r_id not in target_id_filter:
-                    continue
-
-                kind = str(row["kind"])
-                action = str(structured.get("action") or "").lower()
-                event = str(structured.get("event") or "").lower()
-
-                # Confirmed cooking check (never infer from planning or unconfirmed meals)
-                is_cooking = kind != "planning" and (
-                    kind in ("cooked", "cooking")
-                    or action in ("recipe_cooked", "cooked", "meal_cooked", "cooking_completed")
-                    or event in ("recipe_cooked", "cooked", "meal_cooked", "cooking_completed")
-                    or (kind == "domain_event" and ("cook" in action or "cook" in event))
-                )
-                if is_cooking:
-                    cooked_counts[r_id] = cooked_counts.get(r_id, 0) + 1
-
-                # Order/purchase check traced to this recipe
-                is_ordered = (
-                    kind == "purchase"
-                    or action
-                    in (
-                        "recipe_ordered",
-                        "order_placed",
-                        "provider_order",
-                        "order_matched",
-                        "oda_order_matched",
-                    )
-                    or event in ("order", "order_placed", "recipe_ordered", "oda_order")
-                    or (kind == "domain_event" and ("order" in action or "order" in event))
-                )
-                if is_ordered:
-                    ordered_counts[r_id] = ordered_counts.get(r_id, 0) + 1
-
-                # Feedback check
-                if kind == "recipe_rating":
-                    feedback_counts[r_id] = feedback_counts.get(r_id, 0) + 1
-                    rating = structured.get("rating")
-                    if (
-                        isinstance(rating, int)
-                        and not isinstance(rating, bool)
-                        and 1 <= rating <= 5
-                    ):
-                        ratings_by_recipe.setdefault(r_id, []).append(rating)
-                        if r_id not in latest_rating_by_recipe:
-                            latest_rating_by_recipe[r_id] = rating
-                    would_make = structured.get("would_make_again")
-                    if isinstance(would_make, bool):
-                        if r_id not in would_make_by_recipe:
-                            would_make_by_recipe[r_id] = would_make
-
-            if target_id_filter is not None:
-                target_ids = target_id_filter
-            else:
-                target_ids = {r[0] for r in connection.execute(select(recipes.c.id)).all()}
-                target_ids.update(planned_counts.keys())
-                target_ids.update(cooked_counts.keys())
-                target_ids.update(ordered_counts.keys())
-                target_ids.update(feedback_counts.keys())
-
-            result: dict[UUID, RecipeActivityStats] = {}
-            for target_id in target_ids:
-                ratings = ratings_by_recipe.get(target_id, [])
-                avg_rating = round(sum(ratings) / len(ratings), 2) if ratings else None
-                result[target_id] = RecipeActivityStats(
-                    times_planned=planned_counts.get(target_id, 0),
-                    times_cooked=cooked_counts.get(target_id, 0),
-                    times_ordered=ordered_counts.get(target_id, 0),
-                    latest_rating=latest_rating_by_recipe.get(target_id),
-                    average_rating=avg_rating,
-                    would_make_again=would_make_by_recipe.get(target_id),
-                    feedback_count=feedback_counts.get(target_id, 0),
-                )
-            return result
+        return self._recipes_repo().get_recipes_activity_stats(recipe_ids)
 
     def get_recipe(self, recipe_id: UUID) -> Recipe:
         return self.get("recipe", recipe_id, Recipe)

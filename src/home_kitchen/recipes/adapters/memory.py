@@ -8,7 +8,12 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from home_kitchen.models import Recipe, RecipeImageAttribution
+from home_kitchen.models import (
+    Recipe,
+    RecipeActivityStats,
+    RecipeImageAttribution,
+    RecipeTranslation,
+)
 from home_kitchen.recipes.ports import CollectionSession, GenerationLockableProvider
 
 
@@ -182,3 +187,96 @@ class MemoryRecipeImageRepository:
             }
         )
         return updated.model_copy(deep=True)
+
+
+class MemoryRecipeRepository:
+    """In-memory repository implementing recipe CRUD, translations, meal refs, stats, and locale."""
+
+    def __init__(
+        self,
+        initial_recipes: list[Recipe] | None = None,
+        *,
+        household_locale: str = "nb",
+        planned_recipe_ids: set[UUID] | None = None,
+    ) -> None:
+        self.recipes: dict[UUID, Recipe] = {
+            recipe.id: recipe.model_copy(deep=True) for recipe in (initial_recipes or [])
+        }
+        self.translations: dict[tuple[UUID, str, str], RecipeTranslation] = {}
+        self.stats: dict[UUID, RecipeActivityStats] = {}
+        self.planned_recipe_ids: set[UUID] = set(planned_recipe_ids or ())
+        self.household_locale = household_locale
+        self.history_entries: list[dict[str, Any]] = []
+
+    def save(self, recipe: Recipe) -> None:
+        self.recipes[recipe.id] = recipe.model_copy(deep=True)
+        self.history_entries.append(
+            {"kind": "domain_event", "entity_type": "recipe", "recipe_id": recipe.id}
+        )
+
+    def get(self, recipe_id: UUID) -> Recipe:
+        if recipe_id not in self.recipes:
+            raise KeyError(str(recipe_id))
+        return self.recipes[recipe_id].model_copy(deep=True)
+
+    def list_all(self) -> list[Recipe]:
+        return [recipe.model_copy(deep=True) for recipe in self.recipes.values()]
+
+    def delete(self, recipe_id: UUID) -> None:
+        if recipe_id not in self.recipes:
+            raise KeyError(str(recipe_id))
+        del self.recipes[recipe_id]
+
+    def has_meals_for_recipe(self, recipe_id: UUID) -> bool:
+        return recipe_id in self.planned_recipe_ids
+
+    def save_translation(self, translation: RecipeTranslation) -> None:
+        key = (translation.recipe_id, translation.target_locale, translation.recipe_version)
+        self.translations[key] = translation.model_copy(deep=True)
+        self.history_entries.append(
+            {
+                "kind": "domain_event",
+                "entity_type": "recipe_translation",
+                "recipe_id": translation.recipe_id,
+                "target_locale": translation.target_locale,
+            }
+        )
+
+    def get_translation(
+        self, recipe_id: UUID, target_locale: str, recipe_version: str | None = None
+    ) -> RecipeTranslation | None:
+        matches = [
+            tr
+            for (rid, loc, ver), tr in self.translations.items()
+            if rid == recipe_id
+            and loc == target_locale
+            and (recipe_version is None or ver == recipe_version)
+        ]
+        if not matches:
+            return None
+        matches.sort(key=lambda tr: tr.created_at, reverse=True)
+        return matches[0].model_copy(deep=True)
+
+    def list_translations(self, recipe_id: UUID) -> list[RecipeTranslation]:
+        matches = [
+            tr.model_copy(deep=True)
+            for (rid, _, _), tr in self.translations.items()
+            if rid == recipe_id
+        ]
+        matches.sort(key=lambda tr: tr.created_at, reverse=True)
+        return matches
+
+    def get_recipe_activity_stats(self, recipe_id: UUID) -> RecipeActivityStats:
+        return self.stats.get(recipe_id, RecipeActivityStats()).model_copy(deep=True)
+
+    def get_recipes_activity_stats(
+        self, recipe_ids: list[UUID] | None = None
+    ) -> dict[UUID, RecipeActivityStats]:
+        target_ids = recipe_ids if recipe_ids is not None else list(self.recipes.keys())
+        return {
+            rid: self.stats.get(rid, RecipeActivityStats()).model_copy(deep=True)
+            for rid in target_ids
+        }
+
+    def get_household_locale(self) -> str:
+        return self.household_locale

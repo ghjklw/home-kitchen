@@ -1,6 +1,6 @@
 """Explicit, structured recipe feedback saved to household history."""
 
-from typing import Annotated
+from typing import Annotated, Any, Protocol
 from uuid import UUID
 
 from pydantic import (
@@ -13,8 +13,27 @@ from pydantic import (
     model_validator,
 )
 
-from home_kitchen.history import HistoryChannel, HistoryEntry, HistoryEntryCreate, HistoryRepository
-from home_kitchen.service import KitchenService
+from home_kitchen.context import HistoryChannel
+from home_kitchen.history import HistoryEntry, HistoryEntryCreate
+from home_kitchen.models import Recipe
+
+
+class RecipeTitleReader(Protocol):
+    """Narrow port for verifying recipe existence and title when recording feedback."""
+
+    def get_recipe(self, recipe_id: UUID) -> Recipe: ...
+
+
+class HistoryRecordPort(Protocol):
+    """Narrow port for recording recipe feedback entries."""
+
+    def record(
+        self,
+        data: HistoryEntryCreate,
+        actor_id: str | None = None,
+        connection: Any = None,
+    ) -> HistoryEntry: ...
+
 
 FeedbackNotes = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)
@@ -38,7 +57,7 @@ class RecipeFeedbackCreate(BaseModel):
 
 
 class RecipeFeedbackService:
-    def __init__(self, kitchen: KitchenService, history: HistoryRepository):
+    def __init__(self, kitchen: RecipeTitleReader, history: HistoryRecordPort):
         self.kitchen = kitchen
         self.history = history
 

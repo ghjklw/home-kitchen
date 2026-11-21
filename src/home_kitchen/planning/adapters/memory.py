@@ -7,18 +7,18 @@ from contextlib import contextmanager
 from typing import Any
 from uuid import UUID
 
-from home_kitchen.history import HistoryChannel
+from home_kitchen.context import HistoryChannel
 from home_kitchen.models import Meal, Recipe
 from home_kitchen.planning.domain.exceptions import (
     ProposalActorMismatch,
     ProposalNotFound,
 )
 from home_kitchen.planning.domain.models import ProposalRead, ProposalRecord, ProposalStatus
-from home_kitchen.planning.ports.readers import RecipeReader
+from home_kitchen.planning.ports.readers import RecipeReader, SingleRecipeReader
 from home_kitchen.planning.ports.recorders import HistoryRecorder
 from home_kitchen.planning.ports.repository import ProposalRepository
 from home_kitchen.planning.ports.unit_of_work import PlanningSession, PlanningUnitOfWork
-from home_kitchen.planning.ports.writers import MealWriter
+from home_kitchen.planning.ports.writers import MealAgendaRepository, MealWriter
 
 
 class InMemoryProposalRepository(ProposalRepository):
@@ -187,3 +187,71 @@ class MemoryPlanningUnitOfWork(PlanningUnitOfWork):
     @contextmanager
     def session(self) -> Generator[InMemoryPlanningSession]:
         yield InMemoryPlanningSession(self)
+
+
+class MemorySingleRecipeReader(SingleRecipeReader):
+    """In-memory single-recipe reader for testing MealAgendaService without a DB."""
+
+    def __init__(self, recipes: dict[UUID, Recipe] | None = None) -> None:
+        self.recipes = recipes if recipes is not None else {}
+
+    def get_recipe(self, recipe_id: UUID) -> Recipe:
+        if recipe_id not in self.recipes:
+            raise KeyError(str(recipe_id))
+        return self.recipes[recipe_id].model_copy(deep=True)
+
+
+class MemoryMealAgendaRepository(MealAgendaRepository):
+    """In-memory meal-agenda repository preserving insertion order and history semantics."""
+
+    def __init__(
+        self,
+        meals: dict[UUID, Meal] | None = None,
+        history_entries: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.meals = meals if meals is not None else {}
+        self.history_entries = history_entries if history_entries is not None else []
+
+    def save_meal(self, meal: Meal) -> None:
+        if meal.id in self.meals:
+            raise ValueError("A meal with this ID already exists")
+        self.meals[meal.id] = meal.model_copy(deep=True)
+        self.history_entries.append(
+            {
+                "kind": "planning",
+                "message": "Saved meal",
+                "recipe_id": meal.recipe_id,
+                "entity_type": "meal",
+                "entity_id": str(meal.id),
+            }
+        )
+
+    def get_meal(self, meal_id: UUID) -> Meal:
+        if meal_id not in self.meals:
+            raise KeyError(str(meal_id))
+        return self.meals[meal_id].model_copy(deep=True)
+
+    def update_meal(self, meal: Meal) -> None:
+        if meal.id not in self.meals:
+            raise KeyError(str(meal.id))
+        self.meals[meal.id] = meal.model_copy(deep=True)
+        self.history_entries.append(
+            {
+                "kind": "planning",
+                "message": "Updated planned meal",
+                "recipe_id": meal.recipe_id,
+                "entity_type": "meal",
+                "entity_id": str(meal.id),
+            }
+        )
+
+    def list_meals(self) -> list[Meal]:
+        return [meal.model_copy(deep=True) for meal in self.meals.values()]
+
+    def delete_meal(self, meal_id: UUID) -> None:
+        if meal_id not in self.meals:
+            raise KeyError(str(meal_id))
+        del self.meals[meal_id]
+
+    def has_meals_for_recipe(self, recipe_id: UUID) -> bool:
+        return any(meal.recipe_id == recipe_id for meal in self.meals.values())

@@ -13,9 +13,8 @@ from pydantic import AwareDatetime, BaseModel, Field, JsonValue, StringConstrain
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 
-from home_kitchen.context import history_context
+from home_kitchen.context import HistoryChannel, history_context
 
-HistoryChannel = Literal["app", "api", "mcp"]
 HistoryKind = Literal[
     "chat", "feedback", "preference", "purchase", "recipe_rating", "planning", "domain_event"
 ]

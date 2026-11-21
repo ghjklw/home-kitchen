@@ -11,7 +11,9 @@ from home_kitchen.models import (
     GuidedCookingStep,
     PrepCategory,
     Recipe,
+    RecipeActivityStats,
     RecipeImageAttribution,
+    RecipeTranslation,
     RecipeType,
 )
 
@@ -169,3 +171,76 @@ class RecipeImageRepository(Protocol):
         license_name: str,
         license_url: str,
     ) -> Recipe: ...
+
+
+class RecipeRepository(Protocol):
+    """Port for core recipe CRUD persistence."""
+
+    def save(self, recipe: Recipe) -> None: ...
+
+    def get(self, recipe_id: UUID) -> Recipe: ...
+
+    def list_all(self) -> list[Recipe]: ...
+
+    def delete(self, recipe_id: UUID) -> None: ...
+
+
+class RecipeStatsReader(Protocol):
+    """Port for reading derived recipe activity statistics."""
+
+    def get_recipe_activity_stats(self, recipe_id: UUID) -> RecipeActivityStats: ...
+
+    def get_recipes_activity_stats(
+        self, recipe_ids: list[UUID] | None = None
+    ) -> dict[UUID, RecipeActivityStats]: ...
+
+
+class RecipeTranslationRepository(Protocol):
+    """Port for persisting and querying versioned recipe translations."""
+
+    def save_translation(self, translation: RecipeTranslation) -> None: ...
+
+    def get_translation(
+        self, recipe_id: UUID, target_locale: str, recipe_version: str | None = None
+    ) -> RecipeTranslation | None: ...
+
+    def list_translations(self, recipe_id: UUID) -> list[RecipeTranslation]: ...
+
+
+class RecipeMealReferenceChecker(Protocol):
+    """Port for checking whether any planned meals still reference a recipe."""
+
+    def has_meals_for_recipe(self, recipe_id: UUID) -> bool: ...
+
+
+class HouseholdLocalePort(Protocol):
+    """Port for resolving the household's preferred default language code."""
+
+    def get_household_locale(self) -> str: ...
+
+
+class RecipeIdentityPort(Protocol):
+    """Port for resolving and validating canonical product/unit identities on recipes."""
+
+    def resolve(
+        self,
+        kind: str,
+        locale: str,
+        context: str,
+        alias: str,
+        *,
+        household_id: UUID | None = None,
+    ) -> Any: ...
+
+    def validate_identities(self, kind: str, ids: set[UUID]) -> None: ...
+
+
+class RecipeAutoMapperPort(Protocol):
+    """Port for optional AI auto-mapping of unmapped recipe ingredients after save."""
+
+    def auto_map_recipe(
+        self,
+        recipe_id: UUID,
+        *,
+        excluded_fields: dict[tuple[UUID, int], set[str]] | None = None,
+    ) -> int: ...

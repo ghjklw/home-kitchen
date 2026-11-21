@@ -1,14 +1,19 @@
 """Meal planning proposal vertical slice adhering to layered architecture boundaries."""
 
 from home_kitchen.planning.adapters.postgres import (
+    PostgresMealAgendaRepository,
     PostgresPlanningProposalAdapter,
     PostgresPlanningSession,
     PostgresPlanningUnitOfWork,
+    PostgresSingleRecipeReader,
     _proposals,
 )
+from home_kitchen.planning.application.agenda import MealAgendaService
 from home_kitchen.planning.application.service import PlanningProposalService
 from home_kitchen.planning.bootstrap import (
+    create_in_memory_meal_agenda_service,
     create_in_memory_planning_proposal_service,
+    create_meal_agenda_service,
     create_planning_proposal_service,
 )
 from home_kitchen.planning.domain.exceptions import (
@@ -28,10 +33,13 @@ from home_kitchen.planning.domain.rules import (
 )
 
 __all__ = [
+    "MealAgendaService",
     "PlanningProposalService",
+    "PostgresMealAgendaRepository",
     "PostgresPlanningProposalAdapter",
     "PostgresPlanningSession",
     "PostgresPlanningUnitOfWork",
+    "PostgresSingleRecipeReader",
     "ProposalActorMismatch",
     "ProposalConflict",
     "ProposalExpired",
@@ -41,7 +49,9 @@ __all__ = [
     "ProposalStatus",
     "_fingerprint",
     "_proposals",
+    "create_in_memory_meal_agenda_service",
     "create_in_memory_planning_proposal_service",
+    "create_meal_agenda_service",
     "create_planning_proposal_service",
     "fingerprint_meal",
     "fingerprint_recipe",

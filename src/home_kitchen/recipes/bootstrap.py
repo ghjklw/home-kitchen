@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
+from home_kitchen.catalogue.adapters import CatalogueRecipeAutoMapperAdapter
+from home_kitchen.catalogue.identity_repository import PostgresIdentityRepository
+from home_kitchen.catalogue.identity_service import CanonicalIdentityService
 from home_kitchen.imports import import_recipe
 from home_kitchen.models import Recipe
 from home_kitchen.recipes.adapters.discovery import (
@@ -14,12 +18,15 @@ from home_kitchen.recipes.adapters.discovery import (
 from home_kitchen.recipes.adapters.memory import (
     MemoryCollectionUnitOfWork,
     MemoryRecipeImageRepository,
+    MemoryRecipeRepository,
 )
 from home_kitchen.recipes.adapters.oda import OdaDiscoveryProvider
 from home_kitchen.recipes.adapters.postgres import (
     CataloguePostImportMapper,
     PostgresCollectionUnitOfWork,
+    PostgresHouseholdLocaleAdapter,
     PostgresRecipeImageRepository,
+    PostgresRecipeRepository,
 )
 from home_kitchen.recipes.adapters.wikimedia import WikimediaCommonsImageProvider
 from home_kitchen.recipes.collections import CollectionProvider, CollectionService
@@ -27,11 +34,20 @@ from home_kitchen.recipes.discovery import DiscoveryContext, RecipeDiscoveryRegi
 from home_kitchen.recipes.images import ImageSearchProvider, RecipeImageService
 from home_kitchen.recipes.ports import (
     HistoryRecordPort,
+    HouseholdLocalePort,
     OdaRecipeSearchClient,
     PostImportIngredientMapper,
+    RecipeAutoMapperPort,
     RecipeExtractor,
+    RecipeIdentityPort,
     RecipeIdentityResolver,
+    RecipeMealReferenceChecker,
+    RecipeRepository,
+    RecipeStatsReader,
+    RecipeTranslationRepository,
 )
+from home_kitchen.recipes.service import RecipeService
+from home_kitchen.recipes.translation import AIRecipeTranslator, RecipeTranslator
 
 if TYPE_CHECKING:
     from home_kitchen.service import KitchenService
@@ -142,3 +158,96 @@ def create_recipe_discovery_registry(
         ],
         context_provider=context_provider,
     )
+
+
+def create_recipe_service(
+    engine: Any,
+    history: HistoryRecordPort | None = None,
+    *,
+    identity_service: CanonicalIdentityService | None = None,
+    translator: RecipeTranslator | None = None,
+    settings: Any = None,
+    household_id: UUID | None = None,
+    photo_household_id_provider: Callable[[], UUID | None] | None = None,
+    recipes: RecipeRepository | None = None,
+    translations: RecipeTranslationRepository | None = None,
+    stats: RecipeStatsReader | None = None,
+    meal_checker: RecipeMealReferenceChecker | None = None,
+    locale_reader: HouseholdLocalePort | None = None,
+    auto_mapper: RecipeAutoMapperPort | None = None,
+) -> RecipeService:
+    """Bootstrap a production `RecipeService` backed by PostgreSQL/SQLAlchemy."""
+    from home_kitchen.history import HistoryRepository
+    from home_kitchen.store import resolve_recipe_mapping_repository
+
+    resolved_history: HistoryRecordPort = history or HistoryRepository(engine)
+    pg_repo = PostgresRecipeRepository(
+        engine,
+        resolved_history,
+        photo_household_id=household_id,
+        photo_household_id_provider=photo_household_id_provider,
+    )
+    resolved_identities: Any = identity_service or CanonicalIdentityService(
+        PostgresIdentityRepository(engine)
+    )
+    resolved_auto_mapper = auto_mapper or CatalogueRecipeAutoMapperAdapter(
+        resolve_recipe_mapping_repository(
+            pg_repo if hasattr(pg_repo, "engine") else type("_E", (), {"engine": engine})()
+        ),
+        settings_provider=lambda: settings,
+        household_id_provider=lambda: household_id,
+        identity_service=resolved_identities,
+    )
+
+    def _default_translator() -> RecipeTranslator | None:
+        if settings is not None and settings.ai_configured:
+            return AIRecipeTranslator(settings)
+        return None
+
+    return RecipeService(
+        recipes=recipes or pg_repo,
+        identities=resolved_identities,
+        translations=translations or pg_repo,
+        stats=stats or pg_repo,
+        meal_checker=meal_checker or pg_repo,
+        locale_reader=locale_reader or PostgresHouseholdLocaleAdapter(engine),
+        auto_mapper=resolved_auto_mapper,
+        translator=translator,
+        default_translator_factory=_default_translator,
+        household_id=household_id,
+    )
+
+
+def create_in_memory_recipe_service(
+    repository: MemoryRecipeRepository | None = None,
+    *,
+    identities: RecipeIdentityPort,
+    initial_recipes: list[Recipe] | None = None,
+    household_locale: str = "nb",
+    planned_recipe_ids: set[UUID] | None = None,
+    translator: RecipeTranslator | None = None,
+    auto_mapper: RecipeAutoMapperPort | None = None,
+    household_id: UUID | None = None,
+) -> tuple[RecipeService, MemoryRecipeRepository]:
+    """Bootstrap an in-memory `RecipeService` for unit tests without a database."""
+    repo = (
+        repository
+        if repository is not None
+        else MemoryRecipeRepository(
+            initial_recipes=initial_recipes,
+            household_locale=household_locale,
+            planned_recipe_ids=planned_recipe_ids,
+        )
+    )
+    service = RecipeService(
+        recipes=repo,
+        identities=identities,
+        translations=repo,
+        stats=repo,
+        meal_checker=repo,
+        locale_reader=repo,
+        auto_mapper=auto_mapper,
+        translator=translator,
+        household_id=household_id,
+    )
+    return service, repo

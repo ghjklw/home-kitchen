@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 from home_kitchen.context import history_context
-from home_kitchen.history import HistoryRepository
 from home_kitchen.models import Meal, MealCreate, MealEntry
 from home_kitchen.planning.domain.exceptions import (
     ProposalConflict,
@@ -22,7 +22,6 @@ from home_kitchen.planning.domain.rules import (
     validate_service_bounds,
 )
 from home_kitchen.planning.ports.unit_of_work import PlanningUnitOfWork
-from home_kitchen.service import KitchenService
 
 
 class PlanningProposalService:
@@ -30,8 +29,8 @@ class PlanningProposalService:
 
     def __init__(
         self,
-        uow_or_kitchen: PlanningUnitOfWork | KitchenService,
-        history: HistoryRepository | None = None,
+        uow_or_kitchen: PlanningUnitOfWork | Any,
+        history: Any = None,
         *,
         ttl_seconds: int = 900,
         max_meals: int = 90,
@@ -46,18 +45,17 @@ class PlanningProposalService:
         self.max_meals = max_meals
         self.max_range_days = max_range_days
 
-        if isinstance(uow_or_kitchen, KitchenService):
-            self.kitchen: KitchenService | None = uow_or_kitchen
-            from home_kitchen.planning.adapters.postgres import PostgresPlanningUnitOfWork
-
-            self.history = history or HistoryRepository(uow_or_kitchen.store.engine)
-            self._uow: PlanningUnitOfWork = PostgresPlanningUnitOfWork(
-                uow_or_kitchen.store, self.history
-            )
+        if callable(getattr(uow_or_kitchen, "session", None)):
+            self._uow: PlanningUnitOfWork = cast(PlanningUnitOfWork, uow_or_kitchen)
+            self.kitchen: Any = None
+            self.history: Any = history
         else:
-            self._uow = uow_or_kitchen
-            self.kitchen = None
-            self.history = history
+            from home_kitchen.planning.bootstrap import create_planning_uow_for_kitchen
+
+            self.kitchen = uow_or_kitchen
+            self._uow, self.history = create_planning_uow_for_kitchen(
+                cast(Any, uow_or_kitchen), history
+            )
 
     # Backward-compatible static helpers
     _actor = staticmethod(validate_actor)

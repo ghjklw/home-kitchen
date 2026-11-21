@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from typing import Annotated, Protocol
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from pydantic import BaseModel, Field, HttpUrl
 
@@ -13,6 +13,7 @@ from home_kitchen.models import (
     Recipe,
     RegularItem,
     ShoppingItem,
+    ShoppingItemCreate,
     ShoppingLine,
     ShoppingSourceQuantity,
     UnquantifiedNeed,
@@ -342,3 +343,115 @@ class PurchasePlanPort(Protocol):
     """Port for reading inventory-adjusted purchase plans for a period."""
 
     def plan(self, start: date, end: date) -> PurchasePlan: ...
+
+
+class ShoppingItemRepository(Protocol):
+    """Port for persistence of one-time capture items, regular items, and confirmations."""
+
+    def save_item(self, item: ShoppingItem) -> None: ...
+
+    def get_item(self, item_id: UUID) -> ShoppingItem: ...
+
+    def list_items(self) -> list[ShoppingItem]: ...
+
+    def delete_item(self, item_id: UUID) -> None: ...
+
+    def save_regular(self, item: RegularItem) -> None: ...
+
+    def get_regular(self, item_id: UUID) -> RegularItem: ...
+
+    def list_regulars(self) -> list[RegularItem]: ...
+
+    def active_confirmations(self) -> set[UUID]: ...
+
+    def confirm_regular(self, regular_id: UUID, item: ShoppingItem) -> ShoppingItem: ...
+
+
+class ShoppingMealReader(Protocol):
+    """Port for reading planned meals within a date window."""
+
+    def list_meals(self, start: date, end: date) -> list[Meal]: ...
+
+
+class ShoppingRecipeReader(Protocol):
+    """Port for listing recipes used by planned meals."""
+
+    def list_recipes(self) -> list[Recipe]: ...
+
+
+class ShoppingService:
+    """Application service for quick additions, regular items, confirmations, and shopping list."""
+
+    def __init__(
+        self,
+        items: ShoppingItemRepository,
+        meals: ShoppingMealReader,
+        recipes: ShoppingRecipeReader,
+        *,
+        shopping_builder: ShoppingBuilder | None = None,
+    ) -> None:
+        self.items = items
+        self.meals = meals
+        self.recipes = recipes
+        self.shopping_builder = shopping_builder or default_shopping_builder()
+
+    def add_item(self, data: ShoppingItemCreate) -> ShoppingItem:
+        item = ShoppingItem(id=uuid4(), **data.model_dump())
+        self.items.save_item(item)
+        return item
+
+    def delete_item(self, item_id: UUID) -> None:
+        self.items.delete_item(item_id)
+
+    def list_items(self) -> list[ShoppingItem]:
+        return self.items.list_items()
+
+    def complete_item(self, item_id: UUID, completed: bool) -> ShoppingItem:
+        item = self.items.get_item(item_id)
+        item.completed = completed
+        self.items.save_item(item)
+        return item
+
+    def add_regular_item(self, data: ShoppingItemCreate, interval_days: int = 7) -> RegularItem:
+        item = RegularItem(id=uuid4(), interval_days=interval_days, **data.model_dump())
+        self.items.save_regular(item)
+        return item
+
+    def list_regular_items(self) -> list[RegularItem]:
+        return self.items.list_regulars()
+
+    def record_purchase(self, item_id: UUID, purchased_on: date) -> RegularItem:
+        item = self.items.get_regular(item_id)
+        item.last_purchased = purchased_on
+        self.items.save_regular(item)
+        return item
+
+    def confirm_suggestion(self, item_id: UUID) -> ShoppingItem:
+        regular = self.items.get_regular(item_id)
+        item = ShoppingItem(
+            id=uuid4(), **regular.model_dump(include={"name", "quantity", "unit", "category"})
+        )
+        return self.items.confirm_regular(item_id, item)
+
+    def shopping_list(
+        self,
+        start: date,
+        end: date,
+        today: date,
+        *,
+        closed_sources: set[ClosedSourceKey] | None = None,
+    ) -> WeekShopping:
+        if end < start:
+            raise ValueError("end must be on or after start")
+        context = ShoppingContext(
+            meals=self.meals.list_meals(start, end),
+            recipes={recipe.id: recipe for recipe in self.recipes.list_recipes()},
+            captures=self.list_items(),
+            regulars=self.list_regular_items(),
+            active_confirmations=self.items.active_confirmations(),
+            today=today,
+            start=start,
+            end=end,
+            closed_sources=closed_sources or set(),
+        )
+        return self.shopping_builder.build(context)

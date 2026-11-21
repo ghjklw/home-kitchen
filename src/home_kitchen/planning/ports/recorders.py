@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 from uuid import UUID
 
-from home_kitchen.history import HistoryChannel
+from home_kitchen.context import HistoryChannel
 
 
 class HistoryRecorder(Protocol):

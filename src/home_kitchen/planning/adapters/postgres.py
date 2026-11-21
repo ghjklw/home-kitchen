@@ -7,23 +7,24 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from sqlalchemy import Column, DateTime, Integer, MetaData, Table, Text, Uuid, select, text
+from sqlalchemy import Column, DateTime, Integer, MetaData, Table, Text, Uuid, select, text, update
 from sqlalchemy.dialects.postgresql import JSONB, insert
-from sqlalchemy.engine import Connection
+from sqlalchemy.engine import Connection, Engine
 
-from home_kitchen.history import HistoryChannel, HistoryEntryCreate, HistoryRepository
+from home_kitchen.context import HistoryChannel, history_context
+from home_kitchen.history import HistoryEntryCreate, HistoryRepository
 from home_kitchen.models import Meal, Recipe
 from home_kitchen.planning.domain.exceptions import (
     ProposalActorMismatch,
     ProposalNotFound,
 )
 from home_kitchen.planning.domain.models import ProposalRead, ProposalRecord, ProposalStatus
-from home_kitchen.planning.ports.readers import RecipeReader
+from home_kitchen.planning.ports.readers import RecipeReader, SingleRecipeReader
 from home_kitchen.planning.ports.recorders import HistoryRecorder
 from home_kitchen.planning.ports.repository import ProposalRepository
 from home_kitchen.planning.ports.unit_of_work import PlanningSession, PlanningUnitOfWork
-from home_kitchen.planning.ports.writers import MealWriter
-from home_kitchen.store import Store, entity_values, meals, recipes
+from home_kitchen.planning.ports.writers import MealAgendaRepository, MealWriter
+from home_kitchen.store import MealIDConflict, Store, entity_values, meals, recipes
 
 if TYPE_CHECKING:
     pass
@@ -231,16 +232,119 @@ class PostgresPlanningSession(PlanningSession):
 
 
 class PostgresPlanningUnitOfWork(PlanningUnitOfWork):
-    """PostgreSQL Unit of Work creating connection sessions from the store engine."""
+    """PostgreSQL Unit of Work creating connection sessions from an Engine or Store."""
 
-    def __init__(self, store: Store, history: HistoryRepository):
-        self.store = store
+    def __init__(self, store_or_engine: Store | Engine, history: Any):
+        self.store_or_engine = store_or_engine
         self.history = history
 
     @contextmanager
     def session(self) -> Generator[PostgresPlanningSession]:
-        with self.store.connection() as connection:
-            yield PostgresPlanningSession(connection, self.history)
+        if isinstance(self.store_or_engine, Engine):
+            with self.store_or_engine.begin() as connection:
+                yield PostgresPlanningSession(connection, self.history)
+        else:
+            with self.store_or_engine.connection() as connection:
+                yield PostgresPlanningSession(connection, self.history)
+
+
+class PostgresSingleRecipeReader(SingleRecipeReader):
+    """PostgreSQL implementation of single-recipe lookup for meal planning."""
+
+    def __init__(self, engine: Engine) -> None:
+        self.engine = engine
+
+    def get_recipe(self, recipe_id: UUID) -> Recipe:
+        with self.engine.begin() as connection:
+            row = (
+                connection.execute(select(recipes).where(recipes.c.id == recipe_id))
+                .mappings()
+                .first()
+            )
+        if row is None:
+            raise KeyError(str(recipe_id))
+        return Recipe.model_validate(dict(row))
+
+
+class PostgresMealAgendaRepository(MealAgendaRepository):
+    """PostgreSQL adapter for planned meal-agenda CRUD and planning history."""
+
+    def __init__(self, engine: Engine, history: Any = None) -> None:
+        self.engine = engine
+        self.history = history if history is not None else HistoryRepository(engine)
+
+    def save_meal(self, meal: Meal) -> None:
+        values = entity_values(meal)
+        with self.engine.begin() as connection:
+            inserted = connection.execute(
+                insert(meals)
+                .values(**values)
+                .on_conflict_do_nothing(index_elements=[meals.c.id])
+                .returning(meals.c.id)
+            ).scalar_one_or_none()
+            if inserted is None:
+                raise MealIDConflict("A meal with this ID already exists")
+            self.history.record(
+                HistoryEntryCreate(
+                    channel=history_context.get().channel,
+                    kind="planning",
+                    message="Saved meal",
+                    structured={
+                        "entity_type": "meal",
+                        "entity_id": str(meal.id),
+                        "data": meal.model_dump(mode="json"),
+                    },
+                    recipe_id=meal.recipe_id,
+                ),
+                connection=connection,
+            )
+
+    def get_meal(self, meal_id: UUID) -> Meal:
+        with self.engine.begin() as connection:
+            row = connection.execute(select(meals).where(meals.c.id == meal_id)).mappings().first()
+        if row is None:
+            raise KeyError(str(meal_id))
+        return Meal.model_validate(dict(row))
+
+    def update_meal(self, meal: Meal) -> None:
+        values = entity_values(meal)
+        values.pop("id")
+        with self.engine.begin() as connection:
+            result = connection.execute(update(meals).where(meals.c.id == meal.id).values(**values))
+            if result.rowcount == 0:
+                raise KeyError(str(meal.id))
+            self.history.record(
+                HistoryEntryCreate(
+                    channel=history_context.get().channel,
+                    kind="planning",
+                    message="Updated planned meal",
+                    recipe_id=meal.recipe_id,
+                    structured={
+                        "entity_type": "meal",
+                        "entity_id": str(meal.id),
+                        "data": meal.model_dump(mode="json"),
+                    },
+                ),
+                connection=connection,
+            )
+
+    def list_meals(self) -> list[Meal]:
+        with self.engine.begin() as connection:
+            rows = connection.execute(select(meals).order_by(meals.c.position)).mappings().all()
+        return [Meal.model_validate(dict(row)) for row in rows]
+
+    def delete_meal(self, meal_id: UUID) -> None:
+        with self.engine.begin() as connection:
+            result = connection.execute(meals.delete().where(meals.c.id == meal_id))
+            if result.rowcount == 0:
+                raise KeyError(str(meal_id))
+
+    def has_meals_for_recipe(self, recipe_id: UUID) -> bool:
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                select(meals.c.id).where(meals.c.recipe_id == recipe_id).limit(1)
+            ).first()
+        return row is not None
 
 
 # Backward-compatibility alias

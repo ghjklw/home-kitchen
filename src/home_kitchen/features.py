@@ -23,7 +23,7 @@ from home_kitchen.catalogue.sku_repository import PostgresCatalogueSkuRepository
 from home_kitchen.catalogue.sku_service import CatalogueSkuService
 from home_kitchen.connector_auth import ConnectorAuthService
 from home_kitchen.connector_store import ConnectorStore, resolve_connector_cipher
-from home_kitchen.context import history_context
+from home_kitchen.context import PurchaseHistoryContext, history_context
 from home_kitchen.cookidoo_plan_sync import CookidooPlanSyncService
 from home_kitchen.cookidoo_recipes import CookidooCollectionProvider
 from home_kitchen.history import HistoryEntryCreate, HistoryRepository
@@ -259,6 +259,7 @@ class KitchenFeatures:
             connector_store=self.connector_store,
             household_id=self.household_id,
             adapter_factory=_build_purchase_adapter,
+            connector_auth=self.connector_auth,
         )
         self.purchase_sync.identity_service = kitchen.identities
         self.purchase_sync.mapping_store = kitchen.store
@@ -307,6 +308,15 @@ class KitchenFeatures:
             ),
         )
 
+    def purchase_history_context(self, *, limit: int = 25) -> PurchaseHistoryContext:
+        sync_svc = getattr(self, "purchase_sync", None)
+        if sync_svc is None or getattr(sync_svc, "engine", None) is None:
+            return PurchaseHistoryContext()
+        get_ctx = getattr(sync_svc, "get_bought_before_context", None)
+        if callable(get_ctx):
+            return get_ctx(limit=limit)
+        return PurchaseHistoryContext()
+
     def evidence(self, query: str) -> list[EvidenceSnippet]:
         # Explicit feedback/preferences and actual purchases remain relevant even
         # when their words do not appear in the current recipe request.
@@ -335,6 +345,34 @@ class KitchenFeatures:
             )
             for item in stock[:8]
         )
+        # Synced provider history provides "bought before" context only; never
+        # asserts current stock, cooked recipes, or explicit preference.
+        bought_ctx = self.purchase_history_context(limit=10)
+        for idx, bought in enumerate(bought_ctx.bought_before):
+            ref = bought.evidence_refs[0] if bought.evidence_refs else str(idx)
+            evidence.append(
+                EvidenceSnippet(
+                    evidence_id=f"purchase_history:{bought.provider}:{ref}:{idx}",
+                    text=json.dumps(
+                        {
+                            "kind": "bought_before",
+                            "provider": bought.provider,
+                            "product_name": bought.product_name,
+                            "canonical_product_id": bought.canonical_product_id,
+                            "purchase_count": bought.purchase_count,
+                            "last_purchased_at": bought.last_purchased_at.isoformat()
+                            if bought.last_purchased_at
+                            else None,
+                            "last_quantity": bought.last_quantity,
+                            "unit": bought.unit,
+                            "store_name": bought.store_name,
+                            "provenance": bought.provenance,
+                            "boundary": bought_ctx.boundary_note,
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            )
         return evidence
 
     async def draft_recipe(self, provider_id: str, data: RecipeDraftRequest) -> RecipeDraft:
@@ -359,6 +397,7 @@ class KitchenFeatures:
             raise ValueError("Save a recipe before requesting a meal plan")
         existing_meals = self.kitchen.list_meals(start, start + timedelta(days=days - 1))
         evidence = self.evidence("meal preferences feedback purchases")
+        purchase_ctx = self.purchase_history_context(limit=25)
         raw_corrections = self.catalogue_identities.list_correction_events(
             household_id=self.household_id,
             limit=20,
@@ -378,6 +417,7 @@ class KitchenFeatures:
             evidence_context="\n".join(item.model_dump_json() for item in evidence),
             existing_meals=existing_meals,
             identity_corrections=correction_citations,
+            purchase_history_context=purchase_ctx,
         )
         return result.model_copy(
             update={

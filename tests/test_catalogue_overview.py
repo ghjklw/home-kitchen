@@ -1376,3 +1376,108 @@ def test_postgres_repository_merge_preview_detects_variant_mismatch_and_preferen
     assert preview.source_variant == "skimmed"
     assert preview.preferences_to_move == 1
     assert preview.exclusions_to_move == 2
+
+
+def test_postgres_repository_excludes_cancelled_and_returned_provider_orders(
+    overview_sqlite_engine,
+):
+    hid = UUID("00000000-0000-0000-0000-000000000001")
+    prod_id = uuid4()
+    now = datetime(2026, 11, 20, 10, 0, tzinfo=UTC)
+
+    with overview_sqlite_engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO kitchen_canonical_products (id, canonical_name, variant) "
+                "VALUES (:pid, 'helmelk', '')"
+            ),
+            {"pid": prod_id},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO provider_order_sources "
+                "(id, provider, account_id, external_id, revision_id, payload, observed_at) "
+                "VALUES "
+                "(:id1, 'oda', 'malo', 'oda-canc', 'r1', :p1, :ts1), "
+                "(:id2, 'oda', 'malo', 'oda-canc', 'r2', :p2, :ts2), "
+                "(:id3, 'trumf', 'malo', 'trumf-refund', 'r1', :p3, :ts3), "
+                "(:id4, 'rema1000', 'malo', 'rema-partial', 'r1', :p4, :ts4)"
+            ),
+            {
+                "id1": uuid4(),
+                "p1": json.dumps(
+                    {
+                        "order": {
+                            "orderNumber": "oda-canc",
+                            "deliveryDate": "2026-11-10",
+                            "products": [
+                                {
+                                    "product": {"id": 9001, "name": "Helmelk 1L", "unitName": "l"},
+                                    "quantity": 2,
+                                }
+                            ],
+                        },
+                        "tracking": {"orderNumber": "oda-canc", "status": "delivered"},
+                    }
+                ),
+                "ts1": (now - timedelta(days=3)).isoformat(),
+                "id2": uuid4(),
+                "p2": json.dumps(
+                    {
+                        "order": {
+                            "orderNumber": "oda-canc",
+                            "deliveryDate": "2026-11-10",
+                            "products": [
+                                {
+                                    "product": {"id": 9001, "name": "Helmelk 1L", "unitName": "l"},
+                                    "quantity": 2,
+                                }
+                            ],
+                        },
+                        "tracking": {"orderNumber": "oda-canc", "status": "cancelled"},
+                    }
+                ),
+                "ts2": (now - timedelta(days=2)).isoformat(),
+                "id3": uuid4(),
+                "p3": json.dumps(
+                    {
+                        "batchId": "trumf-refund",
+                        "transaksjonsTidspunkt": (now - timedelta(days=2)).isoformat(),
+                        "belop": -30.0,
+                        "hasReceipt": True,
+                        "varelinjer": [
+                            {"produktBeskrivelse": "Helmelk 1L", "antall": 1, "belop": -30.0}
+                        ],
+                    }
+                ),
+                "ts3": (now - timedelta(days=2)).isoformat(),
+                "id4": uuid4(),
+                "p4": json.dumps(
+                    {
+                        "receiptId": "rema-partial",
+                        "storeName": "REMA 1000",
+                        "timestamp": (now - timedelta(days=1)).isoformat(),
+                        "hasReceipt": True,
+                        "totalAmount": 25.0,
+                        "lines": [
+                            {"name": "Helmelk 1L", "ean": "7038010000011", "quantity": 2, "amount": 50.0},
+                            {"name": "Helmelk 1L", "ean": "7038010000011", "quantity": -1, "amount": -25.0},
+                        ],
+                    }
+                ),
+                "ts4": (now - timedelta(days=1)).isoformat(),
+            },
+        )
+
+    repo = PostgresProductOverviewRepository(overview_sqlite_engine)
+    service = ProductOverviewService(repository=repo, household_id=hid)
+    overview = service.get_product_overview(prod_id)
+
+    # Cancelled Oda order and Trumf refund are excluded; only net 1 from Rema remains
+    assert len(overview.purchase_frequency.evidence_history) == 1
+    ev = overview.purchase_frequency.evidence_history[0]
+    assert ev.evidence_source == "rema1000"
+    assert ev.quantity == Decimal("1")
+    assert len(overview.previously_purchased_skus) == 1
+    assert overview.previously_purchased_skus[0].provider == "rema1000"
+    assert overview.previously_purchased_skus[0].purchase_count == 1

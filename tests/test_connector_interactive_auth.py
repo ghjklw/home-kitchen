@@ -1984,3 +1984,45 @@ def test_trumf_otp_verify_rejects_empty_cookie_instead_of_fabricating(sqlite_eng
     )
     assert verify_resp.status_code == 502
     assert store.get_credentials(household_id, "trumf") is None
+
+
+def test_refresh_expiring_connections_persists_last_error_when_refresh_material_missing(
+    sqlite_engine, cipher
+):
+    from fastapi import HTTPException
+
+    from home_kitchen.connector_auth import ConnectorAuthService
+    from home_kitchen.integrations import (
+        CoopIntegration,
+        IntegrationRegistry,
+        Rema1000Integration,
+        TrumfIntegration,
+    )
+
+    store = ConnectorStore(sqlite_engine, cipher)
+    household_id = uuid4()
+    store.save_connection(
+        household_id=household_id,
+        provider_id="coop",
+        auth_mode="oauth_pkce",
+        credentials={"access_token": "secret-coop-access"},
+        expires_at=datetime.now(UTC) - timedelta(minutes=5),
+        actor_id="malo",
+        account_id="acc-1",
+    )
+
+    registry = IntegrationRegistry(
+        [
+            Rema1000Integration(store, household_id),
+            CoopIntegration(store, household_id),
+            TrumfIntegration(store, household_id),
+        ]
+    )
+    auth = ConnectorAuthService(store=store, integrations=registry, household_id=household_id)
+    with pytest.raises(HTTPException) as exc_info:
+        auth.refresh_connection(household_id, "malo", "coop", account_id="acc-1")
+    assert exc_info.value.status_code == 400
+    meta = store.get_connection_metadata(household_id, "coop", account_id="acc-1")
+    assert meta is not None
+    assert "refresh_token" in str(meta.metadata.get("last_error"))
+    assert "secret-coop-access" not in str(meta.metadata.get("last_error"))

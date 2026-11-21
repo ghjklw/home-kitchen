@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 from base64 import b64decode, urlsafe_b64encode
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Literal, Protocol, runtime_checkable
 from uuid import UUID, uuid4
@@ -20,6 +21,17 @@ from home_kitchen.purchase_sync import ProviderOrderRecord, ProviderPage
 
 COOP_SCHEMA_SOURCE = "https://gist.github.com/HelgeSverre/80a7f34f874336324184a0c513c2e6a2"
 COOP_SCHEMA_VERSION = "4.17.3"
+DEFAULT_COOP_BASE_URL = "https://coopay.coop.no"
+DEFAULT_COOP_USER_AGENT = "Android(14)/Coop(4.42.0)/6926"
+_COOP_AUTH_ERROR_CODES = frozenset(
+    {
+        "INVALID_TOKEN",
+        "NO_REFRESH_TOKEN",
+        "REFRESH_ACCESS_TOKEN",
+        "UNAUTHORIZED",
+        "EXPIRED_TOKEN",
+    }
+)
 
 
 def _to_camel(value: str) -> str:
@@ -36,7 +48,7 @@ class CoopAuthenticationError(RuntimeError):
 
 
 class CoopReceiptLine(BaseModel):
-    model_config = ConfigDict(extra="forbid", alias_generator=_to_camel, populate_by_name=True)
+    model_config = ConfigDict(extra="ignore", alias_generator=_to_camel, populate_by_name=True)
 
     product_name: str | None = None
     ean13: str | None = None
@@ -52,7 +64,7 @@ class CoopReceiptLine(BaseModel):
 class CoopReceipt(BaseModel):
     """Typed detail receipt retaining provider IDs and nullable source fields."""
 
-    model_config = ConfigDict(extra="forbid", alias_generator=_to_camel, populate_by_name=True)
+    model_config = ConfigDict(extra="ignore", alias_generator=_to_camel, populate_by_name=True)
 
     summary_id: str | None = None
     receipt_id: str | None = None
@@ -72,7 +84,7 @@ class CoopReceipt(BaseModel):
 
 
 class CoopPurchaseStub(BaseModel):
-    model_config = ConfigDict(extra="forbid", alias_generator=_to_camel, populate_by_name=True)
+    model_config = ConfigDict(extra="ignore", alias_generator=_to_camel, populate_by_name=True)
 
     summary_id: str | None = None
     purchase_date: AwareDatetime | None = None
@@ -273,15 +285,37 @@ def _extract_coop_purchase_stubs(data: Any) -> list[CoopPurchaseStub]:
     return [CoopPurchaseStub.model_validate(item) for item in raw_list]
 
 
+def _check_coop_base_response(data: Any) -> None:
+    """Validate Coop TBaseResponse resultCode/errorCode body errors even on HTTP 200."""
+    if not isinstance(data, dict):
+        return
+    result_code = data.get("resultCode")
+    if not isinstance(result_code, str):
+        return
+    normalized_result = result_code.strip().upper()
+    if not normalized_result or normalized_result in ("OK", "SUCCESS"):
+        return
+    error_code = str(data.get("errorCode") or "").strip()
+    upper_code = error_code.upper()
+    if upper_code in _COOP_AUTH_ERROR_CODES or "TOKEN" in upper_code or "AUTH" in upper_code:
+        raise CoopAuthenticationError(
+            "Coop-sesjonen er utløpt eller ugyldig; forny eller koble til på nytt i Innstillinger."
+        )
+    detail = error_code or str(data.get("errorMessage") or "ukjent feil").strip()
+    raise UnsupportedCoopContract(f"Coop svarte med {normalized_result}: {detail}")
+
+
 class CoopHttpSource:
-    """Live HTTP source for Coop purchases and digital receipts (api.coop.no)."""
+    """Live HTTP source for Coop purchases and digital receipts (coopay.coop.no)."""
 
     def __init__(
         self,
         *,
         access_token: str | None = None,
         session_cookie: str | None = None,
-        base_url: str = "https://api.coop.no",
+        base_url: str = DEFAULT_COOP_BASE_URL,
+        user_agent: str = DEFAULT_COOP_USER_AGENT,
+        locale: str = "nb-NO",
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         clean_token = access_token.strip() if isinstance(access_token, str) else ""
@@ -291,12 +325,15 @@ class CoopHttpSource:
         self.access_token = clean_token or None
         self.session_cookie = clean_cookie or None
         self.base_url = base_url.rstrip("/")
+        self.user_agent = user_agent
+        self.locale = locale
         self.transport = transport
 
     def _client(self) -> httpx.Client:
         headers = {
             "Accept": "application/json",
-            "User-Agent": "HomeKitchen/1.0",
+            "User-Agent": self.user_agent,
+            "X-Locale": self.locale,
         }
         if self.access_token:
             headers["Authorization"] = f"Bearer {self.access_token}"
@@ -309,7 +346,20 @@ class CoopHttpSource:
             headers=headers,
         )
 
-    def _raise_for_response_status(self, resp: httpx.Response, *, allow_404: bool = False) -> None:
+    def _raise_for_response_status(
+        self,
+        resp: httpx.Response,
+        *,
+        allow_404: bool = False,
+        context: str = "Coop",
+    ) -> None:
+        if (
+            resp.status_code == 403
+            and resp.headers.get("x-client-upgrade", "").strip().lower() == "force"
+        ):
+            raise UnsupportedCoopContract(
+                f"{context} krevde app-oppgradering (HTTP 403 x-client-upgrade: force)"
+            )
         if resp.status_code in (401, 403):
             raise CoopAuthenticationError(
                 "Coop-sesjonen er utløpt eller ugyldig; forny eller koble til på nytt i Innstillinger."
@@ -317,33 +367,57 @@ class CoopHttpSource:
         if resp.status_code == 404 and allow_404:
             return
         if resp.status_code >= 400:
-            raise UnsupportedCoopContract(f"Coop svarte med HTTP {resp.status_code}")
+            raise UnsupportedCoopContract(f"{context} svarte med HTTP {resp.status_code}")
+
+    def _parse_purchases_response(self, resp: httpx.Response) -> list[CoopPurchaseStub]:
+        self._raise_for_response_status(resp)
+        payload = resp.json()
+        _check_coop_base_response(payload)
+        return _extract_coop_purchase_stubs(payload)
 
     def get_purchases(self, account_id: str) -> list[CoopPurchaseStub]:
+        now = datetime.now(UTC)
         with self._client() as client:
             resp = client.get(f"{self.base_url}/user/pay/history/list")
+            if resp.status_code == 400:
+                resp = client.get(
+                    f"{self.base_url}/user/pay/history/list",
+                    params={"numberOfPurchases": "50"},
+                )
+            elif resp.status_code < 400:
+                try:
+                    return self._parse_purchases_response(resp)
+                except UnsupportedCoopContract:
+                    resp = client.get(
+                        f"{self.base_url}/user/pay/history/list",
+                        params={"numberOfPurchases": "50"},
+                    )
+
             if resp.status_code == 404:
                 resp = client.get(
                     f"{self.base_url}/user/pay/history/search",
-                    params={"searchQuery": ""},
+                    params={"searchText": ""},
                 )
             if resp.status_code != 404:
-                self._raise_for_response_status(resp)
-                return _extract_coop_purchase_stubs(resp.json())
+                return self._parse_purchases_response(resp)
 
-            month_resp = client.get(f"{self.base_url}/user/pay/history/month")
+            month_resp = client.get(
+                f"{self.base_url}/user/pay/history/month",
+                params={"year": str(now.year), "month": str(now.month)},
+            )
             self._raise_for_response_status(month_resp, allow_404=True)
             month_stubs: list[CoopPurchaseStub] | None = None
             if month_resp.status_code < 400:
-                month_stubs = _extract_coop_purchase_stubs(month_resp.json())
+                month_payload = month_resp.json()
+                _check_coop_base_response(month_payload)
+                month_stubs = _extract_coop_purchase_stubs(month_payload)
                 if month_stubs:
                     return month_stubs
 
             dash_resp = client.get(f"{self.base_url}/user/pay/history/dashboard")
             if dash_resp.status_code == 404 and month_stubs is not None:
                 return month_stubs
-            self._raise_for_response_status(dash_resp)
-            return _extract_coop_purchase_stubs(dash_resp.json())
+            return self._parse_purchases_response(dash_resp)
 
     def get_receipt(self, account_id: str, summary_id: str) -> CoopReceipt | None:
         url = f"{self.base_url}/user/pay/history/details"
@@ -351,15 +425,12 @@ class CoopHttpSource:
             resp = client.get(url, params={"summaryId": summary_id})
         if resp.status_code == 404:
             return None
-        if resp.status_code in (401, 403):
-            raise CoopAuthenticationError(
-                "Coop-sesjonen er utløpt eller ugyldig; forny eller koble til på nytt i Innstillinger."
-            )
-        if resp.status_code >= 400:
-            raise UnsupportedCoopContract(
-                f"Coop kvittering {summary_id} svarte med HTTP {resp.status_code}"
-            )
-        return parse_receipt_detail(resp.json())
+        self._raise_for_response_status(resp, context=f"Coop kvittering {summary_id}")
+        payload = resp.json()
+        _check_coop_base_response(payload)
+        if isinstance(payload, dict) and isinstance(payload.get("summary"), dict):
+            return parse_receipt_detail({"summary": payload["summary"]})
+        return parse_receipt_detail(payload)
 
 
 class CoopPurchaseHistoryAdapter:

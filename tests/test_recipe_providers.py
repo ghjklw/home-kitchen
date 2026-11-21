@@ -74,9 +74,27 @@ async def test_web_provider_preserves_unparsed_ingredients(monkeypatch, context)
     fetch = AsyncMock(return_value=imported)
     monkeypatch.setattr("home_kitchen.recipes.providers.imports.import_recipe", fetch)
     result = await registry().draft("web", RecipeDraftRequest(url=imported.source_url), context)
-    assert result.imported == imported
+    assert result.imported == imported.model_copy(update={"source_language": "en"})
     assert result.recipe is None
     fetch.assert_awaited_once_with(str(imported.source_url))
+
+
+async def test_web_provider_detects_source_language_on_imported_draft(monkeypatch, context):
+    imported = ImportedDraft(
+        title="Gratin dauphinois traditionnel",
+        servings=4,
+        ingredients=["1 kg de pommes de terre", "40 cl de crème fraîche", "2 gousses d'ail"],
+        instructions=[
+            "Éplucher et couper les pommes de terre en fines rondelles.",
+            "Ajouter la crème et cuire au four pendant une heure.",
+        ],
+        source_url="https://www.marmiton.org/recettes/gratin-dauphinois/",
+    )
+    fetch = AsyncMock(return_value=imported)
+    monkeypatch.setattr("home_kitchen.recipes.providers.imports.import_recipe", fetch)
+    result = await registry().draft("web", RecipeDraftRequest(url=imported.source_url), context)
+    assert result.imported is not None
+    assert result.imported.source_language == "fr"
 
 
 async def test_ai_provider_uses_typed_agent_and_tracks_supplied_evidence(recipe, context):

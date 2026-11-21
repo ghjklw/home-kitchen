@@ -186,6 +186,14 @@
     const api = options.api;
     const notify = options.notify || (() => {});
     const onContentChange = options.onContentChange || (() => {});
+    const rawLocale = String(options.locale ?? "").trim();
+    const lowerLocale = rawLocale.toLowerCase();
+    const intlLocale =
+      !lowerLocale || lowerLocale === "nb" || lowerLocale === "nb-no" || lowerLocale === "und"
+        ? "nb-NO"
+        : lowerLocale === "en" || lowerLocale === "fr"
+          ? lowerLocale
+          : rawLocale;
 
     const translationsByLocale = new Map();
     let currentTranslation = null;
@@ -543,7 +551,7 @@
       if (currentTranslation.created_at) {
         try {
           const dt = new Date(currentTranslation.created_at);
-          parts.push(`Dato: ${dt.toLocaleDateString("nb-NO")}`);
+          parts.push(`Dato: ${dt.toLocaleDateString(intlLocale)}`);
         } catch {}
       }
       infoText.textContent = parts.join(" · ");

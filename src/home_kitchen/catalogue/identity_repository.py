@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import bindparam, inspect, text
 from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.exc import NoInspectionAvailable
 
 from home_kitchen.catalogue.identity import (
     VALID_ALIAS_SOURCE_TYPES,
@@ -33,7 +34,10 @@ class PostgresIdentityRepository:
 
     @staticmethod
     def _table_columns(connection: Connection, table: str) -> set[str]:
-        return {col["name"] for col in inspect(connection).get_columns(table)}
+        try:
+            return {col["name"] for col in inspect(connection).get_columns(table)}
+        except NoInspectionAvailable:
+            return set()
 
     def product(
         self, canonical_name: str, variant: str, identity_id: UUID | None = None

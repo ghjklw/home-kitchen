@@ -4,22 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import time
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
-from typing import Literal, Protocol
-from urllib.parse import urlparse
+from typing import Any, Literal, Protocol, cast
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
-from sqlalchemy import Column, DateTime, ForeignKey, Table, Text, Uuid, select, text
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from home_kitchen.history import HistoryEntryCreate, HistoryRepository
-from home_kitchen.imports import ImportedDraft, import_recipe, validate_url
 from home_kitchen.models import (
     GuidedCookingStep,
     Ingredient,
@@ -31,14 +22,14 @@ from home_kitchen.models import (
     SourceIngredient,
     infer_recipe_metadata,
 )
-from home_kitchen.recipes.source_quantities import source_ingredient_parts
-from home_kitchen.service import KitchenService
-from home_kitchen.store import (
-    entity_values,
-    metadata,
-    recipes,
-    resolve_recipe_mapping_repository,
+from home_kitchen.recipes.ports import (
+    CollectionUnitOfWork,
+    ExtractedRecipeDraft,
+    PostImportIngredientMapper,
+    RecipeExtractor,
+    RecipeIdentityResolver,
 )
+from home_kitchen.recipes.source_quantities import source_ingredient_parts
 
 _LOG = logging.getLogger(__name__)
 CollectionKind = str
@@ -53,16 +44,19 @@ PROVIDER_KINDS: dict[str, set[str]] = {
     "oda": {"liked", "purchased"},
     "cookidoo": {"saved", "created", "bookmarks"},
 }
-source_links = Table(
-    "recipe_source_links",
-    metadata,
-    Column("provider", Text, primary_key=True),
-    Column("external_recipe_id", Text, primary_key=True),
-    Column("recipe_id", Uuid, ForeignKey("recipes.id", ondelete="CASCADE"), nullable=False),
-    Column("source_url", Text, nullable=False),
-    Column("metadata", JSONB, nullable=False),
-    Column("created_at", DateTime(timezone=True), nullable=False),
-)
+
+
+class _InlineRecipeDraft(BaseModel):
+    title: str
+    servings: int
+    ingredients: list[str]
+    instructions: list[str]
+    source_url: str
+    image_url: str | None = None
+    recipe_type: RecipeType | None = None
+    prep_time_minutes: int | None = None
+    prep_category: PrepCategory | None = None
+    guided_steps: list[GuidedCookingStep] = Field(default_factory=list)
 
 
 class CollectionEntry(BaseModel):
@@ -103,70 +97,7 @@ class CollectionProvider(Protocol):
 
     def validate_source(self, entry: CollectionEntry) -> None: ...
 
-    def lock_generation(self, connection, actor_id: str, generation: object) -> None: ...
-
-
-class OdaCollectionProvider:
-    id = "oda"
-
-    def __init__(self, oda):
-        self.oda = oda
-
-    def generation(self, actor_id: str) -> object:
-        generation = self.oda.search_cache_context(actor_id)
-        if generation is None or not self.oda.status(actor_id).get("connected"):
-            raise ValueError("Connect Oda before reading recipe collections")
-        return generation
-
-    async def page(self, actor_id, kind, page, size):
-        method = self.oda.list_liked_recipes if kind == "liked" else self.oda.list_purchased_recipes
-        payload = await method(actor_id, page=page, size=size)
-        return CollectionPage(
-            has_more=payload["hasMore"],
-            entries=[
-                CollectionEntry(
-                    id=str(item["id"]),
-                    provider=self.id,
-                    title=item["title"],
-                    source_url=item.get("url"),
-                    image_url=item.get("imageUrl"),
-                    badges=[LABELS[kind]],
-                    metadata={
-                        key: item[key] for key in ("providerName", "deliveriesCount") if key in item
-                    },
-                )
-                for item in payload["recipes"]
-            ],
-        )
-
-    def lock_generation(self, connection, actor_id, generation):
-        # Hold the lifecycle row until recipe/map/history commit. A disconnect or
-        # reconnect cannot pass its generation bump between this check and save.
-        from home_kitchen.oda.repository import connections, lifecycles
-
-        accepted = connection.execute(
-            lifecycles.update()
-            .where(
-                lifecycles.c.actor_id == actor_id,
-                lifecycles.c.generation == generation,
-            )
-            .values(generation=generation)
-            .returning(lifecycles.c.actor_id)
-        ).scalar_one_or_none()
-        connected = connection.execute(
-            select(connections.c.actor_id).where(connections.c.actor_id == actor_id)
-        ).scalar_one_or_none()
-        if accepted is None or connected is None:
-            raise ValueError("Oda connection changed; preview the collections again")
-
-    def validate_source(self, entry):
-        if entry.source_url is None:
-            raise ValueError("This Oda recipe has no public source URL")
-        validate_url(entry.source_url)
-        parsed = urlparse(entry.source_url)
-        match = re.fullmatch(r"/no/recipes/([1-9][0-9]*)-[a-z0-9]+(?:-[a-z0-9]+)*/?", parsed.path)
-        if parsed.hostname not in {"oda.com", "www.oda.com"} or not match or match[1] != entry.id:
-            raise ValueError("Oda source URL does not match the listed recipe identity")
+    def lock_generation(self, connection: Any, actor_id: str, generation: object) -> None: ...
 
 
 class CollectionJob(BaseModel):
@@ -184,13 +115,19 @@ class CollectionJob(BaseModel):
 
 
 class _Job:
-    def __init__(self, actor, generation, view, provider: CollectionProvider):
+    def __init__(
+        self,
+        actor: str,
+        generation: object,
+        view: CollectionJob,
+        provider: CollectionProvider,
+    ):
         self.actor = actor
         self.generation = generation
         self.view = view
         self.provider = provider
         self.created = time.monotonic()
-        self.task: asyncio.Task | None = None
+        self.task: asyncio.Task[None] | None = None
         self.cancelled = False
 
 
@@ -219,16 +156,23 @@ class CollectionService:
 
     def __init__(
         self,
-        kitchen: KitchenService,
-        history: HistoryRepository,
+        uow: CollectionUnitOfWork,
         provider: CollectionProvider | None = None,
-        extractor: Callable[[str], Awaitable[ImportedDraft]] = import_recipe,
+        extractor: RecipeExtractor | Callable[[str], Awaitable[ExtractedRecipeDraft]] | None = None,
         *,
         providers: dict[str, CollectionProvider] | None = None,
+        identity_resolver: RecipeIdentityResolver | None = None,
+        post_import_mapper: PostImportIngredientMapper | None = None,
+        default_extractor: RecipeExtractor
+        | Callable[[str], Awaitable[ExtractedRecipeDraft]]
+        | None = None,
     ):
-        self.kitchen = kitchen
-        self.history = history
+        self.uow = uow
+        self.history = getattr(uow, "history", None)
         self.extractor = extractor
+        self._default_extractor = default_extractor
+        self.identity_resolver = identity_resolver
+        self.post_import_mapper = post_import_mapper
         self._jobs: dict[UUID, _Job] = {}
         self._job_reservations = 0
         self._semaphore = asyncio.Semaphore(2)
@@ -257,7 +201,7 @@ class CollectionService:
             raise ValueError(f"Ukjent leverandør: {provider_id}")
         return self.providers[provider_id]
 
-    def _prune(self):
+    def _prune(self) -> None:
         now = time.monotonic()
         for key, job in list(self._jobs.items()):
             if now - job.created >= self.TTL_SECONDS:
@@ -266,7 +210,7 @@ class CollectionService:
                     job.task.cancel()
                 del self._jobs[key]
 
-    def _job(self, actor_id, job_id) -> _Job:
+    def _job(self, actor_id: str, job_id: UUID | str) -> _Job:
         self._prune()
         try:
             job = self._jobs[UUID(str(job_id))]
@@ -278,7 +222,7 @@ class CollectionService:
             raise KeyError("Collection job unavailable; preview your own collections again.")
         return job
 
-    def _fence(self, job):
+    def _fence(self, job: Any) -> None:
         if job.cancelled:
             raise asyncio.CancelledError
         if time.monotonic() - job.created >= self.TTL_SECONDS:
@@ -336,11 +280,11 @@ class CollectionService:
             await asyncio.to_thread(self._fence, job)
         return job.view.model_copy(deep=True)
 
-    async def _preview(self, job):
+    async def _preview(self, job: _Job) -> None:
         try:
             async with self._semaphore:
                 prov = getattr(job, "provider", None) or self.provider
-                seen = {}
+                seen: dict[str, CollectionEntry] = {}
                 for kind in job.view.kinds:
                     try:
                         for number in range(1, self.MAX_PAGES + 1):
@@ -416,7 +360,9 @@ class CollectionService:
                 "Collection connection changed or became unavailable; preview again."
             )
 
-    def _inspect_entry(self, entry, provider=None):
+    def _inspect_entry(
+        self, entry: CollectionEntry, provider: CollectionProvider | None = None
+    ) -> None:
         prov = provider or self._provider_for(entry.provider)
         entry.recipe_id = self._existing(entry)
         if entry.recipe_id:
@@ -430,30 +376,15 @@ class CollectionService:
             except ValueError as error:
                 entry.status, entry.error = "failed", str(error)
 
-    def _existing(self, entry, connection=None):
-        def lookup(conn):
-            linked = conn.execute(
-                select(source_links.c.recipe_id).where(
-                    source_links.c.provider == entry.provider,
-                    source_links.c.external_recipe_id == entry.id,
-                )
-            ).scalar_one_or_none()
-            if linked is not None or entry.source_url is None:
-                return linked
-            return conn.execute(
-                select(recipes.c.id)
-                .where(recipes.c.source_url == entry.source_url)
-                .order_by(recipes.c.position)
-                .limit(1)
-            ).scalar_one_or_none()
-
-        if connection is not None:
-            return lookup(connection)
-        with self.kitchen.store.engine.connect() as owned:
-            return lookup(owned)
+    def _existing(self, entry: CollectionEntry) -> UUID | None:
+        return self.uow.find_existing_recipe_id(entry.provider, entry.id, entry.source_url)
 
     async def start_import(
-        self, actor_id, job_id, selected_ids: list[str], reviewed: bool
+        self,
+        actor_id: str,
+        job_id: UUID | str,
+        selected_ids: list[str],
+        reviewed: bool,
     ) -> CollectionJob:
         job = self._job(actor_id, job_id)
         await asyncio.to_thread(self._fence, job)
@@ -471,7 +402,9 @@ class CollectionService:
         job.task = asyncio.create_task(self._import(job, selected))
         return job.view.model_copy(deep=True)
 
-    def _save(self, job, entry, draft):
+    def _save(
+        self, job: Any, entry: CollectionEntry, draft: ExtractedRecipeDraft | None
+    ) -> tuple[UUID, bool]:
         self._fence(job)
         prov = getattr(job, "provider", None) or self._provider_for(entry.provider)
         # The public URL is the exact reviewed provider URL, even if an extractor redirects.
@@ -517,75 +450,52 @@ class CollectionService:
                 prep_category=inferred_prep_category,
                 guided_steps=list(draft.guided_steps or entry.guided_steps or []),
             )
-            resolve_fn = getattr(self.kitchen, "resolve_recipe_identities", None)
-            if callable(resolve_fn):
+            if self.identity_resolver is not None:
                 try:
-                    recipe = resolve_fn(recipe)
+                    recipe = self.identity_resolver.resolve_recipe_identities(recipe)
                 except Exception:
                     _LOG.warning(
                         "Fast alias resolution failed during collection import",
                         exc_info=True,
                     )
-        with self.kitchen.store.engine.begin() as connection:
-            if connection.dialect.name == "postgresql":
-                connection.execute(
-                    text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-                    {"key": f"recipe-source:{entry.provider}:{entry.id}"},
-                )
+        with self.uow.session() as session:
+            session.acquire_source_lock(entry.provider, entry.id)
             self._fence(job)
-            prov.lock_generation(connection, job.actor, job.generation)
-            existing = self._existing(entry, connection)
+            session.lock_provider_generation(prov, job.actor, job.generation)
+            existing = session.find_existing_recipe_id(entry.provider, entry.id, entry.source_url)
             if existing is None:
                 if recipe is None:
                     raise ValueError("Previously saved recipe was removed; preview again")
-                from sqlalchemy import insert as core_insert
-
-                connection.execute(core_insert(recipes).values(**entity_values(recipe)))
+                session.save_recipe(recipe)
                 history_msg = (
                     "Importerte Cookidoo-oppskrift"
                     if entry.provider == "cookidoo"
                     else "Imported source recipe"
                 )
-                self.history.record(
-                    HistoryEntryCreate(
-                        kind="domain_event",
-                        message=history_msg,
-                        recipe_id=recipe.id,
-                        structured={
-                            "provider": entry.provider,
-                            "external_recipe_id": entry.id,
-                            "source_url": entry.source_url,
-                            "badges": entry.badges,
-                        },
-                    ),
+                session.record_import_history(
                     actor_id=job.actor,
-                    connection=connection,
-                )
-            if existing is not None:
-                recipe_id = existing
-            else:
-                assert recipe is not None
-                recipe_id = recipe.id
-            link_insert = (
-                pg_insert(source_links)
-                if connection.dialect.name == "postgresql"
-                else sqlite_insert(source_links)
-            )
-            connection.execute(
-                link_insert.values(
+                    recipe_id=recipe.id,
                     provider=entry.provider,
                     external_recipe_id=entry.id,
-                    recipe_id=recipe_id,
                     source_url=entry.source_url,
-                    metadata={"badges": entry.badges, **entry.metadata},
-                    created_at=datetime.now(UTC),
-                ).on_conflict_do_nothing(
-                    index_elements=[source_links.c.provider, source_links.c.external_recipe_id]
+                    badges=entry.badges,
+                    message=history_msg,
                 )
+                recipe_id = recipe.id
+            else:
+                recipe_id = existing
+            session.link_source(
+                provider=entry.provider,
+                external_recipe_id=entry.id,
+                recipe_id=recipe_id,
+                source_url=entry.source_url,
+                metadata={"badges": entry.badges, **entry.metadata},
             )
         return recipe_id, existing is not None
 
-    async def _save_async(self, job, entry, draft):
+    async def _save_async(
+        self, job: Any, entry: CollectionEntry, draft: ExtractedRecipeDraft | None
+    ) -> tuple[UUID, bool]:
         task = asyncio.create_task(asyncio.to_thread(self._save, job, entry, draft))
         try:
             return await asyncio.shield(task)
@@ -593,23 +503,11 @@ class CollectionService:
             await task
             raise
 
-    async def _auto_map_imported_recipes(self, job, recipe_ids: list[UUID]) -> None:
-        kitchen_settings = getattr(self.kitchen, "settings", None)
-        if kitchen_settings is None or not kitchen_settings.ai_configured:
+    async def _auto_map_imported_recipes(self, job: Any, recipe_ids: list[UUID]) -> None:
+        if self.post_import_mapper is None:
             return
         try:
-            from home_kitchen.catalogue.ai_mapper import auto_map_unmapped_ingredients_async
-
-            await auto_map_unmapped_ingredients_async(
-                resolve_recipe_mapping_repository(self.kitchen.store),
-                kitchen_settings,
-                household_id=getattr(self.kitchen, "household_id", None),
-                actor_id=job.actor,
-                recipe_ids=recipe_ids,
-                batch_size=40,
-                max_batches=10,
-                identity_service=getattr(self.kitchen, "identities", None),
-            )
+            await self.post_import_mapper.map_imported_recipes(job.actor, recipe_ids)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -619,7 +517,7 @@ class CollectionService:
                 exc_info=True,
             )
 
-    async def _import(self, job, selected):
+    async def _import(self, job: Any, selected: list[CollectionEntry]) -> None:
         imported_recipe_ids: list[UUID] = []
         try:
             async with self._semaphore:
@@ -639,8 +537,9 @@ class CollectionService:
                         else:
                             ingredients = entry.ingredients or entry.metadata.get("ingredients")
                             instructions = entry.instructions or entry.metadata.get("instructions")
+                            draft: ExtractedRecipeDraft
                             if ingredients and instructions:
-                                draft = ImportedDraft(
+                                draft = _InlineRecipeDraft(
                                     title=entry.title,
                                     servings=entry.servings or entry.metadata.get("servings", 4),
                                     ingredients=ingredients,
@@ -654,12 +553,24 @@ class CollectionService:
                                 )
                             else:
                                 extract_entry = getattr(prov, "extract_entry", None)
-                                if extract_entry is not None and self.extractor is import_recipe:
-                                    draft = await extract_entry(entry)
-                                else:
+                                if self.extractor is not None:
                                     draft = await self.extractor(entry.source_url)
-                                if draft.image_url is None and entry.image_url is not None:
-                                    draft = draft.model_copy(update={"image_url": entry.image_url})
+                                elif extract_entry is not None:
+                                    draft = await extract_entry(entry)
+                                elif self._default_extractor is not None:
+                                    draft = await self._default_extractor(entry.source_url)
+                                else:
+                                    raise ValueError("No recipe extractor configured")
+                                model_copy = getattr(draft, "model_copy", None)
+                                if (
+                                    draft.image_url is None
+                                    and entry.image_url is not None
+                                    and callable(model_copy)
+                                ):
+                                    draft = cast(
+                                        ExtractedRecipeDraft,
+                                        model_copy(update={"image_url": entry.image_url}),
+                                    )
                             await asyncio.to_thread(self._fence, job)
                             entry.recipe_id, existed = await self._save_async(job, entry, draft)
                             entry.status = "already_imported" if existed else "imported"
@@ -693,7 +604,7 @@ class CollectionService:
                 "Collection connection changed; preview again. Completed imports are retained."
             )
 
-    async def cancel(self, actor_id, job_id):
+    async def cancel(self, actor_id: str, job_id: UUID | str) -> CollectionJob:
         job = self._job(actor_id, job_id)
         job.cancelled = True
         if job.task and not job.task.done():
@@ -702,7 +613,7 @@ class CollectionService:
         job.view.status = "cancelled"
         return job.view.model_copy(deep=True)
 
-    async def close(self):
+    async def close(self) -> None:
         self._closed = True
         tasks = []
         for job in self._jobs.values():
@@ -711,3 +622,15 @@ class CollectionService:
                 job.task.cancel()
                 tasks.append(job.task)
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def __getattr__(name: str) -> Any:
+    if name == "OdaCollectionProvider":
+        from home_kitchen.recipes.adapters.oda import OdaCollectionProvider
+
+        return OdaCollectionProvider
+    if name == "source_links":
+        from home_kitchen.recipes.adapters.postgres import source_links
+
+        return source_links
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -9,7 +9,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
 
 from home_kitchen.ai_credentials import anthropic_model
-from home_kitchen.models import PurchaseEstimate, RecipeCreate
+from home_kitchen.models import GuidedCookingStep, PurchaseEstimate, RecipeCreate
 from home_kitchen.recommendations import PlanDraft, build_planner, recommend_plan
 from home_kitchen.settings import Household, Settings
 
@@ -48,12 +48,51 @@ def recipe_agent(
             "Keep source servings unchanged: portion arithmetic belongs to the application. "
             "Reference original ingredient indices in source_indices; retain source_ingredients "
             "unchanged. Clearly proposed substitutions may use an empty source_indices list. "
-            "Preserve Thermomix/device settings only when supplied; never invent them or claim "
+            "Preserve Thermomix/device settings only when supplied; never invent device "
+            "instructions, never claim or imply Thermomix/TM6 device control, and never claim "
             "allergy safety. No external actions are available. All output is an editable proposal."
         ),
         retries=1,
         model_settings={"max_tokens": 3000, "timeout": 45},
     )
+
+
+def _device_step_signature(
+    step: GuidedCookingStep,
+) -> tuple[
+    int | None, str | None, str | None, str | None, bool | None, str | None, str | None, str | None
+]:
+    return (
+        step.time_seconds,
+        step.temperature,
+        step.speed,
+        step.direction,
+        step.reverse,
+        step.blade,
+        step.accessory,
+        step.mode,
+    )
+
+
+def _sanitize_adapted_guided_steps(
+    source_steps: list[GuidedCookingStep],
+    proposed_raw: object,
+) -> list[dict]:
+    """Never invent or fabricate Thermomix/TM6 device settings during AI adaptation."""
+    if not source_steps or not isinstance(proposed_raw, list):
+        return []
+    allowed_signatures = {_device_step_signature(step) for step in source_steps}
+    kept: list[dict] = []
+    for raw_step in proposed_raw:
+        if not isinstance(raw_step, dict):
+            continue
+        try:
+            step = GuidedCookingStep.model_validate(raw_step)
+        except Exception:
+            continue
+        if _device_step_signature(step) in allowed_signatures:
+            kept.append(step.model_dump())
+    return kept
 
 
 async def draft_recipe(
@@ -96,6 +135,9 @@ async def draft_recipe(
         prep_category=source.prep_category
         if source.prep_category is not None
         else output.get("prep_category"),
+        guided_steps=_sanitize_adapted_guided_steps(
+            source.guided_steps, output.get("guided_steps")
+        ),
     )
     adapted = EditableRecipeDraft.model_validate(output)
     from home_kitchen.recipes.source_quantities import (

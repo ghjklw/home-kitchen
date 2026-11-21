@@ -244,6 +244,9 @@
       ...(values.prep_category ? { prep_category: String(values.prep_category) } : {}),
       ...(values.photo_source ? { photo_source: { ...values.photo_source } } : {}),
       ...(values.image_attribution ? { image_attribution: { ...values.image_attribution } } : {}),
+      ...(Array.isArray(values.guided_steps) && values.guided_steps.length
+        ? { guided_steps: values.guided_steps.map((step) => ({ ...step })) }
+        : {}),
     };
     const isAdaptedDraft = !mode.isEditing && mode.source === "ai";
     if (isAdaptedDraft)

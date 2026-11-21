@@ -602,3 +602,220 @@ async def test_mcp_cookidoo_plan_sync_tools_and_actor_isolation(
                 await mcp.call_tool("get_cookidoo_plan_sync_preview", {"preview_id": preview_id})
         finally:
             history_context.reset(tok)
+
+
+@pytest.mark.asyncio
+async def test_my_week_resolves_custom_recipes_and_changed_day_write_responses(
+    sqlite_engine,  # noqa: F811
+    cipher,  # noqa: F811
+):
+    hid = uuid4()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/planner/en/api/my-week":
+            if request.method == "GET":
+                return httpx.Response(
+                    200,
+                    json={
+                        "days": [
+                            {
+                                "date": "2026-11-23",
+                                "recipes": [
+                                    {
+                                        "entryId": "mw-cat-1",
+                                        "recipeId": "r-cat-1",
+                                        "title": "Katalogsuppe",
+                                        "ingredients": ["400 g tomat"],
+                                        "instructions": [
+                                            "Kok opp <nobr>5 min/100°C/hastighet 2</nobr>"
+                                        ],
+                                    }
+                                ],
+                                "customRecipes": ["cust-id-1"],
+                            }
+                        ]
+                    },
+                )
+            if request.method == "POST":
+                body = json.loads(request.content.decode())
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": "2026-11-23",
+                        "date": "2026-11-23",
+                        "recipes": [
+                            {
+                                "entryId": "mw-day-ret-99",
+                                "recipeId": body["recipeId"],
+                                "title": "Skrevet rett",
+                                "servings": body.get("servings", 4),
+                            }
+                        ],
+                    },
+                )
+        if request.url.path == "/created-recipes/en":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "recipeId": "cust-id-1",
+                            "recipeContent": {
+                                "name": "Egen grøt",
+                                "recipeIngredient": ["2 dl havregryn", "5 dl melk"],
+                                "recipeInstructions": ["Kok <nobr>8 min/90°C/hastighet 1</nobr>"],
+                                "recipeYield": 2,
+                            },
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(404)
+
+    app, features, _, store = _offline_app(
+        sqlite_engine,
+        cipher,
+        household_id=hid,
+        cookidoo_transport=httpx.MockTransport(handler),
+    )
+    _save_cookidoo_connection(store, hid)
+    provider = features.cookidoo_plan_sync.provider
+
+    # Unresolved custom entry preserves /created-recipes/ distinction
+    unresolved = await provider.get_my_week_plan(
+        date(2026, 11, 23), date(2026, 11, 23), resolve_custom_recipes=False
+    )
+    assert len(unresolved) == 2
+    assert unresolved[1].is_custom is True
+    assert unresolved[1].cookidoo_recipe_id == "cust-id-1"
+    assert "/created-recipes/" in unresolved[1].source_url
+    assert unresolved[1].ingredients == []
+
+    # Resolved custom entry hydrates full recipe details while keeping /created-recipes/ link
+    resolved = await provider.get_my_week_plan(
+        date(2026, 11, 23), date(2026, 11, 23), resolve_custom_recipes=True
+    )
+    assert resolved[1].title == "Egen grøt"
+    assert resolved[1].ingredients == ["2 dl havregryn", "5 dl melk"]
+    assert "/created-recipes/" in resolved[1].source_url
+
+    # Calendar write returning changed day extracts real entryId instead of day id
+    written = await provider.add_to_my_week("r-cat-1", date(2026, 11, 23), servings=4)
+    assert written.external_entry_id == "mw-day-ret-99"
+
+    # Full plan import uses inline resolved custom & catalogue entries without hitting /recipes/recipe/en/*
+    with TestClient(app) as client:
+        prev = client.post(
+            "/api/cookidoo/plan-sync/preview",
+            json={
+                "direction": "cookidoo_to_kitchen",
+                "start": "2026-11-23",
+                "end": "2026-11-23",
+            },
+        )
+        assert prev.status_code == 200, prev.text
+        preview_data = prev.json()
+        assert len(preview_data["additions"]) == 2
+        conf = client.post(
+            f"/api/cookidoo/plan-sync/{preview_data['preview_id']}/confirm",
+            json={"reviewed": True},
+        )
+        assert conf.status_code == 200, conf.text
+        assert conf.json()["applied_count"] == 2
+
+    with sqlite_engine.connect() as conn:
+        rec_rows = conn.execute(select(recipes)).mappings().all()
+        by_title = {r["title"]: r for r in rec_rows}
+        assert "Egen grøt" in by_title
+        assert "/created-recipes/" in by_title["Egen grøt"]["source_url"]
+        assert by_title["Egen grøt"]["ingredients"][0]["name"] == "havregryn"
+        assert len(by_title["Egen grøt"]["guided_steps"]) == 1
+        assert "Katalogsuppe" in by_title
+        assert len(by_title["Katalogsuppe"]["guided_steps"]) == 1
+
+
+def test_cookidoo_plan_sync_rejects_duplicate_edit_targets_and_unknown_source_keys(
+    sqlite_engine,  # noqa: F811
+    cipher,  # noqa: F811
+):
+    hid = uuid4()
+    rec_id = uuid4()
+    target_meal_id = uuid4()
+
+    with sqlite_engine.begin() as conn:
+        conn.execute(
+            insert(recipes).values(
+                id=rec_id,
+                title="Suppe",
+                servings=4,
+                ingredients=[{"name": "vann", "quantity": "5", "unit": "dl", "category": "Other"}],
+                instructions=["Kok"],
+                source="manual",
+                source_ingredients=[],
+                source_language="nob",
+                guided_steps=[],
+            )
+        )
+        conn.execute(
+            insert(meals).values(
+                id=target_meal_id,
+                date=date(2026, 11, 23),
+                label="Middag",
+                recipe_id=rec_id,
+                servings=4,
+            )
+        )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/planner/en/api/my-week":
+            return httpx.Response(
+                200,
+                json={
+                    "days": [
+                        {
+                            "date": "2026-11-23",
+                            "recipes": [
+                                {"entryId": "mw-1", "recipeId": "r1", "title": "Rett 1"},
+                                {"entryId": "mw-2", "recipeId": "r2", "title": "Rett 2"},
+                            ],
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(404)
+
+    app, _, _, store = _offline_app(
+        sqlite_engine,
+        cipher,
+        household_id=hid,
+        cookidoo_transport=httpx.MockTransport(handler),
+    )
+    _save_cookidoo_connection(store, hid)
+
+    with TestClient(app) as client:
+        dup_target = client.post(
+            "/api/cookidoo/plan-sync/preview",
+            json={
+                "direction": "cookidoo_to_kitchen",
+                "start": "2026-11-23",
+                "end": "2026-11-23",
+                "edits": [
+                    {"source_key": "mw-1", "target_meal_id": str(target_meal_id)},
+                    {"source_key": "mw-2", "target_meal_id": str(target_meal_id)},
+                ],
+            },
+        )
+        assert dup_target.status_code == 422
+
+        unknown_source = client.post(
+            "/api/cookidoo/plan-sync/preview",
+            json={
+                "direction": "cookidoo_to_kitchen",
+                "start": "2026-11-23",
+                "end": "2026-11-23",
+                "edits": [
+                    {"source_key": "mw-does-not-exist", "target_meal_id": str(target_meal_id)},
+                ],
+            },
+        )
+        assert unknown_source.status_code == 422

@@ -1515,3 +1515,118 @@ def test_alembic_migration_0029_guided_steps_structure_and_single_head():
     assert len(heads) == 1
     revisions = {rev.revision for rev in script.walk_revisions()}
     assert "0029_recipe_guided_steps" in revisions
+
+
+@pytest.mark.asyncio
+async def test_ai_adaptation_never_invents_or_alters_tm6_device_instructions():
+    from pydantic_ai.models.test import TestModel
+
+    from home_kitchen.ai import recipe_agent
+    from home_kitchen.models import GuidedCookingStep, RecipeCreate
+    from home_kitchen.recipes import RecipeContext, RecipeDraftRequest, create_recipe_providers
+
+    settings = Settings(local_dev=True)
+
+    # 1. Source without guided_steps: even if AI fabricates TM6 steps, application strips them
+    manual_source = RecipeCreate(
+        title="Vanlig suppe",
+        servings=4,
+        ingredients=[{"name": "tomat", "quantity": "500", "unit": "g"}],
+        instructions=["Kok opp tomater i kjele."],
+        source=RecipeSource.MANUAL,
+    )
+    fabricating_model = TestModel(
+        custom_output_args={
+            "title": "Vanlig suppe (KI-utkast)",
+            "servings": 4,
+            "ingredients": [
+                {"name": "tomat", "quantity": "500", "unit": "g", "source_indices": [0]}
+            ],
+            "instructions": ["Kok opp i kjele i 10 min."],
+            "source": "ai",
+            "source_ingredients": [{"index": 0, "text": "500 g tomat"}],
+            "guided_steps": [
+                {
+                    "step_index": 0,
+                    "text": "Kok opp i 10 min.",
+                    "time_seconds": 600,
+                    "temperature": "100°C",
+                    "speed": "3",
+                }
+            ],
+        }
+    )
+    providers = create_recipe_providers(settings, recipe_agent(settings, fabricating_model))
+    draft_no_source_steps = await providers.draft(
+        "ai",
+        RecipeDraftRequest(recipe=manual_source, prompt="Gjør den raskere"),
+        RecipeContext(household=Household()),
+    )
+    assert draft_no_source_steps.adapted is not None
+    assert draft_no_source_steps.adapted.guided_steps == []
+
+    # 2. Source WITH TM6 guided_steps: fabricated/altered settings are dropped, verbatim preserved settings kept
+    cookidoo_source = RecipeCreate(
+        title="TM6 Suppe",
+        servings=4,
+        ingredients=[{"name": "tomat", "quantity": "500", "unit": "g"}],
+        instructions=["Kok opp 10 min/100°C/hastighet 2"],
+        source=RecipeSource.COOKIDOO,
+        source_url="https://cookidoo.international/recipes/recipe/nb-NO/r-tm6-guard",
+        guided_steps=[
+            GuidedCookingStep(
+                step_index=0,
+                text="Kok opp 10 min/100°C/hastighet 2",
+                time_seconds=600,
+                temperature="100°C",
+                speed="2",
+            )
+        ],
+    )
+    mixed_model = TestModel(
+        custom_output_args={
+            "title": "TM6 Suppe (KI-utkast)",
+            "servings": 4,
+            "ingredients": [
+                {"name": "tomat", "quantity": "500", "unit": "g", "source_indices": [0]}
+            ],
+            "instructions": [
+                "Kok opp 10 min/100°C/hastighet 2",
+                "Kjør videre på høy varme.",
+            ],
+            "source": "ai",
+            "source_url": str(cookidoo_source.source_url),
+            "source_ingredients": [{"index": 0, "text": "500 g tomat"}],
+            "provenance": {
+                "kind": "ai_adaptation",
+                "original_source": "cookidoo",
+                "source_url": str(cookidoo_source.source_url),
+            },
+            "guided_steps": [
+                {
+                    "step_index": 0,
+                    "text": "Kok opp 10 min/100°C/hastighet 2",
+                    "time_seconds": 600,
+                    "temperature": "100°C",
+                    "speed": "2",
+                },
+                {
+                    "step_index": 1,
+                    "text": "Kjør videre på høy varme.",
+                    "time_seconds": 300,
+                    "temperature": "120°C",
+                    "speed": "10",
+                },
+            ],
+        }
+    )
+    providers_mixed = create_recipe_providers(settings, recipe_agent(settings, mixed_model))
+    draft_with_steps = await providers_mixed.draft(
+        "ai",
+        RecipeDraftRequest(recipe=cookidoo_source, prompt="Tilpass krydder"),
+        RecipeContext(household=Household()),
+    )
+    assert draft_with_steps.adapted is not None
+    assert len(draft_with_steps.adapted.guided_steps) == 1
+    assert draft_with_steps.adapted.guided_steps[0].temperature == "100°C"
+    assert draft_with_steps.adapted.guided_steps[0].speed == "2"

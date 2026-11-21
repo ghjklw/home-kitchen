@@ -816,6 +816,7 @@ class CookidooMyWeekEntry(BaseModel):
     source_url: str
     image_url: str | None = None
     label: str | None = None
+    is_custom: bool = False
     ingredients: list[str] = Field(default_factory=list)
     instructions: list[str] = Field(default_factory=list)
     guided_steps: list[GuidedCookingStep] = Field(default_factory=list)
@@ -1354,6 +1355,7 @@ class CookidooCollectionProvider:
         fallback_date: date | None,
         country: str,
         locale: str,
+        is_custom: bool = False,
     ) -> CookidooMyWeekEntry | None:
         item_date = (
             self._parse_calendar_date(
@@ -1407,6 +1409,34 @@ class CookidooCollectionProvider:
         ):
             raw_recipe["url"] = item.get("url") or item.get("sourceUrl") or item.get("source_url")
 
+        detected_custom = bool(
+            is_custom
+            or item.get("isCustom")
+            or item.get("is_custom")
+            or raw_recipe.get("isCustom")
+            or raw_recipe.get("is_custom")
+            or str(item.get("type") or item.get("recipeType") or "").strip().lower() == "custom"
+            or (
+                isinstance(
+                    raw_recipe.get("url")
+                    or raw_recipe.get("sourceUrl")
+                    or raw_recipe.get("source_url"),
+                    str,
+                )
+                and "/created-recipes/"
+                in str(
+                    raw_recipe.get("url")
+                    or raw_recipe.get("sourceUrl")
+                    or raw_recipe.get("source_url")
+                )
+            )
+        )
+        if detected_custom and not (
+            raw_recipe.get("url") or raw_recipe.get("sourceUrl") or raw_recipe.get("source_url")
+        ):
+            domain = _cookidoo_domain_for_country(country)
+            raw_recipe["url"] = f"https://{domain}/created-recipes/en/{cookidoo_recipe_id}"
+
         normalized = normalize_cookidoo_recipe(
             raw_recipe, provider=self.id, country=country, locale=locale
         )
@@ -1435,6 +1465,7 @@ class CookidooCollectionProvider:
             source_url=normalized.source_url,
             image_url=normalized.image_url,
             label=label,
+            is_custom=detected_custom,
             ingredients=normalized.ingredients,
             instructions=normalized.instructions,
             guided_steps=normalized.guided_steps,
@@ -1451,6 +1482,34 @@ class CookidooCollectionProvider:
     ) -> list[CookidooMyWeekEntry]:
         entries: list[CookidooMyWeekEntry] = []
 
+        def _consume_item_list(
+            raw_items: Any, *, fallback_date: date | None, is_custom: bool
+        ) -> None:
+            if not isinstance(raw_items, list):
+                return
+            for item in raw_items:
+                if isinstance(item, str) and item.strip():
+                    item_dict: dict[str, Any] = {"recipeId": item.strip()}
+                    entry = self._normalize_my_week_item(
+                        item_dict,
+                        fallback_date=fallback_date,
+                        country=country,
+                        locale=locale,
+                        is_custom=is_custom,
+                    )
+                elif isinstance(item, dict):
+                    entry = self._normalize_my_week_item(
+                        item,
+                        fallback_date=fallback_date,
+                        country=country,
+                        locale=locale,
+                        is_custom=is_custom,
+                    )
+                else:
+                    entry = None
+                if entry is not None and start <= entry.date <= end:
+                    entries.append(entry)
+
         def _consume_day(day_obj: dict[str, Any]) -> None:
             day_date = self._parse_calendar_date(
                 day_obj.get("date")
@@ -1465,25 +1524,12 @@ class CookidooCollectionProvider:
                 or day_obj.get("items")
                 or []
             )
-            if not isinstance(day_items, list):
-                return
-            for item in day_items:
-                if not isinstance(item, dict):
-                    continue
-                entry = self._normalize_my_week_item(
-                    item, fallback_date=day_date, country=country, locale=locale
-                )
-                if entry is not None and start <= entry.date <= end:
-                    entries.append(entry)
+            _consume_item_list(day_items, fallback_date=day_date, is_custom=False)
+            custom_items = day_obj.get("customRecipes") or day_obj.get("custom_recipes") or []
+            _consume_item_list(custom_items, fallback_date=day_date, is_custom=True)
 
         if isinstance(payload, list):
-            for item in payload:
-                if isinstance(item, dict):
-                    entry = self._normalize_my_week_item(
-                        item, fallback_date=None, country=country, locale=locale
-                    )
-                    if entry is not None and start <= entry.date <= end:
-                        entries.append(entry)
+            _consume_item_list(payload, fallback_date=None, is_custom=False)
             return entries
 
         if not isinstance(payload, dict):
@@ -1501,21 +1547,90 @@ class CookidooCollectionProvider:
                 if isinstance(day_obj, dict):
                     _consume_day(day_obj)
 
-        for list_key in ("entries", "items", "meals", "recipes"):
-            raw_items = payload.get(list_key)
-            if isinstance(raw_items, list):
-                for item in raw_items:
-                    if isinstance(item, dict):
-                        entry = self._normalize_my_week_item(
-                            item, fallback_date=None, country=country, locale=locale
-                        )
-                        if entry is not None and start <= entry.date <= end:
-                            entries.append(entry)
+        if any(
+            k in payload
+            for k in ("recipes", "entries", "meals", "items", "customRecipes", "custom_recipes")
+        ):
+            _consume_day(payload)
 
         return entries
 
+    async def _resolve_custom_my_week_entries(
+        self,
+        entries: list[CookidooMyWeekEntry],
+        headers: dict[str, str],
+        base_url: str,
+        country: str,
+    ) -> list[CookidooMyWeekEntry]:
+        unresolved_ids = {
+            entry.cookidoo_recipe_id
+            for entry in entries
+            if entry.is_custom and (not entry.ingredients or not entry.instructions)
+        }
+        if not unresolved_ids:
+            return entries
+
+        domain = _cookidoo_domain_for_country(country)
+        by_id: dict[str, CollectionEntry] = {}
+        try:
+            async with httpx.AsyncClient(transport=self.transport, timeout=15.0) as client:
+                pages = await self._fetch_paginated_collection(
+                    client, "/created-recipes/en", headers, base_url
+                )
+        except CookidooError as exc:
+            if exc.status_code == 401:
+                raise
+            return entries
+
+        for page_data in pages:
+            items = (
+                page_data.get("items")
+                or page_data.get("createdRecipes")
+                or page_data.get("recipes")
+                or []
+            )
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                rid = str(
+                    item.get("recipeId") or item.get("id") or item.get("recipe_id") or ""
+                ).strip()
+                if rid in unresolved_ids:
+                    item_copy = dict(item)
+                    item_copy.setdefault("url", f"https://{domain}/created-recipes/en/{rid}")
+                    by_id[rid] = normalize_cookidoo_recipe(
+                        item_copy, provider=self.id, country=country, locale="en"
+                    )
+
+        resolved: list[CookidooMyWeekEntry] = []
+        for entry in entries:
+            detail = by_id.get(entry.cookidoo_recipe_id)
+            if entry.is_custom and detail is not None:
+                resolved.append(
+                    entry.model_copy(
+                        update={
+                            "title": detail.title or entry.title,
+                            "servings": detail.servings or entry.servings,
+                            "source_url": detail.source_url or entry.source_url,
+                            "image_url": detail.image_url or entry.image_url,
+                            "ingredients": detail.ingredients or entry.ingredients,
+                            "instructions": detail.instructions or entry.instructions,
+                            "guided_steps": detail.guided_steps or entry.guided_steps,
+                        }
+                    )
+                )
+            else:
+                resolved.append(entry)
+        return resolved
+
     async def get_my_week_plan(
-        self, start: date, end: date | None = None
+        self,
+        start: date,
+        end: date | None = None,
+        *,
+        resolve_custom_recipes: bool = True,
     ) -> list[CookidooMyWeekEntry]:
         """Read scheduled recipes from Cookidoo My Week for [start, end]."""
         effective_end = end or (start + timedelta(days=6))
@@ -1534,9 +1649,14 @@ class CookidooCollectionProvider:
             f"/planner/en/api/v2/calendar/week/{start.isoformat()}",
         ]
         data = await self._fetch_from_api(candidate_paths, params, headers, base_url)
-        return self._extract_my_week_entries(
+        entries = self._extract_my_week_entries(
             data, start=start, end=effective_end, country=country, locale=locale
         )
+        if resolve_custom_recipes:
+            entries = await self._resolve_custom_my_week_entries(
+                entries, headers, base_url, country
+            )
+        return entries
 
     async def add_to_my_week(
         self,
@@ -1622,6 +1742,38 @@ class CookidooCollectionProvider:
                 )
 
         if isinstance(response_data, dict):
+            if any(
+                k in response_data
+                for k in (
+                    "weeks",
+                    "days",
+                    "recipes",
+                    "entries",
+                    "meals",
+                    "items",
+                    "customRecipes",
+                    "custom_recipes",
+                )
+            ):
+                day_entries = self._extract_my_week_entries(
+                    response_data,
+                    start=planned_date,
+                    end=planned_date,
+                    country=country,
+                    locale=locale,
+                )
+                matching = [
+                    e
+                    for e in day_entries
+                    if e.cookidoo_recipe_id == recipe_id_clean
+                    and (entry_id is None or e.external_entry_id == entry_id)
+                ]
+                if matching:
+                    chosen = matching[-1]
+                    if entry_id is not None and not chosen.external_entry_id:
+                        chosen = chosen.model_copy(update={"external_entry_id": entry_id})
+                    return chosen
+
             parsed = self._normalize_my_week_item(
                 response_data, fallback_date=planned_date, country=country, locale=locale
             )

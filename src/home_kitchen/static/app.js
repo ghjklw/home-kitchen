@@ -2258,6 +2258,9 @@ function openCookidooPlanSync() {
   const selectedIds = new Set();
   const editTargets = new Map();
   let currentPreview = null;
+  [directionField.input, startField.input, endField.input].forEach((input) => {
+    input.addEventListener("change", () => editTargets.clear());
+  });
 
   const previewButton = button("Hent forhåndsvisning", () => loadPreview(), "primary");
   const confirmButton = button("Bekreft og synkroniser valgte", () => applyConfirm(), "primary");
@@ -3168,9 +3171,11 @@ function recipeForm(draft = {}, source = "manual") {
       el("summary", "Få forslag fra KI"),
       el(
         "p",
-        isEditing
-          ? "KI foreslår et utkast. Den lagrede oppskriften endres først når du velger Lagre."
-          : "KI foreslår et utkast. Se over det og velg Lagre oppskrift når du er klar.",
+        isEditing && source === "cookidoo"
+          ? "KI foreslår et eget, uavhengig utkast. Originaloppskriften fra Cookidoo og veiledet matlaging på TM6 forblir uendret."
+          : isEditing
+            ? "KI foreslår et utkast. Den lagrede oppskriften endres først når du velger Lagre."
+            : "KI foreslår et utkast. Se over det og velg Lagre oppskrift når du er klar.",
         "muted",
       ),
     );
@@ -3217,6 +3222,7 @@ function recipeForm(draft = {}, source = "manual") {
       provenance: draft.provenance || null,
       photo_source: draft.photo_source || null,
       image_attribution: draft.image_attribution || null,
+      guided_steps: Array.isArray(draft.guided_steps) ? draft.guided_steps : [],
     });
     const revise = button("Se over KI-forslaget", async () => {
       revise.disabled = true;
@@ -3362,6 +3368,9 @@ function viewRecipe(recipe) {
     body,
     recipeImage(recipe),
     badges,
+    recipe.provenance?.original_source
+      ? el("p", "Tilpasset fra " + recipeOriginLabel(recipe.provenance.original_source) + ".", "muted")
+      : null,
     el("p", formatUiCount(recipe.servings) + " porsjoner", "muted"),
     statsContainer,
   );

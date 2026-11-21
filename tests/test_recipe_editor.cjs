@@ -1163,3 +1163,27 @@ test("DOM: unsaved URL-imported draft pre-populates Kildespråk before save", as
   const langSelect = metaRow.findAll((n) => n.name === "source_language")[0];
   assert.equal(langSelect.value, "fr");
 });
+
+test("buildRevisionRequest forwards guided_steps only when non-empty", () => {
+  const base = {
+    title: "TM6 Risotto",
+    servings: 4,
+    ingredients: [{ name: "ris", quantity: "300", unit: "g", category: "Other" }],
+    instructions: ["Kok 15 min/100°C/revers/hastighet 1"],
+  };
+  const withoutGuided = buildRevisionRequest(base, { isEditing: true, source: "cookidoo" }, "tilpass");
+  assert.equal("guided_steps" in withoutGuided.recipe, false);
+
+  const withGuided = buildRevisionRequest(
+    {
+      ...base,
+      guided_steps: [
+        { step_index: 0, text: "Kok", time_seconds: 900, temperature: "100°C", speed: "1", reverse: true },
+      ],
+    },
+    { isEditing: true, source: "cookidoo" },
+    "tilpass",
+  );
+  assert.equal(withGuided.recipe.guided_steps.length, 1);
+  assert.equal(withGuided.recipe.guided_steps[0].temperature, "100°C");
+});

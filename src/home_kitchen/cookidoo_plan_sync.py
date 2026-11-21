@@ -112,7 +112,11 @@ class _SyncJob:
         self.actor_id = actor_id
         self.generation = generation
         self.preview = preview
-        self.my_week_entries = {f"mw:{idx}": entry for idx, entry in enumerate(my_week_entries)}
+        self.my_week_entries: dict[str, CookidooMyWeekEntry] = {}
+        for idx, entry in enumerate(my_week_entries):
+            self.my_week_entries[f"mw:{idx}"] = entry
+            if entry.external_entry_id:
+                self.my_week_entries[entry.external_entry_id] = entry
         self.created_monotonic = time.monotonic()
 
 
@@ -292,7 +296,24 @@ class CookidooPlanSyncService:
         additions: list[SyncPreviewItem] = []
         edits: list[SyncPreviewItem] = []
         skipped: list[SyncSkippedItem] = []
-        edits_by_key = {edit.source_key: edit for edit in request.edits}
+        edits_by_key: dict[str, SyncEditTarget] = {}
+        seen_target_meals: set[UUID] = set()
+        seen_target_entries: set[str] = set()
+        for edit in request.edits:
+            if edit.source_key in edits_by_key:
+                raise ValueError(f"Kildeoppføringen {edit.source_key!r} kan bare ha én endring.")
+            edits_by_key[edit.source_key] = edit
+            if edit.target_meal_id is not None:
+                if edit.target_meal_id in seen_target_meals:
+                    raise ValueError("Hvert mål-måltid kan bare oppdateres av én endring.")
+                seen_target_meals.add(edit.target_meal_id)
+            if edit.target_external_entry_id:
+                if edit.target_external_entry_id in seen_target_entries:
+                    raise ValueError(
+                        "Hver Cookidoo Min uke-oppføring kan bare oppdateres av én endring."
+                    )
+                seen_target_entries.add(edit.target_external_entry_id)
+        matched_edit_keys: set[str] = set()
 
         if request.direction == "cookidoo_to_kitchen":
             kitchen_meals_by_id = {meal.id: meal for meal in kitchen_meals}
@@ -318,6 +339,7 @@ class CookidooPlanSyncService:
                     or edits_by_key.get(str(idx))
                 )
                 if edit_target is not None:
+                    matched_edit_keys.add(edit_target.source_key)
                     if edit_target.target_meal_id is None:
                         raise ValueError(
                             "Endringsmål krever eksplisitt target_meal_id ved import til Kjøkken."
@@ -447,6 +469,7 @@ class CookidooPlanSyncService:
 
                 edit_target = edits_by_key.get(str(meal.id))
                 if edit_target is not None:
+                    matched_edit_keys.add(edit_target.source_key)
                     if not edit_target.target_external_entry_id:
                         raise ValueError(
                             "Endringsmål krever eksplisitt target_external_entry_id ved eksport til Cookidoo."
@@ -511,6 +534,12 @@ class CookidooPlanSyncService:
                             repeated_recipe_count=repeated_count,
                         )
                     )
+
+        unmatched_edits = [key for key in edits_by_key if key not in matched_edit_keys]
+        if unmatched_edits:
+            raise ValueError(
+                f"Fant ikke kildeoppføringen {unmatched_edits[0]!r} i valgt periode for oppdatering."
+            )
 
         now = datetime.now(UTC)
         summary = (
@@ -651,6 +680,8 @@ class CookidooPlanSyncService:
         del selected_set
         resolved_recipes: dict[str, UUID] = {}
         for item in selected_items:
+            if item.cookidoo_recipe_id in resolved_recipes:
+                continue
             resolved_recipes[
                 item.cookidoo_recipe_id
             ] = await self._resolve_or_import_cookidoo_recipe(actor_id, job, item)

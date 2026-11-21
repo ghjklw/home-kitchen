@@ -19,6 +19,8 @@ class Node {
     this.children = [];
   }
   append(child) { this.children.push(child); }
+  replaceChildren(...children) { this.children = children.filter(Boolean); }
+  setAttribute() {}
   get text() { return this.textContent + " " + this.children.map((child) => child.text || "").join(" "); }
 }
 
@@ -97,4 +99,45 @@ test("recipe detail renders Bokmål TM6 guided-cooking badges and ingredient ref
   assert.match(li.text, /Retning: Revers/u);
   assert.match(li.text, /Tilbehør: Simmering basket/u);
   assert.match(li.text, /Ingredienser: 300 g risottoris, 8 dl kraft/u);
+});
+
+test("viewRecipe renders provenance note for AI adaptation of a Cookidoo recipe", () => {
+  const dialog = new Node("dialog");
+  const context = {
+    openDialog: () => dialog,
+    el: (tag, text = "", className = "") => new Node(tag, text, className),
+    add: (parent, ...children) => { children.filter(Boolean).forEach((child) => parent.append(child)); return parent; },
+    recipeImage: () => new Node("img"),
+    formatRecipeBadge: () => "",
+    formatRecipeSourceBadge: () => "KI-idé",
+    renderRecipeStatsBadges: () => null,
+    renderRecipeQuickFeedbackWidget: undefined,
+    recipeOriginLabel: undefined,
+    formatUiCount: String,
+    ingredientQuantityText: (item) => item.name,
+    purchaseEstimateText: () => "",
+    renderInstructionStepNode: (step) => new Node("li", step),
+    button: (text, action, className = "") => new Node("button", text, className),
+    window: {},
+  };
+  vm.runInNewContext(
+    ["recipeOriginLabel", "viewRecipe"].map(functionSource).join("\n"),
+    context,
+  );
+  context.viewRecipe({
+    id: "ai-1",
+    title: "Vegetarisk risotto (KI-tilpasset)",
+    source: "ai",
+    servings: 4,
+    provenance: {
+      kind: "ai_adaptation",
+      original_source: "cookidoo",
+      source_url: "https://cookidoo.international/recipes/recipe/nb-NO/r-tm6",
+    },
+    source_url: "https://cookidoo.international/recipes/recipe/nb-NO/r-tm6",
+    ingredients: [{ name: "risottoris" }],
+    instructions: ["Kok på komfyr"],
+    guided_steps: [],
+  });
+  assert.match(dialog.text, /Tilpasset fra en Cookidoo-oppskrift\./u);
 });

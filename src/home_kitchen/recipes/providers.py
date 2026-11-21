@@ -116,6 +116,7 @@ class AIRecipeProvider:
                 recipe_type=imported.recipe_type,
                 prep_time_minutes=imported.prep_time_minutes,
                 prep_category=imported.prep_category,
+                guided_steps=list(imported.guided_steps or []),
             )
         elif request.recipe is not None:
             recipe = request.recipe

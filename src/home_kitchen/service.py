@@ -300,7 +300,12 @@ class KitchenService:
         self, kind: str, alias: str, locales: list[str]
     ) -> tuple[UUID | None, bool]:
         for locale in locales:
-            res = self.identities.resolve(kind, locale, "recipe", alias)
+            try:
+                res = self.identities.resolve(
+                    kind, locale, "recipe", alias, household_id=self.household_id
+                )
+            except TypeError:
+                res = self.identities.resolve(kind, locale, "recipe", alias)
             if res.status == "resolved" and len(res.candidates) == 1:
                 return res.candidates[0].id, False
             if res.status == "ambiguous":
@@ -830,13 +835,37 @@ class KitchenService:
         if canonical_product_id is not None:
             self.identities.validate_identities("product", {canonical_product_id})
             if add_alias:
-                self.identities.add_alias(
-                    "product", locale, context, target.name, canonical_product_id
-                )
+                try:
+                    self.identities.add_alias(
+                        "product",
+                        locale,
+                        context,
+                        target.name,
+                        canonical_product_id,
+                        household_id=self.household_id,
+                        source_type="reviewed_correction",
+                    )
+                except TypeError:
+                    self.identities.add_alias(
+                        "product", locale, context, target.name, canonical_product_id
+                    )
         if canonical_unit_id is not None:
             self.identities.validate_identities("unit", {canonical_unit_id})
             if add_alias and target.unit:
-                self.identities.add_alias("unit", locale, context, target.unit, canonical_unit_id)
+                try:
+                    self.identities.add_alias(
+                        "unit",
+                        locale,
+                        context,
+                        target.unit,
+                        canonical_unit_id,
+                        household_id=self.household_id,
+                        source_type="reviewed_correction",
+                    )
+                except TypeError:
+                    self.identities.add_alias(
+                        "unit", locale, context, target.unit, canonical_unit_id
+                    )
 
         updated_ingredients = []
         for idx, ing in enumerate(recipe.ingredients):

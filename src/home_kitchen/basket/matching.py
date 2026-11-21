@@ -14,12 +14,13 @@ from collections.abc import Awaitable, Callable, Hashable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_CEILING, Decimal, InvalidOperation, localcontext
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 from starlette.concurrency import run_in_threadpool
 
+from home_kitchen.catalogue.identity import IdentityCorrectionCitation
 from home_kitchen.inventory import InventoryService, PurchasePlan
 from home_kitchen.oda.media import ProductMedia, fetch_product_media
 from home_kitchen.oda.models import OdaSearchResponse
@@ -685,6 +686,25 @@ def _query_expansions(query: str) -> tuple[str, ...]:
     return (query,)
 
 
+class StockEvidenceCitation(BaseModel):
+    """Stock-offset evidence kept separate from identity and SKU preferences."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    available_quantity: Decimal
+    covered_quantity: Decimal
+    unit: str
+
+
+class SkuPreferenceCitation(BaseModel):
+    """Household preferred/excluded SKU evidence kept separate from identity corrections."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    preferred_product_ids: list[str] = Field(default_factory=list)
+    excluded_product_ids: list[str] = Field(default_factory=list)
+
+
 class BasketCandidate(BaseModel):
     """A provider result with explicit unknowns kept unknown."""
 
@@ -716,6 +736,7 @@ class BasketCandidate(BaseModel):
     recommended_fulfillment_quantity: Decimal | None = Field(
         default=None, ge=0, allow_inf_nan=False
     )
+    identity_correction_citations: list[IdentityCorrectionCitation] = Field(default_factory=list)
 
 
 class ProviderProduct(BaseModel):
@@ -756,6 +777,10 @@ class NeedMatchResult(BaseModel):
     search_query: str | None = None
     revision: int = 0
     observed_at: datetime | None = None
+    identity_correction_citations: list[IdentityCorrectionCitation] = Field(default_factory=list)
+    stock_evidence: StockEvidenceCitation | None = None
+    sku_preference_evidence: SkuPreferenceCitation | None = None
+    purchase_evidence: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class BasketMatchResult(BaseModel):
@@ -1009,6 +1034,11 @@ class BasketMatchingService:
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         preferences_provider: Callable[[UUID], tuple[list[str], list[str]]] | None = None,
         product_id_resolver: Callable[[str], UUID | None] | None = None,
+        identity_corrections_provider: Callable[
+            [str, UUID | None], list[IdentityCorrectionCitation]
+        ]
+        | None = None,
+        purchase_evidence_provider: Callable[[UUID], list[dict[str, Any]]] | None = None,
     ):
         self.inventory = inventory
         self.provider = provider
@@ -1017,6 +1047,8 @@ class BasketMatchingService:
         self.clock = clock
         self.preferences_provider = preferences_provider
         self.product_id_resolver = product_id_resolver
+        self.identity_corrections_provider = identity_corrections_provider
+        self.purchase_evidence_provider = purchase_evidence_provider
         self._search_cache: OrderedDict[tuple, tuple[datetime, ProviderSearchGroup]] = OrderedDict()
         self._inflight: dict[tuple, asyncio.Future] = {}
         self._context_reads: dict[str, asyncio.Task] = {}
@@ -1179,6 +1211,18 @@ class BasketMatchingService:
                 provenance=line.provenance,
                 source_url=line.source_url,
                 search_query=effective_queries[index],
+                stock_evidence=(
+                    StockEvidenceCitation(
+                        available_quantity=line.available_quantity,
+                        covered_quantity=line.covered_quantity,
+                        unit=line.unit,
+                    )
+                    if (
+                        getattr(line, "available_quantity", Decimal("0")) > 0
+                        or getattr(line, "covered_quantity", Decimal("0")) > 0
+                    )
+                    else None
+                ),
             )
             for index, line in enumerate(bounded_lines)
         ]
@@ -1265,6 +1309,35 @@ class BasketMatchingService:
                         excluded_ids = set(excl_list)
                     except Exception:
                         pass
+                sku_preference_evidence = (
+                    SkuPreferenceCitation(
+                        preferred_product_ids=list(preferred_ids),
+                        excluded_product_ids=sorted(excluded_ids),
+                    )
+                    if preferred_ids or excluded_ids
+                    else None
+                )
+                purchase_evidence: list[dict[str, Any]] = []
+                if canon_id is not None and self.purchase_evidence_provider is not None:
+                    try:
+                        purchase_evidence = list(self.purchase_evidence_provider(canon_id))
+                    except Exception:
+                        purchase_evidence = []
+                correction_citations: list[IdentityCorrectionCitation] = []
+                if self.identity_corrections_provider is not None:
+                    try:
+                        raw_citations = self.identity_corrections_provider(
+                            bounded_lines[current_index].name, canon_id
+                        )
+                        for item in raw_citations:
+                            if isinstance(item, IdentityCorrectionCitation):
+                                correction_citations.append(item)
+                            else:
+                                correction_citations.append(
+                                    IdentityCorrectionCitation.from_event(item)
+                                )
+                    except Exception:
+                        correction_citations = []
 
                 filtered_products = [p for p in group.products if p.product_id not in excluded_ids]
                 if preferred_ids:
@@ -1276,6 +1349,12 @@ class BasketMatchingService:
                     )
 
                 preferred_rank = {pid: idx + 1 for idx, pid in enumerate(preferred_ids)}
+                correction_prefix = (
+                    f"Identitetsretting ({correction_citations[0].source_type}, "
+                    f"{correction_citations[0].channel} av {correction_citations[0].actor_id}); "
+                    if correction_citations
+                    else ""
+                )
                 candidates = [
                     BasketCandidate(
                         id=f"{product.provider}:{product.product_id}",
@@ -1296,6 +1375,7 @@ class BasketMatchingService:
                                 if product.product_id in preferred_rank
                                 else ""
                             )
+                            + correction_prefix
                             + f"{'Identity compatible' if product.identity_status == 'compatible' else 'Identity unverified; explicit confirmation required'}; "
                             f"returned by {product.provider} product search for the need name "
                             f"'{group.query}'."
@@ -1303,9 +1383,13 @@ class BasketMatchingService:
                         identity_status=product.identity_status,
                         is_preferred=product.product_id in preferred_rank,
                         preference_rank=preferred_rank.get(product.product_id),
+                        identity_correction_citations=correction_citations,
                     )
                     for product in filtered_products[:size]
                 ]
+                results[current_index].sku_preference_evidence = sku_preference_evidence
+                results[current_index].purchase_evidence = purchase_evidence
+                results[current_index].identity_correction_citations = correction_citations
                 results[current_index].has_more = group.has_more or len(filtered_products) > size
                 results[current_index].candidates = await asyncio.gather(
                     *(enrich(candidate, current_index) for candidate in candidates)

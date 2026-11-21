@@ -9,7 +9,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from fastmcp import Client, FastMCP
 
-from home_kitchen.catalogue.identity import CanonicalProduct, CanonicalUnit
+from home_kitchen.catalogue.identity import (
+    AliasResolution,
+    AliasSourceType,
+    CanonicalProduct,
+    CanonicalUnit,
+)
 from home_kitchen.catalogue.identity_service import CanonicalIdentityService
 from home_kitchen.feature_api import feature_router
 from home_kitchen.feature_mcp import install_feature_tools
@@ -23,6 +28,7 @@ class MemoryIdentityRepository:
         self.units: dict[str, CanonicalUnit] = {}
         self.aliases: dict[tuple[str, str, str, str], set[UUID]] = {}
         self.reviewed: set[tuple[str, str, str, str]] = set()
+        self.alias_source_types: dict[tuple[str, str, str, str, UUID], AliasSourceType] = {}
 
     def product(self, name: str, variant: str) -> CanonicalProduct:
         return self.products.setdefault(
@@ -33,21 +39,52 @@ class MemoryIdentityRepository:
         return self.units.setdefault(name, CanonicalUnit(id=uuid4(), canonical_name=name))
 
     def add_alias(
-        self, kind: str, locale: str, context: str, alias: str, identity_id: UUID
+        self,
+        kind: str,
+        locale: str,
+        context: str,
+        alias: str,
+        identity_id: UUID,
+        *,
+        household_id: UUID | None = None,
+        source_type: AliasSourceType = "automatic_suggestion",
     ) -> None:
-        key = kind, locale, context, " ".join(alias.split()).casefold()
+        del household_id
+        normalized = " ".join(alias.split()).casefold()
+        key = kind, locale, context, normalized
         self.aliases.setdefault(key, set()).add(identity_id)
+        self.alias_source_types[(kind, locale, context, normalized, identity_id)] = source_type
 
     def correct_alias(
-        self, kind: str, locale: str, context: str, alias: str, identity_id: UUID
+        self,
+        kind: str,
+        locale: str,
+        context: str,
+        alias: str,
+        identity_id: UUID,
+        *,
+        actor_id: str = "system",
+        household_id: UUID | None = None,
+        channel: str = "api",
+        source_type: AliasSourceType = "reviewed_correction",
     ) -> None:
-        key = kind, locale, context, " ".join(alias.split()).casefold()
+        del actor_id, household_id, channel
+        normalized = " ".join(alias.split()).casefold()
+        key = kind, locale, context, normalized
         self.aliases[key] = {identity_id}
         self.reviewed.add(key)
+        self.alias_source_types[(kind, locale, context, normalized, identity_id)] = source_type
 
-    def resolve(
-        self, kind: str, locale: str, context: str, alias: str
-    ) -> list[CanonicalProduct | CanonicalUnit]:
+    def resolve_with_metadata(
+        self,
+        kind: str,
+        locale: str,
+        context: str,
+        alias: str,
+        *,
+        household_id: UUID | None = None,
+    ) -> AliasResolution:
+        del household_id
         normalized = " ".join(alias.split()).casefold()
         ids = self.aliases.get((kind, locale, context, normalized), set()) | self.aliases.get(
             (kind, locale, "", normalized), set()
@@ -55,7 +92,36 @@ class MemoryIdentityRepository:
         identities = (
             list(self.products.values()) if kind == "product" else list(self.units.values())
         )
-        return [identity for identity in identities if identity.id in ids]
+        candidates = [identity for identity in identities if identity.id in ids]
+        if not candidates:
+            return AliasResolution(status="unmapped", candidates=[])
+        source_types: list[AliasSourceType] = []
+        for candidate in candidates:
+            for ctx in (context, ""):
+                st = self.alias_source_types.get((kind, locale, ctx, normalized, candidate.id))
+                if st and st not in source_types:
+                    source_types.append(st)
+        if not source_types:
+            source_types = ["automatic_suggestion"]
+        status = "resolved" if len(candidates) == 1 else "ambiguous"
+        is_rev = (kind, locale, context, normalized) in self.reviewed or (
+            kind,
+            locale,
+            "",
+            normalized,
+        ) in self.reviewed
+        return AliasResolution(
+            status=status,
+            candidates=candidates,
+            source_type=source_types[0] if len(source_types) == 1 else None,
+            source_types=source_types,
+            reviewed=is_rev if status == "resolved" else None,
+        )
+
+    def resolve(
+        self, kind: str, locale: str, context: str, alias: str
+    ) -> list[CanonicalProduct | CanonicalUnit]:
+        return self.resolve_with_metadata(kind, locale, context, alias).candidates
 
     def validate_identities(self, kind: str, ids: set[UUID]) -> None:
         if not ids:
@@ -114,13 +180,20 @@ def test_aliases_are_language_and_context_scoped_and_ambiguity_needs_reviewed_co
     service.add_alias("product", "nb", "recipe", "tomat", fresh.id)
     service.add_alias("product", "nb", "recipe", "tomat", tinned.id)
 
-    assert service.resolve("product", "nb", "recipe", "tomat").status == "ambiguous"
-    assert service.resolve("product", "en", "recipe", "tomat").status == "unmapped"
+    ambiguous_res = service.resolve("product", "nb", "recipe", "tomat")
+    assert ambiguous_res.status == "ambiguous"
+    assert ambiguous_res.source_type == "automatic_suggestion"
+    assert ambiguous_res.source_types == ["automatic_suggestion"]
+    unmapped_res = service.resolve("product", "en", "recipe", "tomat")
+    assert unmapped_res.status == "unmapped"
+    assert unmapped_res.source_type is None
     corrected = service.correct_alias("product", "nb", "recipe", "tomat", fresh.id)
     assert corrected is None
     result = service.resolve("product", "nb", "recipe", " TOMAT ")
     assert result.status == "resolved"
     assert result.candidates == [fresh]
+    assert result.source_type == "reviewed_correction"
+    assert result.reviewed is True
     assert ("product", "nb", "recipe", "tomat") in repository.reviewed
 
 
@@ -568,6 +641,11 @@ def test_list_and_map_unmapped_ingredients():
     )
     assert mapped_recipe.ingredients[0].canonical_product_id == garlic.id
     assert mapped_recipe.ingredients[0].canonical_unit_id == clove.id
+    assert (
+        identities.resolve("product", "nb", "recipe", "hvitløk").source_type
+        == "reviewed_correction"
+    )
+    assert identities.resolve("unit", "nb", "recipe", "fedd").source_type == "reviewed_correction"
 
     # Subsequent recipe creation with "hvitløk" auto-resolves because add_alias=True:
     subsequent = service.create_recipe(

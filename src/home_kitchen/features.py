@@ -11,6 +11,7 @@ from pydantic_ai import Agent
 
 from home_kitchen.basket.jobs import BasketMatchJobs
 from home_kitchen.basket.matching import BasketMatchingService, OdaSearchAdapter
+from home_kitchen.catalogue.identity import IdentityCorrectionCitation, IdentityCorrectionEvent
 from home_kitchen.catalogue.overview_repository import (
     MemoryProductOverviewRepository,
     PostgresProductOverviewRepository,
@@ -193,16 +194,54 @@ class KitchenFeatures:
         def _resolve_product_id(name: str) -> UUID | None:
             for loc in ("nb", "en", "fr"):
                 for ctx in ("recipe", "receipt", ""):
-                    res = self.catalogue_identities.resolve("product", loc, ctx, name)
+                    try:
+                        res = self.catalogue_identities.resolve(
+                            "product", loc, ctx, name, household_id=self.household_id
+                        )
+                    except TypeError:
+                        res = self.catalogue_identities.resolve("product", loc, ctx, name)
                     if res.status == "resolved" and len(res.candidates) == 1:
                         return res.candidates[0].id
             return None
+
+        def _identity_corrections(
+            need_name: str, product_id: UUID | None
+        ) -> list[IdentityCorrectionCitation]:
+            events = self.catalogue_identities.list_correction_events(
+                kind="product",
+                alias=need_name,
+                household_id=self.household_id,
+                limit=10,
+            )
+            citations: list[IdentityCorrectionCitation] = []
+            if isinstance(events, list):
+                for ev in events:
+                    if not isinstance(ev, IdentityCorrectionEvent):
+                        continue
+                    if product_id is not None and ev.new_identity_id != product_id:
+                        continue
+                    citations.append(IdentityCorrectionCitation.from_event(ev))
+            if not citations and product_id is not None:
+                recent_events = self.catalogue_identities.list_correction_events(
+                    kind="product",
+                    household_id=self.household_id,
+                    limit=50,
+                )
+                if isinstance(recent_events, list):
+                    for ev in recent_events:
+                        if (
+                            isinstance(ev, IdentityCorrectionEvent)
+                            and ev.new_identity_id == product_id
+                        ):
+                            citations.append(IdentityCorrectionCitation.from_event(ev))
+            return citations
 
         self.basket_matching = BasketMatchingService(
             self.inventory,
             OdaSearchAdapter(self.oda),
             preferences_provider=_sku_preferences,
             product_id_resolver=_resolve_product_id,
+            identity_corrections_provider=_identity_corrections,
         )
         self.basket_jobs = BasketMatchJobs(
             self.basket_matching, self.inventory, self.oda.search_cache_context
@@ -318,6 +357,15 @@ class KitchenFeatures:
             raise ValueError("Save a recipe before requesting a meal plan")
         existing_meals = self.kitchen.list_meals(start, start + timedelta(days=days - 1))
         evidence = self.evidence("meal preferences feedback purchases")
+        raw_corrections = self.catalogue_identities.list_correction_events(
+            household_id=self.household_id,
+            limit=20,
+        )
+        correction_citations = [
+            IdentityCorrectionCitation.from_event(ev)
+            for ev in (raw_corrections if isinstance(raw_corrections, list) else [])
+            if isinstance(ev, IdentityCorrectionEvent)
+        ]
         planner = build_planner(self.settings)
         result = await recommend_plan(
             planner,
@@ -327,8 +375,14 @@ class KitchenFeatures:
             days,
             evidence_context="\n".join(item.model_dump_json() for item in evidence),
             existing_meals=existing_meals,
+            identity_corrections=correction_citations,
         )
-        return result.model_copy(update={"evidence_ids": [item.evidence_id for item in evidence]})
+        return result.model_copy(
+            update={
+                "evidence_ids": [item.evidence_id for item in evidence],
+                "identity_correction_citations": correction_citations,
+            }
+        )
 
     def _resolve_home_assistant_client(self) -> HomeAssistantTodoClient:
         if self.home_assistant_client is not None:

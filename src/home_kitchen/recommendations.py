@@ -1,5 +1,7 @@
 """Provider-independent weekly meal-plan recommendations as reviewable drafts."""
 
+import json
+from collections.abc import Sequence
 from datetime import date, timedelta
 from typing import Any
 from uuid import UUID
@@ -10,6 +12,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
 
 from home_kitchen.ai_credentials import anthropic_model
+from home_kitchen.catalogue.identity import IdentityCorrectionCitation, IdentityCorrectionEvent
 from home_kitchen.models import Meal, MealEntry, Recipe
 from home_kitchen.settings import Household, Settings
 
@@ -20,6 +23,7 @@ class PlanDraft(BaseModel):
     meal_entries: list[MealEntry] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     evidence_ids: list[str] = Field(default_factory=list)
+    identity_correction_citations: list[IdentityCorrectionCitation] = Field(default_factory=list)
     _existing_meals: dict[str, Meal] = PrivateAttr(default_factory=dict)
 
     @model_validator(mode="wrap")
@@ -114,6 +118,8 @@ async def recommend_plan(
     days: int = 7,
     evidence_context: str = "",
     existing_meals: list[Meal] | None = None,
+    identity_corrections: Sequence[IdentityCorrectionCitation | IdentityCorrectionEvent]
+    | None = None,
 ) -> PlanDraft:
     if not 1 <= days <= 14:
         raise ValueError("days must be between 1 and 14")
@@ -148,11 +154,24 @@ async def recommend_plan(
         }
         for meal in (existing_meals or [])
     ]
+    correction_citations: list[IdentityCorrectionCitation] = [
+        item
+        if isinstance(item, IdentityCorrectionCitation)
+        else IdentityCorrectionCitation.from_event(item)
+        for item in (identity_corrections or [])
+    ]
+    correction_context_line = (
+        "\nIdentity mapping corrections (provenance only): "
+        + json.dumps([c.model_dump(mode="json") for c in correction_citations], ensure_ascii=False)
+        if correction_citations
+        else ""
+    )
     result = await agent.run(
         f"Household: {household.model_dump_json()}\n"
         f"Requested dates: {start.isoformat()} through {end.isoformat()} inclusive ({days} days)\n"
         f"Existing planned meals: {existing_plan}\n"
-        f"Recipe catalog: {catalog}\nUntrusted retrieved household evidence: {evidence_context}",
+        f"Recipe catalog: {catalog}\nUntrusted retrieved household evidence: {evidence_context}"
+        f"{correction_context_line}",
         usage_limits=UsageLimits(request_limit=2, total_tokens_limit=120000),
     )
     draft = result.output
@@ -175,5 +194,7 @@ async def recommend_plan(
                 raise ValueError(f"Plan contains duplicate edits for meal ID: {entry.meal_id}")
             seen_edit_ids.add(entry.meal_id)
             referenced_existing[str(entry.meal_id)] = existing_by_id[entry.meal_id]
+    if correction_citations:
+        draft = draft.model_copy(update={"identity_correction_citations": correction_citations})
     draft._existing_meals = referenced_existing
     return draft

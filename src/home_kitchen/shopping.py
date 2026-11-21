@@ -2,8 +2,11 @@
 
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Protocol
+from decimal import Decimal
+from typing import Annotated, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
+
+from pydantic import BaseModel, Field, HttpUrl
 
 from home_kitchen.models import (
     Meal,
@@ -16,6 +19,44 @@ from home_kitchen.models import (
     WeekShopping,
 )
 from home_kitchen.units import add_exact, canonical_unit, canonicalize_quantity, scale_quantity
+
+StockQuantity = Annotated[Decimal, Field(ge=0, allow_inf_nan=False)]
+
+
+class PurchasePlanLine(BaseModel):
+    id: UUID
+    name: str
+    canonical_product_id: UUID | None = None
+    unit: str
+    category: str = "Other"
+    required_quantity: StockQuantity
+    available_quantity: StockQuantity
+    covered_quantity: StockQuantity
+    to_buy_quantity: StockQuantity
+    origins: list[str]
+    source_quantities: list[ShoppingSourceQuantity] = Field(default_factory=list)
+    approximate: bool = False
+    provenance: str | None = None
+    source_url: HttpUrl | None = None
+
+
+class PurchasePlan(BaseModel):
+    start: date
+    end: date
+    lines: list[PurchasePlanLine]
+    suggestions: list[RegularItem]
+    unquantified: list[UnquantifiedNeed] = Field(default_factory=list)
+
+    @property
+    def purchase_lines(self) -> list[PurchasePlanLine]:
+        return [line for line in self.lines if line.to_buy_quantity > 0]
+
+    @property
+    def groups(self) -> dict[str, list[PurchasePlanLine]]:
+        result: dict[str, list[PurchasePlanLine]] = {}
+        for line in self.lines:
+            result.setdefault(line.category, []).append(line)
+        return result
 
 
 def normalize_need_text(value: str) -> str:
@@ -282,3 +323,22 @@ class ShoppingBuilder:
 
 def default_shopping_builder() -> ShoppingBuilder:
     return ShoppingBuilder([PlannedRecipes(), QuickAdditions(), RegularItems()])
+
+
+class ShoppingListPort(Protocol):
+    """Port for computing gross weekly shopping requirements."""
+
+    def shopping_list(
+        self,
+        start: date,
+        end: date,
+        today: date,
+        *,
+        closed_sources: set[ClosedSourceKey] | None = None,
+    ) -> WeekShopping: ...
+
+
+class PurchasePlanPort(Protocol):
+    """Port for reading inventory-adjusted purchase plans for a period."""
+
+    def plan(self, start: date, end: date) -> PurchasePlan: ...

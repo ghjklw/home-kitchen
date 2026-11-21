@@ -2,17 +2,21 @@
 
 from datetime import date
 from decimal import Decimal
-from typing import Protocol
+from typing import Any, Protocol, cast
 from uuid import UUID
 
 from pydantic import BaseModel, Field
-from sqlalchemy import text
 
 from home_kitchen.context import history_context
-from home_kitchen.history import HistoryEntryCreate, HistoryRepository
-from home_kitchen.inventory import InventoryService, PurchasePlanLine
+from home_kitchen.history import HistoryEntryCreate
 from home_kitchen.models import UnquantifiedNeed
-from home_kitchen.oda import OdaService
+from home_kitchen.purchasing_ports import (
+    HistoryRecordPort,
+    OdaStatusPort,
+    PurchasePlanPort,
+    StoreTripRepository,
+)
+from home_kitchen.shopping import PurchasePlanLine
 
 
 class PurchaseModeInfo(BaseModel):
@@ -37,7 +41,7 @@ class InStoreMode:
 
 
 class OdaMode:
-    def __init__(self, service: OdaService):
+    def __init__(self, service: OdaStatusPort):
         self.service = service
 
     def info(self) -> PurchaseModeInfo:
@@ -83,23 +87,43 @@ class StoreTrip(BaseModel):
 
 
 class StoreTripService:
-    def __init__(self, inventory: InventoryService, history: HistoryRepository):
+    def __init__(
+        self,
+        inventory: PurchasePlanPort,
+        history: HistoryRecordPort | None = None,
+        *,
+        repository: StoreTripRepository | None = None,
+        engine: Any = None,
+    ):
         self.inventory = inventory
         self.history = history
-        self.engine = history.engine
+        self._repository = repository
+        self._engine = (
+            engine
+            if engine is not None
+            else getattr(repository, "engine", None) or getattr(history, "engine", None)
+        )
+
+    @property
+    def engine(self) -> Any:
+        return self._engine
+
+    @engine.setter
+    def engine(self, value: Any) -> None:
+        self._engine = value
+        if self._repository is not None and hasattr(self._repository, "engine"):
+            cast(Any, self._repository).engine = value
+
+    def _resolve_repository(self) -> StoreTripRepository:
+        if self._repository is None:
+            from home_kitchen.purchasing_adapters import PostgresStoreTripRepository
+
+            self._repository = PostgresStoreTripRepository(self._engine, self.history)
+        return self._repository
 
     def review(self, start: date, end: date) -> StoreTrip:
         plan = self.inventory.plan(start, end)
-        with self.engine.connect() as connection:
-            progress = dict(
-                connection.execute(
-                    text(
-                        "SELECT need_id, checked_quantity FROM kitchen_store_trip "
-                        "WHERE week_start = :start AND week_end = :end"
-                    ),
-                    {"start": start, "end": end},
-                ).all()
-            )
+        progress = self._resolve_repository().load_checked_quantities(start, end)
         lines = []
         for line in plan.lines:
             if line.to_buy_quantity <= 0:
@@ -127,35 +151,25 @@ class StoreTripService:
         if line is None:
             raise ValueError("This item no longer needs buying; refresh the shopping plan")
         quantity = line.to_buy_quantity if checked else Decimal(0)
-        with self.engine.begin() as connection:
-            changed = connection.execute(
-                text(
-                    "INSERT INTO kitchen_store_trip "
-                    "(week_start, week_end, need_id, checked_quantity) "
-                    "VALUES (:start, :end, :need, :quantity) "
-                    "ON CONFLICT (week_start, week_end, need_id) DO UPDATE "
-                    "SET checked_quantity = EXCLUDED.checked_quantity, updated_at = now() "
-                    "WHERE kitchen_store_trip.checked_quantity IS DISTINCT FROM "
-                    "EXCLUDED.checked_quantity RETURNING need_id"
-                ),
-                {"start": start, "end": end, "need": need_id, "quantity": quantity},
-            ).scalar_one_or_none()
-            if changed is not None:
-                self.history.record(
-                    HistoryEntryCreate(
-                        channel=history_context.get().channel,
-                        kind="domain_event",
-                        message=f"{'Picked up' if checked else 'Unchecked'} {line.name} in store",
-                        structured={
-                            "action": "store_trip_checkoff",
-                            "need_id": str(need_id),
-                            "checked": checked,
-                            "quantity": str(quantity),
-                            "unit": line.unit,
-                            "week_start": start.isoformat(),
-                            "week_end": end.isoformat(),
-                        },
-                    ),
-                    connection=connection,
-                )
+        entry = HistoryEntryCreate(
+            channel=history_context.get().channel,
+            kind="domain_event",
+            message=f"{'Picked up' if checked else 'Unchecked'} {line.name} in store",
+            structured={
+                "action": "store_trip_checkoff",
+                "need_id": str(need_id),
+                "checked": checked,
+                "quantity": str(quantity),
+                "unit": line.unit,
+                "week_start": start.isoformat(),
+                "week_end": end.isoformat(),
+            },
+        )
+        self._resolve_repository().save_check(
+            start=start,
+            end=end,
+            need_id=need_id,
+            quantity=quantity,
+            history_entry=entry,
+        )
         return self.review(start, end)

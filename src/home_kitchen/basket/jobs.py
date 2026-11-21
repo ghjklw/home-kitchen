@@ -24,7 +24,8 @@ from home_kitchen.basket.matching import (
     BasketMatchResult,
     NeedMatchResult,
 )
-from home_kitchen.inventory import InventoryService, PurchasePlan, PurchasePlanLine
+from home_kitchen.basket.ports import PurchasePlanPort
+from home_kitchen.shopping import PurchasePlan, PurchasePlanLine
 
 SAFE_ERROR = "Product matching could not finish. Please try again."
 MATCH_JOB_VERSION = 2
@@ -97,7 +98,7 @@ class BasketMatchJobs:
     def __init__(
         self,
         matching: BasketMatchingService,
-        inventory: InventoryService,
+        inventory: PurchasePlanPort,
         scope_provider: Callable[[str], int | None],
         *,
         max_jobs: int = 128,

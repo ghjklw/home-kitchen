@@ -5,18 +5,22 @@ import hashlib
 import json
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import text
-from sqlalchemy.engine import Connection
 
 from home_kitchen.basket.models import ProductSnapshot, SelectedProduct
 from home_kitchen.context import history_context
-from home_kitchen.history import HistoryEntryCreate, HistoryRepository
-from home_kitchen.inventory import InventoryService, PurchasePlanLine
+from home_kitchen.history import HistoryEntryCreate
 from home_kitchen.models import NonBlank
+from home_kitchen.purchasing_ports import (
+    HistoryRecordPort,
+    PurchasePlanPort,
+    TripCompletionSession,
+    TripCompletionUnitOfWork,
+)
+from home_kitchen.shopping import PurchasePlanLine
 from home_kitchen.units import add_exact, canonicalize_quantity
 
 
@@ -150,56 +154,44 @@ def _hash(value: object) -> str:
 
 
 class TripCompletionService:
-    def __init__(self, inventory: InventoryService, history: HistoryRepository):
+    def __init__(
+        self,
+        inventory: PurchasePlanPort,
+        history: HistoryRecordPort | None = None,
+        *,
+        uow: TripCompletionUnitOfWork | None = None,
+        engine: Any = None,
+    ):
         self.inventory = inventory
         self.history = history
-        self.engine = history.engine
+        self.engine = (
+            engine
+            if engine is not None
+            else getattr(uow, "engine", None) or getattr(history, "engine", None)
+        )
+        self._uow = uow
+
+    def _resolve_uow(self) -> TripCompletionUnitOfWork:
+        if self._uow is None:
+            from home_kitchen.purchasing_adapters import PostgresTripCompletionUnitOfWork
+
+            self._uow = PostgresTripCompletionUnitOfWork(self.engine, self.history)
+        return self._uow
 
     def review(self, start: date, end: date) -> TripCompletionReview:
         # Locks give one coherent view even though the existing plan builder owns
         # its read connections. Source mutations take ordinary conflicting locks.
-        with self.engine.begin() as connection:
-            self._lock(connection)
-            return self._review(start, end, connection)
+        with self._resolve_uow().session() as session:
+            return self._review(start, end, session)
 
-    @staticmethod
-    def _lock(connection: Connection) -> None:
-        connection.execute(
-            text(
-                "LOCK TABLE recipes, meals, items, regulars, confirmations, kitchen_inventory, "
-                "kitchen_basket_selections, kitchen_trip_source_closures "
-                "IN SHARE ROW EXCLUSIVE MODE"
-            )
-        )
-
-    def _review(self, start: date, end: date, connection: Connection) -> TripCompletionReview:
+    def _review(
+        self, start: date, end: date, session: TripCompletionSession
+    ) -> TripCompletionReview:
         plan = self.inventory.plan(start, end)
-        captures = {
-            row["id"]: dict(row)
-            for row in connection.execute(
-                text(
-                    "SELECT i.id,i.quantity,i.unit,c.regular_id FROM items i LEFT JOIN confirmations c "
-                    "ON c.item_id=i.id WHERE NOT i.completed ORDER BY i.id"
-                )
-            ).mappings()
-        }
-        regulars = {
-            row["id"]: dict(row)
-            for row in connection.execute(
-                text("SELECT id,quantity,unit,last_purchased FROM regulars ORDER BY id")
-            ).mappings()
-        }
-        selected_products: dict[UUID, list[SelectedProduct]] = {}
-        for row in connection.execute(
-            text(
-                "SELECT need_id,payload FROM kitchen_basket_selections "
-                "WHERE week_start=:start AND week_end=:end ORDER BY need_id,provider,product_id"
-            ),
-            {"start": start, "end": end},
-        ).mappings():
-            selected_products.setdefault(row["need_id"], []).append(
-                SelectedProduct.model_validate(row["payload"])
-            )
+        sources = session.load_review_sources(start, end)
+        captures = sources.captures
+        regulars = sources.regulars
+        selected_products = sources.selected_products
         lines = []
         for need in sorted(plan.purchase_lines, key=lambda line: str(line.id)):
             capture_sources, regular_sources = [], []
@@ -238,23 +230,14 @@ class TripCompletionService:
     def complete(self, data: TripCompletionCreate) -> CompletedTrip:
         actor = history_context.get().actor_id
         fingerprint = _hash({"request": data.model_dump(mode="json"), "actor_id": actor})
-        with self.engine.begin() as connection:
-            self._lock(connection)
-            previous = (
-                connection.execute(
-                    text(
-                        "SELECT request_hash,result FROM kitchen_completed_trips WHERE idempotency_key=:key"
-                    ),
-                    {"key": data.idempotency_key},
-                )
-                .mappings()
-                .first()
-            )
-            if previous:
-                if previous["request_hash"] != fingerprint:
+        with self._resolve_uow().session() as session:
+            previous = session.get_completed_trip(data.idempotency_key)
+            if previous is not None:
+                prev_hash, prev_result = previous
+                if prev_hash != fingerprint:
                     raise ValueError("Idempotency key already belongs to another purchase request")
-                return CompletedTrip.model_validate(previous["result"])
-            review = self._review(data.start, data.end, connection)
+                return CompletedTrip.model_validate(prev_result)
+            review = self._review(data.start, data.end, session)
             if review.review_token != data.review_token:
                 raise ValueError("Shopping needs changed; refresh and review the purchase again")
             current = {line.id: line for line in review.lines}
@@ -336,7 +319,7 @@ class TripCompletionService:
                             source_closure.resolution
                         )
 
-            completed_at = connection.execute(text("SELECT clock_timestamp()")).scalar_one()
+            completed_at = session.current_timestamp()
             trip = CompletedTrip(
                 id=uuid4(),
                 idempotency_key=data.idempotency_key,
@@ -348,57 +331,23 @@ class TripCompletionService:
                 lines=snapshots,
                 source_closures=data.source_closures,
             )
-            connection.execute(
-                text(
-                    "INSERT INTO kitchen_completed_trips "
-                    "(id,idempotency_key,request_hash,result,completed_at,actor_id) "
-                    "VALUES (:id,:key,:hash,CAST(:result AS jsonb),:at,:actor)"
-                ),
-                {
-                    "id": trip.id,
-                    "key": data.idempotency_key,
-                    "hash": fingerprint,
-                    "result": trip.model_dump_json(),
-                    "at": completed_at,
-                    "actor": actor,
-                },
+            session.save_completed_trip(trip, request_hash=fingerprint)
+            session.save_source_closures(
+                start=data.start,
+                end=data.end,
+                trip_id=trip.id,
+                actor_id=actor,
+                closures=closures,
             )
-            for (need_id, source_kind, source_id), resolution in closures.items():
-                connection.execute(
-                    text(
-                        "INSERT INTO kitchen_trip_source_closures "
-                        "(week_start,week_end,need_id,source_kind,source_id,resolution,trip_id,actor_id) "
-                        "VALUES (:start,:end,:need,:kind,:source,:resolution,:trip,:actor)"
-                    ),
-                    {
-                        "start": data.start,
-                        "end": data.end,
-                        "need": need_id,
-                        "kind": source_kind,
-                        "source": source_id,
-                        "resolution": resolution,
-                        "trip": trip.id,
-                        "actor": actor,
-                    },
-                )
             captured_ids = {
                 source_id
                 for (_, kind, source_id), _resolution in closures.items()
                 if kind == "capture"
             }
-            for identity in captured_ids:
-                connection.execute(
-                    text("UPDATE items SET completed=true WHERE id=:id"), {"id": identity}
-                )
-            for identity in purchased_regular_ids:
-                connection.execute(
-                    text(
-                        "UPDATE regulars SET last_purchased=GREATEST(last_purchased,:day) WHERE id=:id"
-                    ),
-                    {"id": identity, "day": data.purchased_on},
-                )
+            session.mark_captures_completed(captured_ids)
+            session.update_regulars_last_purchased(purchased_regular_ids, data.purchased_on)
             for line in trip.lines:
-                self.history.record(
+                session.record_history(
                     HistoryEntryCreate(
                         channel=history_context.get().channel,
                         kind="purchase",
@@ -413,11 +362,10 @@ class TripCompletionService:
                             "purchased_on": str(data.purchased_on),
                             **line.model_dump(mode="json"),
                         },
-                    ),
-                    connection=connection,
+                    )
                 )
             for source_closure in data.source_closures:
-                self.history.record(
+                session.record_history(
                     HistoryEntryCreate(
                         channel=history_context.get().channel,
                         kind="domain_event",
@@ -429,8 +377,7 @@ class TripCompletionService:
                             "week_end": data.end.isoformat(),
                             **source_closure.model_dump(mode="json"),
                         },
-                    ),
-                    connection=connection,
+                    )
                 )
         return trip
 
@@ -528,12 +475,4 @@ class TripCompletionService:
     def list(self, limit: int = 30) -> builtins.list[CompletedTrip]:
         if not 1 <= limit <= 100:
             raise ValueError("limit must be between 1 and 100")
-        with self.engine.connect() as connection:
-            rows = connection.execute(
-                text(
-                    "SELECT result FROM kitchen_completed_trips ORDER BY completed_at DESC,id DESC "
-                    "LIMIT :limit"
-                ),
-                {"limit": limit},
-            ).scalars()
-            return [CompletedTrip.model_validate(row) for row in rows]
+        return self._resolve_uow().list_completed_trips(limit)

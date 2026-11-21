@@ -2,22 +2,20 @@
 
 import json
 from datetime import UTC, date, datetime
+from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import TypeAdapter
-from sqlalchemy import text
-from sqlalchemy.engine import Connection, Engine
 
-from home_kitchen.history import HistoryChannel, HistoryEntryCreate, HistoryRepository
-from home_kitchen.inventory import InventoryService
+from home_kitchen.history import HistoryChannel, HistoryEntryCreate
 from home_kitchen.models import ShoppingLine, WeekShopping
-from home_kitchen.service import KitchenService
 from home_kitchen.shopping import need_id
 from home_kitchen.units import canonicalize_quantity
 
 from .evaluation import evaluate_basket, selection_allocation
 from .matching import NeedMatchResult
 from .models import BasketReview, PurchaseNeed, SelectedProduct
+from .ports import BasketHistoryPort, BasketSelectionStore, PurchasePlanPort
 
 _selection_adapter = TypeAdapter(SelectedProduct)
 
@@ -28,11 +26,6 @@ def _selection_id(start: date, end: date, selection: SelectedProduct) -> UUID:
         f"basket:{start}:{end}:{selection.need_id}:{selection.product.provider}:"
         f"{selection.product.product_id}",
     )
-
-
-def _selection_lock_key(start: date, end: date, need_id: UUID) -> int:
-    lock_id = uuid5(NAMESPACE_URL, f"basket-selection-lock:{start}:{end}:{need_id}").int >> 64
-    return lock_id - (1 << 64) if lock_id >= (1 << 63) else lock_id
 
 
 def _unverified(selection: SelectedProduct) -> SelectedProduct:
@@ -46,11 +39,29 @@ def _unverified(selection: SelectedProduct) -> SelectedProduct:
 class BasketService:
     """Persist product choices and recompute review against current kitchen needs."""
 
-    def __init__(self, kitchen: KitchenService, history: HistoryRepository):
-        self.kitchen = kitchen
-        self.engine: Engine = kitchen.store.engine
+    def __init__(
+        self,
+        purchase_plan: PurchasePlanPort | Any,
+        history: BasketHistoryPort,
+        *,
+        selection_store: BasketSelectionStore | None = None,
+        engine: Any = None,
+    ):
+        if selection_store is not None and callable(getattr(purchase_plan, "plan", None)):
+            self.purchase_plan: PurchasePlanPort = purchase_plan
+            self.selection_store: BasketSelectionStore = selection_store
+            self.engine = engine if engine is not None else getattr(selection_store, "engine", None)
+        else:
+            from home_kitchen.basket.adapters import build_legacy_basket_dependencies
+
+            plan_reader, store, resolved_engine = build_legacy_basket_dependencies(
+                purchase_plan, history, engine=engine, selection_store=selection_store
+            )
+            self.purchase_plan = plan_reader
+            self.selection_store = store
+            self.engine = resolved_engine
+        self.inventory = self.purchase_plan
         self.history = history
-        self.inventory = InventoryService(kitchen, history)
 
     def review(self, start: date, end: date) -> BasketReview:
         week = self._week(start, end)
@@ -118,12 +129,9 @@ class BasketService:
                 "need_quantity": str(need.quantity),
             },
         )
-        with self.engine.begin() as connection:
-            connection.execute(
-                text("SELECT pg_advisory_xact_lock(:lock_key)"),
-                {"lock_key": _selection_lock_key(start, end, selection.need_id)},
-            )
-            existing_rows = self._load(start, end, connection=connection)
+        with self.selection_store.session() as session:
+            session.acquire_need_locks(start, end, [selection.need_id])
+            existing_rows = self._load(start, end, connection=session.connection)
             valid_ids = set(need_by_id)
             existing = []
             for row in existing_rows:
@@ -140,27 +148,17 @@ class BasketService:
             # Evaluate the candidate in context before any persistent write. Evaluation
             # retains residual/overbuy quantities as review issues without guessing.
             evaluate_basket(needs, [*existing, selection])
-            connection.execute(
-                text(
-                    "INSERT INTO kitchen_basket_selections "
-                    "(id, week_start, week_end, need_id, provider, product_id, payload, updated_at) "
-                    "VALUES (:id, :week_start, :week_end, :need_id, :provider, :product_id, "
-                    "CAST(:payload AS jsonb), :updated_at) "
-                    "ON CONFLICT (week_start, week_end, need_id, provider, product_id) "
-                    "DO UPDATE SET payload = EXCLUDED.payload, updated_at = EXCLUDED.updated_at"
-                ),
-                {
-                    "id": selection_id,
-                    "week_start": start,
-                    "week_end": end,
-                    "need_id": selection.need_id,
-                    "provider": selection.product.provider,
-                    "product_id": selection.product.product_id,
-                    "payload": json.dumps(payload),
-                    "updated_at": now,
-                },
+            session.upsert_selection(
+                selection_id=selection_id,
+                start=start,
+                end=end,
+                need_id=selection.need_id,
+                provider=selection.product.provider,
+                product_id=selection.product.product_id,
+                payload=payload,
+                updated_at=now,
             )
-            self.history.record(event, connection=connection)
+            session.record_history(event)
         return self.review(start, end)
 
     def select_batch(
@@ -212,23 +210,9 @@ class BasketService:
         evaluate_basket(needs, combined)
 
         now = datetime.now(UTC)
-        with self.engine.begin() as connection:
-            for need_id in sorted(submitted_need_ids, key=str):
-                connection.execute(
-                    text("SELECT pg_advisory_xact_lock(:lock_key)"),
-                    {"lock_key": _selection_lock_key(start, end, need_id)},
-                )
-            existing_payloads = {
-                (row["need_id"], row["provider"], row["product_id"]): row["payload"]
-                for row in connection.execute(
-                    text(
-                        "SELECT need_id, provider, product_id, payload "
-                        "FROM kitchen_basket_selections "
-                        "WHERE week_start = :start AND week_end = :end"
-                    ),
-                    {"start": start, "end": end},
-                ).mappings()
-            }
+        with self.selection_store.session() as session:
+            session.acquire_need_locks(start, end, sorted(submitted_need_ids, key=str))
+            existing_payloads = session.load_existing_payloads(start, end)
             submitted_need_ids = {selection.need_id for selection in safe}
             desired_keys = {
                 (selection.need_id, selection.product.provider, selection.product.product_id)
@@ -236,24 +220,10 @@ class BasketService:
             }
             for key in existing_payloads:
                 if key[0] in submitted_need_ids and key not in desired_keys:
-                    connection.execute(
-                        text(
-                            "DELETE FROM kitchen_basket_selections "
-                            "WHERE week_start = :start AND week_end = :end "
-                            "AND need_id = :need_id AND provider = :provider AND product_id = :product_id"
-                        ),
-                        {
-                            "start": start,
-                            "end": end,
-                            "need_id": key[0],
-                            "provider": key[1],
-                            "product_id": key[2],
-                        },
-                    )
+                    session.delete_selection_by_key(start, end, key[0], key[1], key[2])
             for selection in safe:
                 selection_id = _selection_id(start, end, selection)
                 payload = selection.model_dump(mode="json")
-                encoded = json.dumps(payload)
                 key = (selection.need_id, selection.product.provider, selection.product.product_id)
                 previous = existing_payloads.get(key)
                 if (
@@ -262,30 +232,20 @@ class BasketService:
                     == payload
                 ):
                     continue
-                connection.execute(
-                    text(
-                        "INSERT INTO kitchen_basket_selections "
-                        "(id, week_start, week_end, need_id, provider, product_id, payload, updated_at) "
-                        "VALUES (:id, :start, :end, :need_id, :provider, :product_id, "
-                        "CAST(:payload AS jsonb), :updated_at) "
-                        "ON CONFLICT (week_start, week_end, need_id, provider, product_id) "
-                        "DO UPDATE SET payload = EXCLUDED.payload, updated_at = EXCLUDED.updated_at"
-                    ),
-                    {
-                        "id": selection_id,
-                        "start": start,
-                        "end": end,
-                        "need_id": selection.need_id,
-                        "provider": selection.product.provider,
-                        "product_id": selection.product.product_id,
-                        "payload": encoded,
-                        "updated_at": now,
-                    },
+                session.upsert_selection(
+                    selection_id=selection_id,
+                    start=start,
+                    end=end,
+                    need_id=selection.need_id,
+                    provider=selection.product.provider,
+                    product_id=selection.product.product_id,
+                    payload=payload,
+                    updated_at=now,
                 )
                 need = need_by_id[selection.need_id]
                 allocated = selection_allocation(need, selection)
                 _, allocated_unit = canonicalize_quantity(need.quantity, need.unit)
-                self.history.record(
+                session.record_history(
                     HistoryEntryCreate(
                         channel=channel,
                         kind="domain_event",
@@ -304,8 +264,7 @@ class BasketService:
                             "allocated_unit": allocated_unit,
                             "need_quantity": str(need.quantity),
                         },
-                    ),
-                    connection=connection,
+                    )
                 )
         return self.review(start, end)
 
@@ -322,26 +281,13 @@ class BasketService:
         selection_id = uuid5(
             NAMESPACE_URL, f"basket:{start}:{end}:{need_id}:oda:{product_id.strip()}"
         )
-        with self.engine.begin() as connection:
-            connection.execute(
-                text("SELECT pg_advisory_xact_lock(:lock_key)"),
-                {"lock_key": _selection_lock_key(start, end, need_id)},
-            )
-            row = (
-                connection.execute(
-                    text(
-                        "SELECT payload FROM kitchen_basket_selections WHERE id = :id "
-                        "AND week_start = :week_start AND week_end = :week_end"
-                    ),
-                    {"id": selection_id, "week_start": start, "week_end": end},
-                )
-                .mappings()
-                .first()
-            )
-            if row is None:
+        with self.selection_store.session() as session:
+            session.acquire_need_locks(start, end, [need_id])
+            payload = session.get_selection_payload(start, end, selection_id)
+            if payload is None:
                 raise KeyError(f"basket selection not found: {product_id}")
-            selection = _selection_adapter.validate_python(row["payload"])
-            self.history.record(
+            selection = _selection_adapter.validate_python(payload)
+            session.record_history(
                 HistoryEntryCreate(
                     channel=channel,
                     kind="domain_event",
@@ -358,17 +304,13 @@ class BasketService:
                             selection.product.pack_quantity * selection.packages
                         ),
                     },
-                ),
-                connection=connection,
+                )
             )
-            connection.execute(
-                text("DELETE FROM kitchen_basket_selections WHERE id = :id"),
-                {"id": selection_id},
-            )
+            session.delete_selection_by_id(selection_id)
         return self.review(start, end)
 
     def _week(self, start: date, end: date) -> WeekShopping:
-        plan = self.inventory.plan(start, end)
+        plan = self.purchase_plan.plan(start, end)
         return WeekShopping(
             lines=[
                 ShoppingLine(
@@ -404,15 +346,5 @@ class BasketService:
             for line in week.lines
         ]
 
-    def _load(self, start: date, end: date, *, connection: Connection | None = None) -> list[dict]:
-        query = text(
-            "SELECT id, need_id, provider, product_id, payload "
-            "FROM kitchen_basket_selections "
-            "WHERE week_start = :week_start AND week_end = :week_end"
-        )
-        params = {"week_start": start, "week_end": end}
-        if connection is not None:
-            return [dict(row) for row in connection.execute(query, params).mappings()]
-        with self.engine.connect() as owned_connection:
-            rows = owned_connection.execute(query, params).mappings()
-            return [dict(row) for row in rows]
+    def _load(self, start: date, end: date, *, connection: Any = None) -> list[dict]:
+        return self.selection_store.load_selections(start, end, connection=connection)

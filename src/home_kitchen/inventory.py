@@ -3,20 +3,26 @@
 import builtins
 from datetime import date
 from decimal import Decimal
-from typing import Annotated
+from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from pydantic import BaseModel, Field, HttpUrl, field_validator
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 
 from home_kitchen.context import history_context
-from home_kitchen.history import HistoryEntryCreate, HistoryRepository
-from home_kitchen.models import NonBlank, RegularItem, ShoppingSourceQuantity, UnquantifiedNeed
-from home_kitchen.service import KitchenService
-from home_kitchen.shopping import ClosedSourceKey, need_id, normalize_need_text
+from home_kitchen.history import HistoryEntryCreate
+from home_kitchen.models import NonBlank
+from home_kitchen.purchasing_ports import HistoryRecordPort
+from home_kitchen.shopping import (
+    ClosedSourceKey,
+    PurchasePlan,
+    PurchasePlanLine,
+    ShoppingListPort,
+    StockQuantity,
+    need_id,
+    normalize_need_text,
+)
 from home_kitchen.units import add_exact, canonicalize_quantity, compatible_units, normalize_unit
-
-StockQuantity = Annotated[Decimal, Field(ge=0, allow_inf_nan=False)]
 
 
 class InventoryItemCreate(BaseModel):
@@ -36,47 +42,39 @@ class InventoryItem(InventoryItemCreate):
     id: UUID
 
 
-class PurchasePlanLine(BaseModel):
-    id: UUID
-    name: str
-    canonical_product_id: UUID | None = None
-    unit: str
-    category: str = "Other"
-    required_quantity: StockQuantity
-    available_quantity: StockQuantity
-    covered_quantity: StockQuantity
-    to_buy_quantity: StockQuantity
-    origins: list[str]
-    source_quantities: list[ShoppingSourceQuantity] = Field(default_factory=list)
-    approximate: bool = False
-    provenance: str | None = None
-    source_url: HttpUrl | None = None
-
-
-class PurchasePlan(BaseModel):
-    start: date
-    end: date
-    lines: list[PurchasePlanLine]
-    suggestions: list[RegularItem]
-    unquantified: list[UnquantifiedNeed] = Field(default_factory=list)
-
-    @property
-    def purchase_lines(self) -> list[PurchasePlanLine]:
-        return [line for line in self.lines if line.to_buy_quantity > 0]
-
-    @property
-    def groups(self) -> dict[str, list[PurchasePlanLine]]:
-        result: dict[str, list[PurchasePlanLine]] = {}
-        for line in self.lines:
-            result.setdefault(line.category, []).append(line)
-        return result
-
-
 class InventoryService:
-    def __init__(self, kitchen: KitchenService, history: HistoryRepository | None = None):
-        self.kitchen = kitchen
-        self.engine = kitchen.store.engine
-        self.history = history or HistoryRepository(self.engine)
+    def __init__(
+        self,
+        shopping: ShoppingListPort,
+        history: HistoryRecordPort | None = None,
+        *,
+        engine: Any = None,
+    ):
+        self.shopping = shopping
+        self.kitchen = shopping
+        self.engine: Any = (
+            engine
+            if engine is not None
+            else getattr(getattr(shopping, "store", None), "engine", None)
+            or getattr(history, "engine", None)
+        )
+        if history is not None:
+            self.history: HistoryRecordPort | None = history
+        elif self.engine is not None:
+            from home_kitchen.history import HistoryRepository
+
+            self.history = HistoryRepository(self.engine)
+        else:
+            self.history = None
+
+    def _record_history(self, entry: HistoryEntryCreate, *, connection: Any) -> None:
+        if self.history is None:
+            if self.engine is None:
+                raise RuntimeError("InventoryService requires an engine or history port")
+            from home_kitchen.history import HistoryRepository
+
+            self.history = HistoryRepository(self.engine)
+        self.history.record(entry, connection=connection)
 
     def list(self) -> builtins.list[InventoryItem]:
         with self.engine.connect() as connection:
@@ -202,7 +200,7 @@ class InventoryService:
                     .one()
                 )
                 saved = InventoryItem.model_validate(dict(row))
-            self.history.record(
+            self._record_history(
                 HistoryEntryCreate(
                     channel=history_context.get().channel,
                     kind="domain_event",
@@ -249,7 +247,7 @@ class InventoryService:
                 ),
                 {"name": row["normalized_name"], **params},
             )
-            self.history.record(
+            self._record_history(
                 HistoryEntryCreate(
                     channel=history_context.get().channel,
                     kind="domain_event",
@@ -286,7 +284,7 @@ class InventoryService:
                     )
                     for row in rows
                 }
-        week = self.kitchen.shopping_list(
+        week = self.shopping.shopping_list(
             start, end, today=date.today(), closed_sources=closed_sources
         )
         stock = {

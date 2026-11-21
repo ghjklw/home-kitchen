@@ -17,6 +17,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from datetime import time as dt_time
 from decimal import Decimal, InvalidOperation
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import UUID
 
@@ -242,23 +243,85 @@ def _is_kassal_rate_limit_error(exc: Exception) -> bool:
     return "http 429" in msg or "too many attempts" in msg or "rate limit" in msg
 
 
-class _KassalLookupSession:
-    """Per-sync EAN lookup cache and circuit breaker for Kassal.app enrichment."""
+def _serialize_kassal_product(product: Any) -> dict[str, Any]:
+    return {
+        "ean": getattr(product, "ean", None),
+        "name": getattr(product, "name", None),
+        "brand": getattr(product, "brand", None),
+        "vendor": getattr(product, "vendor", None),
+        "weight": getattr(product, "weight", None),
+        "weight_unit": getattr(product, "weight_unit", None),
+        "category": getattr(product, "category", None),
+        "image": getattr(product, "image", None),
+    }
 
-    def __init__(self, client: Any) -> None:
+
+def _deserialize_kassal_product(payload: dict[str, Any]) -> SimpleNamespace:
+    return SimpleNamespace(
+        ean=payload.get("ean"),
+        name=payload.get("name"),
+        brand=payload.get("brand"),
+        vendor=payload.get("vendor"),
+        weight=payload.get("weight"),
+        weight_unit=payload.get("weight_unit"),
+        category=payload.get("category"),
+        image=payload.get("image"),
+    )
+
+
+class _KassalLookupSession:
+    """Per-sync EAN lookup cache, DB cache bridge, and circuit breaker for Kassal.app."""
+
+    def __init__(self, client: Any | None, persistent_cache: Any | None = None) -> None:
         self._client = client
+        self._persistent_cache = persistent_cache
         self._cache: dict[str, Any] = {}
         self.rate_limited: bool = False
         self.disabled: bool = False
 
+    def _get_persistent(self, cleaned_ean: str) -> tuple[bool, Any | None] | None:
+        getter = getattr(self._persistent_cache, "get_cached_kassal_ean", None)
+        if not callable(getter):
+            return None
+        try:
+            entry = getter(cleaned_ean)
+        except Exception:
+            _LOG.warning("Failed reading Kassal EAN cache for %s", cleaned_ean, exc_info=True)
+            return None
+        if entry is None:
+            return None
+        found, payload = entry
+        if found and isinstance(payload, dict):
+            return True, _deserialize_kassal_product(payload)
+        return False, None
+
+    def _put_persistent(self, cleaned_ean: str, *, found: bool, product: Any | None) -> None:
+        setter = getattr(self._persistent_cache, "put_cached_kassal_ean", None)
+        if not callable(setter):
+            return
+        payload = _serialize_kassal_product(product) if (found and product is not None) else None
+        try:
+            setter(cleaned_ean, found=found, product_payload=payload)
+        except Exception:
+            _LOG.warning("Failed persisting Kassal EAN cache for %s", cleaned_ean, exc_info=True)
+
     def lookup_ean(self, ean: str | None) -> Any | None:
-        if not ean or self.disabled:
+        if not ean:
             return None
         cleaned = re.sub(r"\s+", "", str(ean).strip())
         if not cleaned:
             return None
         if cleaned in self._cache:
             return self._cache[cleaned]
+
+        persistent_hit = self._get_persistent(cleaned)
+        if persistent_hit is not None:
+            _, cached_product = persistent_hit
+            self._cache[cleaned] = cached_product
+            return cached_product
+
+        if self.disabled or self._client is None:
+            return None
 
         try:
             product = self._client.lookup_ean(cleaned)
@@ -294,6 +357,7 @@ class _KassalLookupSession:
                 return None
             raise
 
+        self._put_persistent(cleaned, found=product is not None, product=product)
         self._cache[cleaned] = product
         return product
 
@@ -447,7 +511,11 @@ def sync_account(
     kassal_session: _KassalLookupSession | None = (
         kassal_client
         if isinstance(kassal_client, _KassalLookupSession)
-        else (_KassalLookupSession(kassal_client) if kassal_client is not None else None)
+        else (
+            _KassalLookupSession(kassal_client, persistent_cache=order_store)
+            if kassal_client is not None
+            else None
+        )
     )
 
     cursor = order_store.get_checkpoint(provider, account_id)
@@ -471,40 +539,54 @@ def sync_account(
                     continue
             records_to_enrich.append(rec)
 
-        has_eans = any(
-            any(extract_line_ean(line) for line in extract_receipt_lines(rec))
+        eans_on_page = {
+            re.sub(r"\s+", "", ean.strip())
             for rec in records_to_enrich
-        )
-        if has_eans and kassal_session is None:
-            active_kassal = None
-            api_key: str | None = None
-            if connector_store is not None and household_id is not None:
-                creds = connector_store.get_credentials(household_id, "kassal")
-                if creds and isinstance(creds, dict) and creds.get("api_key"):
-                    api_key = str(creds["api_key"])
-            if (
-                api_key is None
-                and settings is not None
-                and getattr(settings, "kassal_api_key", None)
-            ):
-                s_key = settings.kassal_api_key
-                clean_k = (
-                    s_key.get_secret_value() if hasattr(s_key, "get_secret_value") else str(s_key)
-                )
-                if clean_k.strip():
-                    api_key = clean_k.strip()
-            if api_key is not None:
-                if kassal_client_factory is not None:
-                    active_kassal = kassal_client_factory(api_key)
-                else:
-                    from home_kitchen.bootstrap import create_kassal_client
+            for line in extract_receipt_lines(rec)
+            if (ean := extract_line_ean(line))
+        }
+        has_uncached_eans = False
+        if eans_on_page and kassal_session is None:
+            cache_getter = getattr(order_store, "get_cached_kassal_ean", None)
+            if callable(cache_getter):
+                has_uncached_eans = any(cache_getter(ean) is None for ean in eans_on_page)
+            else:
+                has_uncached_eans = True
+        if eans_on_page and kassal_session is None:
+            if not has_uncached_eans:
+                kassal_session = _KassalLookupSession(None, persistent_cache=order_store)
+            else:
+                active_kassal = None
+                api_key: str | None = None
+                if connector_store is not None and household_id is not None:
+                    creds = connector_store.get_credentials(household_id, "kassal")
+                    if creds and isinstance(creds, dict) and creds.get("api_key"):
+                        api_key = str(creds["api_key"])
+                if (
+                    api_key is None
+                    and settings is not None
+                    and getattr(settings, "kassal_api_key", None)
+                ):
+                    s_key = settings.kassal_api_key
+                    clean_k = (
+                        s_key.get_secret_value()
+                        if hasattr(s_key, "get_secret_value")
+                        else str(s_key)
+                    )
+                    if clean_k.strip():
+                        api_key = clean_k.strip()
+                if api_key is not None:
+                    if kassal_client_factory is not None:
+                        active_kassal = kassal_client_factory(api_key)
+                    else:
+                        from home_kitchen.bootstrap import create_kassal_client
 
-                    active_kassal = create_kassal_client(api_key)
-            if active_kassal is None:
-                from home_kitchen.bootstrap import missing_kassal_key_error
+                        active_kassal = create_kassal_client(api_key)
+                if active_kassal is None:
+                    from home_kitchen.bootstrap import missing_kassal_key_error
 
-                raise ValueError(missing_kassal_key_error())
-            kassal_session = _KassalLookupSession(active_kassal)
+                    raise ValueError(missing_kassal_key_error())
+                kassal_session = _KassalLookupSession(active_kassal, persistent_cache=order_store)
 
         all_unmapped: list[dict[str, Any]] = []
         for rec in records_to_enrich:
@@ -2142,6 +2224,7 @@ def __getattr__(name: str) -> Any:
         "metadata",
         "provider_order_sources",
         "provider_order_checkpoints",
+        "kassal_ean_cache",
         "checkpoint",
         "persist_page",
     }:

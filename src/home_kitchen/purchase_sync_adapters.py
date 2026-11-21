@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     Column,
     DateTime,
     MetaData,
@@ -58,6 +59,16 @@ provider_order_checkpoints = Table(
     Column("provider", String(100), primary_key=True),
     Column("account_id", String(255), primary_key=True),
     Column("cursor", String(2048), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
+kassal_ean_cache = Table(
+    "kassal_ean_cache",
+    metadata,
+    Column("ean", String(64), primary_key=True),
+    Column("found", Boolean, nullable=False),
+    Column("product_payload", JSON().with_variant(JSONB, "postgresql"), nullable=True),
+    Column("fetched_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
 )
 
@@ -292,6 +303,53 @@ class PostgresPurchaseOrderStore:
             )
             return [_utc(row[0]) for row in cp_rows], [dict(row) for row in source_rows]
 
+    def get_cached_kassal_ean(self, ean: str) -> tuple[bool, dict[str, Any] | None] | None:
+        with self.engine.connect() as connection:
+            if not inspect(connection).has_table("kassal_ean_cache"):
+                return None
+            row = (
+                connection.execute(
+                    select(
+                        kassal_ean_cache.c.found,
+                        kassal_ean_cache.c.product_payload,
+                    ).where(kassal_ean_cache.c.ean == ean)
+                )
+                .mappings()
+                .first()
+            )
+            if row is None:
+                return None
+            payload = row["product_payload"]
+            return bool(row["found"]), (dict(payload) if isinstance(payload, dict) else None)
+
+    def put_cached_kassal_ean(
+        self,
+        ean: str,
+        *,
+        found: bool,
+        product_payload: dict[str, Any] | None,
+    ) -> None:
+        now = datetime.now(UTC)
+        with self.engine.begin() as connection:
+            if not inspect(connection).has_table("kassal_ean_cache"):
+                return
+            stmt = _insert(kassal_ean_cache, connection.dialect.name).values(
+                ean=ean,
+                found=found,
+                product_payload=product_payload,
+                fetched_at=now,
+                updated_at=now,
+            )
+            stmt = stmt.on_conflict_do_update(
+                index_elements=[kassal_ean_cache.c.ean],
+                set_={
+                    "found": found,
+                    "product_payload": product_payload,
+                    "updated_at": now,
+                },
+            )
+            connection.execute(stmt)
+
 
 class MemoryPurchaseOrderStore:
     """In-memory secondary adapter implementing `PurchaseOrderStore` for unit tests."""
@@ -299,6 +357,26 @@ class MemoryPurchaseOrderStore:
     def __init__(self) -> None:
         self._checkpoints: dict[tuple[str, str], tuple[str, datetime]] = {}
         self._sources: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        self._kassal_ean_cache: dict[str, tuple[bool, dict[str, Any] | None]] = {}
+
+    def get_cached_kassal_ean(self, ean: str) -> tuple[bool, dict[str, Any] | None] | None:
+        entry = self._kassal_ean_cache.get(ean)
+        if entry is None:
+            return None
+        found, payload = entry
+        return found, (dict(payload) if isinstance(payload, dict) else None)
+
+    def put_cached_kassal_ean(
+        self,
+        ean: str,
+        *,
+        found: bool,
+        product_payload: dict[str, Any] | None,
+    ) -> None:
+        self._kassal_ean_cache[ean] = (
+            found,
+            dict(product_payload) if isinstance(product_payload, dict) else None,
+        )
 
     def get_checkpoint(self, provider: str, account_id: str) -> str | None:
         provider, account_id = _identity(provider, account_id)

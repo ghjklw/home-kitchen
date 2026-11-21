@@ -1028,3 +1028,212 @@ def test_rema1000_service_sync_provider_succeeds_when_kassal_returns_429(memory_
     assert second_result.records_synced == 3
     assert factory_calls == 1
     assert kassal_requests == ["7032069101520", "7032069101611"]
+
+
+def test_kassal_ean_cache_persists_across_restarts_and_skips_429(memory_engine):
+    from pathlib import Path
+    from uuid import uuid4
+
+    from home_kitchen.connector_store import MemoryConnectorStore
+    from home_kitchen.kassal import KassalClient
+    from home_kitchen.purchase_sync import PurchaseHistorySyncService, kassal_ean_cache
+
+    hid = uuid4()
+    connector_store = MemoryConnectorStore()
+    connector_store.save_connection(hid, "kassal", "api_key", {"api_key": "kassal-test-key"})
+
+    txs = [
+        Rema1000Transaction.model_validate(
+            {
+                "receiptId": "rema-db-cache-1",
+                "storeName": "REMA 1000 Vulkan",
+                "totalAmount": "189.80",
+                "timestamp": "2026-11-21T10:00:00Z",
+                "hasReceipt": True,
+            }
+        ),
+    ]
+    receipts = {
+        "rema-db-cache-1": {
+            "rows": [
+                {"prodtxt1": "NORVEGIA 1KG", "prodtxt3": "7038010009457", "amount": "149.90"},
+                {"prodtxt1": "UKJENT VARE", "prodtxt3": "7038010009999", "amount": "10.00"},
+                {"prodtxt1": "KVIKK LUNSJ 4PK", "prodtxt3": "7032069101520", "amount": "29.90"},
+            ]
+        },
+    }
+    source = Rema1000FixtureSource(txs, receipts=receipts)
+    adapter = Rema1000PurchaseHistoryAdapter(source, "alice")
+
+    first_run_calls: list[str] = []
+
+    def _first_factory(api_key: str) -> KassalClient:
+        def handler(request: httpx.Request) -> httpx.Response:
+            ean = request.url.path.rsplit("/", 1)[-1]
+            first_run_calls.append(ean)
+            if ean == "7038010009457":
+                return httpx.Response(
+                    200,
+                    json={
+                        "data": {
+                            "products": [
+                                {
+                                    "name": "Norvegia Original 1kg",
+                                    "brand": "Tine",
+                                    "weight": 1.0,
+                                    "weight_unit": "kg",
+                                }
+                            ]
+                        }
+                    },
+                )
+            if ean == "7038010009999":
+                return httpx.Response(404, json={"message": "Not found"})
+            return httpx.Response(429, json={"message": "Too Many Attempts."})
+
+        return KassalClient(api_key, transport=httpx.MockTransport(handler))
+
+    service_1 = PurchaseHistorySyncService(
+        engine=memory_engine,
+        connector_store=connector_store,
+        household_id=hid,
+        kassal_client_factory=_first_factory,
+    )
+    service_1.register_adapter("rema1000", adapter, account_id="alice")
+    res_1 = service_1.sync_provider("rema1000", account_id="alice")
+    assert res_1.status == "success"
+    assert res_1.records_synced == 1
+    assert first_run_calls == ["7038010009457", "7038010009999", "7032069101520"]
+
+    with memory_engine.connect() as connection:
+        cache_rows = {
+            row["ean"]: row for row in connection.execute(select(kassal_ean_cache)).mappings().all()
+        }
+    assert set(cache_rows.keys()) == {"7038010009457", "7038010009999"}
+    assert cache_rows["7038010009457"]["found"] is True
+    assert cache_rows["7038010009457"]["product_payload"]["name"] == "Norvegia Original 1kg"
+    assert cache_rows["7038010009999"]["found"] is False
+    assert cache_rows["7038010009999"]["product_payload"] is None
+
+    # Simulate pod restart: new service + new KassalClient instance (empty in-memory cache)
+    # Syncing a brand-new receipt should hit DB cache for 7038010009457 and 7038010009999,
+    # and only call Kassal for 7032069101520 (which was NOT cached on 429).
+    source._transactions.append(
+        Rema1000Transaction.model_validate(
+            {
+                "receiptId": "rema-db-cache-2",
+                "storeName": "REMA 1000 Vulkan",
+                "totalAmount": "189.80",
+                "timestamp": "2026-11-21T16:00:00Z",
+                "hasReceipt": True,
+            }
+        )
+    )
+    receipts["rema-db-cache-2"] = {
+        "rows": [
+            {"prodtxt1": "NORVEGIA 1KG", "prodtxt3": "7038010009457", "amount": "149.90"},
+            {"prodtxt1": "UKJENT VARE", "prodtxt3": "7038010009999", "amount": "10.00"},
+            {"prodtxt1": "KVIKK LUNSJ 4PK", "prodtxt3": "7032069101520", "amount": "29.90"},
+        ]
+    }
+
+    second_run_calls: list[str] = []
+
+    def _second_factory(api_key: str) -> KassalClient:
+        def handler(request: httpx.Request) -> httpx.Response:
+            ean = request.url.path.rsplit("/", 1)[-1]
+            second_run_calls.append(ean)
+            return httpx.Response(
+                200,
+                json={"data": {"products": [{"name": "Kvikk Lunsj 4pk", "brand": "Freia"}]}},
+            )
+
+        return KassalClient(api_key, transport=httpx.MockTransport(handler))
+
+    service_2 = PurchaseHistorySyncService(
+        engine=memory_engine,
+        connector_store=connector_store,
+        household_id=hid,
+        kassal_client_factory=_second_factory,
+    )
+    service_2.register_adapter("rema1000", adapter, account_id="alice")
+    res_2 = service_2.sync_provider("rema1000", account_id="alice")
+    assert res_2.status == "success"
+    assert res_2.records_synced == 2
+    assert second_run_calls == ["7032069101520"]
+
+    with memory_engine.connect() as connection:
+        rows = (
+            connection.execute(
+                select(provider_order_sources).where(
+                    provider_order_sources.c.external_id == "rema-db-cache-2"
+                )
+            )
+            .mappings()
+            .all()
+        )
+    assert len(rows) == 1
+    lines_2 = extract_normalized_lines("rema1000", rows[0]["payload"])
+    assert [line.name for line in lines_2] == [
+        "Norvegia Original 1kg",
+        "UKJENT VARE",
+        "Kvikk Lunsj 4pk",
+    ]
+
+    # Third receipt with only DB-cached EANs succeeds even with no Kassal key configured
+    source._transactions.append(
+        Rema1000Transaction.model_validate(
+            {
+                "receiptId": "rema-db-cache-3",
+                "storeName": "REMA 1000 Vulkan",
+                "totalAmount": "149.90",
+                "timestamp": "2026-11-21T17:00:00Z",
+                "hasReceipt": True,
+            }
+        )
+    )
+    receipts["rema-db-cache-3"] = {
+        "rows": [{"prodtxt1": "NORVEGIA 1KG", "prodtxt3": "7038010009457", "amount": "149.90"}]
+    }
+    assert sync_account(memory_engine, "rema1000", "alice", adapter) == 3
+
+    # Also verify Alembic migration 0032_kassal_ean_cache is the single head
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    cfg = Config(str(Path(__file__).parents[1] / "alembic.ini"))
+    script = ScriptDirectory.from_config(cfg)
+    heads = script.get_heads()
+    assert heads == ["0032_kassal_ean_cache"]
+
+
+def test_alembic_migration_0032_kassal_ean_cache_structure():
+    import runpy
+    from pathlib import Path
+    from unittest.mock import patch
+
+    migration_path = (
+        Path(__file__).parents[1] / "migrations" / "versions" / "0032_kassal_ean_cache.py"
+    )
+    assert migration_path.exists()
+    migration = runpy.run_path(str(migration_path))
+    assert migration["revision"] == "0032_kassal_ean_cache"
+    assert len(migration["revision"]) <= 32
+    assert migration["down_revision"] == "0031_alias_household_source_type"
+
+    with (
+        patch.object(migration["op"], "create_table") as mock_create,
+        patch.object(migration["op"], "drop_table") as mock_drop,
+    ):
+        migration["upgrade"]()
+        mock_create.assert_called_once()
+        assert mock_create.call_args[0][0] == "kassal_ean_cache"
+        col_names = [
+            arg.name
+            for arg in mock_create.call_args[0][1:]
+            if hasattr(arg, "name") and hasattr(arg, "type")
+        ]
+        assert col_names == ["ean", "found", "product_payload", "fetched_at", "updated_at"]
+
+        migration["downgrade"]()
+        mock_drop.assert_called_once_with("kassal_ean_cache")

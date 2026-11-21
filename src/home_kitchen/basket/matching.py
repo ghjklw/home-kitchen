@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Hashable
+from collections.abc import Awaitable, Callable, Hashable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_CEILING, Decimal, InvalidOperation, localcontext
@@ -20,6 +20,11 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 from starlette.concurrency import run_in_threadpool
 
+from home_kitchen.basket.ports import (
+    IdentityCorrectionPort,
+    IdentityLookupPort,
+    SkuPreferencePort,
+)
 from home_kitchen.catalogue.identity import IdentityCorrectionCitation
 from home_kitchen.inventory import InventoryService, PurchasePlan
 from home_kitchen.oda.media import ProductMedia, fetch_product_media
@@ -1137,6 +1142,41 @@ def _package_recommendation(
     return packages, fulfillment
 
 
+class _CallableSkuPreferenceAdapter(SkuPreferencePort):
+    def __init__(self, fn: Callable[[UUID], tuple[list[str], list[str]]]) -> None:
+        self._fn = fn
+
+    def get_sku_preferences(self, product_id: UUID) -> tuple[list[str], list[str]]:
+        return self._fn(product_id)
+
+
+class _CallableIdentityLookupAdapter(IdentityLookupPort):
+    def __init__(self, fn: Callable[[str], UUID | None]) -> None:
+        self._fn = fn
+
+    def resolve_product_id(self, name: str) -> UUID | None:
+        return self._fn(name)
+
+
+class _CallableIdentityCorrectionAdapter(IdentityCorrectionPort):
+    def __init__(
+        self,
+        fn: Callable[[str, UUID | None], Sequence[IdentityCorrectionCitation | Any]],
+    ) -> None:
+        self._fn = fn
+
+    def get_identity_corrections(
+        self, need_name: str, product_id: UUID | None
+    ) -> list[IdentityCorrectionCitation]:
+        citations: list[IdentityCorrectionCitation] = []
+        for item in self._fn(need_name, product_id):
+            if isinstance(item, IdentityCorrectionCitation):
+                citations.append(item)
+            else:
+                citations.append(IdentityCorrectionCitation.from_event(item))
+        return citations
+
+
 class BasketMatchingService:
     """Find candidates for current positive inventory-adjusted purchase needs."""
 
@@ -1148,6 +1188,9 @@ class BasketMatchingService:
         media_fetcher: MediaFetcher = fetch_product_media,
         media_cache: _MediaCache | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        sku_preferences: SkuPreferencePort | None = None,
+        identity_lookup: IdentityLookupPort | None = None,
+        identity_corrections: IdentityCorrectionPort | None = None,
         preferences_provider: Callable[[UUID], tuple[list[str], list[str]]] | None = None,
         product_id_resolver: Callable[[str], UUID | None] | None = None,
         identity_corrections_provider: Callable[
@@ -1161,9 +1204,21 @@ class BasketMatchingService:
         self.media_fetcher = media_fetcher
         self.media_cache = media_cache or _MediaCache()
         self.clock = clock
-        self.preferences_provider = preferences_provider
-        self.product_id_resolver = product_id_resolver
-        self.identity_corrections_provider = identity_corrections_provider
+        self.sku_preferences: SkuPreferencePort | None = sku_preferences or (
+            _CallableSkuPreferenceAdapter(preferences_provider)
+            if preferences_provider is not None
+            else None
+        )
+        self.identity_lookup: IdentityLookupPort | None = identity_lookup or (
+            _CallableIdentityLookupAdapter(product_id_resolver)
+            if product_id_resolver is not None
+            else None
+        )
+        self.identity_corrections: IdentityCorrectionPort | None = identity_corrections or (
+            _CallableIdentityCorrectionAdapter(identity_corrections_provider)
+            if identity_corrections_provider is not None
+            else None
+        )
         self.purchase_evidence_provider = purchase_evidence_provider
         self._search_cache: OrderedDict[tuple, tuple[datetime, ProviderSearchGroup]] = OrderedDict()
         self._inflight: dict[tuple, asyncio.Future] = {}
@@ -1413,14 +1468,16 @@ class BasketMatchingService:
                 preferred_ids: list[str] = []
                 excluded_ids: set[str] = set()
                 canon_id = getattr(bounded_lines[current_index], "canonical_product_id", None)
-                if canon_id is None and self.product_id_resolver is not None:
+                if canon_id is None and self.identity_lookup is not None:
                     try:
-                        canon_id = self.product_id_resolver(bounded_lines[current_index].name)
+                        canon_id = self.identity_lookup.resolve_product_id(
+                            bounded_lines[current_index].name
+                        )
                     except Exception:
                         canon_id = None
-                if canon_id is not None and self.preferences_provider is not None:
+                if canon_id is not None and self.sku_preferences is not None:
                     try:
-                        pref_list, excl_list = self.preferences_provider(canon_id)
+                        pref_list, excl_list = self.sku_preferences.get_sku_preferences(canon_id)
                         preferred_ids = list(pref_list)
                         excluded_ids = set(excl_list)
                     except Exception:
@@ -1440,18 +1497,13 @@ class BasketMatchingService:
                     except Exception:
                         purchase_evidence = []
                 correction_citations: list[IdentityCorrectionCitation] = []
-                if self.identity_corrections_provider is not None:
+                if self.identity_corrections is not None:
                     try:
-                        raw_citations = self.identity_corrections_provider(
-                            bounded_lines[current_index].name, canon_id
+                        correction_citations = list(
+                            self.identity_corrections.get_identity_corrections(
+                                bounded_lines[current_index].name, canon_id
+                            )
                         )
-                        for item in raw_citations:
-                            if isinstance(item, IdentityCorrectionCitation):
-                                correction_citations.append(item)
-                            else:
-                                correction_citations.append(
-                                    IdentityCorrectionCitation.from_event(item)
-                                )
                     except Exception:
                         correction_citations = []
 

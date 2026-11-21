@@ -5516,7 +5516,7 @@ function openBasketBatchReview(targetNeedId = null) {
     const primary = candidates.find((candidate) =>
       staged?.candidate_id === candidate.id && staged?.match_job_id === state.basketBatchReviewJobId &&
         staged?.start === start && staged?.end === end,
-    ) || compatible[0] || selectable[0];
+    ) || compatible[0] || null;
     const renderOption = (candidate) => {
       const card = el("article", null, "basket-batch-option");
       add(card, renderBasketMatchCandidate(candidate, need));
@@ -5846,8 +5846,8 @@ function renderCompactShoppingMatch(line, match) {
         } else if (unverified.length) {
           badgeText = "Må bekreftes";
           badgeClass += " match-unverified";
-          buttonLabel = "Se forslag";
-          buttonAria = "Se over uavklart produktforslag for " + line.name;
+          buttonLabel = "Se over";
+          buttonAria = "Søk manuelt eller avklar uavklarte treff for " + line.name;
         } else {
           badgeText = "Uavklart treff";
           badgeClass += " match-unresolved";
@@ -6649,7 +6649,7 @@ function odaSearchResultCard(product, need) {
     );
   add(
     details,
-    el("small", "Forslag til treff · kontroller produkt og pakningsstørrelse", "muted"),
+    el("small", "Søketreff · kontroller produkt og pakningsstørrelse", "muted"),
   );
   add(card, details);
   return card;
@@ -7350,7 +7350,10 @@ function renderBasketMatchSummary() {
   const busyCount = needs.filter((need) => state.basketMatchBusy[String(need.id)]).length;
   const foundCount = needs.filter((need) => {
     const page = state.basketMatchCurrentPage[String(need.id)] || 1;
-    return (state.basketMatchPages[String(need.id)]?.[page]?.candidates || []).length > 0;
+    const candidates = state.basketMatchPages[String(need.id)]?.[page]?.candidates || [];
+    return candidates.some(
+      (candidate) => window.KitchenBasketMatchView.identityStatus(candidate) === "compatible",
+    );
   }).length;
   const summary = busyCount
     ? "Søker etter produkter for " + formatUiCount(busyCount) + " av " + formatUiCount(needs.length) + " varer …"
@@ -7388,9 +7391,20 @@ function renderBasketMatchNeed(need) {
   const result = pages[currentPage] || pages[1];
   const busy = state.basketMatchBusy[id];
   const error = state.basketMatchErrors[id];
+  const candidates = result?.candidates || [];
+  const compatible = candidates.filter(
+    (candidate) => window.KitchenBasketMatchView.identityStatus(candidate) === "compatible",
+  );
+  const unverified = candidates.filter(
+    (candidate) => window.KitchenBasketMatchView.identityStatus(candidate) !== "compatible",
+  );
+  const heading =
+    compatible.length > 0 || busy || !result || ["pending", "searching"].includes(result.status)
+      ? "Foreslåtte produkter"
+      : "Produktgjennomgang";
   const panel = add(
     el("section", null, "basket-match-need"),
-    el("h3", "Foreslåtte produkter"),
+    el("h3", heading),
   );
   const observedAt = state.basketMatchObservedAt[id]?.[result?.page || currentPage];
   if (observedAt) {
@@ -7406,7 +7420,20 @@ function renderBasketMatchNeed(need) {
     errorText.setAttribute("role", "alert");
     add(panel, errorText);
   } else if (result) {
-    add(panel, el("p", window.KitchenBasketMatchView.statusLabel(result.status), "muted"));
+    if (result.status === "matched" && !compatible.length) {
+      add(
+        panel,
+        el(
+          "p",
+          unverified.length
+            ? "Ingen sikre produktforslag funnet. Søk manuelt eller se uavklarte treff."
+            : "Ingen sikre produktforslag funnet.",
+          "muted",
+        ),
+      );
+    } else {
+      add(panel, el("p", window.KitchenBasketMatchView.statusLabel(result.status), "muted"));
+    }
     if (result.detail)
       add(
         panel,
@@ -7422,18 +7449,28 @@ function renderBasketMatchNeed(need) {
     add(panel, el("p", "Venter på automatisk produktsøk …", "muted"));
   }
 
-  if (result?.candidates?.length) {
-    add(panel, renderBasketMatchCandidate(result.candidates[0], need));
-    if (result.candidates.length > 1) {
+  if (compatible.length) {
+    add(panel, renderBasketMatchCandidate(compatible[0], need));
+    const rest = [...compatible.slice(1), ...unverified];
+    if (rest.length) {
       const alternatives = el("details", null, "basket-match-alternatives");
-      add(alternatives, el("summary", "Flere treff (" + formatUiCount(result.candidates.length - 1) + ")"));
+      add(alternatives, el("summary", "Flere treff (" + formatUiCount(rest.length) + ")"));
       const list = el("div", null, "basket-match-candidates");
-      result.candidates.slice(1).forEach((candidate) =>
+      rest.forEach((candidate) =>
         list.append(renderBasketMatchCandidate(candidate, need)),
       );
       add(alternatives, list);
       add(panel, alternatives);
     }
+  } else if (unverified.length) {
+    const alternatives = el("details", null, "basket-match-alternatives");
+    add(alternatives, el("summary", "Vis uavklarte treff (" + formatUiCount(unverified.length) + ")"));
+    const list = el("div", null, "basket-match-candidates");
+    unverified.forEach((candidate) =>
+      list.append(renderBasketMatchCandidate(candidate, need)),
+    );
+    add(alternatives, list);
+    add(panel, alternatives);
   }
   const baselineQuery = result?.search_query ?? need.name;
   const currentQuery = state.basketMatchQueries?.[id] ?? baselineQuery;
@@ -7531,6 +7568,9 @@ function renderBasketMatchCandidate(candidate, need) {
   const summary = el("div", null, "basket-match-candidate-main");
   const details = add(el("div", null, "product-details"), el("strong", candidate.name));
   if (candidate.brand) add(details, el("small", candidate.brand, "muted"));
+  if (window.KitchenBasketMatchView.identityStatus(candidate) !== "compatible") {
+    add(details, el("small", "Produktidentiteten er ikke bekreftet · kontroller før du velger", "muted"));
+  }
   if (candidate.recommended_packages != null && candidate.recommended_fulfillment_quantity != null) {
     const lang = state?.household?.language;
     add(

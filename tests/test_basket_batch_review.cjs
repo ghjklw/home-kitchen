@@ -163,6 +163,7 @@ function fixture({ api } = {}) {
     "basketBatchSkipReason",
     "toggleBasketBatchChoice",
     "renderBasketMatchCandidate",
+    "renderBasketMatchSummary",
     "openBasketBatchReview",
     "renderBasketBatchReview",
     "renderBasketMatchNeed",
@@ -827,4 +828,45 @@ test("createOdaCartProposal refreshes availability first, surfaces unavailable i
   assert.equal(requests[1].path, "/oda/cart/proposals");
   assert.deepEqual(JSON.parse(JSON.stringify(requests[1].body.additions)), [{ product_id: 101, quantity: 1 }]);
   assert.ok(proposalRendered);
+});
+
+test("issue 135: unverified candidates are not shown as product suggestions in need view, summary, or batch review", () => {
+  const value = fixture();
+  const unverifiedWithPack = {
+    ...value.safeCandidate,
+    id: "oda:unverified-item",
+    identity_status: "unverified",
+    name: "Uavklart produkt",
+  };
+  value.state.basketMatchPages[value.safeNeed.id][1].candidates = [unverifiedWithPack];
+  value.state.basketMatchPages[value.unclearNeed.id][1].candidates = [];
+  value.state.basketMatchPages[value.unclearNeed.id][1].status = "no_results";
+
+  const summaryPanel = value.context.renderBasketMatchSummary();
+  assert.match(summaryPanel.text, /0 av 2 varer har produktforslag/u);
+
+  const needPanel = value.context.renderBasketMatchNeed(value.safeNeed);
+  assert.doesNotMatch(needPanel.text, /Foreslåtte produkter/u);
+  assert.doesNotMatch(needPanel.text, /Forslagene er klare/u);
+  assert.match(needPanel.text, /Ingen sikre produktforslag funnet/u);
+  assert.equal(needPanel.children.filter((n) => n.className === "basket-match-candidate").length, 0);
+  const disclosure = needPanel.find((n) => n.className === "basket-match-alternatives");
+  assert.ok(disclosure);
+  assert.match(disclosure.text, /Vis uavklarte treff \(1\)/u);
+  assert.ok(needPanel.find((n) => n.className === "basket-match-refine"));
+
+  value.context.openBasketBatchReview();
+  const sections = allNodes(value.modal.root).filter((n) => n.className === "basket-batch-need");
+  assert.equal(sections[0].children.filter((n) => n.className === "basket-batch-option").length, 0);
+  const batchDisclosure = sections[0].find((n) => n.className === "basket-batch-alternatives");
+  assert.ok(batchDisclosure);
+  assert.match(batchDisclosure.text, /Vis uavklarte treff \(1\)/u);
+
+  // When both unverified and compatible candidates exist, the compatible candidate is suggested first.
+  value.state.basketMatchPages[value.safeNeed.id][1].candidates = [unverifiedWithPack, value.safeCandidate];
+  const mixedPanel = value.context.renderBasketMatchNeed(value.safeNeed);
+  assert.match(mixedPanel.text, /Foreslåtte produkter/u);
+  const topCandidate = mixedPanel.children.find((n) => n.className === "basket-match-candidate");
+  assert.ok(topCandidate);
+  assert.match(topCandidate.text, /Yoghurt 500 g/u);
 });

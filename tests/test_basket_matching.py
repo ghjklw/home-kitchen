@@ -1633,3 +1633,258 @@ async def test_check_products_availability_surfaces_unavailable_and_price_change
     # Calling again must bypass cache and query provider freshly.
     await service.check_products_availability("household-1", targets[:1])
     assert provider.calls >= 3
+
+
+@pytest.mark.asyncio
+async def test_issue_135_uat_examples_and_bilingual_matches_through_service():
+    """Verify all six Issue #135 UAT examples, extended negatives, and bilingual matches end-to-end."""
+
+    class DeterministicOdaService:
+        def search_cache_context(self, actor_id):
+            return 1
+
+        async def search_products(self, actor_id, queries, page, size):
+            catalog = {
+                "Hot water": ["Tundra Tonic Water Raspberry", "Farris Bris Mango"],
+                "varmt vann": ["Imsdal Vann", "Nivea Micellar Water"],
+                "unsalted butter, plus extra for greasing": [
+                    "Rummo Glutenfri spaghetti",
+                    "Tine Meierismør Saltet",
+                    "Body Butter Shea",
+                ],
+                "usaltet smør": ["Tine Meierismør Usaltet"],
+                "Vegetable oil": ["Nivea Hawaii Flower & Oil Shower", "Neutral Babyolje"],
+                "matolje": ["Eldorado Rapsolje"],
+                "All-purpose flour": ["LOOP nicotine pouches", "Møllerens Rugmel", "Potetmel"],
+                "hvetemel": ["Møllerens Siktet Hvetemel"],
+                "Baking powder": [
+                    "Den Gode Baker Glutenfri Pepperkakedeig",
+                    "Pepperkaker",
+                    "Vaskepulver",
+                ],
+                "bakepulver": ["Freia Bakepulver"],
+                "Large eggs": ["Old El Paso tortillas", "Prior Egg 12 stk M", "Kinderegg"],
+                "egg L": ["Prior Egg 12 stk L"],
+                "chicken breast": ["Kyllinglår", "Kyllingbuljong"],
+                "kyllingfilet": ["Prior Kyllingfilet 400 g"],
+                "butter": ["Peanøttsmør", "Kakaosmør"],
+                "smør": ["Tine Meierismør"],
+            }
+            result = [
+                {
+                    "query": query,
+                    "hasMore": False,
+                    "products": [
+                        {
+                            "id": (abs(hash((query, name))) % 900000) + 1000,
+                            "name": name,
+                            "description": "500 g",
+                            "price": "39.90",
+                            "unitPrice": "79.80",
+                            "unitName": "per kg",
+                            "available": True,
+                            "url": f"https://oda.com/no/products/{abs(hash((query, name))) % 900000 + 1000}-item",
+                        }
+                        for name in catalog.get(query, [])
+                    ],
+                }
+                for query in queries
+            ]
+            # Include an unrequested provider group whenever room remains under Oda's 10-group limit.
+            if len(result) < 10:
+                result.append(
+                    {
+                        "query": "leaked unrelated query",
+                        "hasMore": False,
+                        "products": [
+                            {
+                                "id": 999999,
+                                "name": "Leaked Unrelated Product",
+                                "description": "500 g",
+                                "price": "19.90",
+                                "unitPrice": "39.80",
+                                "unitName": "per kg",
+                                "available": True,
+                                "url": "https://oda.com/no/products/999999-leaked",
+                            }
+                        ],
+                    }
+                )
+            return {"result": result}
+
+    needs = [
+        line("Hot water", "200", "ml", index=1),
+        line("unsalted butter, plus extra for greasing", "100", "g", index=2),
+        line("Vegetable oil", "100", "ml", index=3),
+        line("All-purpose flour", "250", "g", index=4),
+        line("Baking powder", "10", "g", index=5),
+        line("Large eggs", "2", "item", index=6),
+        line("chicken breast", "400", "g", index=7),
+        line("kyllingfilet", "400", "g", index=8),
+        line("butter", "100", "g", index=9),
+        line("smør", "100", "g", index=10),
+    ]
+    service = BasketMatchingService(
+        FakeInventory(needs),
+        OdaSearchAdapter(DeterministicOdaService()),
+        media_fetcher=lambda _: _media(None),
+    )
+
+    result = await service.find_products("household-1", date(2026, 11, 16), date(2026, 11, 22))
+    by_name = {need.name: need for need in result.needs}
+
+    # Hot water has no matching grocery item -> remains honestly unresolved (no_results)
+    assert by_name["Hot water"].status == "no_results"
+    assert by_name["Hot water"].candidates == []
+
+    # The remaining 5 UAT failure cases reject irrelevant hits and retain valid localized matches
+    assert [c.name for c in by_name["unsalted butter, plus extra for greasing"].candidates] == [
+        "Tine Meierismør Usaltet"
+    ]
+    assert [c.name for c in by_name["Vegetable oil"].candidates] == ["Eldorado Rapsolje"]
+    assert [c.name for c in by_name["All-purpose flour"].candidates] == [
+        "Møllerens Siktet Hvetemel"
+    ]
+    assert [c.name for c in by_name["Baking powder"].candidates] == ["Freia Bakepulver"]
+    assert [c.name for c in by_name["Large eggs"].candidates] == ["Prior Egg 12 stk L"]
+
+    # Positive bilingual matches (chicken breast / kyllingfilet and butter / smør)
+    assert [c.name for c in by_name["chicken breast"].candidates] == ["Prior Kyllingfilet 400 g"]
+    assert [c.name for c in by_name["kyllingfilet"].candidates] == ["Prior Kyllingfilet 400 g"]
+    assert [c.name for c in by_name["butter"].candidates] == ["Tine Meierismør"]
+    assert [c.name for c in by_name["smør"].candidates] == ["Tine Meierismør"]
+
+    for need_name in (
+        "unsalted butter, plus extra for greasing",
+        "Vegetable oil",
+        "All-purpose flour",
+        "Baking powder",
+        "Large eggs",
+        "chicken breast",
+        "kyllingfilet",
+        "butter",
+        "smør",
+    ):
+        need_result = by_name[need_name]
+        assert need_result.status == "matched"
+        assert need_result.candidates[0].identity_status == "compatible"
+        assert need_result.candidates[0].match_query == need_name
+        assert need_result.candidates[0].pack_metadata_status in {"unknown", "unverified"}
+
+    # Ensure leaked product never enters any need
+    all_candidate_names = [c.name for n in result.needs for c in n.candidates]
+    assert "Leaked Unrelated Product" not in all_candidate_names
+
+
+@pytest.mark.asyncio
+async def test_oda_adapter_deduplicates_case_variants_and_service_rejects_mismatched_group_query():
+    class CaseOda:
+        def __init__(self):
+            self.seen_queries = []
+
+        async def search_products(self, actor_id, queries, page, size):
+            self.seen_queries.append(list(queries))
+            return {
+                "result": [
+                    {
+                        "query": query,
+                        "hasMore": False,
+                        "products": [
+                            {
+                                "id": 1,
+                                "name": "Tine Meierismør",
+                                "description": "500 g",
+                                "price": "45.00",
+                                "unitPrice": "90.00",
+                                "unitName": "per kg",
+                                "url": "https://oda.com/no/products/1-smor",
+                            }
+                        ],
+                    }
+                    for query in queries
+                ]
+            }
+
+    oda = CaseOda()
+    groups = await OdaSearchAdapter(oda).search_products("household-1", ["Butter", "butter"], 1, 5)
+    assert oda.seen_queries == [["Butter", "smør"]]
+    assert [g.query for g in groups] == ["Butter", "butter"]
+    assert all([p.name for p in g.products] == ["Tine Meierismør"] for g in groups)
+
+    # Also verify BasketMatchingService filters incompatible products even if provider skips adapter
+    class UnfilteredProvider:
+        async def search_products(self, actor_id, queries, page, size):
+            return [
+                ProviderSearchGroup(
+                    query=queries[0],
+                    has_more=False,
+                    products=[
+                        ProviderProduct(
+                            provider="oda",
+                            product_id="bad-1",
+                            name="Nivea Hawaii Flower & Oil Shower",
+                            description="Title 500 ml should not infer pack",
+                            unit_price="50.00",
+                            unit_name="per l",
+                        )
+                    ],
+                )
+            ]
+
+    service = BasketMatchingService(
+        FakeInventory([line("Vegetable oil", "100", "ml")]),
+        UnfilteredProvider(),
+        media_fetcher=lambda _: _media(None),
+    )
+    res = await service.find_products("household-1", date(2026, 11, 16), date(2026, 11, 22))
+    assert res.needs[0].status == "no_results"
+    assert res.needs[0].candidates == []
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_localized", "bad_product", "good_product"),
+    [
+        (
+            "unsalted butter, melted and cooled",
+            "usaltet smør",
+            "Rummo Glutenfri spaghetti",
+            "Tine Meierismør Usaltet",
+        ),
+        (
+            "all-purpose flour, sifted",
+            "hvetemel",
+            "LOOP nicotine pouches",
+            "Møllerens Siktet Hvetemel",
+        ),
+        (
+            "large eggs, lightly beaten",
+            "egg L",
+            "Old El Paso tortillas",
+            "Prior Egg 12 stk L",
+        ),
+        (
+            "baking powder, sifted",
+            "bakepulver",
+            "Den Gode Baker Glutenfri Pepperkakedeig",
+            "Freia Bakepulver",
+        ),
+    ],
+)
+def test_recipe_prep_suffixes_normalize_and_filter_unrelated_products(
+    query, expected_localized, bad_product, good_product
+):
+    assert _bokmal_ingredient_query(query) == expected_localized
+    assert (
+        _identity_status(
+            query,
+            ProviderProduct(provider="oda", product_id="bad", name=bad_product, description=""),
+        )
+        is None
+    )
+    assert (
+        _identity_status(
+            query,
+            ProviderProduct(provider="oda", product_id="good", name=good_product, description=""),
+        )
+        == "compatible"
+    )

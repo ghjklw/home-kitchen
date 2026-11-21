@@ -166,6 +166,7 @@ async def test_streamable_http_tools_are_text_parseable_and_annotated(test_datab
 def test_all_mcp_tools_expose_valid_wire_schemas_and_text_json_contracts():
     """Verify every MCP tool exposes annotations, schemas, and JSON text wire output."""
     service = MagicMock()
+    service.list_recipes.return_value = []
     features = MagicMock()
     basket = MagicMock()
     missing_id = uuid4()
@@ -239,6 +240,13 @@ def test_all_mcp_tools_expose_valid_wire_schemas_and_text_json_contracts():
         )
         assert missing["isError"] is True
         assert "Inventory item not found" in missing["content"][0]["text"]
+
+        empty_recipes = _wire_call(client, 5, "list_recipes", {})
+        assert empty_recipes["isError"] is False
+        assert empty_recipes["content"]
+        assert all(item["type"] == "text" for item in empty_recipes["content"])
+        assert json.loads(empty_recipes["content"][0]["text"]) == []
+        assert empty_recipes["structuredContent"] == {"result": []}
 
 
 @pytest.mark.mocked_provider

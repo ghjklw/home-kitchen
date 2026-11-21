@@ -13,6 +13,7 @@ import pytest
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from fastmcp.server.auth.jwt_issuer import JWTIssuer
 from fastmcp.server.auth.oauth_proxy.models import JTIMapping, UpstreamTokenSet
@@ -22,6 +23,7 @@ from pydantic import ValidationError
 from sqlalchemy import create_engine, func, select
 
 from home_kitchen.app import create_app
+from home_kitchen.auth import AccessControl
 from home_kitchen.context import history_context
 from home_kitchen.mcp_auth import HouseholdAzureProvider
 from home_kitchen.mcp_oauth_storage import oauth_records
@@ -203,13 +205,47 @@ async def test_broker_checks_real_signed_upstream_identity_on_every_use(
         engine.dispose()
 
 
+def test_access_control_allows_all_registered_mcp_well_known_discovery_routes():
+    settings = oauth_settings("postgresql+psycopg://localhost/kitchen_test")
+    provider = HouseholdAzureProvider(settings, create_engine("sqlite:///:memory:"))
+    app = FastAPI()
+    app.router.routes.extend(provider.get_well_known_routes(mcp_path="/"))
+    app.middleware("http")(AccessControl(settings).middleware)
+
+    @app.get("/api/recipes")
+    def recipes():
+        return []
+
+    with TestClient(app, base_url="https://kitchen.example") as client:
+        oauth_meta = client.get("/.well-known/oauth-authorization-server/mcp")
+        oidc_mcp = client.get("/.well-known/openid-configuration/mcp")
+        oidc_root = client.get("/.well-known/openid-configuration")
+        protected = client.get("/.well-known/oauth-protected-resource/mcp/")
+        assert oauth_meta.status_code == 200
+        assert oidc_mcp.status_code == 200
+        assert oidc_root.status_code == 200
+        assert protected.status_code == 200
+        assert oidc_mcp.json() == oidc_root.json() == oauth_meta.json()
+        assert oauth_meta.json()["token_endpoint_auth_methods_supported"] == ["none"]
+        assert oauth_meta.json()["code_challenge_methods_supported"] == ["S256"]
+        assert protected.json()["resource"] == BASE + "/"
+        assert client.get("/.well-known/not-an-oauth-route").status_code == 401
+        assert client.get("/api/recipes").status_code == 401
+
+
 def test_discovery_challenge_and_dcr_redirects(test_database_url):
     app = create_app(oauth_settings(test_database_url))
     with TestClient(
         app, base_url="https://kitchen.example", client=("203.0.113.20", 5000)
     ) as client:
         metadata = client.get("/.well-known/oauth-authorization-server/mcp").json()
+        oidc_mcp = client.get("/.well-known/openid-configuration/mcp")
+        oidc_root = client.get("/.well-known/openid-configuration")
         resource = client.get("/.well-known/oauth-protected-resource/mcp/").json()
+        assert oidc_mcp.status_code == 200
+        assert oidc_root.status_code == 200
+        assert oidc_mcp.json() == metadata
+        assert oidc_root.json() == metadata
         assert resource["resource"] == BASE + "/"
         assert resource["authorization_servers"] == [metadata["issuer"]] == [BASE]
         assert metadata["code_challenge_methods_supported"] == ["S256"]

@@ -21,6 +21,8 @@ const {
   buildTrumfSessionCookie,
   buildTrumfConnectPayload,
   buildHomeAssistantConnectPayload,
+  formatSyncErrorMessage,
+  formatIntegrationIssueMessage,
 } = require("../src/home_kitchen/static/settings-view.js");
 
 test("moves a category without mutating the saved order", () => {
@@ -1398,4 +1400,75 @@ test("style.css wraps desktop sidebar header and mobile week navigation without 
   assert.doesNotMatch(css, /\.period-toolbar\s*\{[^}]*42px\s+minmax\(0,\s*1fr\)\s+42px/s);
   assert.match(css, /\.period-toolbar\s*\{[^}]*flex-wrap:\s*wrap/s);
   assert.match(css, /\.period-toolbar\s*>\s*button\s*\{[^}]*white-space:\s*nowrap/s);
+});
+
+test("formats backend actionable_issues and last_sync_error strings into Bokmål in Settings", () => {
+  assert.equal(
+    formatSyncErrorMessage("Database read failure: connection timeout"),
+    "Kunne ikke lese fra databasen: connection timeout",
+  );
+  assert.match(
+    formatSyncErrorMessage(
+      "Trumf history scan truncated at page 3; backfill is incomplete; available records captured and next poll restarts at page 1",
+    ),
+    /Kvitteringssøk for Trumf ble avbrutt ved side 3/,
+  );
+  assert.equal(
+    formatIntegrationIssueMessage("Kvitteringssynk (rema1000): Session expired; please log in"),
+    "Kvitteringssynk (Rema 1000): Sesjonen har utløpt: please log in",
+  );
+
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const appSource = fs.readFileSync(path.join(__dirname, "../src/home_kitchen/static/app.js"), "utf8");
+  const fns = ["el", "add", "button", "renderConnectionSettings"].map((f) => extractFunction(appSource, f));
+
+  const { renderConnectionSettings } = new Function(
+    "state",
+    "window",
+    "document",
+    "refreshConnectionSettings",
+    "syncPurchaseHistory",
+    "connectOdaAccount",
+    "disconnectOdaAccount",
+    "refreshConnectorAccount",
+    "disconnectConnectorAccount",
+    "disconnectConnector",
+    "openConnectorModal",
+    `
+    ${fns.join("\n")}
+    return { renderConnectionSettings };
+    `,
+  )(
+    {
+      settingsRefreshInFlight: false,
+      integrations: [{ id: "rema1000", name: "Rema 1000", status: "connected", supported_auth_modes: ["oauth_pkce"], accounts: [] }],
+      integrationHealth: {
+        overall_status: "degraded",
+        actionable_issues: ["Kvitteringssynk (rema1000): Database read failure: socket closed"],
+      },
+      purchaseHistoryStatus: {
+        providers: {
+          rema1000: {
+            coverage_window: { total_records: 5 },
+            last_sync_error: "Session expired",
+          },
+        },
+      },
+    },
+    { KitchenSettingsView: require("../src/home_kitchen/static/settings-view.js") },
+    { createElement: (tag) => new MockNode(tag) },
+    () => {},
+    () => {},
+    () => {},
+    () => {},
+    () => {},
+    () => {},
+    () => {},
+    () => {},
+  );
+
+  const section = renderConnectionSettings();
+  assert.match(section.textContent, /Kvitteringssynk \(Rema 1000\): Kunne ikke lese fra databasen: socket closed/);
+  assert.match(section.textContent, /Siste synkroniseringsfeil: Sesjonen har utløpt/);
 });

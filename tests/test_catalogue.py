@@ -101,6 +101,101 @@ def test_autocomplete_is_bounded_deterministic_and_does_not_return_all_for_blank
         service.autocomplete("gulrot", limit=0)
 
 
+def test_list_foods_supports_empty_query_browse_while_autocomplete_stays_strict():
+    entries = [
+        item("06.036", "Gulrot, norsk, rå", display_name="Gulrot"),
+        item("01.291", "Melk, uspesifisert", display_name="Melk"),
+        item("05.010", "Hvetemel, siktet", display_name="Hvetemel"),
+    ]
+    service = FoodCatalogueService(MemoryCatalogue(entries))
+
+    browsed = service.list_foods(limit=2)
+    assert [entry.source_item_id for entry in browsed] == ["06.036", "05.010"]
+    assert [entry.source_item_id for entry in service.list_foods(limit=37)] == [
+        "06.036",
+        "05.010",
+        "01.291",
+    ]
+    assert service.autocomplete("  ") == []
+    with pytest.raises(ValueError, match="limit"):
+        service.list_foods(limit=0)
+
+
+def test_catalogue_foods_api_returns_seeded_foods_on_blank_query_and_links_product():
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from home_kitchen.catalogue.sku_models import RetailerProductOption
+    from home_kitchen.feature_api import feature_router
+
+    melk = item("01.291", "Melk, uspesifisert", display_name="Melk")
+    gulrot = item("06.036", "Gulrot, norsk, rå", display_name="Gulrot")
+    catalogue = FoodCatalogueService(MemoryCatalogue([melk, gulrot]))
+    household_id = uuid4()
+    recorded: list[dict] = []
+
+    class FakeSkuService:
+        def remember_selection(self, hid, food_id, snapshot, *, actor_id):
+            recorded.append(
+                {
+                    "household_id": hid,
+                    "food_id": food_id,
+                    "snapshot": snapshot,
+                    "actor_id": actor_id,
+                }
+            )
+            return RetailerProductOption(
+                id=uuid4(),
+                snapshot_id=uuid4(),
+                household_id=hid,
+                food_catalogue_id=food_id,
+                provider=snapshot.provider,
+                product_id=snapshot.product_id,
+                snapshot=snapshot.model_copy(update={"evidence_status": "unverified"}),
+                preferred=False,
+            )
+
+    features = SimpleNamespace(
+        catalogue=catalogue,
+        catalogue_skus=FakeSkuService(),
+        household_id=household_id,
+        kitchen=SimpleNamespace(),
+    )
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def inject_actor(request, call_next):
+        request.state.actor_id = "tester"
+        return await call_next(request)
+
+    app.include_router(feature_router(features, basket=None))
+
+    with TestClient(app) as client:
+        res = client.get("/api/catalogue/foods", params={"q": "", "limit": 37})
+        assert res.status_code == 200
+        foods = res.json()
+        assert [entry["source_item_id"] for entry in foods] == ["06.036", "01.291"]
+
+        link_res = client.post(
+            f"/api/catalogue/foods/{melk.id}/products",
+            json={
+                "provider": "oda",
+                "product_id": "oda-melk-1",
+                "name": "Tine Helmelk 1L",
+                "observed_at": datetime.now(UTC).isoformat(),
+                "evidence_status": "unverified",
+            },
+        )
+        assert link_res.status_code == 201
+        assert link_res.json()["food_catalogue_id"] == str(melk.id)
+        assert len(recorded) == 1
+        assert recorded[0]["food_id"] == melk.id
+        assert recorded[0]["snapshot"].product_id == "oda-melk-1"
+
+
 def test_food_ids_are_stable_per_exact_upstream_identifier():
     assert food_catalogue_id("06.036") == food_catalogue_id("06.036")
     assert food_catalogue_id("06.036") != food_catalogue_id("06.743")

@@ -28,6 +28,14 @@ const refreshHelpersBlock = appSource.match(
   /function shouldRefreshHouseholdView\([\s\S]*?\nasync function refreshWeekIfSafe\(force = false\) \{[\s\S]*?\n\}/u,
 );
 assert.ok(refreshHelpersBlock, "household refresh guards and safe refresh helpers are defined");
+const refineGuardHelper = appSource.match(
+  /function isBasketRefineFormActiveOrDirty\([\s\S]*?\n\}/,
+);
+assert.ok(refineGuardHelper, "the basket refine guard helper is present");
+const openFormHelper = appSource.match(
+  /function hasOpenShoppingForm\([\s\S]*?\n\}/,
+);
+assert.ok(openFormHelper, "the open shopping form helper is present");
 
 const returnListenersBlock = appSource.match(
   /window\.addEventListener\("online", \(\) => \{[\s\S]*?\ndocument\.addEventListener\("visibilitychange", refreshActiveHouseholdViewOnReturn\);/u,
@@ -44,7 +52,10 @@ vm.runInNewContext(
   `
   function shoppingRefreshLabel() { return ""; }
   function updateShoppingRefreshControl() {}
+  ${refineGuardHelper[0]}
+  ${openFormHelper[0]}
   ${refreshHelpersBlock[0]}
+  globalThis.hasOpenShoppingForm = hasOpenShoppingForm;
   globalThis.shouldRefreshHouseholdView = shouldRefreshHouseholdView;
   globalThis.shouldRefreshShopping = shouldRefreshShopping;
   globalThis.shouldRefreshWeek = shouldRefreshWeek;
@@ -161,9 +172,12 @@ function createReturnHarness({
 
   vm.runInNewContext(
     `
+    ${refineGuardHelper[0]}
+    ${openFormHelper[0]}
     ${refreshHelpersBlock[0]}
     ${returnListenersBlock[0]}
     ${modalDirtyAndCloseBlock[0]}
+    globalThis.hasOpenShoppingForm = hasOpenShoppingForm;
     globalThis.refreshActiveHouseholdViewOnReturn = refreshActiveHouseholdViewOnReturn;
     globalThis.refreshShoppingIfSafe = refreshShoppingIfSafe;
     globalThis.refreshWeekIfSafe = refreshWeekIfSafe;
@@ -312,4 +326,51 @@ test("defers shopping refresh while a modal/form/write is active and flushes whe
 test("uses concise accessible quantities while preserving tiny positive amounts", () => {
   assert.equal(quantityContext.formatUiAccessibleQuantity("233.3333333333333333333333334"), "233,33");
   assert.equal(quantityContext.formatUiAccessibleQuantity("0.0001"), "<0,01");
+});
+
+test("mounted basket-match-refine forms do not block shopping refresh unless focused or dirty", () => {
+  function makeForm(className, { focused = false, dirtyAttr = false, defaultValue = "Helmelk", value = "Helmelk" } = {}) {
+    const input = { defaultValue, value };
+    return {
+      className,
+      dataset: dirtyAttr ? { dirty: "true" } : {},
+      contains: (el) => focused && el === input,
+      querySelector: () => input,
+      _input: input,
+    };
+  }
+
+  const idleRefine = makeForm("basket-match-refine");
+  const mainWithIdleRefine = { querySelectorAll: () => [idleRefine] };
+  assert.equal(context.hasOpenShoppingForm(mainWithIdleRefine, null), false);
+
+  const focusedRefine = makeForm("basket-match-refine", { focused: true });
+  assert.equal(
+    context.hasOpenShoppingForm({ querySelectorAll: () => [focusedRefine] }, focusedRefine._input),
+    true,
+  );
+
+  const dirtyValueRefine = makeForm("basket-match-refine", {
+    defaultValue: "Helmelk",
+    value: "Tine Helmelk",
+  });
+  assert.equal(
+    context.hasOpenShoppingForm({ querySelectorAll: () => [dirtyValueRefine] }, null),
+    true,
+  );
+
+  const dirtyFlagRefine = makeForm("basket-match-refine", { dirtyAttr: true });
+  assert.equal(
+    context.hasOpenShoppingForm({ querySelectorAll: () => [dirtyFlagRefine] }, null),
+    true,
+  );
+
+  const otherForm = makeForm("oda-search-form");
+  assert.equal(
+    context.hasOpenShoppingForm({ querySelectorAll: () => [idleRefine, otherForm] }, null),
+    true,
+  );
+
+  assert.equal((appSource.match(/refineInput\.defaultValue\s*=/gu) || []).length, 2);
+  assert.match(appSource, /hasOpenShoppingForm\(\$\("#main"\),\s*document\.activeElement\)/u);
 });

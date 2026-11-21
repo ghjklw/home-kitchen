@@ -1328,12 +1328,19 @@ class ConnectorAuthService:
 
             refresh_token = creds.get("refresh_token")
             if not isinstance(refresh_token, str) or not refresh_token.strip():
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Tilkoblingen for '{provider_id}' mangler refresh_token og må kobles til på nytt.",
+                detail = (
+                    f"Tilkoblingen for '{provider_id}' mangler refresh_token og må kobles til på nytt."
                 )
+                self.store.update_account_metadata(
+                    household_id,
+                    provider_id,
+                    meta.account_id,
+                    {"last_error": detail},
+                )
+                raise HTTPException(status_code=400, detail=detail)
 
             clean_refresh_token = refresh_token.strip()
+            access_secret = creds.get("access_token")
             try:
                 access_token, new_refresh_token, expires_at, token_data = (
                     self._execute_oauth_refresh_request(
@@ -1347,11 +1354,14 @@ class ConnectorAuthService:
                     )
                 )
             except HTTPException as exc:
+                safe_detail = str(exc.detail).replace(clean_refresh_token, "[REDACTED]")
+                if isinstance(access_secret, str) and access_secret.strip():
+                    safe_detail = safe_detail.replace(access_secret.strip(), "[REDACTED]")
                 self.store.update_account_metadata(
                     household_id,
                     provider_id,
                     meta.account_id,
-                    {"last_error": str(exc.detail).replace(clean_refresh_token, "[REDACTED]")},
+                    {"last_error": safe_detail},
                 )
                 raise
 
@@ -1401,10 +1411,16 @@ class ConnectorAuthService:
 
             raw_cookie = creds.get("session_cookie") or creds.get("cookie")
             if not isinstance(raw_cookie, str) or not raw_cookie.strip():
-                raise HTTPException(
-                    status_code=400,
-                    detail="Tilkoblingen for 'trumf' mangler sesjonsinformasjonskapsel og må kobles til på nytt.",
+                detail = (
+                    "Tilkoblingen for 'trumf' mangler sesjonsinformasjonskapsel og må kobles til på nytt."
                 )
+                self.store.update_account_metadata(
+                    household_id,
+                    "trumf",
+                    meta.account_id,
+                    {"last_error": detail},
+                )
+                raise HTTPException(status_code=400, detail=detail)
 
             try:
                 new_cookie, server_expires_at = self._validate_trumf_session(
@@ -1643,7 +1659,23 @@ class ConnectorAuthService:
                 )
                 refreshed.append(provider_id)
             except Exception as exc:
-                if not isinstance(exc, HTTPException):
+                if isinstance(exc, HTTPException):
+                    existing_meta = self.store.get_connection_metadata(
+                        self.household_id, provider_id, account_id=account_id
+                    )
+                    has_last_error = bool(
+                        existing_meta
+                        and isinstance(existing_meta.metadata, dict)
+                        and existing_meta.metadata.get("last_error")
+                    )
+                    if not has_last_error:
+                        self.store.update_account_metadata(
+                            self.household_id,
+                            provider_id,
+                            account_id,
+                            {"last_error": str(exc.detail or "Automatisk tokenfornyelse feilet")},
+                        )
+                else:
                     self.store.update_account_metadata(
                         self.household_id,
                         provider_id,

@@ -830,12 +830,18 @@ class PostgresProductOverviewRepository:
 
             # 3. provider_order_sources (Trumf, Coop, Rema 1000, Oda)
             if inspector.has_table("provider_order_sources"):
+                from home_kitchen.purchase_sync import resolve_effective_orders
+
                 cols = {c["name"] for c in inspector.get_columns("provider_order_sources")}
                 select_list = ["id", "provider", "payload", "observed_at"]
                 if "external_id" in cols:
                     select_list.append("external_id")
+                if "revision_id" in cols:
+                    select_list.append("revision_id")
                 if "account_id" in cols:
                     select_list.append("account_id")
+                if "source_updated_at" in cols:
+                    select_list.append("source_updated_at")
                 source_rows = list(
                     connection.execute(
                         text(
@@ -845,295 +851,68 @@ class PostgresProductOverviewRepository:
                         )
                     ).mappings()
                 )
-                # Keep latest revision per (provider, account_id, external_id) when external_id exists
-                deduped_rows: list[Any] = []
-                by_ext: dict[tuple[str, str, str], int] = {}
-                for row in source_rows:
-                    ext_id = row.get("external_id")
-                    if ext_id is not None:
-                        key = (
-                            str(row["provider"]),
-                            str(row.get("account_id") or ""),
-                            str(ext_id),
+                normalized_rows = [
+                    {
+                        "id": row["id"],
+                        "provider": str(row["provider"]).casefold(),
+                        "account_id": str(row.get("account_id") or "default"),
+                        "external_id": str(row.get("external_id") or row["id"]),
+                        "revision_id": str(row.get("revision_id") or row["id"]),
+                        "source_updated_at": _parse_dt(row.get("source_updated_at")),
+                        "observed_at": _parse_dt(row["observed_at"]),
+                        "payload": _parse_json(row["payload"]) or {},
+                    }
+                    for row in source_rows
+                ]
+                for eff in resolve_effective_orders(normalized_rows):
+                    if eff.is_cancellation or eff.is_return:
+                        continue
+                    purchased_at = eff.transaction_at or eff.observed_at
+                    for line in eff.lines:
+                        if line.is_return:
+                            continue
+                        cand_names = [
+                            n for n in (line.name, line.raw_name) if isinstance(n, str) and n
+                        ]
+                        line_proxy = {"canonical_product_id": line.canonical_product_id}
+                        if not _line_matches_product(
+                            line_proxy, product.id, match_names, cand_names
+                        ):
+                            continue
+                        display_name = line.raw_name or line.name
+                        default_unit = "stk" if eff.provider in ("coop", "rema1000") else None
+                        if purchased_at is not None:
+                            evidence.append(
+                                PurchaseEvidenceRecord(
+                                    evidence_id=eff.source_id
+                                    or f"{eff.provider}:{eff.external_id}",
+                                    purchased_at=purchased_at,
+                                    provenance=eff.provenance,
+                                    evidence_source=eff.provider,
+                                    evidence_ref=eff.evidence_ref,
+                                    quantity=line.quantity,
+                                    unit=line.unit or default_unit,
+                                    product_name=display_name,
+                                    oda_product_id=(
+                                        line.oda_product_id if eff.provider == "oda" else None
+                                    ),
+                                )
+                            )
+                        sku_id = (
+                            (line.oda_product_id or line.ean or line.name)
+                            if eff.provider == "oda"
+                            else (line.ean or line.oda_product_id or display_name)
                         )
-                        if key in by_ext:
-                            deduped_rows[by_ext[key]] = row
-                        else:
-                            by_ext[key] = len(deduped_rows)
-                            deduped_rows.append(row)
-                    else:
-                        deduped_rows.append(row)
-
-                for r in deduped_rows:
-                    provider = str(r["provider"]).casefold()
-                    payload = _parse_json(r["payload"]) or {}
-                    observed_at = _parse_dt(r["observed_at"])
-
-                    if provider == "trumf":
-                        lines = payload.get("varelinjer") or payload.get("lines") or []
-                        has_receipt = bool(
-                            payload.get("hasReceipt")
-                            or payload.get("harKvittering")
-                            or payload.get("kvitteringsId")
-                        )
-                        tx_time_str = payload.get("transaksjonsTidspunkt") or payload.get("dato")
-                        tx_time = _parse_dt(tx_time_str) if tx_time_str else observed_at
-                        store_name = payload.get("storeName") or payload.get("chain") or "Trumf"
-                        for line in lines:
-                            kassal = line.get("kassal") or {}
-                            raw_name = line.get("produktBeskrivelse") or line.get("vareTekst") or ""
-                            cand_names = [
-                                n for n in (kassal.get("name"), raw_name) if isinstance(n, str)
-                            ]
-                            if _line_matches_product(line, product.id, match_names, cand_names):
-                                prov: Literal[
-                                    "provider_verified", "user_confirmed", "uncertain"
-                                ] = "provider_verified" if has_receipt else "uncertain"
-                                qty = line.get("antall") or line.get("quantity")
-                                if tx_time is not None:
-                                    evidence.append(
-                                        PurchaseEvidenceRecord(
-                                            evidence_id=str(r["id"]),
-                                            purchased_at=tx_time,
-                                            provenance=prov,
-                                            evidence_source="trumf",
-                                            evidence_ref=payload.get("kvitteringsId")
-                                            or payload.get("batchId"),
-                                            quantity=Decimal(str(qty)) if qty is not None else None,
-                                            unit=line.get("enhetsType") or line.get("unit"),
-                                            product_name=raw_name or kassal.get("name"),
-                                        )
-                                    )
-                                ean = line.get("ean") or kassal.get("ean")
-                                sku_id = str(
-                                    ean
-                                    or line.get("sku")
-                                    or line.get("product_id")
-                                    or raw_name
-                                    or kassal.get("name")
-                                    or ""
-                                )
-                                if sku_id:
-                                    _record_purchased_sku(
-                                        provider="trumf",
-                                        sku_id=sku_id,
-                                        name=kassal.get("name") or raw_name or None,
-                                        store_name=store_name,
-                                        ean=str(ean) if ean else None,
-                                        purchased_at=tx_time,
-                                        provenance=prov,
-                                    )
-
-                    elif provider == "coop":
-                        summary = payload.get("summary") or payload
-                        lines = summary.get("lines") or []
-                        p_date_str = summary.get("purchaseDate")
-                        p_date = _parse_dt(p_date_str) if p_date_str else observed_at
-                        has_receipt = bool(summary.get("receiptId") and lines)
-                        store_name = summary.get("storeName") or "Coop"
-                        for line in lines:
-                            kassal = line.get("kassal") or {}
-                            raw_name = line.get("productName") or ""
-                            cand_names = [
-                                n for n in (kassal.get("name"), raw_name) if isinstance(n, str)
-                            ]
-                            if _line_matches_product(line, product.id, match_names, cand_names):
-                                prov = "provider_verified" if has_receipt else "uncertain"
-                                qty = line.get("quantity")
-                                if p_date is not None:
-                                    evidence.append(
-                                        PurchaseEvidenceRecord(
-                                            evidence_id=str(r["id"]),
-                                            purchased_at=p_date,
-                                            provenance=prov,
-                                            evidence_source="coop",
-                                            evidence_ref=summary.get("receiptId")
-                                            or summary.get("summaryId"),
-                                            quantity=Decimal(str(qty)) if qty is not None else None,
-                                            unit="stk",
-                                            product_name=raw_name or kassal.get("name"),
-                                        )
-                                    )
-                                ean = (
-                                    line.get("ean13")
-                                    or line.get("gtin13")
-                                    or line.get("barcode")
-                                    or line.get("ean")
-                                    or kassal.get("ean")
-                                )
-                                sku_id = str(
-                                    ean
-                                    or line.get("productId")
-                                    or line.get("sku")
-                                    or raw_name
-                                    or kassal.get("name")
-                                    or ""
-                                )
-                                if sku_id:
-                                    _record_purchased_sku(
-                                        provider="coop",
-                                        sku_id=sku_id,
-                                        name=kassal.get("name") or raw_name or None,
-                                        store_name=store_name,
-                                        ean=str(ean) if ean else None,
-                                        purchased_at=p_date,
-                                        provenance=prov,
-                                    )
-
-                    elif provider == "rema1000":
-                        rec = payload.get("receipt") or payload
-                        lines = rec.get("lines") or rec.get("varelinjer") or []
-                        p_date_str = rec.get("timestamp") or rec.get("purchaseDate")
-                        p_date = _parse_dt(p_date_str) if p_date_str else observed_at
-                        has_receipt = bool(rec.get("hasReceipt") and lines)
-                        store_name = rec.get("storeName") or "REMA 1000"
-                        for line in lines:
-                            kassal = line.get("kassal") or {}
-                            raw_name = line.get("name") or line.get("productName") or ""
-                            cand_names = [
-                                n for n in (kassal.get("name"), raw_name) if isinstance(n, str)
-                            ]
-                            if _line_matches_product(line, product.id, match_names, cand_names):
-                                prov = "provider_verified" if has_receipt else "uncertain"
-                                qty = line.get("quantity")
-                                if p_date is not None:
-                                    evidence.append(
-                                        PurchaseEvidenceRecord(
-                                            evidence_id=str(r["id"]),
-                                            purchased_at=p_date,
-                                            provenance=prov,
-                                            evidence_source="rema1000",
-                                            evidence_ref=rec.get("receiptId"),
-                                            quantity=Decimal(str(qty)) if qty is not None else None,
-                                            unit=line.get("unit") or "stk",
-                                            product_name=raw_name or kassal.get("name"),
-                                        )
-                                    )
-                                ean = line.get("ean") or kassal.get("ean")
-                                sku_id = str(
-                                    ean
-                                    or line.get("productId")
-                                    or line.get("sku")
-                                    or raw_name
-                                    or kassal.get("name")
-                                    or ""
-                                )
-                                if sku_id:
-                                    _record_purchased_sku(
-                                        provider="rema1000",
-                                        sku_id=sku_id,
-                                        name=kassal.get("name") or raw_name or None,
-                                        store_name=store_name,
-                                        ean=str(ean) if ean else None,
-                                        purchased_at=p_date,
-                                        provenance=prov,
-                                    )
-
-                    elif provider == "oda":
-                        # Support both Oda adapter envelope (`order` + `tracking`) and synthetic `lines`
-                        if isinstance(payload.get("order"), dict):
-                            order_obj = payload["order"]
-                            tracking = payload.get("tracking") or {}
-                            status = str(tracking.get("status") or payload.get("status") or "")
-                            has_receipt = status == "delivered"
-                            order_time_str = order_obj.get("deliveryDate") or payload.get(
-                                "orderedAt"
+                        if sku_id:
+                            _record_purchased_sku(
+                                provider=eff.provider,
+                                sku_id=str(sku_id),
+                                name=line.name or display_name or None,
+                                store_name=eff.store_name,
+                                ean=line.ean,
+                                purchased_at=purchased_at,
+                                provenance=eff.provenance,
                             )
-                            order_time = (
-                                _parse_dt(order_time_str) if order_time_str else observed_at
-                            )
-                            order_ref = order_obj.get("orderNumber") or payload.get("orderId")
-                            for item in order_obj.get("products") or []:
-                                prod_obj = item.get("product") or {}
-                                name = str(prod_obj.get("name") or "")
-                                sku_id = str(prod_obj.get("id") or "")
-                                line_proxy = {
-                                    "canonical_product_id": item.get("canonical_product_id")
-                                    or prod_obj.get("canonical_product_id")
-                                }
-                                if _line_matches_product(
-                                    line_proxy, product.id, match_names, [name]
-                                ):
-                                    prov = "provider_verified" if has_receipt else "uncertain"
-                                    qty = item.get("quantity")
-                                    if order_time is not None:
-                                        evidence.append(
-                                            PurchaseEvidenceRecord(
-                                                evidence_id=str(r["id"]),
-                                                purchased_at=order_time,
-                                                provenance=prov,
-                                                evidence_source="oda",
-                                                evidence_ref=order_ref,
-                                                quantity=Decimal(str(qty))
-                                                if qty is not None
-                                                else None,
-                                                unit=prod_obj.get("unitName"),
-                                                product_name=name,
-                                                oda_product_id=sku_id or None,
-                                            )
-                                        )
-                                    if sku_id or name:
-                                        _record_purchased_sku(
-                                            provider="oda",
-                                            sku_id=sku_id or name,
-                                            name=name or None,
-                                            store_name="Oda",
-                                            ean=None,
-                                            purchased_at=order_time,
-                                            provenance=prov,
-                                        )
-                        else:
-                            lines = payload.get("lines") or []
-                            status = payload.get("status") or ""
-                            lifecycle = payload.get("lifecycle") or ""
-                            has_receipt = status == "delivered" or lifecycle == "completed"
-                            order_time_str = payload.get("orderedAt") or payload.get("deliveryDate")
-                            order_time = (
-                                _parse_dt(order_time_str) if order_time_str else observed_at
-                            )
-                            for line in lines:
-                                name = line.get("sourceName") or line.get("name") or ""
-                                sku_id = str(
-                                    line.get("oda_product_id")
-                                    or line.get("product_id")
-                                    or line.get("sku")
-                                    or name
-                                    or ""
-                                )
-                                if _line_matches_product(line, product.id, match_names, [name]):
-                                    prov = "provider_verified" if has_receipt else "uncertain"
-                                    qty = line.get("quantity")
-                                    if order_time is not None:
-                                        evidence.append(
-                                            PurchaseEvidenceRecord(
-                                                evidence_id=str(r["id"]),
-                                                purchased_at=order_time,
-                                                provenance=prov,
-                                                evidence_source="oda",
-                                                evidence_ref=payload.get("orderId"),
-                                                quantity=Decimal(str(qty))
-                                                if qty is not None
-                                                else None,
-                                                unit=line.get("unit"),
-                                                product_name=name,
-                                                oda_product_id=str(
-                                                    line.get("oda_product_id")
-                                                    or line.get("product_id")
-                                                    or ""
-                                                )
-                                                or None,
-                                            )
-                                        )
-                                    if sku_id:
-                                        _record_purchased_sku(
-                                            provider="oda",
-                                            sku_id=sku_id,
-                                            name=name or None,
-                                            store_name="Oda",
-                                            ean=None,
-                                            purchased_at=order_time,
-                                            provenance=prov,
-                                        )
 
         purchased_skus = [
             PreviouslyPurchasedSku.model_validate(item) for item in purchased_map.values()

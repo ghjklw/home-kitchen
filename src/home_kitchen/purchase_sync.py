@@ -12,14 +12,16 @@ import asyncio
 import logging
 import re
 import time
-from collections.abc import Callable, Sequence
-from datetime import UTC, date, datetime
+from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import UUID, uuid4
 
 if TYPE_CHECKING:
     from home_kitchen.connector_store import ConnectorStore
+    from home_kitchen.context import PurchaseHistoryContext
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import (
@@ -32,6 +34,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
     and_,
+    inspect,
     select,
     update,
 )
@@ -408,8 +411,14 @@ def persist_page(
                 "account checkpoint advanced while provider page was in flight"
             )
 
-        for record in page.records:
-            _persist_record(connection, provider, account_id, record, now)
+        for idx, record in enumerate(page.records):
+            _persist_record(
+                connection,
+                provider,
+                account_id,
+                record,
+                now + timedelta(microseconds=idx),
+            )
 
         result = connection.execute(
             update(provider_order_checkpoints)
@@ -510,6 +519,570 @@ def sync_account(
 
 SUPPORTED_PROVIDERS: tuple[str, ...] = ("oda", "coop", "trumf", "rema1000")
 
+RecordLifecycle = Literal[
+    "purchase",
+    "correction",
+    "return",
+    "cancellation",
+    "non_receipt_stub",
+    "pending_order",
+]
+
+_CANCELLATION_STATUSES = frozenset(
+    {"cancelled", "canceled", "failed", "void", "voided", "annullert"}
+)
+_RETURN_STATUSES = frozenset(
+    {
+        "return",
+        "returned",
+        "refund",
+        "refunded",
+        "credit_note",
+        "retur",
+        "kreditnota",
+        "refund_scenario",
+    }
+)
+_DELIVERED_STATUSES = frozenset({"delivered", "completed", "paid", "settled"})
+
+
+class NormalizedOrderLine(BaseModel):
+    """Normalized receipt/order line item with explicit return/adjustment semantics."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    raw_name: str | None = None
+    quantity: Decimal | None = None
+    unit: str | None = None
+    amount: Decimal | None = None
+    ean: str | None = None
+    canonical_product_id: str | None = None
+    canonical_unit_id: str | None = None
+    oda_product_id: str | None = None
+    is_return: bool = False
+
+
+class EffectiveProviderOrder(BaseModel):
+    """Resolved latest state of a provider order/receipt after corrections and returns."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: str | None = None
+    provider: str
+    account_id: str
+    external_id: str
+    revision_id: str
+    lifecycle: RecordLifecycle
+    is_correction: bool = False
+    is_return: bool = False
+    is_cancellation: bool = False
+    is_active_purchase: bool = True
+    provenance: Literal["provider_verified", "user_confirmed", "uncertain"] = "provider_verified"
+    returned_external_id: str | None = None
+    revision_count: int = 1
+    superseded_revision_ids: list[str] = Field(default_factory=list)
+    total_amount: Decimal | None = None
+    transaction_at: AwareDatetime | None = None
+    source_updated_at: AwareDatetime | None = None
+    observed_at: AwareDatetime | None = None
+    store_name: str | None = None
+    evidence_ref: str | None = None
+    lines: list[NormalizedOrderLine] = Field(default_factory=list)
+    returned_lines: list[NormalizedOrderLine] = Field(default_factory=list)
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+def _to_decimal(val: Any) -> Decimal | None:
+    if val is None or isinstance(val, bool):
+        return None
+    try:
+        dec = Decimal(str(val))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    return dec if dec.is_finite() else None
+
+
+def _envelope_for_provider(provider: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if provider == "coop" and isinstance(payload.get("summary"), dict):
+        return payload["summary"]
+    if provider == "rema1000" and isinstance(payload.get("receipt"), dict):
+        return payload["receipt"]
+    if provider == "oda" and isinstance(payload.get("order"), dict):
+        return payload["order"]
+    return payload
+
+
+def extract_returned_external_id(payload: dict[str, Any]) -> str | None:
+    """Extract referenced original order/receipt external_id for standalone return/refund records."""
+    candidates: list[dict[str, Any]] = [payload]
+    for parent_key in ("summary", "receipt", "order", "receiptDetails"):
+        sub = payload.get(parent_key)
+        if isinstance(sub, dict):
+            candidates.append(sub)
+    for container in candidates:
+        for key in (
+            "returnedExternalId",
+            "returned_external_id",
+            "originalReceiptId",
+            "original_receipt_id",
+            "originalOrderId",
+            "original_order_id",
+            "originalOrderNumber",
+            "original_order_number",
+            "creditedReceiptId",
+            "credited_receipt_id",
+            "returnFor",
+            "return_for",
+            "return_for_external_id",
+            "relatedReceiptId",
+            "related_receipt_id",
+        ):
+            val = container.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+    return None
+
+
+def extract_record_total_amount(provider: str, payload: dict[str, Any]) -> Decimal | None:
+    """Extract total monetary amount across provider payload envelopes."""
+    env = _envelope_for_provider(provider, payload)
+    for container in (env, payload):
+        for key in (
+            "belop",
+            "amount",
+            "totalAmount",
+            "total_amount",
+            "grossAmount",
+            "gross_amount",
+            "total",
+            "sum",
+        ):
+            dec = _to_decimal(container.get(key))
+            if dec is not None:
+                return dec
+    return None
+
+
+def extract_record_store_name(provider: str, payload: dict[str, Any]) -> str | None:
+    """Extract store or chain attribution from a provider payload."""
+    env = _envelope_for_provider(provider, payload)
+    for container in (env, payload):
+        for key in ("storeName", "store_name", "beskrivelse", "chain", "chainId"):
+            val = container.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+    defaults = {"oda": "Oda", "coop": "Coop", "rema1000": "REMA 1000", "trumf": "Trumf"}
+    return defaults.get(provider)
+
+
+def extract_record_evidence_ref(provider: str, payload: dict[str, Any]) -> str | None:
+    """Extract provider receipt or order reference ID."""
+    env = _envelope_for_provider(provider, payload)
+    for container in (env, payload):
+        for key in ("kvitteringsId", "receiptId", "orderNumber", "orderId", "batchId", "summaryId"):
+            val = container.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+    return None
+
+
+def is_non_receipt_stub(provider: str, payload: dict[str, Any]) -> bool:
+    """Return True when the provider snapshot explicitly lacks digital receipt details."""
+    env = _envelope_for_provider(provider, payload)
+    if provider == "trumf":
+        for container in (payload, env):
+            for key in ("hasReceipt", "harKvittering"):
+                if key in container:
+                    return not bool(container.get(key))
+        return not bool(payload.get("kvitteringsId") or extract_receipt_lines_from_payload(payload))
+    if provider == "rema1000":
+        for container in (env, payload):
+            for key in ("hasReceipt", "harKvittering"):
+                if key in container:
+                    return not bool(container.get(key))
+        return not bool(extract_receipt_lines_from_payload(payload))
+    if provider == "coop":
+        lines = extract_receipt_lines_from_payload(payload)
+        receipt_id = env.get("receiptId") or payload.get("receiptId")
+        return not (bool(receipt_id) and bool(lines))
+    return False
+
+
+def extract_receipt_lines_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract raw line dicts from any supported provider payload dict."""
+    if not isinstance(payload, dict):
+        return []
+    for key in ("lines", "varelinjer", "items", "receiptLines"):
+        val = payload.get(key)
+        if isinstance(val, list):
+            return [item for item in val if isinstance(item, dict)]
+    for parent_key in ("summary", "receipt", "receiptDetails"):
+        parent = payload.get(parent_key)
+        if isinstance(parent, dict):
+            for key in ("lines", "varelinjer", "items", "receiptLines"):
+                val = parent.get(key)
+                if isinstance(val, list):
+                    return [item for item in val if isinstance(item, dict)]
+    return []
+
+
+def extract_normalized_lines(provider: str, payload: dict[str, Any]) -> list[NormalizedOrderLine]:
+    """Normalize provider-specific receipt or order lines including return markers."""
+    normalized: list[NormalizedOrderLine] = []
+    if provider == "oda" and isinstance(payload.get("order"), dict):
+        order_obj = payload["order"]
+        for item in order_obj.get("products") or []:
+            if not isinstance(item, dict):
+                continue
+            prod_obj = item.get("product") or {}
+            if not isinstance(prod_obj, dict):
+                prod_obj = {}
+            name = str(prod_obj.get("name") or item.get("name") or "").strip()
+            qty = _to_decimal(item.get("quantity"))
+            amt = _to_decimal(item.get("totalGrossAmount") or item.get("amount"))
+            is_ret = bool(
+                item.get("isReturn")
+                or item.get("is_return")
+                or item.get("returned")
+                or (qty is not None and qty < 0)
+                or (amt is not None and amt < 0)
+            )
+            oda_pid = prod_obj.get("id") or item.get("oda_product_id")
+            canon_pid = item.get("canonical_product_id") or prod_obj.get("canonical_product_id")
+            canon_uid = item.get("canonical_unit_id") or prod_obj.get("canonical_unit_id")
+            normalized.append(
+                NormalizedOrderLine(
+                    name=name or (f"Oda SKU {oda_pid}" if oda_pid is not None else "Oda item"),
+                    quantity=qty,
+                    unit=(
+                        str(prod_obj.get("unitName")).strip()
+                        if prod_obj.get("unitName")
+                        else None
+                    ),
+                    amount=amt,
+                    ean=extract_line_ean(item),
+                    canonical_product_id=str(canon_pid) if canon_pid else None,
+                    canonical_unit_id=str(canon_uid) if canon_uid else None,
+                    oda_product_id=str(oda_pid) if oda_pid is not None else None,
+                    is_return=is_ret,
+                )
+            )
+        return normalized
+
+    raw_lines = extract_receipt_lines_from_payload(payload)
+    for line in raw_lines:
+        raw_kassal = line.get("kassal")
+        kassal: dict[str, Any] = raw_kassal if isinstance(raw_kassal, dict) else {}
+        raw_name = extract_line_name(line)
+        kassal_name = str(kassal.get("name") or "").strip()
+        display_name = kassal_name or raw_name or str(line.get("sourceName") or "").strip()
+        qty = _to_decimal(line.get("quantity") if "quantity" in line else line.get("antall"))
+        amt = _to_decimal(
+            line.get("amount")
+            if "amount" in line
+            else (line.get("belop") if "belop" in line else line.get("total"))
+        )
+        unit = extract_line_unit(line)
+        if not unit and kassal.get("weight_unit"):
+            unit = str(kassal["weight_unit"]).strip() or None
+        kassal_ean = kassal.get("ean")
+        ean = extract_line_ean(line) or (str(kassal_ean).strip() if kassal_ean else None)
+        oda_pid = line.get("oda_product_id") or line.get("product_id") or line.get("sku")
+        canon_pid = line.get("canonical_product_id")
+        canon_uid = line.get("canonical_unit_id")
+        line_type = str(line.get("type") or line.get("lineType") or "").strip().casefold()
+        is_ret = bool(
+            line.get("isReturn")
+            or line.get("is_return")
+            or line.get("returned")
+            or line_type in _RETURN_STATUSES
+            or (qty is not None and qty < 0)
+            or (amt is not None and amt < 0)
+        )
+        normalized.append(
+            NormalizedOrderLine(
+                name=display_name or "Unknown item",
+                raw_name=raw_name or str(line.get("sourceName") or "").strip() or None,
+                quantity=qty,
+                unit=unit,
+                amount=amt,
+                ean=ean,
+                canonical_product_id=str(canon_pid) if canon_pid else None,
+                canonical_unit_id=str(canon_uid) if canon_uid else None,
+                oda_product_id=str(oda_pid) if oda_pid is not None else None,
+                is_return=is_ret,
+            )
+        )
+    return normalized
+
+
+def classify_record_lifecycle(
+    provider: str,
+    payload: dict[str, Any],
+    *,
+    revision_count: int = 1,
+    lines: Sequence[NormalizedOrderLine] | None = None,
+) -> tuple[RecordLifecycle, bool, bool, bool]:
+    """Classify a provider snapshot into lifecycle, correction, return, and cancellation flags."""
+    p = provider.strip().lower()
+    env = _envelope_for_provider(p, payload)
+    raw_tracking = payload.get("tracking")
+    tracking: dict[str, Any] = raw_tracking if isinstance(raw_tracking, dict) else {}
+
+    raw_statuses: list[str] = []
+    for container in (tracking, env, payload):
+        for key in ("status", "lifecycle", "transactionType", "transaksjonsKategori", "type"):
+            val = container.get(key)
+            if isinstance(val, str) and val.strip():
+                raw_statuses.append(val.strip().casefold())
+
+    is_correction = revision_count > 1
+
+    cancelled_flag = any(
+        bool(container.get(flag))
+        for container in (tracking, env, payload)
+        for flag in ("isCancelled", "is_cancelled", "cancelled", "canceled")
+    )
+    if cancelled_flag or any(st in _CANCELLATION_STATUSES for st in raw_statuses):
+        return ("cancellation", is_correction, False, True)
+
+    returned_flag = any(
+        bool(container.get(flag))
+        for container in (tracking, env, payload)
+        for flag in ("isReturn", "is_return", "isReturned", "isRefund", "is_refund", "refunded")
+    )
+    total_amount = extract_record_total_amount(p, payload)
+    returned_ext = extract_returned_external_id(payload)
+    parsed_lines = (
+        list(lines) if lines is not None else extract_normalized_lines(p, payload)
+    )
+    all_lines_returned = bool(parsed_lines) and all(line.is_return for line in parsed_lines)
+
+    if (
+        returned_flag
+        or any(st in _RETURN_STATUSES for st in raw_statuses)
+        or (total_amount is not None and total_amount < 0)
+        or returned_ext is not None
+        or all_lines_returned
+    ):
+        return ("return", is_correction, True, False)
+
+    if p == "oda":
+        if raw_statuses and not any(st in _DELIVERED_STATUSES for st in raw_statuses):
+            return ("pending_order", is_correction, False, False)
+        if not raw_statuses:
+            return ("pending_order", is_correction, False, False)
+    elif is_non_receipt_stub(p, payload):
+        return ("non_receipt_stub", is_correction, False, False)
+
+    if is_correction:
+        return ("correction", True, False, False)
+    return ("purchase", False, False, False)
+
+
+def _line_match_key(line: NormalizedOrderLine) -> str:
+    if line.canonical_product_id:
+        return f"pid:{line.canonical_product_id}"
+    if line.ean:
+        return f"ean:{line.ean}"
+    return f"name:{' '.join(line.name.casefold().split())}"
+
+
+def _net_order_lines(
+    lines: Sequence[NormalizedOrderLine],
+) -> tuple[list[NormalizedOrderLine], list[NormalizedOrderLine]]:
+    """Separate active positive lines from returned/negative lines, netting matching quantities."""
+    active: list[NormalizedOrderLine] = []
+    returned: list[NormalizedOrderLine] = []
+
+    for line in lines:
+        if line.is_return:
+            returned.append(line)
+        else:
+            active.append(line.model_copy())
+
+    if not returned or not active:
+        return active, returned
+
+    remaining_active = list(active)
+    for ret in returned:
+        ret_key = _line_match_key(ret)
+        ret_qty = abs(ret.quantity) if ret.quantity is not None else None
+        for idx, act in enumerate(remaining_active):
+            if _line_match_key(act) != ret_key:
+                continue
+            if act.quantity is not None and ret_qty is not None:
+                net_qty = act.quantity - ret_qty
+                if net_qty <= 0:
+                    ret_qty = abs(net_qty)
+                    remaining_active[idx] = act.model_copy(update={"quantity": Decimal("0")})
+                    if ret_qty == 0:
+                        break
+                else:
+                    remaining_active[idx] = act.model_copy(update={"quantity": net_qty})
+                    ret_qty = Decimal("0")
+                    break
+            else:
+                remaining_active[idx] = act.model_copy(update={"quantity": Decimal("0")})
+                break
+
+    net_active = [
+        line for line in remaining_active if line.quantity is None or line.quantity > 0
+    ]
+    return net_active, returned
+
+
+def resolve_effective_orders(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    provider: str | None = None,
+) -> list[EffectiveProviderOrder]:
+    """Resolve immutable provider_order_sources revisions into effective orders/receipts.
+
+    - Groups revisions by ``(provider, external_id)`` so corrections supersede earlier snapshots.
+    - Orders revisions chronologically by ``(source_updated_at or observed_at, observed_at)``.
+    - Nets line-level returns and linked standalone return/refund receipts against original orders.
+    """
+    filter_provider = provider.strip().lower() if provider is not None else None
+    grouped: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    for row in rows:
+        prov = str(row["provider"]).strip().lower()
+        if filter_provider is not None and prov != filter_provider:
+            continue
+        ext_id = str(row.get("external_id") or row.get("id") or "").strip()
+        if not ext_id:
+            continue
+        grouped.setdefault((prov, ext_id), []).append(row)
+
+    def _sort_key(row: Mapping[str, Any]) -> tuple[datetime, datetime, str]:
+        obs = _utc(row.get("observed_at")) or datetime.min.replace(tzinfo=UTC)
+        src = _utc(row.get("source_updated_at")) or obs
+        return (src, obs, str(row.get("revision_id") or ""))
+
+    effective_by_key: dict[tuple[str, str], EffectiveProviderOrder] = {}
+    ordered_keys: list[tuple[str, str]] = []
+
+    for key, revisions in grouped.items():
+        prov, ext_id = key
+        sorted_revs = sorted(revisions, key=_sort_key)
+        latest = sorted_revs[-1]
+        superseded: list[str] = []
+        seen_rev_ids: set[str] = set()
+        latest_rev_id = str(latest.get("revision_id") or "")
+        for rev in sorted_revs[:-1]:
+            rev_id = str(rev.get("revision_id") or "")
+            if rev_id and rev_id != latest_rev_id and rev_id not in seen_rev_ids:
+                seen_rev_ids.add(rev_id)
+                superseded.append(rev_id)
+
+        payload = latest.get("payload")
+        payload_dict: dict[str, Any] = dict(payload) if isinstance(payload, dict) else {}
+        revision_count = len(superseded) + 1
+        raw_lines = extract_normalized_lines(prov, payload_dict)
+        lifecycle, is_correction, is_return, is_cancellation = classify_record_lifecycle(
+            prov,
+            payload_dict,
+            revision_count=revision_count,
+            lines=raw_lines,
+        )
+        net_lines, returned_lines = _net_order_lines(raw_lines)
+        if raw_lines and not net_lines and not is_cancellation:
+            is_return = True
+            lifecycle = "return"
+
+        is_active = (
+            not is_cancellation
+            and not is_return
+            and lifecycle not in ("non_receipt_stub", "pending_order")
+        )
+        provenance: Literal["provider_verified", "user_confirmed", "uncertain"] = (
+            "provider_verified" if is_active else "uncertain"
+        )
+        order = EffectiveProviderOrder(
+            source_id=str(latest["id"]) if latest.get("id") is not None else None,
+            provider=prov,
+            account_id=str(latest.get("account_id") or "default"),
+            external_id=ext_id,
+            revision_id=latest_rev_id or "rev-0",
+            lifecycle=lifecycle,
+            is_correction=is_correction,
+            is_return=is_return,
+            is_cancellation=is_cancellation,
+            is_active_purchase=is_active,
+            provenance=provenance,
+            returned_external_id=extract_returned_external_id(payload_dict),
+            revision_count=revision_count,
+            superseded_revision_ids=superseded,
+            total_amount=extract_record_total_amount(prov, payload_dict),
+            transaction_at=extract_transaction_time(prov, payload_dict),
+            source_updated_at=_utc(latest.get("source_updated_at")),
+            observed_at=_utc(latest.get("observed_at")),
+            store_name=extract_record_store_name(prov, payload_dict),
+            evidence_ref=extract_record_evidence_ref(prov, payload_dict),
+            lines=net_lines,
+            returned_lines=returned_lines,
+            payload=payload_dict,
+        )
+        effective_by_key[key] = order
+        ordered_keys.append(key)
+
+    # Apply standalone linked return/refund records against their original order/receipt.
+    for key in ordered_keys:
+        ret_order = effective_by_key[key]
+        if not ret_order.is_return or not ret_order.returned_external_id:
+            continue
+        target_key = (ret_order.provider, ret_order.returned_external_id)
+        target = effective_by_key.get(target_key)
+        if target is None or target.is_cancellation:
+            continue
+
+        ret_items = ret_order.returned_lines or ret_order.lines
+        if not ret_items:
+            if (
+                ret_order.total_amount is None
+                or target.total_amount is None
+                or abs(ret_order.total_amount) >= abs(target.total_amount)
+            ):
+                effective_by_key[target_key] = target.model_copy(
+                    update={
+                        "lifecycle": "return",
+                        "is_return": True,
+                        "is_active_purchase": False,
+                        "provenance": "uncertain",
+                        "returned_lines": list(target.returned_lines) + list(target.lines),
+                        "lines": [],
+                    }
+                )
+            continue
+
+        flipped = [item.model_copy(update={"is_return": True}) for item in ret_items]
+        combined_lines = list(target.lines) + flipped
+        net_active, newly_returned = _net_order_lines(combined_lines)
+        all_returned = list(target.returned_lines) + newly_returned
+        fully_returned = bool(target.lines) and not net_active
+        effective_by_key[target_key] = target.model_copy(
+            update={
+                "lifecycle": "return" if fully_returned else target.lifecycle,
+                "is_return": fully_returned,
+                "is_active_purchase": False if fully_returned else target.is_active_purchase,
+                "provenance": "uncertain" if fully_returned else target.provenance,
+                "lines": net_active,
+                "returned_lines": all_returned,
+            }
+        )
+
+    result = list(effective_by_key.values())
+    result.sort(
+        key=lambda item: (
+            -(item.observed_at.timestamp()) if item.observed_at else 0.0,
+            -(item.source_updated_at.timestamp()) if item.source_updated_at else 0.0,
+            item.provider,
+            item.external_id,
+        )
+    )
+    return result
+
 
 class CoverageWindow(BaseModel):
     """Historical coverage and retention boundaries for a provider's records."""
@@ -519,6 +1092,9 @@ class CoverageWindow(BaseModel):
     start: AwareDatetime | None = None
     end: AwareDatetime | None = None
     total_records: int = 0
+    correction_count: int = 0
+    return_count: int = 0
+    cancellation_count: int = 0
     retained_months: int | None = None
     description: str | None = None
 
@@ -672,6 +1248,7 @@ class PurchaseHistorySyncService:
         connector_store: ConnectorStore | None = None,
         household_id: UUID | None = None,
         adapter_factory: Callable[[str, str, dict[str, Any]], ProviderAdapter | None] | None = None,
+        connector_auth: Any | None = None,
     ) -> None:
         self.engine = engine
         self.settings = settings
@@ -679,13 +1256,104 @@ class PurchaseHistorySyncService:
         self.connector_store = connector_store
         self.household_id = household_id
         self.adapter_factory = adapter_factory
+        self.connector_auth = connector_auth
         self._adapters: dict[str, ProviderAdapter] = dict(adapters or {})
         self._account_adapters: dict[tuple[str, str], ProviderAdapter] = {}
         self._last_sync_time: dict[str, datetime] = {}
         self._last_sync_error: dict[str, str | None] = {}
+        self._last_auth_error: dict[str, str | None] = {}
+        self._partial_auth_failure: dict[str, bool] = {}
         self.identity_service: Any = None
         self.mapping_store: Any = None
         self.kassal_client: Any = None
+
+    @staticmethod
+    def _is_auth_exception(exc: Exception) -> bool:
+        exc_name = type(exc).__name__
+        if exc_name in {
+            "CoopAuthenticationError",
+            "Rema1000AuthenticationError",
+            "TrumfAuthenticationError",
+            "ConnectorAuthError",
+        }:
+            return True
+        status_code = getattr(exc, "status_code", None)
+        if exc_name == "OdaError" and status_code in (401, 403, 409):
+            return True
+        if exc_name == "HTTPException" and status_code in (400, 401, 403, 409):
+            return True
+        return False
+
+    def _sanitize_account_error(
+        self, provider: str, account_id: str, exc: Exception
+    ) -> str:
+        raw = str(getattr(exc, "detail", None) or str(exc) or type(exc).__name__)
+        if self.connector_store is not None and self.household_id is not None:
+            try:
+                creds = self.connector_store.get_credentials(
+                    self.household_id, provider, account_id=account_id
+                )
+            except Exception:
+                creds = None
+            if isinstance(creds, dict):
+                for key in ("access_token", "refresh_token", "session_token", "session_cookie", "cookie"):
+                    secret = creds.get(key)
+                    if isinstance(secret, str) and secret.strip():
+                        raw = raw.replace(secret.strip(), "[REDACTED]")
+        return raw
+
+    def _record_account_auth_error(
+        self, provider: str, account_id: str, message: str
+    ) -> None:
+        if (
+            self.connector_store is None
+            or self.household_id is None
+            or provider not in ("rema1000", "coop", "trumf")
+        ):
+            return
+        try:
+            meta = self.connector_store.get_connection_metadata(
+                self.household_id, provider, account_id=account_id
+            )
+            if meta is None:
+                return
+            self.connector_store.update_account_metadata(
+                self.household_id, provider, account_id, {"last_error": message}
+            )
+        except Exception:
+            _LOG.warning(
+                "Failed to persist connector auth error for %s account %s",
+                provider,
+                account_id,
+            )
+
+    def _clear_account_auth_error(self, provider: str, account_id: str) -> None:
+        if (
+            self.connector_store is None
+            or self.household_id is None
+            or provider not in ("rema1000", "coop", "trumf")
+        ):
+            return
+        try:
+            meta = self.connector_store.get_connection_metadata(
+                self.household_id, provider, account_id=account_id
+            )
+            if meta is None or not isinstance(meta.metadata, dict):
+                return
+            if "last_error" in meta.metadata:
+                self.connector_store.update_account_metadata(
+                    self.household_id,
+                    provider,
+                    account_id,
+                    {},
+                    remove_keys=("last_error",),
+                )
+        except Exception:
+            _LOG.warning(
+                "Failed to clear connector auth error for %s account %s",
+                provider,
+                account_id,
+            )
 
     def _dispatch_background_mapping(self, items: list[dict[str, Any]]) -> None:
         """Run AI/variant mapping for unmapped receipt lines without blocking sync."""
@@ -860,6 +1528,8 @@ class PurchaseHistorySyncService:
         merged: list[dict[str, Any]] = []
         seen: set[tuple[str, ...]] = set()
         with self.engine.connect() as connection:
+            if not inspect(connection).has_table("provider_order_sources"):
+                return []
             rows = connection.execute(query).mappings().all()
             for row in rows:
                 key = (
@@ -886,6 +1556,44 @@ class PurchaseHistorySyncService:
                     }
                 )
         return merged
+
+    def get_effective_orders(
+        self,
+        provider: str | None = None,
+        *,
+        include_inactive: bool = True,
+    ) -> list[EffectiveProviderOrder]:
+        """Return resolved effective orders/receipts after applying corrections and returns."""
+        if self.engine is None:
+            return []
+
+        query = select(
+            provider_order_sources.c.provider,
+            provider_order_sources.c.account_id,
+            provider_order_sources.c.external_id,
+            provider_order_sources.c.revision_id,
+            provider_order_sources.c.source_updated_at,
+            provider_order_sources.c.observed_at,
+            provider_order_sources.c.payload,
+        )
+        if provider is not None:
+            query = query.where(provider_order_sources.c.provider == provider.strip().lower())
+
+        with self.engine.connect() as connection:
+            if not inspect(connection).has_table("provider_order_sources"):
+                return []
+            rows = connection.execute(query).mappings().all()
+        effective = resolve_effective_orders(rows, provider=provider)
+        if include_inactive:
+            return effective
+        return [order for order in effective if order.is_active_purchase]
+
+    def get_bought_before_context(self, *, limit: int = 25) -> PurchaseHistoryContext:
+        """Build bounded 'bought before' context from active resolved purchases only."""
+        from home_kitchen.context import build_purchase_history_context
+
+        effective = self.get_effective_orders(include_inactive=False)
+        return build_purchase_history_context(effective, limit=limit)
 
     def _connected_store_auth_mode(
         self, provider: str, account_id: str | None = None
@@ -989,6 +1697,17 @@ class PurchaseHistorySyncService:
 
         adapter = targets[0][1] if targets else self.get_adapter(p, account_id)
 
+        store_last_error = next(
+            (
+                str(acc.metadata["last_error"])
+                for acc in store_accounts
+                if isinstance(acc.metadata, dict)
+                and isinstance(acc.metadata.get("last_error"), str)
+                and acc.metadata["last_error"].strip()
+            ),
+            None,
+        )
+
         # Determine connection & auth state
         if adapter is not None:
             status: Literal["connected", "not_configured", "unavailable", "degraded", "error"] = (
@@ -1007,6 +1726,12 @@ class PurchaseHistorySyncService:
                     auth_method = str(adapter_stat.auth_method)
                 if hasattr(adapter_stat, "history_window_months"):
                     retained_months = adapter_stat.history_window_months
+            if store_accounts:
+                active_store_accounts = [acc for acc in store_accounts if not acc.is_expired]
+                if not active_store_accounts:
+                    status = "unavailable"
+                    auth_state = "expired"
+                    auth_method = store_accounts[0].auth_mode
         elif store_accounts:
             active_store_accounts = [acc for acc in store_accounts if not acc.is_expired]
             if active_store_accounts:
@@ -1035,8 +1760,13 @@ class PurchaseHistorySyncService:
                 f"{p.capitalize()} integration is not configured or authenticated for this account."
             )
 
-        last_error = self._last_sync_error.get(p)
-        if last_error:
+        last_auth_error = self._last_auth_error.get(p)
+        last_error = self._last_sync_error.get(p) or last_auth_error or store_last_error
+        if last_auth_error:
+            auth_state = "expired"
+            if status in ("connected", "degraded"):
+                status = "degraded" if self._partial_auth_failure.get(p) else "unavailable"
+        elif last_error and status == "connected":
             status = "degraded"
 
         # Query database metrics if engine is available
@@ -1085,6 +1815,8 @@ class PurchaseHistorySyncService:
                     all_source_rows = (
                         connection.execute(
                             select(
+                                provider_order_sources.c.provider,
+                                provider_order_sources.c.account_id,
                                 provider_order_sources.c.external_id,
                                 provider_order_sources.c.revision_id,
                                 provider_order_sources.c.source_updated_at,
@@ -1101,25 +1833,18 @@ class PurchaseHistorySyncService:
                         .all()
                     )
 
-                    deduped_records = []
-                    seen_revisions: set[tuple[str, str]] = set()
-                    for r in all_source_rows:
-                        rev_key = (str(r["external_id"]), str(r["revision_id"]))
-                        if rev_key in seen_revisions:
-                            continue
-                        seen_revisions.add(rev_key)
-                        deduped_records.append(r)
-
-                    total_records = len(deduped_records)
+                    effective_orders = resolve_effective_orders(all_source_rows, provider=p)
+                    total_records = len(effective_orders)
+                    correction_count = sum(1 for o in effective_orders if o.is_correction)
+                    return_count = sum(1 for o in effective_orders if o.is_return)
+                    cancellation_count = sum(1 for o in effective_orders if o.is_cancellation)
 
                     if total_records > 0:
-                        records = deduped_records[:100]
+                        recent_orders = effective_orders[:100]
 
-                        tx_times = []
-                        for r in records:
-                            tx = extract_transaction_time(p, r["payload"])
-                            if tx is not None:
-                                tx_times.append(tx)
+                        tx_times = [
+                            o.transaction_at for o in recent_orders if o.transaction_at is not None
+                        ]
 
                         start_tx = min(tx_times) if tx_times else None
                         end_tx = max(tx_times) if tx_times else None
@@ -1127,16 +1852,19 @@ class PurchaseHistorySyncService:
                             start=_utc(start_tx),
                             end=_utc(end_tx),
                             total_records=total_records,
+                            correction_count=correction_count,
+                            return_count=return_count,
+                            cancellation_count=cancellation_count,
                             retained_months=retained_months,
                             description=(
                                 f"Historical coverage for {total_records} {p} order/receipt records."
                             ),
                         )
 
-                        latest_rec = records[0]
-                        latest_obs = _utc(latest_rec["observed_at"])
-                        latest_src = _utc(latest_rec["source_updated_at"])
-                        latest_tx = extract_transaction_time(p, latest_rec["payload"])
+                        latest_rec = recent_orders[0]
+                        latest_obs = _utc(latest_rec.observed_at)
+                        latest_src = _utc(latest_rec.source_updated_at)
+                        latest_tx = latest_rec.transaction_at
 
                         if latest_src is not None and latest_tx is not None:
                             p_delay = max(0.0, (latest_src - latest_tx).total_seconds())
@@ -1237,51 +1965,141 @@ class PurchaseHistorySyncService:
         accounts_synced = 0
         last_checkpoint: str | None = None
         errors: list[str] = []
+        auth_errors: list[str] = []
         had_incomplete = False
         had_failure = False
+        had_auth_failure = False
+
+        assert self.engine is not None
+        engine = self.engine
+
+        def _run_sync(target_account_id: str, active_adapter: ProviderAdapter) -> int:
+            return sync_account(
+                engine,
+                p,
+                target_account_id,
+                active_adapter,
+                kassal_client=getattr(self, "kassal_client", None),
+                identity_service=getattr(self, "identity_service", None),
+                settings=self.settings,
+                connector_store=self.connector_store,
+                household_id=self.household_id,
+                on_unmapped_lines=self._dispatch_background_mapping,
+            )
 
         for target_account_id, adapter in targets:
+            active_adapter = adapter
+            uses_managed_connector = (
+                self.connector_auth is not None
+                and self.connector_store is not None
+                and self.household_id is not None
+                and p in ("rema1000", "coop", "trumf")
+                and (p, target_account_id) not in self._account_adapters
+                and p not in self._adapters
+            )
+            if uses_managed_connector and self.connector_store is not None and self.household_id is not None:
+                try:
+                    meta = self.connector_store.get_connection_metadata(
+                        self.household_id, p, account_id=target_account_id
+                    )
+                    if meta is not None:
+                        self.connector_auth.ensure_fresh_credentials(
+                            self.household_id,
+                            None,
+                            p,
+                            account_id=target_account_id,
+                        )
+                        rebuilt = self.get_adapter(p, target_account_id)
+                        if rebuilt is not None:
+                            active_adapter = rebuilt
+                except Exception as exc:
+                    had_failure = True
+                    last_checkpoint = checkpoint(engine, p, target_account_id)
+                    safe_msg = self._sanitize_account_error(p, target_account_id, exc)
+                    errors.append(safe_msg)
+                    if self._is_auth_exception(exc):
+                        had_auth_failure = True
+                        auth_errors.append(safe_msg)
+                        self._record_account_auth_error(p, target_account_id, safe_msg)
+                    continue
+
             try:
-                count = sync_account(
-                    self.engine,
-                    p,
-                    target_account_id,
-                    adapter,
-                    kassal_client=getattr(self, "kassal_client", None),
-                    identity_service=getattr(self, "identity_service", None),
-                    settings=self.settings,
-                    connector_store=self.connector_store,
-                    household_id=self.household_id,
-                    on_unmapped_lines=self._dispatch_background_mapping,
-                )
+                count = _run_sync(target_account_id, active_adapter)
                 total_records += count
                 accounts_synced += 1
-                last_checkpoint = checkpoint(self.engine, p, target_account_id)
+                last_checkpoint = checkpoint(engine, p, target_account_id)
+                self._clear_account_auth_error(p, target_account_id)
             except IncompleteScanError as exc:
                 had_incomplete = True
                 total_records += getattr(exc, "records_synced", 0)
                 accounts_synced += 1
-                last_checkpoint = checkpoint(self.engine, p, target_account_id)
-                errors.append(str(exc))
+                last_checkpoint = checkpoint(engine, p, target_account_id)
+                errors.append(self._sanitize_account_error(p, target_account_id, exc))
             except Exception as exc:
+                if (
+                    self._is_auth_exception(exc)
+                    and uses_managed_connector
+                    and self.connector_auth is not None
+                    and self.household_id is not None
+                ):
+                    try:
+                        self.connector_auth.refresh_connection(
+                            self.household_id,
+                            None,
+                            p,
+                            account_id=target_account_id,
+                        )
+                        rebuilt = self.get_adapter(p, target_account_id)
+                        if rebuilt is None:
+                            raise exc
+                        count = _run_sync(target_account_id, rebuilt)
+                        total_records += count
+                        accounts_synced += 1
+                        last_checkpoint = checkpoint(engine, p, target_account_id)
+                        self._clear_account_auth_error(p, target_account_id)
+                        continue
+                    except IncompleteScanError as retry_exc:
+                        had_incomplete = True
+                        total_records += getattr(retry_exc, "records_synced", 0)
+                        accounts_synced += 1
+                        last_checkpoint = checkpoint(engine, p, target_account_id)
+                        errors.append(
+                            self._sanitize_account_error(p, target_account_id, retry_exc)
+                        )
+                        continue
+                    except Exception as retry_exc:
+                        exc = retry_exc
+
                 had_failure = True
-                last_checkpoint = checkpoint(self.engine, p, target_account_id)
-                errors.append(str(exc))
+                last_checkpoint = checkpoint(engine, p, target_account_id)
+                safe_msg = self._sanitize_account_error(p, target_account_id, exc)
+                errors.append(safe_msg)
+                if self._is_auth_exception(exc):
+                    had_auth_failure = True
+                    auth_errors.append(safe_msg)
+                    self._record_account_auth_error(p, target_account_id, safe_msg)
 
         duration = round(time.monotonic() - start_time, 3)
         error_text = "; ".join(errors) if errors else None
+        auth_error_text = "; ".join(auth_errors) if auth_errors else None
 
         if not had_incomplete and not had_failure:
             self._last_sync_time[p] = datetime.now(UTC)
             self._last_sync_error[p] = None
+            self._last_auth_error[p] = None
+            self._partial_auth_failure[p] = False
             result_status: Literal["success", "skipped", "incomplete", "failed"] = "success"
         elif had_incomplete or (had_failure and accounts_synced > 0):
             if accounts_synced > 0:
                 self._last_sync_time[p] = datetime.now(UTC)
             self._last_sync_error[p] = error_text
+            self._last_auth_error[p] = auth_error_text
+            self._partial_auth_failure[p] = had_auth_failure and accounts_synced > 0
             result_status = "incomplete"
         else:
             self._last_sync_error[p] = error_text
+            self._last_auth_error[p] = auth_error_text
+            self._partial_auth_failure[p] = False
             result_status = "failed"
 
         return ProviderSyncResult(

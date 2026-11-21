@@ -8,11 +8,13 @@ from home_kitchen.purchase_sync import (
     CheckpointConflict,
     ProviderOrderRecord,
     ProviderPage,
+    PurchaseHistorySyncService,
     RevisionConflict,
     checkpoint,
     metadata,
     persist_page,
     provider_order_sources,
+    resolve_effective_orders,
     sync_account,
 )
 
@@ -230,3 +232,134 @@ def test_rejects_malformed_provider_account_identity(engine, provider, account_i
             page([], "cursor", False),
             expected_cursor=None,
         )
+
+
+def test_same_page_corrections_preserve_order_and_resolve_latest(engine):
+    r1 = ProviderOrderRecord(
+        external_id="order-1",
+        revision_id="rev-1",
+        source_updated_at=None,
+        payload={
+            "order": {
+                "orderNumber": "order-1",
+                "deliveryDate": "2026-04-10",
+                "products": [{"product": {"id": 1, "name": "Melk", "unitName": "l"}, "quantity": 1}],
+            },
+            "tracking": {"orderNumber": "order-1", "status": "delivered"},
+        },
+    )
+    r2 = ProviderOrderRecord(
+        external_id="order-1",
+        revision_id="rev-2",
+        source_updated_at=None,
+        payload={
+            "order": {
+                "orderNumber": "order-1",
+                "deliveryDate": "2026-04-10",
+                "products": [{"product": {"id": 1, "name": "Melk", "unitName": "l"}, "quantity": 1}],
+            },
+            "tracking": {"orderNumber": "order-1", "status": "cancelled"},
+        },
+    )
+    persist_page(engine, "oda", "acct", page([r1, r2], "cur-1", False), expected_cursor=None)
+
+    service = PurchaseHistorySyncService(engine=engine)
+    effective = service.get_effective_orders("oda")
+    assert len(effective) == 1
+    eff = effective[0]
+    assert eff.revision_id == "rev-2"
+    assert eff.is_correction is True
+    assert eff.is_cancellation is True
+    assert eff.is_active_purchase is False
+    assert eff.lifecycle == "cancellation"
+    assert eff.superseded_revision_ids == ["rev-1"]
+
+    status = service.get_provider_status("oda", account_id="acct")
+    assert status.coverage_window.total_records == 1
+    assert status.coverage_window.correction_count == 1
+    assert status.coverage_window.cancellation_count == 1
+
+
+def test_returns_and_linked_refunds_adjust_active_purchases(engine):
+    orig = ProviderOrderRecord(
+        external_id="coop-orig-1",
+        revision_id="r1",
+        payload={
+            "summary": {
+                "summaryId": "coop-orig-1",
+                "receiptId": "coop-rcpt-1",
+                "purchaseDate": "2026-04-07T10:00:00Z",
+                "amount": 100.0,
+                "lines": [
+                    {"productName": "Gulrot", "quantity": 2, "amount": 40.0},
+                    {"productName": "Brød", "quantity": 1, "amount": 60.0},
+                ],
+            }
+        },
+    )
+    partial_refund = ProviderOrderRecord(
+        external_id="coop-ret-1",
+        revision_id="r1",
+        payload={
+            "summary": {
+                "summaryId": "coop-ret-1",
+                "receiptId": "coop-rcpt-ret-1",
+                "originalReceiptId": "coop-orig-1",
+                "purchaseDate": "2026-04-08T10:00:00Z",
+                "amount": -40.0,
+                "lines": [
+                    {"productName": "Gulrot", "quantity": 2, "amount": -40.0},
+                ],
+            }
+        },
+    )
+    inline_return = ProviderOrderRecord(
+        external_id="trumf-inline-ret",
+        revision_id="r1",
+        payload={
+            "batchId": "trumf-inline-ret",
+            "transaksjonsTidspunkt": "2026-04-09T12:00:00Z",
+            "hasReceipt": True,
+            "belop": 25.0,
+            "varelinjer": [
+                {"produktBeskrivelse": "Yoghurt", "antall": 3, "belop": 75.0},
+                {"produktBeskrivelse": "Yoghurt", "antall": -2, "belop": -50.0},
+            ],
+        },
+    )
+    persist_page(
+        engine,
+        "coop",
+        "acct",
+        page([orig, partial_refund], "c-done", False),
+        expected_cursor=None,
+    )
+    persist_page(
+        engine,
+        "trumf",
+        "acct",
+        page([inline_return], "t-done", False),
+        expected_cursor=None,
+    )
+
+    with engine.connect() as conn:
+        rows = conn.execute(select(provider_order_sources)).mappings().all()
+
+    effective = {o.external_id: o for o in resolve_effective_orders(rows)}
+    assert effective["coop-ret-1"].is_return is True
+    assert effective["coop-ret-1"].is_active_purchase is False
+
+    # Gulrot was fully returned by coop-ret-1; Brød remains active
+    assert effective["coop-orig-1"].is_active_purchase is True
+    assert [line.name for line in effective["coop-orig-1"].lines] == ["Brød"]
+    assert [line.name for line in effective["coop-orig-1"].returned_lines] == ["Gulrot"]
+
+    # Inline return nets 3 - 2 = 1 Yoghurt
+    assert effective["trumf-inline-ret"].is_active_purchase is True
+    assert len(effective["trumf-inline-ret"].lines) == 1
+    assert effective["trumf-inline-ret"].lines[0].quantity == 1
+
+    service = PurchaseHistorySyncService(engine=engine)
+    coop_status = service.get_provider_status("coop", account_id="acct")
+    assert coop_status.coverage_window.total_records == 2
+    assert coop_status.coverage_window.return_count == 1

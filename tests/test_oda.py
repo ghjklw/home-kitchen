@@ -416,3 +416,38 @@ def test_disconnect_fences_connect_during_dynamic_registration(oda, monkeypatch)
     next_state = begin(service)
     service.callback("alice", next_state, "authorization-private")
     assert service.status("alice")["connected"]
+
+
+def test_oda_refresh_distinguishes_expired_grant_from_transient_failure(oda, monkeypatch):
+    service, _, _ = oda
+    state = begin(service)
+    service.callback("alice", state, "authorization-private")
+    with service.repository.locked_connection("alice") as (connection, token):
+        token["expires_at"] = 0
+        service.repository.update_connection(connection, "alice", token)
+
+    # HTTP 400 invalid_grant on refresh -> 409 reconnect required
+    def rejected_refresh(method, url, **kwargs):
+        return httpx.Response(
+            400,
+            json={"error": "invalid_grant"},
+            request=httpx.Request(method, url),
+        )
+
+    monkeypatch.setattr(service.http, "request", rejected_refresh)
+    with pytest.raises(OdaError, match="expired") as exc_info:
+        service.access_token("alice")
+    assert exc_info.value.status_code == 409
+
+    # HTTP 503 transient outage on refresh -> 502 retryable
+    def transient_failure(method, url, **kwargs):
+        return httpx.Response(
+            503,
+            text="Service Unavailable",
+            request=httpx.Request(method, url),
+        )
+
+    monkeypatch.setattr(service.http, "request", transient_failure)
+    with pytest.raises(OdaError, match="try again") as transient_exc:
+        service.access_token("alice")
+    assert transient_exc.value.status_code == 502

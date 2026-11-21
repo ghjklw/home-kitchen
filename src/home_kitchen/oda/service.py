@@ -296,16 +296,30 @@ class OdaService:
                 if force_refresh or token["expires_at"] <= time.time() + 30:
                     if not token.get("refresh_token"):
                         raise OdaError("Your Oda connection expired; connect again", 409)
-                    response = self._json(
-                        "POST",
-                        TOKEN,
-                        data={
-                            "grant_type": "refresh_token",
-                            "refresh_token": token["refresh_token"],
-                            "client_id": token["client_id"],
-                            "resource": RESOURCE,
-                        },
-                    )
+                    try:
+                        raw_response = self.http.request(
+                            "POST",
+                            TOKEN,
+                            data={
+                                "grant_type": "refresh_token",
+                                "refresh_token": token["refresh_token"],
+                                "client_id": token["client_id"],
+                                "resource": RESOURCE,
+                            },
+                            follow_redirects=False,
+                        )
+                        if raw_response.status_code in (400, 401, 403):
+                            raise OdaError("Your Oda connection expired; connect again", 409)
+                        raw_response.raise_for_status()
+                        response = raw_response.json()
+                        if not isinstance(response, dict):
+                            raise ValueError
+                    except OdaError:
+                        raise
+                    except (httpx.HTTPError, ValueError):
+                        raise OdaError(
+                            "Oda could not complete this request; try again or reconnect"
+                        ) from None
                     token = self._token_payload(response, token)
                     repository.update_connection(connection, actor_id, token)
                 return token["access_token"]

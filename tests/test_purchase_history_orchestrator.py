@@ -7,13 +7,14 @@ strict separation from kitchen inventory/history tables, and REST/MCP interfaces
 """
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from threading import Event
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
+import httpx
 import pytest
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
@@ -788,3 +789,341 @@ def test_provider_status_reports_connector_store_auth_mode_accurately(memory_eng
     assert "manual" not in (status_session.providers["trumf"].limitations or "").lower()
     assert status_session.providers["rema1000"].auth_method == "session_token"
     assert "manual" not in (status_session.providers["rema1000"].limitations or "").lower()
+
+
+def test_sync_proactively_refreshes_expiring_coop_and_rema_tokens_before_fetch(memory_engine):
+    from home_kitchen.connector_auth import ConnectorAuthService
+    from home_kitchen.integrations import (
+        CoopIntegration,
+        IntegrationRegistry,
+        Rema1000Integration,
+        TrumfIntegration,
+    )
+
+    connector_metadata.create_all(memory_engine)
+    store = ConnectorStore(memory_engine, Fernet(Fernet.generate_key()))
+    household_id = uuid4()
+    seen_tokens: list[tuple[str, str]] = []
+
+    store.save_connection(
+        household_id=household_id,
+        provider_id="coop",
+        auth_mode="oauth_pkce",
+        credentials={"access_token": "old-coop", "refresh_token": "coop-ref-1"},
+        expires_at=datetime.now(UTC) - timedelta(minutes=1),
+        actor_id="household-a",
+        account_id="household-a",
+    )
+    store.save_connection(
+        household_id=household_id,
+        provider_id="rema1000",
+        auth_mode="oauth_pkce",
+        credentials={"access_token": "old-rema", "refresh_token": "rema-ref-1"},
+        expires_at=datetime.now(UTC) + timedelta(minutes=1),
+        actor_id="household-a",
+        account_id="household-a",
+    )
+
+    def auth_handler(request: httpx.Request) -> httpx.Response:
+        if "coop.no" in str(request.url):
+            return httpx.Response(
+                200,
+                json={"access_token": "fresh-coop", "refresh_token": "coop-ref-2", "expires_in": 3600},
+            )
+        if "rema.no" in str(request.url):
+            return httpx.Response(
+                200,
+                json={"access_token": "fresh-rema", "refresh_token": "rema-ref-2", "expires_in": 3600},
+            )
+        return httpx.Response(404)
+
+    registry = IntegrationRegistry(
+        [
+            Rema1000Integration(store, household_id),
+            CoopIntegration(store, household_id),
+            TrumfIntegration(store, household_id),
+        ]
+    )
+    auth = ConnectorAuthService(
+        store=store,
+        integrations=registry,
+        household_id=household_id,
+        transport=httpx.MockTransport(auth_handler),
+    )
+
+    def build_adapter(provider: str, account_id: str, creds: dict):
+        token = creds.get("access_token", "")
+        seen_tokens.append((provider, token))
+        if provider == "coop":
+            return CoopPurchaseHistoryAdapter(
+                CoopFixtureSource(purchases=[], receipts={}), account_id=account_id
+            )
+        if provider == "rema1000":
+            return Rema1000PurchaseHistoryAdapter(Rema1000FixtureSource([]), account_id=account_id)
+        return None
+
+    service = PurchaseHistorySyncService(
+        engine=memory_engine,
+        connector_store=store,
+        household_id=household_id,
+        adapter_factory=build_adapter,
+        connector_auth=auth,
+    )
+
+    res = service.sync(account_id="household-a")
+    assert res.results["coop"].status == "success"
+    assert res.results["rema1000"].status == "success"
+    assert ("coop", "fresh-coop") in seen_tokens
+    assert ("rema1000", "fresh-rema") in seen_tokens
+
+    status = service.get_status(account_id="household-a")
+    assert status.providers["coop"].auth_state == "connected"
+    assert status.providers["coop"].status == "connected"
+    assert status.providers["rema1000"].auth_state == "connected"
+    assert status.providers["rema1000"].status == "connected"
+
+
+def test_sync_retries_once_after_auth_error_for_coop_rema_and_trumf(memory_engine):
+    from home_kitchen.connector_auth import ConnectorAuthService
+    from home_kitchen.coop_history import CoopAuthenticationError
+    from home_kitchen.integrations import (
+        CoopIntegration,
+        IntegrationRegistry,
+        Rema1000Integration,
+        TrumfIntegration,
+    )
+    from home_kitchen.rema1000_history import Rema1000AuthenticationError
+    from home_kitchen.trumf_history import TrumfAuthenticationError
+
+    connector_metadata.create_all(memory_engine)
+    store = ConnectorStore(memory_engine, Fernet(Fernet.generate_key()))
+    household_id = uuid4()
+
+    future = datetime.now(UTC) + timedelta(hours=2)
+    store.save_connection(
+        household_id=household_id,
+        provider_id="coop",
+        auth_mode="oauth_pkce",
+        credentials={"access_token": "stale-coop", "refresh_token": "coop-ref"},
+        expires_at=future,
+        actor_id="household-a",
+        account_id="household-a",
+    )
+    store.save_connection(
+        household_id=household_id,
+        provider_id="rema1000",
+        auth_mode="oauth_pkce",
+        credentials={"access_token": "stale-rema", "refresh_token": "rema-ref"},
+        expires_at=future,
+        actor_id="household-a",
+        account_id="household-a",
+    )
+    store.save_connection(
+        household_id=household_id,
+        provider_id="trumf",
+        auth_mode="session_cookie",
+        credentials={"session_cookie": "__Secure-authjs.session-token=stale"},
+        expires_at=future,
+        actor_id="household-a",
+        account_id="household-a",
+    )
+
+    def auth_handler(request: httpx.Request) -> httpx.Response:
+        if "coop.no" in str(request.url):
+            return httpx.Response(
+                200,
+                json={"access_token": "renewed-coop", "refresh_token": "coop-ref-2", "expires_in": 3600},
+            )
+        if "rema.no" in str(request.url):
+            return httpx.Response(
+                200,
+                json={"access_token": "renewed-rema", "refresh_token": "rema-ref-2", "expires_in": 3600},
+            )
+        if "trumf.no" in str(request.url) and request.url.path == "/api/auth/session":
+            return httpx.Response(
+                200,
+                json={"user": {"name": "Malo"}, "expires": "2026-12-31T00:00:00Z"},
+                headers={"Set-Cookie": "__Secure-authjs.session-token=renewed-cookie; Path=/"},
+            )
+        return httpx.Response(404)
+
+    registry = IntegrationRegistry(
+        [
+            Rema1000Integration(store, household_id),
+            CoopIntegration(store, household_id),
+            TrumfIntegration(store, household_id),
+        ]
+    )
+    auth = ConnectorAuthService(
+        store=store,
+        integrations=registry,
+        household_id=household_id,
+        transport=httpx.MockTransport(auth_handler),
+    )
+
+    def build_adapter(provider: str, account_id: str, creds: dict):
+        if provider == "coop":
+            if creds.get("access_token") == "stale-coop":
+                return CoopPurchaseHistoryAdapter(
+                    CoopFixtureSource([], failure=CoopAuthenticationError("expired")),
+                    account_id=account_id,
+                )
+            return CoopPurchaseHistoryAdapter(CoopFixtureSource([]), account_id=account_id)
+        if provider == "rema1000":
+            if creds.get("access_token") == "stale-rema":
+                return Rema1000PurchaseHistoryAdapter(
+                    Rema1000FixtureSource([], failure=Rema1000AuthenticationError("expired")),
+                    account_id=account_id,
+                )
+            return Rema1000PurchaseHistoryAdapter(Rema1000FixtureSource([]), account_id=account_id)
+        if provider == "trumf":
+            if "stale" in creds.get("session_cookie", ""):
+                return TrumfPurchaseHistoryAdapter(
+                    TrumfFixtureSource([], failure=TrumfAuthenticationError("expired")),
+                    account_id=account_id,
+                )
+            return TrumfPurchaseHistoryAdapter(TrumfFixtureSource([]), account_id=account_id)
+        return None
+
+    service = PurchaseHistorySyncService(
+        engine=memory_engine,
+        connector_store=store,
+        household_id=household_id,
+        adapter_factory=build_adapter,
+        connector_auth=auth,
+    )
+    res = service.sync(account_id="household-a")
+    assert res.results["coop"].status == "success"
+    assert res.results["rema1000"].status == "success"
+    assert res.results["trumf"].status == "success"
+
+
+def test_sync_records_expired_auth_state_and_sanitizes_errors_across_all_providers(memory_engine):
+    from home_kitchen.connector_auth import ConnectorAuthService
+    from home_kitchen.integrations import (
+        CoopIntegration,
+        IntegrationRegistry,
+        Rema1000Integration,
+        TrumfIntegration,
+    )
+    from home_kitchen.oda.service import OdaError
+
+    connector_metadata.create_all(memory_engine)
+    store = ConnectorStore(memory_engine, Fernet(Fernet.generate_key()))
+    household_id = uuid4()
+
+    expired = datetime.now(UTC) - timedelta(hours=1)
+    store.save_connection(
+        household_id=household_id,
+        provider_id="coop",
+        auth_mode="oauth_pkce",
+        credentials={"access_token": "secret-coop-acc", "refresh_token": "secret-coop-ref"},
+        expires_at=expired,
+        actor_id="household-a",
+        account_id="acc-coop-bad",
+    )
+    store.save_connection(
+        household_id=household_id,
+        provider_id="rema1000",
+        auth_mode="oauth_pkce",
+        credentials={"access_token": "secret-rema-acc", "refresh_token": "secret-rema-ref"},
+        expires_at=expired,
+        actor_id="household-a",
+        account_id="acc-rema-bad",
+    )
+    store.save_connection(
+        household_id=household_id,
+        provider_id="rema1000",
+        auth_mode="session_token",
+        credentials={"session_token": "good-rema-session"},
+        expires_at=datetime.now(UTC) + timedelta(hours=5),
+        actor_id="household-a",
+        account_id="acc-rema-good",
+    )
+    store.save_connection(
+        household_id=household_id,
+        provider_id="trumf",
+        auth_mode="session_cookie",
+        credentials={"session_cookie": "secret-trumf-cookie"},
+        expires_at=expired,
+        actor_id="household-a",
+        account_id="acc-trumf-bad",
+    )
+
+    def failing_auth(request: httpx.Request) -> httpx.Response:
+        if "trumf.no" in str(request.url):
+            return httpx.Response(401, json={"error": "expired"})
+        return httpx.Response(400, json={"error": "invalid_grant"})
+
+    registry = IntegrationRegistry(
+        [
+            Rema1000Integration(store, household_id),
+            CoopIntegration(store, household_id),
+            TrumfIntegration(store, household_id),
+        ]
+    )
+    auth = ConnectorAuthService(
+        store=store,
+        integrations=registry,
+        household_id=household_id,
+        transport=httpx.MockTransport(failing_auth),
+    )
+
+    def build_adapter(provider: str, account_id: str, creds: dict):
+        if provider == "coop":
+            return CoopPurchaseHistoryAdapter(CoopFixtureSource([]), account_id=account_id)
+        if provider == "rema1000":
+            return Rema1000PurchaseHistoryAdapter(Rema1000FixtureSource([]), account_id=account_id)
+        if provider == "trumf":
+            return TrumfPurchaseHistoryAdapter(TrumfFixtureSource([]), account_id=account_id)
+        return None
+
+    fake_oda = SimpleNamespace(
+        configured=True,
+        repository=SimpleNamespace(
+            has_connection=lambda acc: acc == "household-a",
+            list_connected_actors=lambda: ["household-a"],
+        ),
+        list_orders=AsyncMock(side_effect=OdaError("Your Oda connection expired; connect again", 409)),
+        track_order=AsyncMock(),
+    )
+
+    service = PurchaseHistorySyncService(
+        engine=memory_engine,
+        oda_service=fake_oda,
+        connector_store=store,
+        household_id=household_id,
+        adapter_factory=build_adapter,
+        connector_auth=auth,
+    )
+
+    res = service.sync(account_id="household-a")
+    assert res.results["coop"].status == "failed"
+    assert res.results["trumf"].status == "failed"
+    assert res.results["oda"].status == "failed"
+    # Multi-account partial failure: acc-rema-good succeeded while acc-rema-bad failed refresh
+    assert res.results["rema1000"].status == "incomplete"
+    assert res.results["rema1000"].accounts_synced == 1
+
+    for secret in (
+        "secret-coop-acc",
+        "secret-coop-ref",
+        "secret-rema-acc",
+        "secret-rema-ref",
+        "secret-trumf-cookie",
+    ):
+        assert secret not in str(res.model_dump())
+
+    status = service.get_status(account_id="household-a")
+    assert status.providers["coop"].auth_state == "expired"
+    assert status.providers["coop"].status == "unavailable"
+    assert status.providers["trumf"].auth_state == "expired"
+    assert status.providers["trumf"].status == "unavailable"
+    assert status.providers["oda"].auth_state == "expired"
+    assert status.providers["oda"].status == "unavailable"
+    assert status.providers["rema1000"].auth_state == "expired"
+    assert status.providers["rema1000"].status == "degraded"
+
+    coop_meta = store.get_connection_metadata(household_id, "coop", account_id="acc-coop-bad")
+    assert coop_meta is not None
+    assert coop_meta.metadata.get("last_error")

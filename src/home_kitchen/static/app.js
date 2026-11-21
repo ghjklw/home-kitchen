@@ -53,6 +53,14 @@ const state = {
   shoppingRefreshRequestCount: 0,
   shoppingLoadSequence: 0,
   shoppingWriteInFlight: 0,
+  weekLastRefreshedAt: null,
+  weekRefreshInFlight: false,
+  weekRefreshPending: false,
+  weekRefreshLastEventAt: 0,
+  weekRefreshRequestCount: 0,
+  weekLoadSequence: 0,
+  weekWriteInFlight: 0,
+  mealPlanEditorDirty: false,
   basket: null,
   items: [],
   regular: [],
@@ -773,6 +781,7 @@ function openDialog(heading) {
       suppressModalFocusRestore = false;
     }
   }
+  state.mealPlanEditorDirty = false;
   modal.dataset.kind = "";
   const root = $("#modal-content");
   root.replaceChildren();
@@ -831,21 +840,42 @@ function formSubmit(form, text, action, { settingsOnFailure = false } = {}) {
   return error;
 }
 async function mutate(path, method, body, message) {
-  await api(path, method, body);
-  $("#modal").close();
-  await refreshView();
-  if (message) notify(message);
+  const isMealWrite = path.startsWith("/meals");
+  if (isMealWrite) state.weekWriteInFlight = (state.weekWriteInFlight || 0) + 1;
+  try {
+    await api(path, method, body);
+    $("#modal").close();
+    await refreshView();
+    if (message) notify(message);
+  } finally {
+    if (isMealWrite) {
+      state.weekWriteInFlight = Math.max(0, (state.weekWriteInFlight || 1) - 1);
+    }
+  }
 }
-function shouldRefreshShopping(view, visibility, modalOpen, formOpen) {
+function shouldRefreshHouseholdView(targetView, view, visibility, modalOpen, formOpen, dirty = false) {
   return (
-    view === "shopping" &&
+    view === targetView &&
     visibility !== "hidden" &&
     !modalOpen &&
-    !formOpen
+    !formOpen &&
+    !dirty
   );
 }
+function shouldRefreshShopping(view, visibility, modalOpen, formOpen) {
+  return shouldRefreshHouseholdView("shopping", view, visibility, modalOpen, formOpen);
+}
+function shouldRefreshWeek(view, visibility, modalOpen, formOpen, dirty = false) {
+  return shouldRefreshHouseholdView("week", view, visibility, modalOpen, formOpen, dirty);
+}
+function isCurrentPeriodLoad(expectedView, view, activeSequence, requestSequence, currentPeriod, requestPeriod) {
+  return view === expectedView && activeSequence === requestSequence && currentPeriod === requestPeriod;
+}
 function isCurrentShoppingLoad(view, activeSequence, requestSequence, currentPeriod, requestPeriod) {
-  return view === "shopping" && activeSequence === requestSequence && currentPeriod === requestPeriod;
+  return isCurrentPeriodLoad("shopping", view, activeSequence, requestSequence, currentPeriod, requestPeriod);
+}
+function isCurrentWeekLoad(view, activeSequence, requestSequence, currentPeriod, requestPeriod) {
+  return isCurrentPeriodLoad("week", view, activeSequence, requestSequence, currentPeriod, requestPeriod);
 }
 function shoppingRefreshLabel() {
   if (state.shoppingRefreshInFlight) return "Oppdaterer …";
@@ -871,48 +901,87 @@ function updateShoppingRefreshControl() {
   }
   if (status) status.textContent = shoppingRefreshLabel();
 }
-function queuePendingShoppingRefresh() {
-  if (!state.shoppingRefreshPending) return;
+const HOUSEHOLD_REFRESH_CONFIG = {
+  shopping: {
+    inFlightKey: "shoppingRefreshInFlight",
+    pendingKey: "shoppingRefreshPending",
+    lastEventKey: "shoppingRefreshLastEventAt",
+    requestCountKey: "shoppingRefreshRequestCount",
+    writeInFlightKey: "shoppingWriteInFlight",
+    onStatusChange: updateShoppingRefreshControl,
+  },
+  week: {
+    inFlightKey: "weekRefreshInFlight",
+    pendingKey: "weekRefreshPending",
+    lastEventKey: "weekRefreshLastEventAt",
+    requestCountKey: "weekRefreshRequestCount",
+    writeInFlightKey: "weekWriteInFlight",
+    onStatusChange: null,
+  },
+};
+function queuePendingHouseholdRefresh(targetView = state.view) {
+  const config = HOUSEHOLD_REFRESH_CONFIG[targetView];
+  if (!config || !state[config.pendingKey]) return;
   setTimeout(() => {
-    if (state.shoppingRefreshPending) void refreshShoppingIfSafe(true);
+    if (state[config.pendingKey] && state.view === targetView) {
+      void refreshHouseholdViewIfSafe(targetView, true);
+    }
   }, 0);
 }
-async function refreshShoppingIfSafe(force = false) {
-  if (state.view !== "shopping") return;
+function queuePendingShoppingRefresh() {
+  queuePendingHouseholdRefresh("shopping");
+}
+async function refreshHouseholdViewIfSafe(targetView, force = false) {
+  const config = HOUSEHOLD_REFRESH_CONFIG[targetView];
+  if (!config || state.view !== targetView) return;
+  const modalOpen = Boolean($("#modal")?.open || $("#private-photo-modal")?.open);
+  const formOpen = Boolean($("#main form"));
+  const dirty = targetView === "week" ? Boolean(state.mealPlanEditorDirty) : false;
   if (
-    !shouldRefreshShopping(
+    !shouldRefreshHouseholdView(
+      targetView,
       state.view,
       document.visibilityState,
-      $("#modal").open,
-      Boolean($("#main form")),
-    ) || state.shoppingWriteInFlight > 0
+      modalOpen,
+      formOpen,
+      dirty,
+    ) || (state[config.writeInFlightKey] || 0) > 0
   ) {
-    state.shoppingRefreshPending = true;
+    state[config.pendingKey] = true;
     return;
   }
-  if (state.shoppingRefreshInFlight || state.shoppingRefreshRequestCount > 0) {
-    state.shoppingRefreshPending = true;
+  if (state[config.inFlightKey] || (state[config.requestCountKey] || 0) > 0) {
+    state[config.pendingKey] = true;
     return;
   }
   const now = Date.now();
-  if (!force && now - state.shoppingRefreshLastEventAt < 1500) return;
-  state.shoppingRefreshLastEventAt = now;
-  state.shoppingRefreshPending = false;
-  state.shoppingRefreshInFlight = true;
-  updateShoppingRefreshControl();
+  if (!force && now - (state[config.lastEventKey] || 0) < 1500) return;
+  state[config.lastEventKey] = now;
+  state[config.pendingKey] = false;
+  state[config.inFlightKey] = true;
+  config.onStatusChange?.();
   try {
     await refreshView();
   } finally {
-    state.shoppingRefreshInFlight = false;
-    updateShoppingRefreshControl();
-    queuePendingShoppingRefresh();
+    state[config.inFlightKey] = false;
+    config.onStatusChange?.();
+    queuePendingHouseholdRefresh(targetView);
   }
+}
+async function refreshShoppingIfSafe(force = false) {
+  return refreshHouseholdViewIfSafe("shopping", force);
+}
+async function refreshWeekIfSafe(force = false) {
+  return refreshHouseholdViewIfSafe("week", force);
 }
 async function refreshView() {
   const matchingVisible = state.view === "shopping" && ["single", "oda"].includes(state.shoppingPanel);
   const refreshingShopping = state.view === "shopping";
+  const refreshingWeek = state.view === "week";
   const shoppingLoadSequence = refreshingShopping ? ++state.shoppingLoadSequence : null;
   const shoppingRange = refreshingShopping ? range() : null;
+  const weekLoadSequence = refreshingWeek ? ++state.weekLoadSequence : null;
+  const weekRange = refreshingWeek ? range() : null;
   const shoppingLoadIsCurrent = () =>
     !refreshingShopping || isCurrentShoppingLoad(
       state.view,
@@ -921,13 +990,35 @@ async function refreshView() {
       range(),
       shoppingRange,
     );
+  const weekLoadIsCurrent = () =>
+    !refreshingWeek || isCurrentWeekLoad(
+      state.view,
+      state.weekLoadSequence,
+      weekLoadSequence,
+      range(),
+      weekRange,
+    );
+  const activeLoadIsCurrent = () => shoppingLoadIsCurrent() && weekLoadIsCurrent();
   if (refreshingShopping) {
     state.shoppingRefreshPending = false;
     state.shoppingRefreshRequestCount += 1;
   }
+  if (refreshingWeek) {
+    state.weekRefreshPending = false;
+    state.weekRefreshRequestCount += 1;
+  }
   pauseBasketMatchPolling();
   try {
-    if (state.view === "week") state.meals = await api("/meals" + range());
+    if (state.view === "week") {
+      const [meals, recipes] = await Promise.all([
+        api("/meals" + weekRange),
+        api("/recipes?include_stats=true"),
+      ]);
+      if (!weekLoadIsCurrent()) return false;
+      state.meals = meals;
+      state.recipes = recipes;
+      state.weekLastRefreshedAt = Date.now();
+    }
     if (state.view === "recipes") state.recipes = await api("/recipes?include_stats=true");
     if (state.view === "settings") await loadConnectionStatus();
     if (state.view === "shopping") {
@@ -981,11 +1072,11 @@ async function refreshView() {
       if (!shoppingLoadIsCurrent()) return false;
       state.shoppingLastRefreshedAt = Date.now();
     }
-    if (!shoppingLoadIsCurrent()) return false;
+    if (!activeLoadIsCurrent()) return false;
     render();
     return true;
   } catch (error) {
-    if (!shoppingLoadIsCurrent()) return false;
+    if (!activeLoadIsCurrent()) return false;
     notify(error.message, true);
     if (matchingVisible)
       Object.values(state.basketMatchJobs).forEach((record) =>
@@ -1000,7 +1091,15 @@ async function refreshView() {
         state.shoppingRefreshRequestCount - 1,
       );
       if (!state.shoppingRefreshRequestCount && !state.shoppingRefreshInFlight)
-        queuePendingShoppingRefresh();
+        queuePendingHouseholdRefresh("shopping");
+    }
+    if (refreshingWeek) {
+      state.weekRefreshRequestCount = Math.max(
+        0,
+        state.weekRefreshRequestCount - 1,
+      );
+      if (!state.weekRefreshRequestCount && !state.weekRefreshInFlight)
+        queuePendingHouseholdRefresh("week");
     }
   }
 }
@@ -1679,6 +1778,7 @@ async function suggestWeek() {
       if (applying || applied || !selected.length) return;
       const selectedHasEdits = selected.some(({ isEdit }) => isEdit);
       applying = true;
+      state.weekWriteInFlight = (state.weekWriteInFlight || 0) + 1;
       updateApply();
       status.textContent = selectedHasEdits
         ? "Lagrer valgte endringer samlet …"
@@ -1708,6 +1808,7 @@ async function suggestWeek() {
             : " Se over utvalget og prøv igjen.");
         }
       } finally {
+        state.weekWriteInFlight = Math.max(0, (state.weekWriteInFlight || 1) - 1);
         applying = false;
         updateApply();
       }
@@ -1932,15 +2033,20 @@ function mealForm(date = iso(state.selectedDate), recipeId, existingMeal = null)
       recipe_id: recipe.input.value,
       servings: servings.input.value,
     });
-    await api(request.path, request.method, request.payload);
-    state.selectedDate = parseDate(mealDate) || localDate(new Date());
-    state.week = startOfWeek(state.selectedDate);
-    syncPlannerUrl();
-    $("#modal").close();
-    state.view = "week";
-    location.hash = "week";
-    await refreshView();
-    notify(existingMeal ? "Måltidet er oppdatert." : "Måltidet er lagt til i planen.");
+    state.weekWriteInFlight = (state.weekWriteInFlight || 0) + 1;
+    try {
+      await api(request.path, request.method, request.payload);
+      state.selectedDate = parseDate(mealDate) || localDate(new Date());
+      state.week = startOfWeek(state.selectedDate);
+      syncPlannerUrl();
+      $("#modal").close();
+      state.view = "week";
+      location.hash = "week";
+      await refreshView();
+      notify(existingMeal ? "Måltidet er oppdatert." : "Måltidet er lagt til i planen.");
+    } finally {
+      state.weekWriteInFlight = Math.max(0, (state.weekWriteInFlight || 1) - 1);
+    }
   });
   add(root, form);
 }
@@ -2143,6 +2249,7 @@ function openCookidooPlanSync() {
     if (!currentPreview) return;
     confirmButton.disabled = true;
     status.textContent = "Lagrer valgte endringer …";
+    state.weekWriteInFlight = (state.weekWriteInFlight || 0) + 1;
     try {
       const req = window.KitchenCookidooPlanSync.buildConfirmRequest(currentPreview, [...selectedIds]);
       const res = await api(req.path, "POST", req.body);
@@ -2158,6 +2265,8 @@ function openCookidooPlanSync() {
     } catch (error) {
       status.textContent = error.message;
       updateConfirmButton();
+    } finally {
+      state.weekWriteInFlight = Math.max(0, (state.weekWriteInFlight || 1) - 1);
     }
   }
 
@@ -9168,15 +9277,21 @@ window.addEventListener("offline", () => {
 });
 window.addEventListener("online", () => {
   notify("Tilkoblingen er gjenopprettet.");
-  if (state.view === "shopping") void refreshShoppingIfSafe(true);
-  else if (!$("#modal").open && !$("#main form")) refreshView();
+  if (state.view === "shopping" || state.view === "week") {
+    refreshActiveHouseholdViewOnReturn(true);
+  } else if (!$("#modal").open && !$("#main form")) {
+    refreshView();
+  }
 });
-function refreshShoppingOnReturn() {
-  if (document.visibilityState !== "hidden") void refreshShoppingIfSafe();
+function refreshActiveHouseholdViewOnReturn(force = false) {
+  if (document.visibilityState === "hidden") return;
+  if (state.view === "shopping" || state.view === "week") {
+    void refreshHouseholdViewIfSafe(state.view, force === true);
+  }
 }
-window.addEventListener("focus", refreshShoppingOnReturn);
-window.addEventListener("pageshow", refreshShoppingOnReturn);
-document.addEventListener("visibilitychange", refreshShoppingOnReturn);
+window.addEventListener("focus", refreshActiveHouseholdViewOnReturn);
+window.addEventListener("pageshow", refreshActiveHouseholdViewOnReturn);
+document.addEventListener("visibilitychange", refreshActiveHouseholdViewOnReturn);
 async function refreshTrackedRecipeCollectionJob() {
   const jobId = state.recipeCollectionJob?.job_id;
   if (!jobId || !["previewing", "importing"].includes(state.recipeCollectionJob.status)) return;
@@ -9197,7 +9312,18 @@ window.addEventListener("pageshow", refreshTrackedRecipeCollectionJob);
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") void refreshTrackedRecipeCollectionJob();
 });
-$("#modal").addEventListener("close", queuePendingShoppingRefresh);
+const markMealPlanEditorDirty = () => {
+  if (state.view === "week" && $("#modal")?.open) state.mealPlanEditorDirty = true;
+};
+$("#modal").addEventListener("input", markMealPlanEditorDirty);
+$("#modal").addEventListener("change", markMealPlanEditorDirty);
+$("#modal").addEventListener("close", () => {
+  state.mealPlanEditorDirty = false;
+  queuePendingHouseholdRefresh();
+});
+$("#private-photo-modal")?.addEventListener("close", () => {
+  queuePendingHouseholdRefresh();
+});
 $("#modal").addEventListener("close", () => restoreModalReturnFocus($("#modal")));
 $("#private-photo-modal")?.addEventListener("close", () =>
   restoreModalReturnFocus($("#private-photo-modal")),

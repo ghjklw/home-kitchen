@@ -124,7 +124,10 @@ async def recommend_plan(
     existing_meals: list[Meal] | None = None,
     identity_corrections: Sequence[IdentityCorrectionCitation | IdentityCorrectionEvent]
     | None = None,
-    purchase_history_context: PurchaseHistoryContext | Sequence[BoughtBeforeItem] | str | None = None,
+    purchase_history_context: PurchaseHistoryContext
+    | Sequence[BoughtBeforeItem]
+    | str
+    | None = None,
 ) -> PlanDraft:
     if not 1 <= days <= 14:
         raise ValueError("days must be between 1 and 14")

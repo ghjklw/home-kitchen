@@ -1328,9 +1328,7 @@ class ConnectorAuthService:
 
             refresh_token = creds.get("refresh_token")
             if not isinstance(refresh_token, str) or not refresh_token.strip():
-                detail = (
-                    f"Tilkoblingen for '{provider_id}' mangler refresh_token og må kobles til på nytt."
-                )
+                detail = f"Tilkoblingen for '{provider_id}' mangler refresh_token og må kobles til på nytt."
                 self.store.update_account_metadata(
                     household_id,
                     provider_id,
@@ -1411,9 +1409,7 @@ class ConnectorAuthService:
 
             raw_cookie = creds.get("session_cookie") or creds.get("cookie")
             if not isinstance(raw_cookie, str) or not raw_cookie.strip():
-                detail = (
-                    "Tilkoblingen for 'trumf' mangler sesjonsinformasjonskapsel og må kobles til på nytt."
-                )
+                detail = "Tilkoblingen for 'trumf' mangler sesjonsinformasjonskapsel og må kobles til på nytt."
                 self.store.update_account_metadata(
                     household_id,
                     "trumf",

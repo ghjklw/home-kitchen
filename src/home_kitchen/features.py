@@ -219,9 +219,7 @@ class KitchenFeatures:
             adapter_factory=_build_purchase_adapter,
             connector_auth=self.connector_auth,
             identity_service=self.catalogue_identities,
-            receipt_mapper=CatalogueReceiptMappingAdapter(
-                kitchen.store, self.catalogue_identities
-            ),
+            receipt_mapper=CatalogueReceiptMappingAdapter(kitchen.store, self.catalogue_identities),
         )
         self.recipe_providers = create_recipe_providers(settings, ai_agent=ai)
         self.recipe_photos = PhotoRecipeService(

@@ -91,9 +91,6 @@ class CanonicalIdentityCorrectionAdapter(IdentityCorrectionPort):
             )
             if isinstance(recent_events, list):
                 for ev in recent_events:
-                    if (
-                        isinstance(ev, IdentityCorrectionEvent)
-                        and ev.new_identity_id == product_id
-                    ):
+                    if isinstance(ev, IdentityCorrectionEvent) and ev.new_identity_id == product_id:
                         citations.append(IdentityCorrectionCitation.from_event(ev))
         return citations

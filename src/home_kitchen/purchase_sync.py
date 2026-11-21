@@ -773,9 +773,7 @@ def extract_normalized_lines(provider: str, payload: dict[str, Any]) -> list[Nor
                     name=name or (f"Oda SKU {oda_pid}" if oda_pid is not None else "Oda item"),
                     quantity=qty,
                     unit=(
-                        str(prod_obj.get("unitName")).strip()
-                        if prod_obj.get("unitName")
-                        else None
+                        str(prod_obj.get("unitName")).strip() if prod_obj.get("unitName") else None
                     ),
                     amount=amt,
                     ean=extract_line_ean(item),
@@ -871,9 +869,7 @@ def classify_record_lifecycle(
     )
     total_amount = extract_record_total_amount(p, payload)
     returned_ext = extract_returned_external_id(payload)
-    parsed_lines = (
-        list(lines) if lines is not None else extract_normalized_lines(p, payload)
-    )
+    parsed_lines = list(lines) if lines is not None else extract_normalized_lines(p, payload)
     all_lines_returned = bool(parsed_lines) and all(line.is_return for line in parsed_lines)
 
     if (
@@ -944,9 +940,7 @@ def _net_order_lines(
                 remaining_active[idx] = act.model_copy(update={"quantity": Decimal("0")})
                 break
 
-    net_active = [
-        line for line in remaining_active if line.quantity is None or line.quantity > 0
-    ]
+    net_active = [line for line in remaining_active if line.quantity is None or line.quantity > 0]
     return net_active, returned
 
 
@@ -1304,9 +1298,7 @@ class PurchaseHistorySyncService:
             return True
         return False
 
-    def _sanitize_account_error(
-        self, provider: str, account_id: str, exc: Exception
-    ) -> str:
+    def _sanitize_account_error(self, provider: str, account_id: str, exc: Exception) -> str:
         raw = str(getattr(exc, "detail", None) or str(exc) or type(exc).__name__)
         if self.connector_store is not None and self.household_id is not None:
             try:
@@ -1316,15 +1308,19 @@ class PurchaseHistorySyncService:
             except Exception:
                 creds = None
             if isinstance(creds, dict):
-                for key in ("access_token", "refresh_token", "session_token", "session_cookie", "cookie"):
+                for key in (
+                    "access_token",
+                    "refresh_token",
+                    "session_token",
+                    "session_cookie",
+                    "cookie",
+                ):
                     secret = creds.get(key)
                     if isinstance(secret, str) and secret.strip():
                         raw = raw.replace(secret.strip(), "[REDACTED]")
         return raw
 
-    def _record_account_auth_error(
-        self, provider: str, account_id: str, message: str
-    ) -> None:
+    def _record_account_auth_error(self, provider: str, account_id: str, message: str) -> None:
         if (
             self.connector_store is None
             or self.household_id is None
@@ -2017,7 +2013,11 @@ class PurchaseHistorySyncService:
                 and (p, target_account_id) not in self._account_adapters
                 and p not in self._adapters
             )
-            if uses_managed_connector and self.connector_store is not None and self.household_id is not None:
+            if (
+                uses_managed_connector
+                and self.connector_store is not None
+                and self.household_id is not None
+            ):
                 try:
                     meta = self.connector_store.get_connection_metadata(
                         self.household_id, p, account_id=target_account_id
@@ -2083,9 +2083,7 @@ class PurchaseHistorySyncService:
                         total_records += getattr(retry_exc, "records_synced", 0)
                         accounts_synced += 1
                         last_checkpoint = checkpoint(engine, p, target_account_id)
-                        errors.append(
-                            self._sanitize_account_error(p, target_account_id, retry_exc)
-                        )
+                        errors.append(self._sanitize_account_error(p, target_account_id, retry_exc))
                         continue
                     except Exception as retry_exc:
                         exc = retry_exc

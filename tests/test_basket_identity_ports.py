@@ -51,7 +51,10 @@ def test_product_overview_sku_preference_adapter_returns_ids_and_handles_missing
             if product_id == missing_id:
                 raise KeyError(product_id)
             return (
-                [SimpleNamespace(oda_product_id="pref-1"), SimpleNamespace(oda_product_id="pref-2")],
+                [
+                    SimpleNamespace(oda_product_id="pref-1"),
+                    SimpleNamespace(oda_product_id="pref-2"),
+                ],
                 [SimpleNamespace(oda_product_id="excl-1")],
             )
 
@@ -116,9 +119,7 @@ def test_canonical_identity_correction_adapter_filters_and_falls_back_to_recent_
         alias="gulrot",
         new_identity_id=product_id,
     )
-    unrelated_event = matching_event.model_copy(
-        update={"id": uuid4(), "new_identity_id": other_id}
-    )
+    unrelated_event = matching_event.model_copy(update={"id": uuid4(), "new_identity_id": other_id})
     recent_event = matching_event.model_copy(
         update={"id": uuid4(), "alias": "gulrøtter", "normalized_alias": "gulrøtter"}
     )
@@ -296,9 +297,7 @@ def test_kitchen_features_wires_explicit_ports_without_monkey_patching():
         settings=Settings(local_dev=True),
         household=lambda: Household(name="Test"),
     )
-    assert isinstance(
-        features.basket_matching.sku_preferences, ProductOverviewSkuPreferenceAdapter
-    )
+    assert isinstance(features.basket_matching.sku_preferences, ProductOverviewSkuPreferenceAdapter)
     assert isinstance(features.basket_matching.identity_lookup, CanonicalIdentityLookupAdapter)
     assert isinstance(
         features.basket_matching.identity_corrections, CanonicalIdentityCorrectionAdapter

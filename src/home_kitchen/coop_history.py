@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from base64 import b64decode, urlsafe_b64encode
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -50,13 +51,20 @@ class CoopAuthenticationError(RuntimeError):
 
 
 def _normalize_comma_decimal(value: Any) -> Any:
-    """Normalize comma-formatted Coop numbers before Pydantic Decimal validation."""
+    """Normalize Coop decimal strings, including spaced thousands separators."""
     if isinstance(value, str):
-        return value.replace(",", ".").strip()
+        normalized = value.strip()
+        if not normalized:
+            return None
+        # Grouping must be valid: never turn malformed "12 34" into "1234".
+        if re.fullmatch(r"[+-]?\d{1,3}(?:[ \u00a0\u202f]\d{3})+(?:[.,]\d+)?", normalized):
+            normalized = re.sub(r"[ \u00a0\u202f]", "", normalized)
+        return normalized.replace(",", ".")
     return value
 
 
-type CommaDecimal = Annotated[Decimal, BeforeValidator(_normalize_comma_decimal)]
+# The validator must wrap the nullable union, so "" can normalize to None.
+type CommaDecimal = Annotated[Decimal | None, BeforeValidator(_normalize_comma_decimal)]
 
 
 class CoopReceiptLine(BaseModel):
@@ -66,11 +74,11 @@ class CoopReceiptLine(BaseModel):
     ean13: str | None = None
     gtin13: str | None = None
     barcode: str | None = None
-    quantity: CommaDecimal | None = None
-    amount: CommaDecimal | None = None
-    discount: CommaDecimal | None = None
-    discount_amount_per_quantity: CommaDecimal | None = None
-    unit_price: CommaDecimal | None = None
+    quantity: CommaDecimal = None
+    amount: CommaDecimal = None
+    discount: CommaDecimal = None
+    discount_amount_per_quantity: CommaDecimal = None
+    unit_price: CommaDecimal = None
 
 
 class CoopReceipt(BaseModel):
@@ -84,10 +92,10 @@ class CoopReceipt(BaseModel):
     store_name: str | None = None
     store_id: str | None = None
     chain_id: str | None = None
-    amount: CommaDecimal | None = None
-    total_discount: CommaDecimal | None = None
+    amount: CommaDecimal = None
+    total_discount: CommaDecimal = None
     total_discount_formatted: str | None = None
-    member_bonus: CommaDecimal | None = None
+    member_bonus: CommaDecimal = None
     lines: list[CoopReceiptLine] | None = None
     source_uri: str = COOP_SCHEMA_SOURCE
     source_schema_version: str = COOP_SCHEMA_VERSION
@@ -103,8 +111,8 @@ class CoopPurchaseStub(BaseModel):
     store_name: str | None = None
     store_id: str | None = None
     chain_id: str | None = None
-    amount: CommaDecimal | None = None
-    total_discount: CommaDecimal | None = None
+    amount: CommaDecimal = None
+    total_discount: CommaDecimal = None
 
 
 def _revision_id(raw: dict[str, Any]) -> str:

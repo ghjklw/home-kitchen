@@ -2,6 +2,7 @@ from decimal import Decimal
 
 import httpx
 import pytest
+from pydantic import ValidationError
 from fixtures.synthetic_kitchen.purchase_history import (
     coop_purchase_list_pages,
     coop_receipt_detail_revisions,
@@ -117,6 +118,51 @@ def test_receipt_detail_accepts_comma_decimal_amounts_and_line_quantities():
     assert receipt.lines[0].discount == Decimal("0.25")
     assert receipt.lines[0].discount_amount_per_quantity == Decimal("0.10")
     assert receipt.lines[0].unit_price == Decimal("2.50")
+
+
+@pytest.mark.parametrize("grouping", [" ", "\u00a0", "\u202f"])
+def test_purchase_list_accepts_grouped_total_discounts(grouping):
+    parsed = parse_purchase_list(
+        {"purchases": [{"summaryId": "grouped", "totalDiscount": f"1{grouping}088.02"}]}
+    )
+
+    assert parsed[0].total_discount == Decimal("1088.02")
+
+
+def test_receipt_detail_accepts_grouped_amounts_and_blank_optional_decimals():
+    receipt = parse_receipt_detail(
+        {
+            "summary": {
+                "summaryId": "localized-detail",
+                "totalDiscount": "1\u00a0088.02",
+                "amount": "1\u202f234,50",
+                "lines": [
+                    {
+                        "productName": "Sample product",
+                        "quantity": "",
+                        "amount": "1 088.02",
+                        "discount": " \u00a0 ",
+                    }
+                ],
+            }
+        }
+    )
+
+    assert receipt.total_discount == Decimal("1088.02")
+    assert receipt.amount == Decimal("1234.50")
+    assert receipt.lines is not None
+    assert receipt.lines[0].quantity is None
+    assert receipt.lines[0].amount == Decimal("1088.02")
+    assert receipt.lines[0].discount is None
+    record = to_provider_order_record(receipt)
+    assert record.payload["lines"][0]["quantity"] is None
+
+
+def test_receipt_decimal_rejects_malformed_grouping():
+    with pytest.raises(ValidationError):
+        parse_purchase_list(
+            {"purchases": [{"summaryId": "invalid", "totalDiscount": "12 34.56"}]}
+        )
 
 
 def test_revision_hash_is_stable_and_distinguishes_fixture_correction():

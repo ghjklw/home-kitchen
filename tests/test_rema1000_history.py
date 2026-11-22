@@ -1197,14 +1197,14 @@ def test_kassal_ean_cache_persists_across_restarts_and_skips_429(memory_engine):
     }
     assert sync_account(memory_engine, "rema1000", "alice", adapter) == 3
 
-    # Also verify Alembic migration 0032_kassal_ean_cache is the single head
+    # Verify the current Alembic migration chain still has one head.
     from alembic.config import Config
     from alembic.script import ScriptDirectory
 
     cfg = Config(str(Path(__file__).parents[1] / "alembic.ini"))
     script = ScriptDirectory.from_config(cfg)
     heads = script.get_heads()
-    assert heads == ["0032_kassal_ean_cache"]
+    assert heads == ["0033_meal_versions"]
 
 
 def test_alembic_migration_0032_kassal_ean_cache_structure():

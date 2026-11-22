@@ -110,6 +110,9 @@ def create_app(
     )
     mcp = build_mcp(service, load_household, auth=mcp_auth)
     install_feature_tools(mcp, features, basket)
+    # The in-process Pydantic AI toolset connects to this same authenticated MCP
+    # server; it does not call an unauthenticated HTTP loopback endpoint.
+    features.assistant_mcp = mcp
     mcp_app = mcp.http_app(path="/", stateless_http=True)
 
     @asynccontextmanager

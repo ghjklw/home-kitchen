@@ -9,6 +9,12 @@ from uuid import UUID, uuid4
 import httpx
 from pydantic_ai import Agent
 
+from home_kitchen.ai_workflow.assistant import (
+    AssistantChatRequest,
+    AssistantChatResponse,
+    build_assistant_agent,
+    run_assistant_chat,
+)
 from home_kitchen.basket.adapters import (
     CanonicalIdentityCorrectionAdapter,
     CanonicalIdentityLookupAdapter,
@@ -251,6 +257,24 @@ class KitchenFeatures:
         self.recipe_discovery = create_recipe_discovery_registry(
             self.oda,
             context_provider=self.discovery_context,
+        )
+        self.assistant_agent: Any = None
+        self.assistant_mcp: Any = None
+
+    async def chat_assistant(
+        self, request: AssistantChatRequest, *, actor_id: str
+    ) -> AssistantChatResponse:
+        """Run the app-wide assistant through the app's authenticated MCP server."""
+        if not actor_id:
+            raise ValueError("Household authentication required")
+        if self.assistant_agent is None:
+            if self.assistant_mcp is None:
+                raise ValueError("Kitchen Assistant capabilities are unavailable")
+            self.assistant_agent = build_assistant_agent(self.settings, self.assistant_mcp)
+        return await run_assistant_chat(
+            self.assistant_agent,
+            actor_id=actor_id,
+            request=request,
         )
 
     @staticmethod

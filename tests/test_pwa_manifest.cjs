@@ -58,7 +58,7 @@ function readPngDimensions(filePath) {
 
 test("sw.js precaches every /static/*.js script loaded by index.html and static PWA icons", () => {
   const { cacheName, assets, listeners } = loadServiceWorkerConfig();
-  assert.equal(cacheName, "kitchen-shell-v24");
+  assert.equal(cacheName, "kitchen-shell-v25");
   assert.ok(listeners.install && listeners.activate && listeners.fetch);
 
   const scriptMatches = [...indexHtml.matchAll(/<script\b[^>]*\bsrc="(\/static\/[^"]+\.js)"/gu)].map(

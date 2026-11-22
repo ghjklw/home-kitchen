@@ -700,6 +700,8 @@ class EffectiveProviderOrder(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
     def standardize(self) -> Receipt:
+        if self.provider not in ("oda", "coop", "trumf", "rema1000"):
+            raise ValueError(f"Unsupported receipt provider: {self.provider}")
         return Receipt(
             provider=self.provider,
             external_id=self.external_id,
@@ -895,9 +897,7 @@ def extract_normalized_lines(provider: str, payload: dict[str, Any]) -> list[Nor
         else:
             raw_lines = extract_receipt_lines_from_payload(payload)
         if not any(
-            isinstance(line.get("kassal"), dict)
-            for line in raw_lines
-            if isinstance(line, dict)
+            isinstance(line.get("kassal"), dict) for line in raw_lines if isinstance(line, dict)
         ):
             return standardized_receipt.lines
     if provider == "oda" and isinstance(payload.get("order"), dict):

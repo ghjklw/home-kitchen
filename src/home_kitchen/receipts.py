@@ -62,7 +62,5 @@ class ReceiptCollection(BaseModel):
     receipts: list[Receipt] = Field(default_factory=list)
 
     @classmethod
-    def from_retailer_receipts(
-        cls, receipts: Iterable[StandardizableReceipt]
-    ) -> ReceiptCollection:
+    def from_retailer_receipts(cls, receipts: Iterable[StandardizableReceipt]) -> ReceiptCollection:
         return cls(receipts=[receipt.standardize() for receipt in receipts])

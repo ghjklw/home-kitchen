@@ -86,6 +86,39 @@ def test_receipt_detail_preserves_fixture_ids_amounts_lines_and_attribution():
     assert parsed.revision_id.startswith("sha256:")
 
 
+def test_receipt_detail_accepts_comma_decimal_amounts_and_line_quantities():
+    receipt = parse_receipt_detail(
+        {
+            "summary": {
+                "summaryId": "comma-detail",
+                "amount": "210,75",
+                "totalDiscount": "10,25",
+                "memberBonus": "0,50",
+                "lines": [
+                    {
+                        "productName": "Sample product",
+                        "quantity": "1,5",
+                        "amount": "3,75",
+                        "discount": "0,25",
+                        "discountAmountPerQuantity": "0,10",
+                        "unitPrice": "2,50",
+                    }
+                ],
+            }
+        }
+    )
+
+    assert receipt.amount == Decimal("210.75")
+    assert receipt.total_discount == Decimal("10.25")
+    assert receipt.member_bonus == Decimal("0.50")
+    assert receipt.lines is not None
+    assert receipt.lines[0].quantity == Decimal("1.5")
+    assert receipt.lines[0].amount == Decimal("3.75")
+    assert receipt.lines[0].discount == Decimal("0.25")
+    assert receipt.lines[0].discount_amount_per_quantity == Decimal("0.10")
+    assert receipt.lines[0].unit_price == Decimal("2.50")
+
+
 def test_revision_hash_is_stable_and_distinguishes_fixture_correction():
     revisions = coop_receipt_detail_revisions()
     base = parse_receipt_detail(revisions[0].payload)

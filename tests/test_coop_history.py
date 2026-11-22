@@ -42,6 +42,25 @@ def test_purchase_list_maps_fixture_stub_fields_and_overlapping_page():
     assert parsed[0].total_discount == Decimal("3.25")
 
 
+def test_purchase_list_accepts_comma_and_dot_decimal_amounts():
+    parsed = parse_purchase_list(
+        {
+            "purchases": [
+                {"summaryId": "comma", "amount": " 7,00 ", "totalDiscount": "-0,50"},
+                {"summaryId": "dot", "amount": "12.34", "totalDiscount": None},
+                {"summaryId": "numeric", "amount": 42.5, "totalDiscount": 0},
+            ]
+        }
+    )
+
+    assert parsed[0].amount == Decimal("7.00")
+    assert parsed[0].total_discount == Decimal("-0.50")
+    assert parsed[1].amount == Decimal("12.34")
+    assert parsed[1].total_discount is None
+    assert parsed[2].amount == Decimal("42.5")
+    assert parsed[2].total_discount == Decimal("0")
+
+
 def test_receipt_detail_preserves_fixture_ids_amounts_lines_and_attribution():
     fixture = coop_receipt_detail_revisions()[0]
     parsed = parse_receipt_detail(fixture.payload)
@@ -65,6 +84,39 @@ def test_receipt_detail_preserves_fixture_ids_amounts_lines_and_attribution():
     assert parsed.source_schema_version == COOP_SCHEMA_VERSION
     assert parsed.source_updated_at is None
     assert parsed.revision_id.startswith("sha256:")
+
+
+def test_receipt_detail_accepts_comma_decimal_amounts_and_line_quantities():
+    receipt = parse_receipt_detail(
+        {
+            "summary": {
+                "summaryId": "comma-detail",
+                "amount": "210,75",
+                "totalDiscount": "10,25",
+                "memberBonus": "0,50",
+                "lines": [
+                    {
+                        "productName": "Sample product",
+                        "quantity": "1,5",
+                        "amount": "3,75",
+                        "discount": "0,25",
+                        "discountAmountPerQuantity": "0,10",
+                        "unitPrice": "2,50",
+                    }
+                ],
+            }
+        }
+    )
+
+    assert receipt.amount == Decimal("210.75")
+    assert receipt.total_discount == Decimal("10.25")
+    assert receipt.member_bonus == Decimal("0.50")
+    assert receipt.lines is not None
+    assert receipt.lines[0].quantity == Decimal("1.5")
+    assert receipt.lines[0].amount == Decimal("3.75")
+    assert receipt.lines[0].discount == Decimal("0.25")
+    assert receipt.lines[0].discount_amount_per_quantity == Decimal("0.10")
+    assert receipt.lines[0].unit_price == Decimal("2.50")
 
 
 def test_revision_hash_is_stable_and_distinguishes_fixture_correction():

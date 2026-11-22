@@ -11,11 +11,11 @@ import json
 from base64 import b64decode, urlsafe_b64encode
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Annotated, Any, Literal, Protocol, runtime_checkable
 from uuid import UUID, uuid4
 
 import httpx
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
+from pydantic import AwareDatetime, BaseModel, BeforeValidator, ConfigDict, Field
 
 from home_kitchen.purchase_sync import ProviderOrderRecord, ProviderPage
 
@@ -49,6 +49,16 @@ class CoopAuthenticationError(RuntimeError):
     """Missing or invalid Coop credentials or unauthenticated response."""
 
 
+def _normalize_comma_decimal(value: Any) -> Any:
+    """Normalize comma-formatted Coop numbers before Pydantic Decimal validation."""
+    if isinstance(value, str):
+        return value.replace(",", ".").strip()
+    return value
+
+
+type CommaDecimal = Annotated[Decimal, BeforeValidator(_normalize_comma_decimal)]
+
+
 class CoopReceiptLine(BaseModel):
     model_config = ConfigDict(extra="ignore", alias_generator=_to_camel, populate_by_name=True)
 
@@ -56,11 +66,11 @@ class CoopReceiptLine(BaseModel):
     ean13: str | None = None
     gtin13: str | None = None
     barcode: str | None = None
-    quantity: Decimal | None = None
-    amount: Decimal | None = None
-    discount: Decimal | None = None
-    discount_amount_per_quantity: Decimal | None = None
-    unit_price: Decimal | None = None
+    quantity: CommaDecimal | None = None
+    amount: CommaDecimal | None = None
+    discount: CommaDecimal | None = None
+    discount_amount_per_quantity: CommaDecimal | None = None
+    unit_price: CommaDecimal | None = None
 
 
 class CoopReceipt(BaseModel):
@@ -74,29 +84,16 @@ class CoopReceipt(BaseModel):
     store_name: str | None = None
     store_id: str | None = None
     chain_id: str | None = None
-    amount: Decimal | None = None
-    total_discount: Decimal | None = None
+    amount: CommaDecimal | None = None
+    total_discount: CommaDecimal | None = None
     total_discount_formatted: str | None = None
-    member_bonus: Decimal | None = None
+    member_bonus: CommaDecimal | None = None
     lines: list[CoopReceiptLine] | None = None
     source_uri: str = COOP_SCHEMA_SOURCE
     source_schema_version: str = COOP_SCHEMA_VERSION
     source_updated_at: None = None
     revision_id: str
 
-
-class CommaDecimal(Decimal):
-    """Decimal subclass that accepts European‑style comma separators (e.g., "7,00")."""
-
-    @classmethod
-    def __get_validators__(cls):
-        yield cls.validate
-
-    @classmethod
-    def validate(cls, v: Any) -> Decimal:
-        if isinstance(v, str):
-            v = v.replace(',', '.').strip()
-        return Decimal(v)
 
 class CoopPurchaseStub(BaseModel):
     model_config = ConfigDict(extra="ignore", alias_generator=_to_camel, populate_by_name=True)
@@ -108,23 +105,6 @@ class CoopPurchaseStub(BaseModel):
     chain_id: str | None = None
     amount: CommaDecimal | None = None
     total_discount: CommaDecimal | None = None
-    @field_validator('total_discount', 'amount', mode='before')
-    def _parse_decimal(cls, v: Any) -> Any:
-        """Accept numbers formatted with commas (e.g., "7,00") and convert to Decimal.
-        This fixes UAT parsing errors where the Coop API returns European‑style decimal strings.
-        """
-        if isinstance(v, str):
-            v = v.replace(',', '.').strip()
-        return v
-    model_config = ConfigDict(extra="ignore", alias_generator=_to_camel, populate_by_name=True)
-
-    summary_id: str | None = None
-    purchase_date: AwareDatetime | None = None
-    store_name: str | None = None
-    store_id: str | None = None
-    chain_id: str | None = None
-    amount: Decimal | None = None
-    total_discount: Decimal | None = None
 
 
 def _revision_id(raw: dict[str, Any]) -> str:

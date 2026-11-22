@@ -119,7 +119,7 @@ class Settings(BaseSettings):
     home_assistant_url: HttpUrl | None = None
     home_assistant_token: SecretStr | None = None
     home_assistant_todo_entity: str | None = None
-    purchase_sync_interval_seconds: float = Field(default=300.0, gt=0)
+    purchase_sync_interval_seconds: float = Field(default=10800.0, gt=0)
     build_revision: str | None = None
     release_channel: Literal["local", "beta", "uat", "production", "release"] | None = None
 

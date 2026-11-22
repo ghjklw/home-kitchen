@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _LOG = logging.getLogger(__name__)
-DEFAULT_PURCHASE_SYNC_INTERVAL_SECONDS = 300.0
+DEFAULT_PURCHASE_SYNC_INTERVAL_SECONDS = 10800.0
 
 
 class CheckpointConflict(RuntimeError):

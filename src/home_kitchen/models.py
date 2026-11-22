@@ -2,7 +2,7 @@
 
 import re
 from collections.abc import Iterable
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Any, Literal
@@ -517,8 +517,16 @@ class RecipeTranslationUpdate(BaseModel):
     instructions: list[NonBlank] = Field(min_length=1)
 
 
+def _current_week_anchor() -> date:
+    today = date.today()
+    return today - timedelta(days=today.weekday())
+
+
+PlanDate = date
+
+
 class MealCreate(BaseModel):
-    date: date
+    date: PlanDate = Field(default_factory=_current_week_anchor)
     recipe_id: UUID
     servings: int = Field(gt=0)
     label: (

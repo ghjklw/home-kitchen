@@ -1,6 +1,7 @@
 """Shared household actions for the PWA, REST clients and AI assistants."""
 
 import asyncio
+import logging
 import os
 import sys
 from contextlib import asynccontextmanager, suppress
@@ -55,6 +56,8 @@ from home_kitchen.recommendations import PlanDraft
 from home_kitchen.service import KitchenService
 from home_kitchen.settings import Household, Settings
 from home_kitchen.store import MealIDConflict, get_expected_alembic_head
+
+_LOG = logging.getLogger(__name__)
 
 
 class Completion(BaseModel):
@@ -135,6 +138,21 @@ def create_app(
             purchase_sync_task = asyncio.create_task(
                 purchase_sync.sync_forever(interval_seconds=sync_interval)
             )
+        cookidoo_sync = getattr(features, "cookidoo_plan_sync", None)
+        cookidoo_sync_task: asyncio.Task[None] | None = None
+        if (
+            cookidoo_sync is not None
+            and callable(getattr(cookidoo_sync, "sync_forever", None))
+            and not _is_test_env()
+        ):
+            sync_interval = getattr(
+                settings,
+                "cookidoo_plan_sync_interval_seconds",
+                DEFAULT_PURCHASE_SYNC_INTERVAL_SECONDS,
+            )
+            cookidoo_sync_task = asyncio.create_task(
+                cookidoo_sync.sync_forever(interval_seconds=sync_interval, actor_id="system")
+            )
         try:
             async with mcp_app.lifespan(app):
                 yield
@@ -143,6 +161,10 @@ def create_app(
                 purchase_sync_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await purchase_sync_task
+            if cookidoo_sync_task is not None:
+                cookidoo_sync_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await cookidoo_sync_task
             if refresh_task is not None:
                 refresh_task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -166,6 +188,23 @@ def create_app(
     app.state.features = features
     app.state.service = service
     app.include_router(feature_router(features, basket))
+
+    async def best_effort_live_cookidoo_sync(request: Request, meal_date: date) -> None:
+        sync_service = getattr(features, "cookidoo_plan_sync", None)
+        sync = getattr(sync_service, "sync_kitchen_to_cookidoo_best_effort", None)
+        if not callable(sync):
+            return
+        week_start = meal_date.fromordinal(meal_date.toordinal() - meal_date.weekday())
+        try:
+            await sync(
+                getattr(request.state, "actor_id", None) or "system",
+                week_start,
+                week_start.fromordinal(week_start.toordinal() + 6),
+            )
+        except Exception:
+            _LOG.info(
+                "Live Kitchen-to-Cookidoo sync failed; Kitchen write succeeded", exc_info=True
+            )
 
     def version_info():
         channel = settings.release_channel or ("beta" if ".dev" in app_version else "release")
@@ -396,20 +435,37 @@ def create_app(
         return service.list_meals(start, end)
 
     @app.post("/api/meals", status_code=201)
-    def plan_meal(data: MealCreate) -> Meal:
-        return service.plan_meal(data)
+    async def plan_meal(data: MealCreate, request: Request) -> Meal:
+        meal = service.plan_meal(data)
+        await best_effort_live_cookidoo_sync(request, meal.date)
+        return meal
 
     @app.put("/api/meals/{meal_id}")
-    def update_meal(meal_id: UUID, data: MealCreate) -> Meal:
-        return service.update_meal(meal_id, data)
+    async def update_meal(meal_id: UUID, data: MealCreate, request: Request) -> Meal:
+        meal_repository = getattr(getattr(service, "meal_agenda", None), "meals", None)
+        get_meal = getattr(meal_repository, "get_meal", None)
+        previous = get_meal(meal_id) if callable(get_meal) else None
+        meal = service.update_meal(meal_id, data)
+        if previous is not None and previous.date != meal.date:
+            await best_effort_live_cookidoo_sync(request, previous.date)
+        await best_effort_live_cookidoo_sync(request, meal.date)
+        return meal
 
     @app.get("/api/meals/{meal_id}/recipe")
     def get_meal_recipe(meal_id: UUID) -> PlannedMealRecipe:
         return service.meal_recipe(meal_id)
 
     @app.delete("/api/meals/{meal_id}")
-    def delete_meal(meal_id: UUID) -> dict[str, bool]:
+    async def delete_meal(meal_id: UUID, request: Request) -> dict[str, bool]:
+        meal_repository = getattr(getattr(service, "meal_agenda", None), "meals", None)
+        get_meal = getattr(meal_repository, "get_meal", None)
+        try:
+            existing = get_meal(meal_id) if callable(get_meal) else None
+        except KeyError:
+            existing = None
         service.delete_meal(meal_id)
+        if existing is not None:
+            await best_effort_live_cookidoo_sync(request, existing.date)
         return {"deleted": True}
 
     @app.get("/api/items")

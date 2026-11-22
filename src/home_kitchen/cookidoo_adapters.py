@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import date
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import insert, inspect, select, text, update
 from sqlalchemy.engine import Connection, Engine
 
 from home_kitchen.history import HistoryEntryCreate, HistoryRepository
@@ -44,6 +45,46 @@ class PostgresCookidooPlanSyncSession:
         values.pop("id")
         self._connection.execute(update(meals).where(meals.c.id == meal.id).values(**values))
 
+    def delete_meal(self, meal_id: UUID) -> None:
+        self._connection.execute(meals.delete().where(meals.c.id == meal_id))
+
+    def find_sync_history(self, direction: str, external_entry_id: str) -> dict[str, Any] | None:
+        if inspect(self._connection).has_table("kitchen_history"):
+            row = (
+                self._connection.execute(
+                    text(
+                        "SELECT structured FROM kitchen_history "
+                        "WHERE kind = 'planning' "
+                        "AND structured->>'provider' = 'cookidoo' "
+                        "AND structured->>'direction' = :direction "
+                        "AND structured->>'external_entry_id' = :external_entry_id "
+                        "ORDER BY occurred_at DESC, id DESC LIMIT 1"
+                    ),
+                    {"direction": direction, "external_entry_id": external_entry_id},
+                )
+                .mappings()
+                .first()
+            )
+            if row is not None:
+                structured = row["structured"]
+                if isinstance(structured, str):
+                    structured = json.loads(structured)
+                return dict(structured) if isinstance(structured, dict) else None
+
+        entries = getattr(self._history, "entries", None)
+        if isinstance(entries, list):
+            for data, _actor in reversed(entries):
+                structured = getattr(data, "structured", None)
+                if (
+                    getattr(data, "kind", None) == "planning"
+                    and isinstance(structured, dict)
+                    and structured.get("provider") == "cookidoo"
+                    and structured.get("direction") == direction
+                    and structured.get("external_entry_id") == external_entry_id
+                ):
+                    return dict(structured)
+        return None
+
     def record_sync_history(
         self,
         *,
@@ -58,6 +99,7 @@ class PostgresCookidooPlanSyncSession:
         message: str,
         external_entry_id: str | None = None,
         include_external_entry_id: bool = False,
+        sync_state: dict[str, Any] | None = None,
     ) -> None:
         structured: dict[str, Any] = {
             "provider": "cookidoo",
@@ -70,6 +112,8 @@ class PostgresCookidooPlanSyncSession:
         }
         if include_external_entry_id:
             structured["external_entry_id"] = external_entry_id
+        if sync_state is not None:
+            structured["sync_state"] = sync_state
         self._history.record(
             HistoryEntryCreate(
                 kind="planning",
@@ -135,6 +179,38 @@ class PostgresCookidooPlanSyncUnitOfWork:
 
         return kitchen_meals, recipes_by_id, links_by_recipe, links_by_ext_id
 
+    def load_sync_history(self) -> list[dict[str, Any]]:
+        with self._engine.connect() as conn:
+            if not inspect(conn).has_table("kitchen_history"):
+                entries = getattr(self.history, "entries", None)
+                if isinstance(entries, list):
+                    return [
+                        dict(data.structured)
+                        for data, _actor in entries
+                        if isinstance(getattr(data, "structured", None), dict)
+                        and data.structured.get("provider") == "cookidoo"
+                    ]
+                return []
+            rows = (
+                conn.execute(
+                    text(
+                        "SELECT structured FROM kitchen_history "
+                        "WHERE kind = 'planning' AND structured->>'provider' = 'cookidoo' "
+                        "ORDER BY occurred_at, id"
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        history: list[dict[str, Any]] = []
+        for row in rows:
+            structured = row["structured"]
+            if isinstance(structured, str):
+                structured = json.loads(structured)
+            if isinstance(structured, dict):
+                history.append(structured)
+        return history
+
     @contextmanager
     def session(self) -> Generator[PostgresCookidooPlanSyncSession]:
         with self._engine.begin() as connection:
@@ -167,6 +243,21 @@ class MemoryCookidooPlanSyncSession:
     def update_meal(self, meal: Meal) -> None:
         self._meals[meal.id] = meal.model_copy(deep=True)
 
+    def delete_meal(self, meal_id: UUID) -> None:
+        self._meals.pop(meal_id, None)
+
+    def find_sync_history(self, direction: str, external_entry_id: str) -> dict[str, Any] | None:
+        for entry in reversed(self._history_entries):
+            structured = entry.get("structured") or {}
+            if (
+                entry.get("kind") == "planning"
+                and structured.get("provider") == "cookidoo"
+                and structured.get("direction") == direction
+                and structured.get("external_entry_id") == external_entry_id
+            ):
+                return dict(structured)
+        return None
+
     def record_sync_history(
         self,
         *,
@@ -181,6 +272,7 @@ class MemoryCookidooPlanSyncSession:
         message: str,
         external_entry_id: str | None = None,
         include_external_entry_id: bool = False,
+        sync_state: dict[str, Any] | None = None,
     ) -> None:
         structured: dict[str, Any] = {
             "provider": "cookidoo",
@@ -193,6 +285,8 @@ class MemoryCookidooPlanSyncSession:
         }
         if include_external_entry_id:
             structured["external_entry_id"] = external_entry_id
+        if sync_state is not None:
+            structured["sync_state"] = sync_state
         self._history_entries.append(
             {
                 "actor_id": actor_id,
@@ -262,6 +356,14 @@ class MemoryCookidooPlanSyncUnitOfWork:
             links_by_recipe[rid] = (ext_id, src_url)
             links_by_ext_id[ext_id] = rid
         return kitchen_meals, recipes_by_id, links_by_recipe, links_by_ext_id
+
+    def load_sync_history(self) -> list[dict[str, Any]]:
+        return [
+            dict(entry.get("structured") or {})
+            for entry in self.history_entries
+            if entry.get("kind") == "planning"
+            and (entry.get("structured") or {}).get("provider") == "cookidoo"
+        ]
 
     @contextmanager
     def session(self) -> Generator[MemoryCookidooPlanSyncSession]:

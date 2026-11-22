@@ -1075,6 +1075,40 @@ h3 {
   background: var(--card);
   color: var(--ink);
 }
+.week-plan-list {
+  max-width: 980px;
+  margin-top: 24px;
+}
+.week-plan-list > h2 {
+  margin: 0 0 5px;
+  font-family: Georgia, serif;
+  font-size: 26px;
+  font-weight: 400;
+}
+.week-plan-list > p {
+  margin: 0 0 16px;
+}
+.week-plan-entries {
+  display: grid;
+  gap: 10px;
+}
+.week-plan-entry {
+  display: grid;
+  grid-template-columns: minmax(100px, 150px) minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+}
+.week-plan-entry-date {
+  padding-top: 17px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.week-plan-entry .agenda-meal {
+  min-width: 0;
+}
+.week-plan-empty {
+  padding: 18px 0;
+}
 .week-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(205px, 1fr));
@@ -2264,6 +2298,13 @@ button.link {
   .week-grid {
     grid-template-columns: 1fr;
     gap: 10px;
+  }
+  .week-plan-entry {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+  .week-plan-entry-date {
+    padding-top: 5px;
   }
   .day {
     padding: 16px;

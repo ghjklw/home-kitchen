@@ -1,5 +1,6 @@
 from datetime import date
 from decimal import Decimal, localcontext
+from uuid import uuid4
 
 import pytest
 from fastmcp import Client
@@ -22,6 +23,14 @@ def seed(service):
     )
     meal = service.plan_meal(MealCreate(date=date(2026, 12, 1), recipe_id=recipe.id, servings=7))
     return recipe, meal
+
+
+def test_undated_meals_anchor_to_monday_of_current_week():
+    meal = MealCreate(recipe_id=uuid4(), servings=2)
+    today = date.today()
+    expected_monday = date.fromordinal(today.toordinal() - today.weekday())
+    assert meal.date == expected_monday
+    assert meal.date.weekday() == 0
 
 
 def test_cooking_and_shopping_share_scaling_without_changing_saved_recipe(test_database_url):

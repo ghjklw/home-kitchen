@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from contextlib import contextmanager
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -26,7 +27,7 @@ from home_kitchen.context import HistoryContext, history_context
 from home_kitchen.cookidoo_recipes import CookidooCollectionProvider, CookidooError
 from home_kitchen.feature_mcp import install_feature_tools
 from home_kitchen.mcp_server import build_mcp
-from home_kitchen.models import RecipeSource
+from home_kitchen.models import Meal, RecipeSource
 from home_kitchen.recipes.collections import source_links
 from home_kitchen.settings import Household
 from home_kitchen.store import meals, recipes
@@ -504,7 +505,7 @@ def test_rest_api_cookidoo_plan_sync_export_reads_my_week_and_skips_ai_drafts(
         assert [m for m, _, _ in requests_log] == ["GET"]
         assert len(preview["additions"]) == 1
         assert preview["additions"][0]["cookidoo_recipe_id"] == "r-wok"
-        assert preview["additions"][0]["same_date_existing_count"] == 1
+        assert preview["additions"][0]["same_date_existing_count"] == 0
         assert len(preview["edits"]) == 1
         assert preview["edits"][0]["external_entry_id"] == "mw-existing-1"
         assert len(preview["skipped"]) == 1
@@ -519,6 +520,243 @@ def test_rest_api_cookidoo_plan_sync_export_reads_my_week_and_skips_ai_drafts(
         assert confirmed["status"] == "applied"
         assert confirmed["applied_count"] == 2
         assert [m for m, _, _ in requests_log] == ["GET", "GET", "PUT", "DELETE", "PUT"]
+
+
+@pytest.mark.asyncio
+async def test_cookidoo_auto_import_is_idempotent_and_tracks_only_unchanged_synced_meals(
+    sqlite_engine,  # noqa: F811
+    cipher,  # noqa: F811
+    caplog,
+):
+    import logging
+
+    caplog.set_level(logging.INFO, logger="home_kitchen.cookidoo_plan_sync")
+    hid = uuid4()
+    recipe_id = uuid4()
+    source_url = "https://cookidoo.international/recipes/recipe/nb-NO/r-known"
+    with sqlite_engine.begin() as conn:
+        conn.execute(
+            insert(recipes).values(
+                id=recipe_id,
+                title="Known soup",
+                servings=4,
+                ingredients=[{"name": "potato", "quantity": "400", "unit": "g"}],
+                instructions=["Boil"],
+                source="cookidoo",
+                source_url=source_url,
+                source_ingredients=[],
+                source_language="nob",
+                guided_steps=[],
+            )
+        )
+        conn.execute(
+            insert(source_links).values(
+                provider="cookidoo",
+                external_recipe_id="r-known",
+                recipe_id=recipe_id,
+                source_url=source_url,
+                metadata={},
+                created_at=datetime.now(UTC),
+            )
+        )
+
+    source_entry = {"date": "2026-11-29", "servings": 2}
+    provider_writes: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method != "GET":
+            provider_writes.append(request.method)
+            return httpx.Response(200, json={"message": "ok"})
+        if request.method == "GET" and request.url.path == "/planning/en/api/my-week/2026-11-23":
+            recipes_for_day = []
+            if source_entry is not None:
+                recipes_for_day = [
+                    {
+                        "entryId": "mw-auto-1",
+                        "id": "r-known",
+                        "title": "Known soup",
+                        "servings": source_entry["servings"],
+                    }
+                ]
+            recipes_for_day.append(
+                {
+                    "entryId": "mw-needs-review",
+                    "id": "r-unknown",
+                    "title": "Unknown recipe",
+                    "servings": 4,
+                }
+            )
+            return httpx.Response(
+                200,
+                json={
+                    "myDays": [
+                        {
+                            "dayKey": source_entry["date"] if source_entry else "2026-11-23",
+                            "recipes": recipes_for_day,
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(404)
+
+    app, _features, _history, store = _offline_app(
+        sqlite_engine,
+        cipher,
+        household_id=hid,
+        cookidoo_transport=httpx.MockTransport(handler),
+    )
+    _save_cookidoo_connection(store, hid)
+
+    url = "/api/cookidoo/plan-sync/auto-import?start=2026-11-23&end=2026-11-29"
+    with TestClient(app) as client:
+        first = client.post(url)
+        assert first.status_code == 200, first.text
+        assert first.json()["added"] == 1, (first.json(), caplog.text)
+        assert first.json()["skipped"] == 1
+        with sqlite_engine.connect() as conn:
+            imported = conn.execute(select(meals)).mappings().one()
+            assert str(imported["date"]) == "2026-11-23"
+
+        # A Sunday Cookidoo entry and a Monday-anchored Kitchen meal are the same
+        # week-level plan item; reconciling back to Cookidoo must not add a duplicate.
+        outbound = await _features.cookidoo_plan_sync.sync_kitchen_to_cookidoo_best_effort(
+            "malo", date(2026, 11, 23), date(2026, 11, 29)
+        )
+        assert outbound["added"] == 0
+        assert provider_writes == []
+
+        repeat = client.post(url)
+        assert repeat.status_code == 200, repeat.text
+        assert repeat.json()["added"] == 0
+
+        source_entry.update(date="2026-11-25", servings=6)
+        update = client.post(url)
+        assert update.status_code == 200, update.text
+        assert update.json()["updated"] == 1
+
+        source_entry = None
+        removed = client.post(url)
+        assert removed.status_code == 200, removed.text
+        assert removed.json()["removed"] == 1
+
+    with sqlite_engine.connect() as conn:
+        assert conn.execute(select(meals)).mappings().all() == []
+
+
+def test_cookidoo_auto_import_rechecks_history_after_an_overlapping_sync_commits(
+    sqlite_engine,  # noqa: F811
+    cipher,  # noqa: F811
+    monkeypatch,
+):
+    hid = uuid4()
+    recipe_id = uuid4()
+    source_url = "https://cookidoo.international/recipes/recipe/nb-NO/r-race"
+    with sqlite_engine.begin() as conn:
+        conn.execute(
+            insert(recipes).values(
+                id=recipe_id,
+                title="Known race recipe",
+                servings=4,
+                ingredients=[],
+                instructions=["Cook"],
+                source="cookidoo",
+                source_url=source_url,
+                source_ingredients=[],
+                source_language="nob",
+                guided_steps=[],
+            )
+        )
+        conn.execute(
+            insert(source_links).values(
+                provider="cookidoo",
+                external_recipe_id="r-race",
+                recipe_id=recipe_id,
+                source_url=source_url,
+                metadata={},
+                created_at=datetime.now(UTC),
+            )
+        )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/planning/en/api/my-week/2026-11-23":
+            return httpx.Response(
+                200,
+                json={
+                    "myDays": [
+                        {
+                            "dayKey": "2026-11-29",
+                            "recipes": [
+                                {
+                                    "entryId": "mw-race-1",
+                                    "id": "r-race",
+                                    "title": "Known race recipe",
+                                    "servings": 2,
+                                }
+                            ],
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(404)
+
+    app, features, _history, store = _offline_app(
+        sqlite_engine,
+        cipher,
+        household_id=hid,
+        cookidoo_transport=httpx.MockTransport(handler),
+    )
+    _save_cookidoo_connection(store, hid)
+
+    sync_uow = features.cookidoo_plan_sync._uow
+    original_session = sync_uow.session
+    race_inserted = False
+
+    @contextmanager
+    def competing_sync_then_session():
+        nonlocal race_inserted
+        if not race_inserted:
+            with original_session() as competing:
+                meal = Meal(
+                    id=uuid4(),
+                    date=date(2026, 11, 23),
+                    recipe_id=recipe_id,
+                    servings=2,
+                )
+                competing.add_meal(meal)
+                competing.record_sync_history(
+                    actor_id="malo",
+                    direction="cookidoo_to_kitchen",
+                    action="addition",
+                    meal_id=meal.id,
+                    recipe_id=recipe_id,
+                    cookidoo_recipe_id="r-race",
+                    source_url=source_url,
+                    scheduled_date=meal.date,
+                    message="Synkroniserte måltid fra Cookidoo Min uke",
+                    external_entry_id="mw-race-1",
+                    include_external_entry_id=True,
+                    sync_state={
+                        "date": "2026-11-23",
+                        "recipe_id": str(recipe_id),
+                        "servings": 2,
+                        "label": None,
+                    },
+                )
+            race_inserted = True
+        with original_session() as active:
+            yield active
+
+    monkeypatch.setattr(sync_uow, "session", competing_sync_then_session)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/cookidoo/plan-sync/auto-import?start=2026-11-23&end=2026-11-29"
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["added"] == 0
+
+    with sqlite_engine.connect() as conn:
+        imported = conn.execute(select(meals)).mappings().all()
+        assert len(imported) == 1
 
 
 @pytest.mark.asyncio
@@ -999,6 +1237,10 @@ async def test_kitchen_to_cookidoo_uses_put_planning_my_day_and_custom_recipe_so
         assert prev_resp.status_code == 200, prev_resp.text
         preview = prev_resp.json()
         assert len(preview["additions"]) == 2
+        assert {item["date"] for item in preview["additions"]} == {
+            "2026-11-29",
+            "2026-12-06",
+        }
         assert len(preview["existing_my_week_entries"]) == 1
         assert preview["existing_my_week_entries"][0]["cookidoo_recipe_id"] == "r999"
 
@@ -1017,12 +1259,12 @@ async def test_kitchen_to_cookidoo_uses_put_planning_my_day_and_custom_recipe_so
         if method == "PUT" and path == "/planning/en/api/my-day"
     ]
     assert put_calls == [
-        ("PUT", "/planning/en/api/my-day", {"dayKey": "2026-11-23", "recipeIds": ["r214846"]}),
+        ("PUT", "/planning/en/api/my-day", {"dayKey": "2026-11-29", "recipeIds": ["r214846"]}),
         (
             "PUT",
             "/planning/en/api/my-day",
             {
-                "dayKey": "2026-11-30",
+                "dayKey": "2026-12-06",
                 "recipeIds": ["01K2CTJ9Y1BABRG5MXK44CFZS4"],
                 "recipeSource": "CUSTOMER",
             },

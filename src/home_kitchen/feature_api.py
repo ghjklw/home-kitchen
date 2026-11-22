@@ -7,7 +7,7 @@ from datetime import UTC, date, datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, Request, Response
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import (
     BaseModel,
@@ -455,6 +455,21 @@ def build_integration_health_summary(
 def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRouter:
     router = APIRouter(prefix="/api")
 
+    def schedule_cookidoo_week_import(background_tasks: BackgroundTasks, actor_id: str) -> None:
+        sync_service = getattr(features, "cookidoo_plan_sync", None)
+        sync = getattr(sync_service, "sync_cookidoo_to_kitchen_best_effort", None)
+        if not callable(sync):
+            return
+        today = date.today()
+        week_start = date.fromordinal(today.toordinal() - today.weekday())
+        week_end = date.fromordinal(week_start.toordinal() + 6)
+        background_tasks.add_task(
+            sync,
+            actor_id,
+            week_start,
+            week_end,
+        )
+
     def get_connector_auth() -> ConnectorAuthService:
         auth = getattr(features, "connector_auth", None)
         if isinstance(auth, ConnectorAuthService):
@@ -688,6 +703,7 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
         data: ConnectorConnectRequest,
         request: Request,
         response: Response,
+        background_tasks: BackgroundTasks,
     ) -> IntegrationInfo:
         actor = authenticated_actor(request)
         response.headers["Cache-Control"] = "no-store"
@@ -756,7 +772,10 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
             raise HTTPException(503, str(exc)) from None
 
         try:
-            return features.integrations.describe_one(provider_id, actor)
+            result = features.integrations.describe_one(provider_id, actor)
+            if provider_id.casefold() == "cookidoo":
+                schedule_cookidoo_week_import(background_tasks, actor)
+            return result
         except KeyError:
             raise HTTPException(404, f"Ukjent leverandør: {provider_id}") from None
 
@@ -876,10 +895,11 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
         data: CookidooLoginRequest,
         request: Request,
         response: Response,
+        background_tasks: BackgroundTasks,
     ) -> IntegrationInfo:
         actor = authenticated_actor(request)
         response.headers["Cache-Control"] = "no-store"
-        return get_connector_auth().login_cookidoo(
+        result = get_connector_auth().login_cookidoo(
             household_id=features.household_id,
             actor_id=actor,
             email=data.email,
@@ -889,6 +909,8 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
             account_label=data.account_label,
             add_account=data.add_account,
         )
+        schedule_cookidoo_week_import(background_tasks, actor)
+        return result
 
     @router.post("/integrations/{provider_id}/refresh")
     def refresh_integration(
@@ -1562,6 +1584,19 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
         authenticated_actor(request)
         response.headers["Cache-Control"] = "no-store"
         return await features.cookidoo_plan_sync.provider.get_my_week_plan(start, end)
+
+    @router.post("/cookidoo/plan-sync/auto-import")
+    async def auto_import_cookidoo_plan(
+        start: date,
+        end: date,
+        request: Request,
+        response: Response,
+    ) -> dict[str, int]:
+        """Pull safe Cookidoo changes; unknown recipes and locally edited rows stay review-gated."""
+        response.headers["Cache-Control"] = "no-store"
+        return await features.cookidoo_plan_sync.sync_cookidoo_to_kitchen_best_effort(
+            authenticated_actor(request), start, end
+        )
 
     @router.post("/cookidoo/plan-sync/preview")
     async def preview_cookidoo_plan_sync(

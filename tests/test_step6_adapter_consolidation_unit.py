@@ -497,7 +497,7 @@ async def test_in_memory_cookidoo_plan_sync_roundtrip_and_guards() -> None:
     )
     assert export_done.applied_count == 1
     assert len(posted_payloads) == 1
-    assert posted_payloads[0] == {"dayKey": "2026-11-23", "recipeIds": ["r-mw-1"]}
+    assert posted_payloads[0] == {"dayKey": "2026-11-29", "recipeIds": ["r-mw-1"]}
 
 
 def test_in_memory_purchase_sync_service_and_conflicts() -> None:

@@ -72,6 +72,9 @@ const state = {
   recipeCollectionJob: null,
   recipeCollectionStatusNode: null,
   recipeCollectionPollGeneration: 0,
+  installPromptEvent: null,
+  initialLoaded: false,
+  loadedViewRanges: {},
 };
 window.KitchenTripCompletion = {
   purchaseSourceField(kind) {
@@ -1237,11 +1240,22 @@ async function refreshView() {
       state.shoppingLastRefreshedAt = Date.now();
     }
     if (!activeLoadIsCurrent()) return false;
+    if (state.view === "week") state.loadedViewRanges.week = weekRange;
+    if (state.view === "shopping")
+      state.loadedViewRanges.shopping = shoppingRange + ":" + state.shoppingPanel;
+    if (state.view === "recipes") state.loadedViewRanges.recipes = true;
+    if (state.view === "settings") state.loadedViewRanges.settings = true;
     render();
     return true;
   } catch (error) {
     if (!activeLoadIsCurrent()) return false;
-    notify(error.message, true);
+    syncNavCurrentView();
+    if (!state.initialLoaded || !viewLoadedForCurrentState(state.view)) {
+      renderUnavailableView(error);
+    } else {
+      ensureOfflineBanner();
+      notify(error.message, true);
+    }
     if (matchingVisible)
       Object.values(state.basketMatchJobs).forEach((record) =>
         scheduleBasketMatchPoll(record),
@@ -1697,6 +1711,62 @@ async function startBasketMatchJob({
     }
   }
 }
+const OFFLINE_SHELL_CALLOUT =
+  "Du er frakoblet. Koble til igjen for å laste inn eller lagre endringer for husholdningen. Bufret app-skall betyr ikke at oppskrifter, ukeplan eller felles handleliste er tilgjengelige uten nett.";
+
+function syncNavCurrentView() {
+  document.querySelectorAll("[data-view]").forEach((node) => {
+    if (node.dataset.view === state.view)
+      node.setAttribute("aria-current", "page");
+    else node.removeAttribute("aria-current");
+  });
+}
+
+function viewLoadedForCurrentState(view) {
+  const loaded = state.loadedViewRanges || {};
+  if (view === "week") return loaded.week === range();
+  if (view === "shopping") return loaded.shopping === range() + ":" + state.shoppingPanel;
+  if (view === "recipes") return Boolean(loaded.recipes);
+  if (view === "settings") return Boolean(loaded.settings);
+  return true;
+}
+
+function ensureOfflineBanner() {
+  const main = $("#main");
+  if (!main) return;
+  const existing = main.querySelector(".callout.offline");
+  if (!navigator.onLine) {
+    if (!existing) {
+      main.prepend(el("p", OFFLINE_SHELL_CALLOUT, "callout offline"));
+    }
+  } else if (existing) {
+    existing.remove();
+  }
+}
+
+function renderUnavailableView(error) {
+  const main = $("#main");
+  if (!main) return;
+  syncNavCurrentView();
+  const offline = typeof navigator !== "undefined" && navigator.onLine === false;
+  main.replaceChildren();
+  if (offline) {
+    add(main, el("p", OFFLINE_SHELL_CALLOUT, "callout offline"));
+  }
+  add(
+    main,
+    empty(
+      offline
+        ? "Husholdningsdata er ikke tilgjengelig uten nett"
+        : "Kunne ikke laste inn visningen",
+      offline
+        ? "App-skallet er lastet fra lokal hurtigbuffer, men oppskrifter, ukeplan og felles handleliste lagres ikke uten nett og krever tilkobling."
+        : error?.message || "Prøv igjen når tilkoblingen er tilbake.",
+      button("Prøv igjen", () => (state.initialLoaded ? refreshView() : start()), "primary"),
+    ),
+  );
+}
+
 function navigate(view) {
   if (view === "basket") {
     state.shoppingPanel = "oda";
@@ -1718,17 +1788,13 @@ function render() {
     } catch {}
   }
   main.replaceChildren();
-  document.querySelectorAll("[data-view]").forEach((node) => {
-    if (node.dataset.view === state.view)
-      node.setAttribute("aria-current", "page");
-    else node.removeAttribute("aria-current");
-  });
+  syncNavCurrentView();
   if (!navigator.onLine)
     add(
       main,
       el(
         "p",
-        "Du er frakoblet. Koble til igjen for å laste inn eller lagre endringer for husholdningen.",
+        OFFLINE_SHELL_CALLOUT,
         "callout offline",
       ),
     );
@@ -3826,10 +3892,72 @@ function recipePhotoForm() {
   const form = el("form");
   const formModal = $("#modal");
   const isCurrentDialog = () => form.isConnected && formModal.open;
-  const image = field("Bilde av oppskriftssiden", "file", "", "JPEG, PNG eller WebP · maks 8 MiB");
-  image.input.accept = "image/jpeg,image/png,image/webp";
-  image.input.capture = "environment";
-  image.input.required = true;
+  const image = field(
+    "Bilde av oppskriftssiden",
+    "file",
+    "",
+    "Velg fra bildebibliotek/filer eller ta nytt bilde · JPEG, PNG eller WebP · maks 8 MiB (store bilder skaleres ned automatisk)",
+  );
+  image.input.accept = "image/*";
+  const cameraInput = el("input");
+  cameraInput.type = "file";
+  cameraInput.accept = "image/*";
+  cameraInput.capture = "environment";
+  cameraInput.hidden = true;
+  cameraInput.setAttribute("aria-hidden", "true");
+  cameraInput.tabIndex = -1;
+  const previewWrap = el("div", null, "recipe-photo-preview-wrap");
+  previewWrap.hidden = true;
+  const previewImg = el("img", null, "recipe-photo-preview");
+  previewImg.alt = "Forhåndsvisning av valgt oppskriftsside";
+  const previewMeta = el("small", "", "muted");
+  add(previewWrap, previewImg, previewMeta);
+  let selectedFile = null;
+  let previewUrl = "";
+  const clearPreviewUrl = () => {
+    if (previewUrl && typeof URL?.revokeObjectURL === "function") {
+      URL.revokeObjectURL(previewUrl);
+    }
+    previewUrl = "";
+  };
+  const setSelectedPhoto = (file, sourceLabel) => {
+    clearPreviewUrl();
+    selectedFile = file || null;
+    if (!selectedFile) {
+      previewWrap.hidden = true;
+      previewImg.removeAttribute("src");
+      previewMeta.textContent = "";
+      return;
+    }
+    const sizeMb = (selectedFile.size / (1024 * 1024)).toFixed(1).replace(".", ",");
+    previewMeta.textContent =
+      (selectedFile.name || sourceLabel || "Valgt bilde") + ` (${sizeMb} MiB)`;
+    if (typeof URL?.createObjectURL === "function") {
+      previewUrl = URL.createObjectURL(selectedFile);
+      previewImg.src = previewUrl;
+      previewImg.hidden = false;
+    } else {
+      previewImg.hidden = true;
+    }
+    previewWrap.hidden = false;
+  };
+  image.input.addEventListener("change", () => {
+    setSelectedPhoto(image.input.files?.[0] || null, "Valgt bilde");
+  });
+  cameraInput.addEventListener("change", () => {
+    const file = cameraInput.files?.[0] || null;
+    if (file) setSelectedPhoto(file, "Kamerabilde");
+  });
+  formModal.addEventListener("close", clearPreviewUrl, { once: true });
+  const cameraButton = button(
+    "Ta bilde med kamera",
+    () => {
+      cameraInput.value = "";
+      cameraInput.click();
+    },
+    "quiet",
+  );
+  const captureActions = add(el("div", null, "recipe-photo-capture-actions"), cameraButton);
   const book = field("Kokebok (valgfritt)", "text", "");
   book.input.maxLength = 300;
   const page = field("Side (valgfritt)", "text", "");
@@ -3872,9 +4000,19 @@ function recipePhotoForm() {
   }
   formSubmit(form, "Lag redigerbart utkast", async () => {
     if (!recipeAssistantConfigured()) throw new Error("Sett opp KI-tilkoblingen i innstillingene før du leser inn bildet.");
-    status.textContent = "Laster opp bildet og leser oppskriften …";
+    const chosenFile = selectedFile || image.input.files?.[0] || cameraInput.files?.[0] || null;
+    if (!chosenFile) {
+      image.input.focus();
+      throw new Error("Velg et bilde av en oppskriftsside.");
+    }
+    status.textContent = "Klargjør og laster opp bildet …";
     retry.hidden = true;
-    const payload = await window.KitchenRecipePhoto.buildUpload(image.input.files?.[0], {
+    const preparedFile =
+      typeof window.KitchenRecipePhoto.preparePhotoFile === "function"
+        ? await window.KitchenRecipePhoto.preparePhotoFile(chosenFile)
+        : chosenFile;
+    if (!isCurrentDialog()) return;
+    const payload = await window.KitchenRecipePhoto.buildUpload(preparedFile, {
       book_title: book.input.value,
       page: page.input.value,
     });
@@ -3885,7 +4023,7 @@ function recipePhotoForm() {
       showPhotoDraft,
     );
   });
-  add(form, image.wrap, book.wrap, page.wrap, status, retry);
+  add(form, image.wrap, cameraInput, captureActions, previewWrap, book.wrap, page.wrap, status, retry);
   add(root, form);
 }
 function recipeCollectionConnectionPrompt(provider = "oda", onConnected) {
@@ -9255,10 +9393,49 @@ function renderConnectionSettings() {
     add(section, el("p", state.odaStatusError, "callout"));
   if (!integrations.length && !state.integrationsError && !state.odaStatusError)
     add(section, el("p", "Tilkoblingsstatus er ikke tilgjengelig ennå. Oppdater for å prøve igjen.", "muted"));
+  const isStandalone =
+    typeof window !== "undefined" &&
+    (window.matchMedia?.("(display-mode: standalone)")?.matches ||
+      window.navigator?.standalone === true);
+  const pwaCard = el("div", null, "pwa-install-card");
+  if (!isStandalone && state?.installPromptEvent) {
+    const installButton = button(
+      "Installer Kjøkken-appen",
+      async () => {
+        const promptEvent = state.installPromptEvent;
+        if (!promptEvent || typeof promptEvent.prompt !== "function") return;
+        installButton.disabled = true;
+        try {
+          await promptEvent.prompt();
+          const choice = await promptEvent.userChoice;
+          if (choice?.outcome === "accepted") {
+            state.installPromptEvent = null;
+            installButton.hidden = true;
+            if (typeof notify === "function") notify("Kjøkken er lagt til på startskjermen.");
+          }
+        } catch {
+          if (typeof notify === "function") {
+            notify("Kunne ikke starte installasjonen fra denne knappen. Bruk nettlesermenyen.", true);
+          }
+        } finally {
+          installButton.disabled = false;
+        }
+      },
+      "primary",
+    );
+    add(pwaCard, installButton);
+  }
   add(
-    section,
-    el("p", "På Android kan du installere Kjøkken fra nettlesermenyen. Appen åpnes uten nett, men delte oppskrifter og endringer krever tilkobling.", "muted"),
+    pwaCard,
+    el(
+      "p",
+      isStandalone
+        ? "Kjøkken kjører som installert app. Selve app-skallet kan åpnes fra lokal hurtigbuffer uten nett, men oppskrifter, ukeplan og felles handleliste hentes fra husholdningen og er ikke tilgjengelige uten tilkobling."
+        : "På Android-telefon og nettbrett kan du installere Kjøkken fra nettlesermenyen (Legg til på startskjermen / Installer app). Selve app-skallet kan åpnes uten nett fra hurtigbuffer, men oppskrifter, ukeplan og felles handleliste hentes fra husholdningen og er ikke tilgjengelige uten tilkobling.",
+      "muted",
+    ),
   );
+  add(section, pwaCard);
   return section;
 }
 function renderSettings(main) {
@@ -9565,17 +9742,35 @@ window.addEventListener("hashchange", () => {
   }
 });
 window.addEventListener("offline", () => {
+  if (typeof ensureOfflineBanner === "function") ensureOfflineBanner();
   notify(
     "Du er frakoblet. Koble til igjen før du lagrer endringene. Det åpne skjemaet blir liggende her.",
     true,
   );
 });
 window.addEventListener("online", () => {
+  if (typeof ensureOfflineBanner === "function") ensureOfflineBanner();
   notify("Tilkoblingen er gjenopprettet.");
-  if (state.view === "shopping" || state.view === "week") {
+  if (state.initialLoaded === false && typeof start === "function") {
+    void start();
+  } else if (state.view === "shopping" || state.view === "week") {
     refreshActiveHouseholdViewOnReturn(true);
   } else if (!$("#modal").open && !$("#main form")) {
     refreshView();
+  }
+});
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  state.installPromptEvent = event;
+  if (state.view === "settings" && !$("#modal")?.open && !$("#main form")) {
+    render();
+  }
+});
+window.addEventListener("appinstalled", () => {
+  state.installPromptEvent = null;
+  notify("Kjøkken er installert på enheten.");
+  if (state.view === "settings" && !$("#modal")?.open && !$("#main form")) {
+    render();
   }
 });
 function refreshActiveHouseholdViewOnReturn(force = false) {
@@ -9644,6 +9839,8 @@ async function start() {
       api("/household"),
       api("/recipes?include_stats=true"),
     ]);
+    state.initialLoaded = true;
+    state.loadedViewRanges.recipes = true;
     await loadConnectionStatus();
     if (rememberedCollectionId) {
       try {
@@ -9692,19 +9889,24 @@ async function start() {
       }
     }
   } catch (error) {
+    const offline = typeof navigator !== "undefined" && navigator.onLine === false;
     const main = $("#main");
     main.replaceChildren(
       title(
-        "Velkommen til Kjøkken",
-        "La oss koble til.",
-        "Kjøkkenet dere deler, trenger tilkobling for å lastes inn.",
+        offline ? "Frakoblet modus" : "Velkommen til Kjøkken",
+        offline ? "Du er uten nett." : "La oss koble til.",
+        offline
+          ? "App-skallet er åpnet fra lokal hurtigbuffer, men oppskrifter, ukeplan og felles handleliste er ikke lagret uten nett og krever tilkobling."
+          : "Kjøkkenet dere deler, trenger tilkobling for å lastes inn.",
       ),
     );
     add(
       main,
       empty(
-        "Kjøkkenet er ikke tilgjengelig",
-        error.message,
+        offline ? "Husholdningsdata er ikke tilgjengelig uten nett" : "Kjøkkenet er ikke tilgjengelig",
+        offline
+          ? OFFLINE_SHELL_CALLOUT
+          : error.message,
         button("Prøv igjen", start, "primary"),
       ),
     );

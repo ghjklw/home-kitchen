@@ -29,6 +29,7 @@
     <script defer src="/static/past-purchases-view.js"></script>
     <script defer src="/static/recipe-feedback-quick.js"></script>
     <script defer src="/static/app.js"></script>
+    <script defer src="/static/assistant-chat.js"></script>
   </head>
   <body>
     <a class="skip-link" href="#main">Hopp til hovedinnhold</a>
@@ -58,6 +59,51 @@
       </main>
     </div>
     <div id="notice" role="status" aria-live="polite" hidden></div>
+    <button
+      id="assistant-toggle"
+      class="assistant-toggle"
+      type="button"
+      aria-controls="assistant-panel"
+      aria-expanded="false"
+    >Spør Kjøkken-assistenten</button>
+    <section
+      id="assistant-panel"
+      class="assistant-panel"
+      role="region"
+      aria-labelledby="assistant-title"
+      hidden
+    >
+      <header class="assistant-header">
+        <div>
+          <h2 id="assistant-title">Kjøkken-assistenten</h2>
+          <p>Spør om måltider, oppskrifter og handleliste. Samtalen følger deg mellom sidene.</p>
+        </div>
+        <button id="assistant-close" class="quiet" type="button">Lukk</button>
+      </header>
+      <div
+        id="assistant-messages"
+        class="assistant-messages"
+        role="log"
+        aria-label="Samtale med Kjøkken-assistenten"
+        aria-live="polite"
+        aria-relevant="additions"
+      ></div>
+      <p id="assistant-status" class="assistant-status" role="status" aria-live="polite"></p>
+      <form id="assistant-form" class="assistant-form">
+        <label for="assistant-input">Meldingen din</label>
+        <textarea
+          id="assistant-input"
+          name="message"
+          rows="3"
+          maxlength="4000"
+          required
+        ></textarea>
+        <p class="assistant-privacy">
+          Assistenten får gjeldende side, et avgrenset utdrag av synlig tekst og relevant markering eller aktivitet. Skjulte elementer og skjemaverdier deles ikke.
+        </p>
+        <button id="assistant-send" class="primary" type="submit">Send melding</button>
+      </form>
+    </section>
     <dialog id="modal"><div id="modal-content"></div></dialog>
     <dialog id="private-photo-modal" aria-labelledby="private-photo-title"><div id="private-photo-content"></div></dialog>
     <noscript

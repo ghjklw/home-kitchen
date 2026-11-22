@@ -489,6 +489,14 @@ class MCPActorMiddleware(Middleware):
     """Carry the verified Entra subject into sync tools and durable history."""
 
     async def on_call_tool(self, context, call_next):
+        # Pydantic AI uses the exact same FastMCP instance in-process for calls
+        # made during an already authenticated REST request. ContextVars are
+        # propagated by asyncio into that nested MCP session; accept that trusted
+        # request identity without inventing a loopback token or weakening the
+        # external MCP bearer-token check below.
+        current = history_context.get()
+        if current.actor_id and current.channel in {"app", "api"}:
+            return await call_next(context)
         verified = get_access_token()
         if verified is None or not verified.claims.get("sub"):
             raise ValueError("Household authentication required")

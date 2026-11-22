@@ -20,6 +20,7 @@ from pydantic import (
 )
 from starlette.concurrency import run_in_threadpool
 
+from home_kitchen.ai_workflow.assistant import AssistantChatRequest, AssistantChatResponse
 from home_kitchen.basket import BasketReview, SelectedProduct
 from home_kitchen.basket.application import (
     AvailabilityRefreshItemInput,
@@ -649,6 +650,26 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
             )
         except ProposalConflict as exc:
             raise HTTPException(409, str(exc)) from None
+
+    @router.post("/ai/assistant/chat")
+    async def chat_assistant(
+        data: AssistantChatRequest, request: Request, response: Response
+    ) -> AssistantChatResponse:
+        actor = authenticated_actor(request)
+        response.headers["Cache-Control"] = "no-store"
+        settings = getattr(features, "settings", None)
+        custom_agent = getattr(features, "assistant_agent", None)
+        if custom_agent is None and settings is not None and not settings.ai_configured:
+            raise HTTPException(
+                503,
+                "KI-assistenten krever at husholdningsadministratoren setter opp en KI-leverandør.",
+            )
+        try:
+            return await features.chat_assistant(data, actor_id=actor)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        except Exception:
+            raise HTTPException(502, "KI-assistenten er midlertidig utilgjengelig.") from None
 
     @router.get("/integrations")
     def integrations(request: Request, response: Response) -> list[IntegrationInfo]:

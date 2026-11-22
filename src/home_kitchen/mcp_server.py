@@ -106,6 +106,12 @@ def build_mcp(
         return service.get_recipe(recipe_id)
 
     @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True})
+    def prepare_recipe_deletion(recipe_id: UUID) -> dict[str, str]:
+        """Prepare a deletion review for one exact recipe without deleting it."""
+        recipe = service.get_recipe(recipe_id)
+        return {"recipe_id": str(recipe.id), "title": recipe.title}
+
+    @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True})
     def get_recipe_stats(recipe_id: UUID) -> RecipeActivityStats:
         """Get activity stats (times planned, cooked, ordered, ratings) for a recipe."""
         return service.get_recipe_stats(recipe_id)

@@ -27,7 +27,17 @@ if TYPE_CHECKING:
     from home_kitchen.connector_ports import ConnectorCredentialPort
     from home_kitchen.context import PurchaseHistoryContext
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
+
+from home_kitchen.receipts import Receipt, ReceiptCollection, ReceiptLine
 
 _LOG = logging.getLogger(__name__)
 DEFAULT_PURCHASE_SYNC_INTERVAL_SECONDS = 300.0
@@ -226,7 +236,16 @@ def extract_line_name(line: dict[str, Any]) -> str:
 
 
 def extract_line_unit(line: dict[str, Any]) -> str | None:
-    for key in ("unit", "enhet", "enhetsType", "enhets_type", "unit_type", "unitOfMeasure"):
+    for key in (
+        "unit",
+        "enhet",
+        "enhetsType",
+        "enhets_type",
+        "unit_type",
+        "unitOfMeasure",
+        "quantityUnit",
+        "quantity_unit",
+    ):
         val = line.get(key)
         if val is not None:
             clean = str(val).strip()
@@ -648,22 +667,7 @@ _RETURN_STATUSES = frozenset(
 _DELIVERED_STATUSES = frozenset({"delivered", "completed", "paid", "settled"})
 
 
-class NormalizedOrderLine(BaseModel):
-    """Normalized receipt/order line item with explicit return/adjustment semantics."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: str
-    raw_name: str | None = None
-    quantity: Decimal | None = None
-    unit: str | None = None
-    amount: Decimal | None = None
-    ean: str | None = None
-    canonical_product_id: str | None = None
-    canonical_unit_id: str | None = None
-    oda_product_id: str | None = None
-    category: str | None = None
-    is_return: bool = False
+NormalizedOrderLine = ReceiptLine
 
 
 class EffectiveProviderOrder(BaseModel):
@@ -694,6 +698,24 @@ class EffectiveProviderOrder(BaseModel):
     lines: list[NormalizedOrderLine] = Field(default_factory=list)
     returned_lines: list[NormalizedOrderLine] = Field(default_factory=list)
     payload: dict[str, Any] = Field(default_factory=dict)
+
+    def standardize(self) -> Receipt:
+        return Receipt(
+            provider=self.provider,
+            external_id=self.external_id,
+            revision_id=self.revision_id,
+            transaction_at=self.transaction_at,
+            store_name=self.store_name,
+            total_amount=self.total_amount,
+            has_receipt=bool(self.lines or self.returned_lines),
+            lines=self.lines,
+        )
+
+
+def standardize_effective_receipts(
+    orders: Sequence[EffectiveProviderOrder],
+) -> ReceiptCollection:
+    return ReceiptCollection.from_retailer_receipts(orders)
 
 
 def _to_decimal(val: Any) -> Decimal | None:
@@ -832,9 +854,47 @@ def extract_receipt_lines_from_payload(payload: dict[str, Any]) -> list[dict[str
     return []
 
 
+def standardize_provider_receipt(provider: str, payload: dict[str, Any]) -> Receipt | None:
+    """Parse and standardize a stored payload when its complete retailer model is present."""
+    try:
+        if provider == "coop":
+            from home_kitchen.coop_history import CoopReceipt, parse_receipt_detail
+
+            if isinstance(payload.get("summary"), dict):
+                return parse_receipt_detail(payload).standardize()
+            return CoopReceipt.model_validate(payload).standardize()
+        if provider == "rema1000":
+            from home_kitchen.rema1000_history import Rema1000Receipt
+
+            return Rema1000Receipt.model_validate(payload).standardize()
+        if provider == "trumf":
+            from home_kitchen.trumf_history import TrumfReceipt
+
+            return TrumfReceipt.model_validate(payload).standardize()
+        if provider == "oda" and isinstance(payload.get("order"), dict):
+            from home_kitchen.oda.purchase_history import Order
+
+            return Order.model_validate(payload["order"]).standardize()
+    except (InvalidOperation, ValidationError, ValueError):
+        return None
+    return None
+
+
 def extract_normalized_lines(provider: str, payload: dict[str, Any]) -> list[NormalizedOrderLine]:
     """Normalize provider-specific receipt or order lines including return markers."""
     normalized: list[NormalizedOrderLine] = []
+    standardized_receipt = standardize_provider_receipt(provider, payload)
+    if standardized_receipt is not None:
+        if provider == "oda":
+            raw_lines = (payload.get("order") or {}).get("products") or []
+        else:
+            raw_lines = extract_receipt_lines_from_payload(payload)
+        if not any(
+            isinstance(line.get("kassal"), dict)
+            for line in raw_lines
+            if isinstance(line, dict)
+        ):
+            return standardized_receipt.lines
     if provider == "oda" and isinstance(payload.get("order"), dict):
         order_obj = payload["order"]
         for item in order_obj.get("products") or []:
@@ -890,13 +950,22 @@ def extract_normalized_lines(provider: str, payload: dict[str, Any]) -> list[Nor
         raw_name = extract_line_name(line)
         kassal_name = str(kassal.get("name") or "").strip()
         display_name = kassal_name or raw_name or str(line.get("sourceName") or "").strip()
-        qty = _to_decimal(line.get("quantity") if "quantity" in line else line.get("antall"))
+        raw_quantity = line.get("quantity") if "quantity" in line else line.get("antall")
+        quantity_unit = None
+        if isinstance(raw_quantity, dict):
+            qty = _to_decimal(raw_quantity.get("value"))
+            raw_unit = raw_quantity.get("unit")
+            quantity_unit = str(raw_unit).strip() if raw_unit is not None else None
+        else:
+            qty = _to_decimal(raw_quantity)
         amt = _to_decimal(
             line.get("amount")
             if "amount" in line
             else (line.get("belop") if "belop" in line else line.get("total"))
         )
         unit = extract_line_unit(line)
+        if not unit and quantity_unit:
+            unit = quantity_unit
         if not unit and kassal.get("weight_unit"):
             unit = str(kassal["weight_unit"]).strip() or None
         kassal_ean = kassal.get("ean")

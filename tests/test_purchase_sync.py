@@ -11,6 +11,10 @@ from home_kitchen.purchase_sync import (
     PurchaseHistorySyncService,
     RevisionConflict,
     checkpoint,
+    extract_line_ean,
+    extract_line_name,
+    extract_line_unit,
+    is_non_receipt_stub,
     metadata,
     persist_page,
     provider_order_sources,
@@ -367,3 +371,53 @@ def test_returns_and_linked_refunds_adjust_active_purchases(engine):
     coop_status = service.get_provider_status("coop", account_id="acct")
     assert coop_status.coverage_window.total_records == 2
     assert coop_status.coverage_window.return_count == 1
+
+
+def test_trumf_empty_receipt_and_undefined_ean_handling(engine):
+    assert extract_line_ean({"ean": "$undefined"}) is None
+    assert extract_line_name({"produktBeskrivelse": "$undefined"}) == ""
+    assert extract_line_unit({"enhetsType": "$undefined"}) is None
+
+    empty_trumf = ProviderOrderRecord(
+        external_id="trumf-empty-1",
+        revision_id="r1",
+        payload={
+            "batchId": "trumf-empty-1",
+            "transaksjonsTidspunkt": "2026-09-05T17:58:14Z",
+            "hasReceipt": True,
+            "varelinjer": [],
+        },
+    )
+    assert is_non_receipt_stub("trumf", empty_trumf.payload) is True
+
+    undefined_ean_trumf = ProviderOrderRecord(
+        external_id="trumf-undef-ean-1",
+        revision_id="r1",
+        payload={
+            "batchId": "trumf-undef-ean-1",
+            "transaksjonsTidspunkt": "2026-09-05T17:58:14Z",
+            "hasReceipt": True,
+            "varelinjer": [
+                {"produktBeskrivelse": "HELMELK", "ean": "$undefined", "belop": "24.90"}
+            ],
+        },
+    )
+    adapter = type(
+        "_Adapter",
+        (),
+        {
+            "fetch_page": lambda self, acc, cur: page(
+                [empty_trumf, undefined_ean_trumf], "done", False
+            )
+        },
+    )()
+    # Must succeed without Kassal key when EAN is "$undefined"
+    assert sync_account(engine, "trumf", "acct", adapter) == 2
+
+    with engine.connect() as conn:
+        rows = conn.execute(select(provider_order_sources)).mappings().all()
+    effective = {o.external_id: o for o in resolve_effective_orders(rows, provider="trumf")}
+    assert effective["trumf-empty-1"].lifecycle == "non_receipt_stub"
+    assert effective["trumf-empty-1"].is_active_purchase is False
+    assert effective["trumf-undef-ean-1"].lifecycle == "purchase"
+    assert effective["trumf-undef-ean-1"].is_active_purchase is True

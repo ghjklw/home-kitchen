@@ -41,6 +41,7 @@ from home_kitchen.trumf_history import (
     _TrumfScanCursor,
     build_transaction_receipt_stub,
     chain_of,
+    extract_rsc_flight_json,
     parse_receipt,
     parse_transactions,
     to_provider_order_record,
@@ -473,3 +474,245 @@ def test_unsupported_contract_shapes_fail_closed():
                 revision_id="sha256:123",
             )
         )
+
+
+def test_extract_rsc_flight_json_handles_escaped_quotes_backslashes_and_key_boundaries():
+    html = (
+        '<script>self.__next_f.push([1,"10:{\\"othertransactionsData\\":[1,2],'
+        '\\"transactionsData\\":null}"])</script>'
+        '<script>self.__next_f.push([1,"20:{\\"transactionsData\\":[{\\"batchId\\":\\"b-q1\\",'
+        '\\"beskrivelse\\":\\"KIWI 12\\\\\\" Ost\\\\\\\\\\",\\"belop\\":45.50,'
+        '\\"transaksjonsTidspunkt\\":\\"$D2026-09-05T17:58:14.000Z\\",\\"harKvittering\\":true}]}"])</script>'
+    )
+    txs = parse_transactions(html)
+    assert len(txs) == 1
+    assert txs[0].batch_id == "b-q1"
+    assert txs[0].beskrivelse == 'KIWI 12" Ost\\'
+
+    # Unescaped JSON embedded in script tag must preserve JSON escapes cleanly.
+    unescaped_html = (
+        '<script>{"purchaseDetails":{"batchId":"b-q1","varelinjer":'
+        '[{"produktBeskrivelse":"OST 12\\" SKIVER","belop":45.50}]}}</script>'
+    )
+    receipt = parse_receipt(unescaped_html)
+    assert receipt.varelinjer[0].produkt_beskrivelse == 'OST 12" SKIVER'
+
+    # Only null / $undefined present returns None cleanly without scanning unrelated brackets later.
+    null_html = (
+        '<script>self.__next_f.push([1,"{\\"purchaseDetails\\":null}"])</script>'
+        "<script>var unrelated = {foo: 1};</script>"
+    )
+    assert extract_rsc_flight_json(null_html, "purchaseDetails") is None
+
+
+def test_rsc_undefined_sentinels_timestamps_and_non_item_lines():
+    txs = parse_transactions(
+        {
+            "transactionsData": [
+                {
+                    "batchId": "$undefined",
+                    "beskrivelse": "KIWI Test",
+                    "belop": "120.50",
+                    "bonus": "$undefined",
+                    "transaksjonsTidspunkt": "$D2026-09-05",
+                    "filterCategory": "$undefined",
+                    "partnerId": "  ",
+                    "medlemId": "$undefined",
+                    "transaksjonKategori": "$undefined",
+                    "harKvittering": "$undefined",
+                }
+            ]
+        }
+    )
+    assert len(txs) == 1
+    tx = txs[0]
+    assert tx.batch_id is None
+    assert tx.bonus is None
+    assert tx.filter_category is None
+    assert tx.partner_id is None
+    assert tx.medlem_id is None
+    assert tx.transaksjon_kategori is None
+    assert tx.har_kvittering is True
+    assert tx.transaksjons_tidspunkt.isoformat() == "2026-09-05T00:00:00+00:00"
+
+    receipt = parse_receipt(
+        {
+            "purchaseDetails": {
+                "batchId": "b-undef-1",
+                "kvitteringsId": "$undefined",
+                "belop": "49.80",
+                "bonus": "$undefined",
+                "transaksjonsTidspunkt": "2026-09-05T17:58:14",
+                "storeName": "$undefined",
+                "chain": "$undefined",
+                "varelinjer": [
+                    {
+                        "produktBeskrivelse": "",
+                        "belop": "-5.00",
+                    },
+                    {
+                        "produktBeskrivelse": "$undefined",
+                        "belop": "0",
+                    },
+                    {
+                        "produktBeskrivelse": "HELMELK 1L",
+                        "ean": "$undefined",
+                        "antall": "$undefined",
+                        "belop": "49.80",
+                        "enhetsType": "$undefined",
+                        "momsProsent": "$undefined",
+                        "bonus": "$undefined",
+                        "besparelser": [
+                            {
+                                "type": "$undefined",
+                                "beskrivelse": "$undefined",
+                                "belop": "$undefined",
+                            }
+                        ],
+                    },
+                ],
+            }
+        }
+    )
+    assert receipt.kvitterings_id is None
+    assert receipt.bonus is None
+    assert receipt.store_name is None
+    assert receipt.chain is None
+    assert receipt.transaksjons_tidspunkt is not None
+    assert receipt.transaksjons_tidspunkt.tzinfo is not None
+    assert len(receipt.varelinjer) == 1
+    line = receipt.varelinjer[0]
+    assert line.produkt_beskrivelse == "HELMELK 1L"
+    assert line.ean is None
+    assert line.antall is None
+    assert line.enhets_type is None
+    assert line.moms_prosent is None
+    assert line.bonus is None
+    assert line.besparelser[0].type is None
+    assert line.besparelser[0].beskrivelse is None
+    assert line.besparelser[0].belop is None
+
+
+def test_validation_rejects_invalid_fields_and_unauthenticated_envelopes():
+    with pytest.raises(UnsupportedTrumfContract):
+        parse_transactions(
+            [
+                {
+                    "batchId": "b-1",
+                    "beskrivelse": "   ",
+                    "belop": "10.00",
+                    "transaksjonsTidspunkt": "2026-09-05T17:58:14Z",
+                }
+            ]
+        )
+
+    with pytest.raises(UnsupportedTrumfContract):
+        parse_transactions(
+            [
+                {
+                    "batchId": "b-1",
+                    "beskrivelse": "KIWI",
+                    "belop": "NaN",
+                    "transaksjonsTidspunkt": "2026-09-05T17:58:14Z",
+                }
+            ]
+        )
+
+    with pytest.raises(UnsupportedTrumfContract):
+        parse_receipt({"purchaseDetails": {"batchId": "b-1", "belop": "Infinity"}})
+
+    with pytest.raises(UnsupportedTrumfContract, match="Malformed JSON"):
+        parse_transactions("{broken-json")
+
+    with pytest.raises(UnsupportedTrumfContract, match="Malformed JSON"):
+        parse_receipt("{broken-json")
+
+    for unauth_dict in (
+        {"authenticated": False, "transactionsData": []},
+        {"statusCode": 401, "message": "Unauthorized"},
+        {"error": "Login required"},
+    ):
+        with pytest.raises(TrumfAuthenticationError):
+            parse_transactions(unauth_dict)
+        with pytest.raises(TrumfAuthenticationError):
+            parse_receipt(unauth_dict)
+
+    # Authenticated RSC page with purchaseDetails: null raises UnsupportedTrumfContract (not auth error)
+    null_rsc = '<script>self.__next_f.push([1,"{\\"purchaseDetails\\":null}"])</script>'
+    with pytest.raises(UnsupportedTrumfContract, match="must be an object"):
+        parse_receipt(null_rsc)
+
+
+def test_parse_receipt_enriches_null_or_undefined_fields_from_transaction():
+    tx = TrumfTransaction.model_validate(
+        {
+            "batchId": "b-enrich-1",
+            "beskrivelse": "KIWI Bogstadveien",
+            "belop": "149.90",
+            "bonus": "1.50",
+            "transaksjonsTidspunkt": "2026-09-05T17:58:14Z",
+            "filterCategory": "KIWI",
+            "harKvittering": True,
+        }
+    )
+    receipt = parse_receipt(
+        {
+            "purchaseDetails": {
+                "batchId": None,
+                "storeName": "",
+                "chain": "$undefined",
+                "transaksjonsTidspunkt": "$undefined",
+                "belop": None,
+                "bonus": "$undefined",
+                "varelinjer": [{"produktBeskrivelse": "MELK", "belop": "24.90"}],
+            }
+        },
+        transaction=tx,
+    )
+    assert receipt.batch_id == "b-enrich-1"
+    assert receipt.store_name == "KIWI Bogstadveien"
+    assert receipt.chain == "KIWI"
+    assert receipt.belop == Decimal("149.90")
+    assert receipt.bonus == Decimal("1.50")
+    assert receipt.has_receipt is True
+    record = to_provider_order_record(receipt)
+    assert record.external_id == "b-enrich-1"
+
+
+def test_adapter_caches_transaction_snapshot_within_multipage_scan():
+    txs = [
+        TrumfTransaction.model_validate(
+            {
+                "batchId": f"batch-{i:03d}",
+                "beskrivelse": "KIWI Test",
+                "belop": "10.00",
+                "transaksjonsTidspunkt": "2026-09-01T10:00:00.000Z",
+                "harKvittering": True,
+            }
+        )
+        for i in range(5)
+    ]
+    receipts: dict[str, Any] = {
+        f"batch-{i:03d}": TrumfReceipt(
+            batch_id=None,  # verify adapter fills tx.batch_id if source omitted it
+            store_name="KIWI Test",
+            belop=Decimal("10.00"),
+            revision_id=f"sha256:rev-{i}",
+        )
+        for i in range(5)
+    }
+    source = TrumfFixtureSource(txs, receipts=receipts)
+    adapter = TrumfPurchaseHistoryAdapter(source, "alice", page_size=2, max_pages=10)
+
+    p1 = adapter.fetch_page("alice", None)
+    p2 = adapter.fetch_page("alice", p1.next_cursor)
+    p3 = adapter.fetch_page("alice", p2.next_cursor)
+    assert p3.has_more is False
+    assert [r.external_id for r in p1.records + p2.records + p3.records] == [
+        f"batch-{i:03d}" for i in range(5)
+    ]
+    assert source.transaction_calls == 1
+
+    # New poll starts a fresh scan and fetches transactions again.
+    adapter.fetch_page("alice", p3.next_cursor)
+    assert source.transaction_calls == 2

@@ -194,11 +194,12 @@ def extract_line_ean(line: dict[str, Any]) -> str | None:
         val = line.get(key)
         if val is not None:
             clean = str(val).strip()
+            if not clean or clean == "$undefined":
+                continue
             digits = re.sub(r"\D", "", clean)
             if len(digits) >= 8:
                 return digits
-            if clean:
-                return clean
+            return clean
     return None
 
 
@@ -217,16 +218,20 @@ def extract_line_name(line: dict[str, Any]) -> str:
         "title",
     ):
         val = line.get(key)
-        if val is not None and str(val).strip():
-            return str(val).strip()
+        if val is not None:
+            clean = str(val).strip()
+            if clean and clean != "$undefined":
+                return clean
     return ""
 
 
 def extract_line_unit(line: dict[str, Any]) -> str | None:
     for key in ("unit", "enhet", "enhetsType", "enhets_type", "unit_type", "unitOfMeasure"):
         val = line.get(key)
-        if val is not None and str(val).strip():
-            return str(val).strip()
+        if val is not None:
+            clean = str(val).strip()
+            if clean and clean != "$undefined":
+                return clean
     return None
 
 
@@ -791,9 +796,11 @@ def is_non_receipt_stub(provider: str, payload: dict[str, Any]) -> bool:
     if provider == "trumf":
         for container in (payload, env):
             for key in ("hasReceipt", "harKvittering"):
-                if key in container:
-                    return not bool(container.get(key))
-        return not bool(payload.get("kvitteringsId") or extract_receipt_lines_from_payload(payload))
+                if key in container and not bool(container.get(key)):
+                    return True
+        return not (
+            bool(payload.get("kvitteringsId")) or bool(extract_receipt_lines_from_payload(payload))
+        )
     if provider == "rema1000":
         for container in (env, payload):
             for key in ("hasReceipt", "harKvittering"):

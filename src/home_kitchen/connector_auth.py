@@ -993,6 +993,8 @@ class ConnectorAuthService:
             else normalized_cookie
         )
         server_expires_at = _parse_iso_datetime(data.get("expires"))
+        if server_expires_at is not None and server_expires_at <= datetime.now(UTC):
+            raise ConnectorAuthError(status_code=401, detail=error_detail)
         return new_cookie, server_expires_at
 
     def connect_trumf_cookie(
@@ -1223,9 +1225,13 @@ class ConnectorAuthService:
                 )
                 raise
 
-            expires_at = (
-                server_expires_at or meta.expires_at or (datetime.now(UTC) + timedelta(hours=24))
+            now = datetime.now(UTC)
+            fallback_expires_at = (
+                meta.expires_at
+                if meta.expires_at is not None and meta.expires_at > now
+                else (now + timedelta(hours=24))
             )
+            expires_at = server_expires_at or fallback_expires_at
 
             updated_credentials: dict[str, Any] = {
                 **creds,

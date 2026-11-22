@@ -174,7 +174,12 @@ def test_meal_plan_adds_duplicates_and_updates_only_target_id(test_database_url)
         assert len(meals) == 3
         update = client.put(
             f"/api/meals/{original.json()['id']}",
-            json={**data, "servings": 5, "label": "Middag"},
+            json={
+                **data,
+                "servings": 5,
+                "label": "Middag",
+                "expected_version": original.json()["version"],
+            },
         )
         assert update.status_code == 200
         assert update.json()["id"] == original.json()["id"]
@@ -182,4 +187,59 @@ def test_meal_plan_adds_duplicates_and_updates_only_target_id(test_database_url)
         assert len(meals) == 3
         assert next(row for row in meals if row["id"] == second.json()["id"])["servings"] == 2
         unknown = "00000000-0000-0000-0000-000000000002"
-        assert client.put(f"/api/meals/{unknown}", json=data).status_code == 404
+        assert (
+            client.put(f"/api/meals/{unknown}", json={**data, "expected_version": 1}).status_code
+            == 404
+        )
+
+
+def test_meal_edit_rejects_stale_version_without_overwriting_newer_changes(test_database_url):
+    with (
+        make_client(test_database_url) as first_device,
+        make_client(test_database_url) as second_device,
+    ):
+        recipe = first_device.post("/api/recipes", json=recipe_payload()).json()
+        data = {"date": "2027-01-12", "recipe_id": recipe["id"], "servings": 2}
+        created = first_device.post("/api/meals", json=data)
+        meal_id = created.json()["id"]
+        assert created.json()["version"] == 1
+
+        # Both devices began editing the same revision.
+        first_snapshot = first_device.get(
+            "/api/meals", params={"start": data["date"], "end": data["date"]}
+        ).json()[0]
+        second_snapshot = second_device.get(
+            "/api/meals", params={"start": data["date"], "end": data["date"]}
+        ).json()[0]
+        assert first_snapshot["version"] == second_snapshot["version"] == 1
+
+        saved = first_device.put(
+            f"/api/meals/{meal_id}",
+            json={**data, "servings": 4, "expected_version": first_snapshot["version"]},
+        )
+        assert saved.status_code == 200
+        assert saved.json()["version"] == 2
+
+        stale = second_device.put(
+            f"/api/meals/{meal_id}",
+            json={**data, "servings": 7, "expected_version": second_snapshot["version"]},
+        )
+        assert stale.status_code == 409
+        assert stale.json()["current_version"] == 2
+        assert "changed by another client" in stale.json()["detail"]
+        assert "current version is 2" in stale.json()["detail"]
+
+        current = first_device.get(
+            "/api/meals", params={"start": data["date"], "end": data["date"]}
+        ).json()[0]
+        assert current["servings"] == 4
+        assert current["version"] == 2
+
+        # A stale client without any revision token is rejected and cannot write.
+        unversioned = second_device.put(f"/api/meals/{meal_id}", json={**data, "servings": 5})
+        assert unversioned.status_code == 422
+        assert any(issue["loc"][-1] == "expected_version" for issue in unversioned.json()["detail"])
+        latest = first_device.get(f"/api/meals/{meal_id}")
+        assert latest.status_code == 200
+        assert latest.json()["servings"] == 4
+        assert latest.json()["version"] == 2

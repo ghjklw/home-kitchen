@@ -34,6 +34,7 @@ from home_kitchen.mcp_server import build_mcp
 from home_kitchen.models import (
     Meal,
     MealCreate,
+    MealUpdate,
     PlannedMealRecipe,
     Recipe,
     RecipeActivityStats,
@@ -47,6 +48,7 @@ from home_kitchen.models import (
     WeekShopping,
 )
 from home_kitchen.oda_api import oda_router
+from home_kitchen.planning.domain.exceptions import MealEditConflict
 from home_kitchen.purchase_sync import (
     DEFAULT_PURCHASE_SYNC_INTERVAL_SECONDS,
     PurchaseHistorySyncService,
@@ -242,6 +244,16 @@ def create_app(
     @app.exception_handler(MealIDConflict)
     async def meal_conflict(_request: Request, exc: MealIDConflict):
         return JSONResponse({"detail": str(exc)}, status_code=409)
+
+    @app.exception_handler(MealEditConflict)
+    async def meal_edit_conflict(_request: Request, exc: MealEditConflict):
+        return JSONResponse(
+            {
+                "detail": str(exc),
+                "current_version": exc.current_version,
+            },
+            status_code=409,
+        )
 
     @app.exception_handler(ValueError)
     async def invalid(_request: Request, exc: Exception):
@@ -440,11 +452,13 @@ def create_app(
         await best_effort_live_cookidoo_sync(request, meal.date)
         return meal
 
+    @app.get("/api/meals/{meal_id}")
+    def get_meal(meal_id: UUID) -> Meal:
+        return service.get_meal(meal_id)
+
     @app.put("/api/meals/{meal_id}")
-    async def update_meal(meal_id: UUID, data: MealCreate, request: Request) -> Meal:
-        meal_repository = getattr(getattr(service, "meal_agenda", None), "meals", None)
-        get_meal = getattr(meal_repository, "get_meal", None)
-        previous = get_meal(meal_id) if callable(get_meal) else None
+    async def update_meal(meal_id: UUID, data: MealUpdate, request: Request) -> Meal:
+        previous = service.get_meal(meal_id)
         meal = service.update_meal(meal_id, data)
         if previous is not None and previous.date != meal.date:
             await best_effort_live_cookidoo_sync(request, previous.date)

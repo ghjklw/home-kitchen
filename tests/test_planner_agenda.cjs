@@ -280,6 +280,11 @@ test("creates append-only meal requests and updates only the selected meal ID", 
     servings: 3,
   });
   assert.equal("slot" in updated.payload, false);
+  const versioned = buildMealWriteRequest(
+    { id: "meal/2", version: 4 },
+    values,
+  );
+  assert.equal(versioned.payload.expected_version, 4);
 });
 
 test("unnamed flexible meals have no hidden default meal type", () => {
@@ -367,7 +372,7 @@ test("editing a week meal preserves its existing date without a date picker", as
     week: new Date(2026, 10, 16, 12),
     selectedDate: new Date(2026, 10, 18, 12),
   });
-  const existingMeal = { id: "m-1", date: "2026-11-18", recipe_id: "r-1", servings: 3 };
+  const existingMeal = { id: "m-1", date: "2026-11-18", recipe_id: "r-1", servings: 3, version: 1 };
 
   harness.context.mealForm("2026-11-16", "r-1", existingMeal);
 
@@ -380,6 +385,7 @@ test("editing a week meal preserves its existing date without a date picker", as
     scheduled_time: null,
     recipe_id: "r-1",
     servings: 3,
+    expected_version: 1,
   }]);
 });
 

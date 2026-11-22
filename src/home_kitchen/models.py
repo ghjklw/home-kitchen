@@ -558,8 +558,15 @@ class MealCreate(BaseModel):
         return value
 
 
+class MealUpdate(MealCreate):
+    """Meal edit payload requires the revision previously read by the client."""
+
+    expected_version: int = Field(gt=0, description="Required version from the meal being edited")
+
+
 class Meal(MealCreate):
     id: UUID
+    version: int = Field(default=1, ge=1)
 
 
 class MealEntry(MealCreate):

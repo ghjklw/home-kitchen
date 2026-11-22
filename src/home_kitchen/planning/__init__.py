@@ -17,6 +17,7 @@ from home_kitchen.planning.bootstrap import (
     create_planning_proposal_service,
 )
 from home_kitchen.planning.domain.exceptions import (
+    MealEditConflict,
     ProposalActorMismatch,
     ProposalConflict,
     ProposalExpired,
@@ -34,6 +35,7 @@ from home_kitchen.planning.domain.rules import (
 
 __all__ = [
     "MealAgendaService",
+    "MealEditConflict",
     "PlanningProposalService",
     "PostgresMealAgendaRepository",
     "PostgresPlanningProposalAdapter",

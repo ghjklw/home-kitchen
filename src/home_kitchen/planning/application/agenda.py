@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, time
 from uuid import UUID, uuid4
 
-from home_kitchen.models import Meal, MealCreate, PlannedMealRecipe
+from home_kitchen.models import Meal, MealCreate, MealUpdate, PlannedMealRecipe
 from home_kitchen.planning.domain.rules import validate_date_range
 from home_kitchen.planning.ports.readers import SingleRecipeReader
 from home_kitchen.planning.ports.writers import MealAgendaRepository
@@ -26,13 +26,18 @@ class MealAgendaService:
         self.meals.save_meal(meal)
         return meal
 
-    def update_meal(self, meal_id: UUID, data: MealCreate) -> Meal:
+    def update_meal(self, meal_id: UUID, data: MealUpdate) -> Meal:
         """Update an existing planned meal after validating recipe and meal existence."""
+        if not isinstance(data, MealUpdate):
+            raise ValueError("expected_version is required when updating a meal")
         self.recipes.get_recipe(data.recipe_id)
         self.meals.get_meal(meal_id)
-        meal = Meal(id=meal_id, **data.model_dump())
-        self.meals.update_meal(meal)
-        return meal
+        meal = Meal(id=meal_id, **data.model_dump(exclude={"expected_version"}))
+        return self.meals.update_meal(meal, expected_version=data.expected_version)
+
+    def get_meal(self, meal_id: UUID) -> Meal:
+        """Return one meal so clients can reload after a stale edit conflict."""
+        return self.meals.get_meal(meal_id)
 
     def list_meals(self, start: date, end: date) -> list[Meal]:
         """List planned meals within [start, end] preserving insertion order for untimed items."""

@@ -162,6 +162,60 @@ async def test_streamable_http_tools_are_text_parseable_and_annotated(test_datab
         assert saved_text["title"] == "Controlled MCP wire fixture"
         assert service.get_recipe(saved_text["id"]).title == saved_text["title"]
 
+        updated_meal = _wire_call(
+            client,
+            7,
+            "update_meal",
+            {
+                "meal_id": str(meal.id),
+                "data": {
+                    "date": "2026-11-16",
+                    "recipe_id": str(source.id),
+                    "servings": 6,
+                    "expected_version": 1,
+                },
+            },
+        )
+        assert updated_meal["isError"] is False
+        updated_meal_data = json.loads(updated_meal["content"][0]["text"])
+        assert updated_meal_data["version"] == 2
+        assert updated_meal_data["servings"] == 6
+
+        stale_meal = _wire_call(
+            client,
+            8,
+            "update_meal",
+            {
+                "meal_id": str(meal.id),
+                "data": {
+                    "date": "2026-11-16",
+                    "recipe_id": str(source.id),
+                    "servings": 8,
+                    "expected_version": 1,
+                },
+            },
+        )
+        assert stale_meal["isError"] is True
+        assert "changed by another client" in stale_meal["content"][0]["text"]
+        assert service.meal_agenda.meals.get_meal(meal.id).servings == 6
+
+        unversioned_meal = _wire_call(
+            client,
+            9,
+            "update_meal",
+            {
+                "meal_id": str(meal.id),
+                "data": {
+                    "date": "2026-11-16",
+                    "recipe_id": str(source.id),
+                    "servings": 10,
+                },
+            },
+        )
+        assert unversioned_meal["isError"] is True
+        assert "expected_version" in unversioned_meal["content"][0]["text"]
+        assert service.meal_agenda.meals.get_meal(meal.id).servings == 6
+
 
 def test_all_mcp_tools_expose_valid_wire_schemas_and_text_json_contracts():
     """Verify every MCP tool exposes annotations, schemas, and JSON text wire output."""
@@ -209,6 +263,9 @@ def test_all_mcp_tools_expose_valid_wire_schemas_and_text_json_contracts():
         assert listed.status_code == 200, listed.text
         tools = {tool["name"]: tool for tool in _payload(listed)["result"]["tools"]}
         assert len(tools) >= 87
+        update_schema = tools["update_meal"]["inputSchema"]
+        meal_data_schema = update_schema["properties"]["data"]
+        assert "expected_version" in meal_data_schema["required"]
         for name, tool in tools.items():
             assert tool.get("description"), f"{name} missing description"
             annotations = tool.get("annotations")
@@ -220,6 +277,23 @@ def test_all_mcp_tools_expose_valid_wire_schemas_and_text_json_contracts():
             assert tool.get("outputSchema", {}).get("type") == "object", (
                 f"{name} outputSchema must be object"
             )
+
+        unversioned = _wire_call(
+            client,
+            9,
+            "update_meal",
+            {
+                "meal_id": str(uuid4()),
+                "data": {
+                    "date": "2026-11-16",
+                    "recipe_id": str(uuid4()),
+                    "servings": 2,
+                },
+            },
+        )
+        assert unversioned["isError"] is True
+        assert "expected_version" in unversioned["content"][0]["text"]
+        service.update_meal.assert_not_called()
 
         deleted = _wire_call(
             client,

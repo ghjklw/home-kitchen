@@ -10,6 +10,7 @@ from uuid import UUID
 from home_kitchen.context import HistoryChannel
 from home_kitchen.models import Meal, Recipe
 from home_kitchen.planning.domain.exceptions import (
+    MealEditConflict,
     ProposalActorMismatch,
     ProposalNotFound,
 )
@@ -94,7 +95,9 @@ class InMemoryMealWriter(MealWriter):
     def update_meal(self, meal: Meal) -> bool:
         if meal.id not in self.meals:
             return False
-        self.meals[meal.id] = meal.model_copy(deep=True)
+        self.meals[meal.id] = meal.model_copy(
+            update={"version": self.meals[meal.id].version + 1}, deep=True
+        )
         return True
 
 
@@ -231,10 +234,14 @@ class MemoryMealAgendaRepository(MealAgendaRepository):
             raise KeyError(str(meal_id))
         return self.meals[meal_id].model_copy(deep=True)
 
-    def update_meal(self, meal: Meal) -> None:
+    def update_meal(self, meal: Meal, *, expected_version: int) -> Meal:
         if meal.id not in self.meals:
             raise KeyError(str(meal.id))
-        self.meals[meal.id] = meal.model_copy(deep=True)
+        current = self.meals[meal.id]
+        if expected_version != current.version:
+            raise MealEditConflict(expected_version, current.version)
+        updated = meal.model_copy(update={"version": current.version + 1}, deep=True)
+        self.meals[meal.id] = updated
         self.history_entries.append(
             {
                 "kind": "planning",
@@ -244,6 +251,7 @@ class MemoryMealAgendaRepository(MealAgendaRepository):
                 "entity_id": str(meal.id),
             }
         )
+        return updated.model_copy(deep=True)
 
     def list_meals(self) -> list[Meal]:
         return [meal.model_copy(deep=True) for meal in self.meals.values()]

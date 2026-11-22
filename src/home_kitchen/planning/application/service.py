@@ -204,7 +204,12 @@ class PlanningProposalService:
                             action = "add"
                             history_message = "Applied reviewed meal plan"
                         else:
-                            meal = Meal(id=entry.meal_id, **payload)
+                            current_meal = target_meals[entry.meal_id]
+                            meal = Meal(
+                                id=entry.meal_id,
+                                version=current_meal.version + 1,
+                                **payload,
+                            )
                             if not session.meals.update_meal(meal):
                                 raise ProposalConflict(
                                     f"Meal {meal.id} is unavailable. Create and review a new proposal."

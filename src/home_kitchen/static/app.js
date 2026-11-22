@@ -201,6 +201,7 @@ async function api(path, method = "GET", body) {
     error.status = response.status;
     error.detail = detail;
     error.path = path;
+    if (Number.isInteger(data?.current_version)) error.currentVersion = data.current_version;
     if (Number.isFinite(data?.retry_after_seconds))
       error.retryAfterSeconds = Math.max(0, data.retry_after_seconds);
     throw error;
@@ -686,7 +687,7 @@ function mealAgendaMetadata(meal) {
     .filter(Boolean)
     .join(" · ");
 }
-function buildMealWriteRequest(existingMeal, values) {
+function buildMealWriteRequest(existingMeal, values, expectedVersion = existingMeal?.version) {
   const payload = {
     date: values.date,
     label: values.label.trim() || null,
@@ -694,6 +695,9 @@ function buildMealWriteRequest(existingMeal, values) {
     recipe_id: values.recipe_id,
     servings: Number(values.servings),
   };
+  if (existingMeal && Number.isInteger(expectedVersion)) {
+    payload.expected_version = expectedVersion;
+  }
   return existingMeal
     ? {
         path: "/meals/" + encodeURIComponent(existingMeal.id),
@@ -2235,7 +2239,7 @@ function mealForm(date = iso(startOfWeek(state.week || state.selectedDate || new
   }
   const root = openDialog(existingMeal ? "Rediger måltid" : "Planlegg et måltid");
   const form = el("form");
-  const mealDate = existingMeal?.date || iso(startOfWeek(parseDate(date) || state.week || state.selectedDate || new Date()));
+  let mealDate = existingMeal?.date || iso(startOfWeek(parseDate(date) || state.week || state.selectedDate || new Date()));
   const label = field(
     "Etikett (valgfritt)",
     "text",
@@ -2263,17 +2267,83 @@ function mealForm(date = iso(startOfWeek(state.week || state.selectedDate || new
   servings.input.max = 100;
   servings.input.required = true;
   add(form, label.wrap, scheduledTime.wrap, recipe.wrap, servings.wrap);
-  formSubmit(form, existingMeal ? "Lagre endringer" : "Legg til i ukeplanen", async () => {
+  const conflictReview = el("div", null, "meal-conflict-review");
+  conflictReview.hidden = true;
+  const conflictPreview = el("p", "", "muted");
+  let reviewedMeal = null;
+  let conflictNeedsReview = false;
+  const loadLatestButton = button("Last siste versjon inn i skjemaet", () => {
+    if (!reviewedMeal) return;
+    mealDate = reviewedMeal.date;
+    label.input.value = reviewedMeal.label || "";
+    scheduledTime.input.value = reviewedMeal.scheduled_time || "";
+    recipe.input.value = reviewedMeal.recipe_id;
+    servings.input.value = reviewedMeal.servings;
+    expectedVersion = reviewedMeal.version;
+    conflictNeedsReview = false;
+    conflictReview.hidden = true;
+    if (formError) formError.textContent = "";
+  }, "quiet small");
+  loadLatestButton.hidden = true;
+  const reviewLatestButton = button("Se siste lagrede versjon", async () => {
+    try {
+      reviewedMeal = await api("/meals/" + encodeURIComponent(existingMeal.id));
+      expectedVersion = reviewedMeal.version;
+      conflictNeedsReview = false;
+      const recipeTitle = state.recipes.find((item) => item.id === reviewedMeal.recipe_id)?.title;
+      conflictPreview.textContent = [
+        `Lagret versjon ${reviewedMeal.version}`,
+        reviewedMeal.date,
+        reviewedMeal.label,
+        formatUiTime(reviewedMeal.scheduled_time),
+        recipeTitle,
+        formatServings(reviewedMeal.servings),
+      ].filter(Boolean).join(" · ");
+      loadLatestButton.hidden = false;
+    } catch (err) {
+      conflictPreview.textContent = err.message;
+    }
+  }, "quiet small");
+  add(conflictReview, reviewLatestButton, conflictPreview, loadLatestButton);
+  add(form, conflictReview);
+  let expectedVersion = existingMeal?.version;
+  let formError = null;
+  formError = formSubmit(form, existingMeal ? "Lagre endringer" : "Legg til i ukeplanen", async () => {
+    if (conflictNeedsReview) {
+      throw new Error("Se den lagrede versjonen nedenfor før du prøver å lagre igjen.");
+    }
+    if (existingMeal && !Number.isInteger(expectedVersion)) {
+      throw new Error(
+        "Måltidet mangler en versjon fra serveren. Endringene dine er fortsatt i skjemaet. " +
+        "Oppdater siden og åpne måltidet på nytt før du lagrer."
+      );
+    }
+    // New plans stay anchored to Monday; edits preserve the meal's current date.
     const request = buildMealWriteRequest(existingMeal, {
       date: mealDate,
       label: label.input.value,
       scheduled_time: scheduledTime.input.value,
       recipe_id: recipe.input.value,
       servings: servings.input.value,
-    });
+    }, expectedVersion);
     state.weekWriteInFlight = (state.weekWriteInFlight || 0) + 1;
     try {
-      await api(request.path, request.method, request.payload);
+      try {
+        await api(request.path, request.method, request.payload);
+      } catch (err) {
+        if (existingMeal && err.status === 409 && Number.isInteger(err.currentVersion)) {
+          conflictNeedsReview = true;
+          conflictReview.hidden = false;
+          conflictPreview.textContent =
+            `Måltidet er nå lagret som versjon ${err.currentVersion}. ` +
+            "Skjemaet beholder endringene dine. Se den lagrede versjonen før du velger om du vil laste den inn eller lagre dine verdier oppå den.";
+          loadLatestButton.hidden = true;
+          err.message =
+            "Måltidet er endret på en annen enhet. Endringene dine er fortsatt i skjemaet. " +
+            "Se den lagrede versjonen nedenfor før du velger hvordan du vil fortsette.";
+        }
+        throw err;
+      }
       state.selectedDate = parseDate(mealDate) || localDate(new Date());
       state.week = startOfWeek(state.selectedDate);
       syncPlannerUrl();

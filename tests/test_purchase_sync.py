@@ -421,3 +421,40 @@ def test_trumf_empty_receipt_and_undefined_ean_handling(engine):
     assert effective["trumf-empty-1"].is_active_purchase is False
     assert effective["trumf-undef-ean-1"].lifecycle == "purchase"
     assert effective["trumf-undef-ean-1"].is_active_purchase is True
+
+
+def test_coop_receipt_with_summary_id_and_lines_is_active(engine):
+    receipt = ProviderOrderRecord(
+        external_id="coop-summary-1",
+        revision_id="r1",
+        payload={
+            "summaryId": "coop-summary-1",
+            "revisionId": "r1",
+            "purchaseDate": "2026-09-05T17:58:14Z",
+            "lines": [
+                {
+                    "productName": "HELMELK",
+                    "quantity": {"value": "1.090", "unit": "kg"},
+                    "amount": "24.90",
+                }
+            ],
+        },
+    )
+    persist_page(
+        engine,
+        "coop",
+        "account-a",
+        page([receipt], "coop-complete", False),
+        expected_cursor=None,
+    )
+
+    with engine.connect() as connection:
+        rows = connection.execute(select(provider_order_sources)).mappings().all()
+    effective = resolve_effective_orders(rows, provider="coop")[0]
+
+    assert effective.lifecycle == "purchase"
+    assert effective.is_active_purchase is True
+    assert len(effective.lines) == 1
+    assert effective.lines[0].name == "HELMELK"
+    assert str(effective.lines[0].quantity) == "1.090"
+    assert effective.lines[0].unit == "kg"

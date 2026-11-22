@@ -831,7 +831,12 @@ def is_non_receipt_stub(provider: str, payload: dict[str, Any]) -> bool:
         return not bool(extract_receipt_lines_from_payload(payload))
     if provider == "coop":
         lines = extract_receipt_lines_from_payload(payload)
-        receipt_id = env.get("receiptId") or payload.get("receiptId")
+        receipt_id = (
+            env.get("receiptId")
+            or env.get("summaryId")
+            or payload.get("receiptId")
+            or payload.get("summaryId")
+        )
         return not (bool(receipt_id) and bool(lines))
     return False
 

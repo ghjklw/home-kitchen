@@ -4,15 +4,17 @@ A configurable household kitchen app for recipes, meal planning, and shopping. I
 
 ## Run locally
 
-Requires Python 3.12 and `uv`, plus a PostgreSQL database reachable from the app. Runtime storage uses PostgreSQL through SQLAlchemy and psycopg; schema changes are managed with Alembic.
+Requires Docker Compose, Python 3.12 or 3.13 and `uv`. Start the database, apply migrations and launch the app with one command:
 
 ```sh
-uv sync --locked
-KITCHEN_DATABASE_URL='postgresql+psycopg://kitchen:replace-me@127.0.0.1:5432/kitchen' uv run python -m alembic upgrade head
-KITCHEN_DATABASE_URL='postgresql+psycopg://kitchen:replace-me@127.0.0.1:5432/kitchen' KITCHEN_LOCAL_DEV=true uv run python -m uvicorn home_kitchen.app:create_app --factory --host 127.0.0.1 --port 8000 --no-proxy-headers --no-access-log
+./scripts/run-local.sh
 ```
 
-Replace the example DSN with a local database account; do not commit credentials. `KITCHEN_DATABASE_URL` is required and must use the `postgresql+psycopg` driver. Open <http://127.0.0.1:8000>. Local development access is accepted only from a loopback client. Without `KITCHEN_LOCAL_DEV=true`, startup requires Entra tenant, audience, and allowed-group configuration; authentication is locked by default. Do not enable local development mode in a deployed environment.
+Open <http://127.0.0.1:18099>. The script starts a local PostgreSQL 17 container, syncs the locked Python dependencies, applies Alembic migrations and binds FastAPI to loopback. The app uses the local development authentication mode, which accepts requests only from loopback. Stop the app with Ctrl+C. The database keeps its data in a Docker volume when the container stops.
+
+Use `KITCHEN_POSTGRES_PORT` to choose another host port if `55435` is occupied. Use `KITCHEN_LOCAL_PORT` to choose another app port if `18099` is occupied. `docker compose down` removes the database container and preserves its volume. `docker compose down -v` also deletes the local database.
+
+Do not enable `KITCHEN_LOCAL_DEV=true` in a deployed environment. Without it, startup requires Entra tenant, audience and allowed-group configuration; authentication is locked by default.
 
 If the default cache is read-only, set `UV_CACHE_DIR` to a writable, disk-backed cache directory.
 

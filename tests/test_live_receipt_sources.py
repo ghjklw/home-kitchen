@@ -33,8 +33,12 @@ def test_coop_http_source_fetches_purchases_and_receipt_detail():
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(f"{request.method} {request.url.path}?{request.url.query.decode()}")
-        assert request.headers.get("authorization") == "Bearer coop-token"
+        assert request.headers.get("x-token") == "coop-token"
+        assert request.headers.get("authorization") is None
+        assert request.headers.get("x-gltlocale") == "nb_NO"
+        assert request.headers.get("x-deviceid")
         if request.url.path == "/user/pay/history/list":
+            assert request.url.params.get("n") == "50"
             return httpx.Response(
                 200,
                 json={

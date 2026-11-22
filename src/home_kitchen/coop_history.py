@@ -22,7 +22,9 @@ from home_kitchen.purchase_sync import ProviderOrderRecord, ProviderPage
 COOP_SCHEMA_SOURCE = "https://gist.github.com/HelgeSverre/80a7f34f874336324184a0c513c2e6a2"
 COOP_SCHEMA_VERSION = "4.17.3"
 DEFAULT_COOP_BASE_URL = "https://coopay.coop.no"
-DEFAULT_COOP_USER_AGENT = "Android(14)/Coop(4.42.0)/6926"
+DEFAULT_COOP_USER_AGENT = "Android(14)/Coop(4.42.0)/2.7.7"
+DEFAULT_COOP_LOCALE = "nb_NO"
+DEFAULT_COOP_PURCHASES_COUNT = 50
 _COOP_AUTH_ERROR_CODES = frozenset(
     {
         "INVALID_TOKEN",
@@ -315,28 +317,36 @@ class CoopHttpSource:
         session_cookie: str | None = None,
         base_url: str = DEFAULT_COOP_BASE_URL,
         user_agent: str = DEFAULT_COOP_USER_AGENT,
-        locale: str = "nb-NO",
+        locale: str = DEFAULT_COOP_LOCALE,
+        device_id: str | None = None,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         clean_token = access_token.strip() if isinstance(access_token, str) else ""
         clean_cookie = session_cookie.strip() if isinstance(session_cookie, str) else ""
         if not clean_token and not clean_cookie:
             raise CoopAuthenticationError("Coop-tilgangstoken eller informasjonskapsel mangler.")
+        clean_device_id = device_id.strip() if isinstance(device_id, str) else ""
+        if not clean_device_id:
+            seed = clean_token or clean_cookie
+            clean_device_id = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
         self.access_token = clean_token or None
         self.session_cookie = clean_cookie or None
         self.base_url = base_url.rstrip("/")
         self.user_agent = user_agent
         self.locale = locale
+        self.device_id = clean_device_id
         self.transport = transport
 
     def _client(self) -> httpx.Client:
         headers = {
-            "Accept": "application/json",
+            "Accept": "application/json;charset=UTF-8",
+            "Content-Type": "application/json; charset=utf-8",
             "User-Agent": self.user_agent,
-            "X-Locale": self.locale,
+            "X-DeviceId": self.device_id,
+            "X-GLTLocale": self.locale,
         }
         if self.access_token:
-            headers["Authorization"] = f"Bearer {self.access_token}"
+            headers["X-Token"] = self.access_token
         elif self.session_cookie:
             headers["Cookie"] = self.session_cookie
         return httpx.Client(
@@ -378,25 +388,17 @@ class CoopHttpSource:
     def get_purchases(self, account_id: str) -> list[CoopPurchaseStub]:
         now = datetime.now(UTC)
         with self._client() as client:
-            resp = client.get(f"{self.base_url}/user/pay/history/list")
-            if resp.status_code == 400:
-                resp = client.get(
-                    f"{self.base_url}/user/pay/history/list",
-                    params={"numberOfPurchases": "50"},
-                )
-            elif resp.status_code < 400:
-                try:
-                    return self._parse_purchases_response(resp)
-                except UnsupportedCoopContract:
-                    resp = client.get(
-                        f"{self.base_url}/user/pay/history/list",
-                        params={"numberOfPurchases": "50"},
-                    )
+            resp = client.get(
+                f"{self.base_url}/user/pay/history/list",
+                params={"n": str(DEFAULT_COOP_PURCHASES_COUNT)},
+            )
+            if resp.status_code < 400:
+                return self._parse_purchases_response(resp)
 
             if resp.status_code == 404:
                 resp = client.get(
                     f"{self.base_url}/user/pay/history/search",
-                    params={"searchText": ""},
+                    params={"text": ""},
                 )
             if resp.status_code != 404:
                 return self._parse_purchases_response(resp)

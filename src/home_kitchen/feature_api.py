@@ -456,11 +456,15 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
     router = APIRouter(prefix="/api")
 
     def schedule_cookidoo_week_import(background_tasks: BackgroundTasks, actor_id: str) -> None:
+        sync_service = getattr(features, "cookidoo_plan_sync", None)
+        sync = getattr(sync_service, "sync_cookidoo_to_kitchen_best_effort", None)
+        if not callable(sync):
+            return
         today = date.today()
         week_start = date.fromordinal(today.toordinal() - today.weekday())
         week_end = date.fromordinal(week_start.toordinal() + 6)
         background_tasks.add_task(
-            features.cookidoo_plan_sync.sync_cookidoo_to_kitchen_best_effort,
+            sync,
             actor_id,
             week_start,
             week_end,

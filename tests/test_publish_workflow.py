@@ -66,3 +66,44 @@ def test_metadata_records_exact_digest_and_original_publisher(monkeypatch, tmp_p
 def test_metadata_rejects_non_digest_identity(monkeypatch, tmp_path, digest):
     with pytest.raises(AssertionError):
         record_metadata(monkeypatch, tmp_path, digest)
+
+
+def test_publish_reuses_upstream_ci_instead_of_rerunning_tests():
+    import yaml
+
+    workflow = yaml.safe_load(WORKFLOW)
+    publish = workflow["jobs"]["publish"]
+    assert "services" not in publish
+    assert "KITCHEN_TEST_DATABASE_URL" not in publish.get("env", {})
+    assert "github.event.workflow_run.conclusion == 'success'" in publish["if"]
+
+    steps = publish["steps"]
+    assert not any("setup-node" in step.get("uses", "") for step in steps)
+    forbidden_commands = (
+        "uv sync",
+        "pre-commit run",
+        "ruff check",
+        "ruff format",
+        "ty check",
+        "node --test",
+        "pytest",
+    )
+    assert not any(
+        command in step.get("run", "") for step in steps for command in forbidden_commands
+    )
+    summary = next(
+        step for step in steps if step.get("name") == "Record successful upstream CI gate"
+    )
+    assert summary["env"]["CI_RUN_URL"] == "${{ github.event.workflow_run.html_url }}"
+    assert summary["env"]["CI_HEAD_SHA"] == "${{ github.event.workflow_run.head_sha }}"
+    assert any("docker/build-push-action@" in step.get("uses", "") for step in steps)
+
+
+def test_kitchen_ci_remains_the_single_required_test_suite():
+    import yaml
+
+    ci = yaml.safe_load(Path(".github/workflows/ci.yml").read_text())
+    steps = ci["jobs"]["checks"]["steps"]
+    commands = [step.get("run", "") for step in steps]
+    assert any("pre-commit run --all-files" in command for command in commands)
+    assert sum("pytest -m" in command for command in commands) == 3

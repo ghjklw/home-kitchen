@@ -1,0 +1,149 @@
+# Onboarding Guide for the Home‑Kitchen Repository
+
+## 1. Getting Started
+
+1. **Clone the repository**
+   ```bash
+   git clone https://github.com/ghjklw/home-kitchen.git
+   cd home-kitchen
+   ```
+2. **Set up a Python virtual environment** (Python 3.13+ is recommended)
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate
+   ```
+3. **Install dependencies**
+   ```bash
+   uv pip install -r requirements.txt   # or `uv sync` if using uv lock
+   ```
+4. **Start the local PostgreSQL dev database** (Docker is the easiest way)
+   ```bash
+   docker run -d --name hk-pg -e POSTGRES_USER=kitchen -e POSTGRES_PASSWORD=secret -e POSTGRES_DB=kitchen -p 5432:5432 postgres:16
+   export KITCHEN_DATABASE_URL=postgresql+psycopg://kitchen:secret@127.0.0.1:5432/kitchen
+   ```
+5. **Run migrations**
+   ```bash
+   uv run alembic upgrade head
+   ```
+6. **Launch the FastAPI dev server**
+   ```bash
+   KITCHEN_LOCAL_DEV=true PYTHONPATH=src uv run uvicorn home_kitchen.app:create_app --factory --host 127.0.0.1 --port 18099
+   ```
+   The API will be reachable at `http://localhost:18099`.
+
+---
+
+## 2. Contributing Code
+
+- **Branching model** – base your work on `main`. Create a short‑descriptive feature branch, e.g. `fix/coop‑header‑mismatch`.
+- **Commit style** – use conventional commits (`fix:`, `feat:`, `chore:`). Keep each commit focused on a single logical change.
+- **Pull request workflow**
+  1. Push your branch:
+     ```bash
+     git push origin <branch>
+     ```
+  2. Open a PR on GitHub targeting `main`.
+  3. Fill the PR template (see `AGENTS.md`).
+  4. Request review from the team (typically one reviewer + a senior reviewer).
+  5. Pass the CI checks (see section 3) before merging.
+- **Review checklist** – ensure the PR:
+  - Has unit/integration test coverage for new/changed code.
+  - Updates documentation where appropriate (`docs/` or `README.md`).
+  - Does not introduce lint or type errors (`ruff`, `mypy`).
+  - Runs the static analysis script (`scripts/validate.sh`).
+
+---
+
+## 3. Issue Management
+
+- **Labeling** – apply one of the canonical labels: `bug`, `enhancement`, `documentation`, `infra`, `priority/high`, `priority/low`.
+- **Triaging** – team members run the daily backlog scheduler (see `/schedule` slash command) which creates a sub‑agent to surface stale items.
+- **Closing** – when a PR resolves an issue, close it via the PR merge or manually add a comment `Fixes #<num>`.
+- **Backlog health** – the `Backlog Gap Auditor` sub‑agent (implementation_worker) runs nightly to ensure every open issue has an owner and a clear next step.
+
+---
+
+## 4. Testing Strategy
+
+### 4.1 Unit Tests
+- Located in `tests/`. Use **pytest**.
+- Run locally:
+  ```bash
+  uv run pytest -q
+  ```
+- Aim for > 80 % coverage (`coverage run -m pytest && coverage report`).
+
+### 4.2 Integration Tests
+- Spin up the dev DB and run the integration suite:
+  ```bash
+  KITCHEN_DATABASE_URL=postgresql+psycopg://kitchen:secret@127.0.0.1:5432/kitchen uv run pytest tests/integration -q
+  ```
+- Tests cover external providers (Coop, Trumf, Oda) using **recorded HTTP fixtures** under `tests/fixtures/`.
+
+### 4.3 CI Pipeline (GitHub Actions)
+- **`ci.yml`** runs on every PR:
+  1. Lint (`ruff check .`)
+  2. Type check (`mypy src`)
+  3. Test matrix (Python 3.12/3.13, SQLite + PostgreSQL)
+  4. Build Docker image for sanity check.
+- Failures block the merge.
+
+---
+
+## 5. Documentation
+
+- **Architecture** – `docs/architecture.md` gives a high‑level diagram of the micro‑service components.
+- **Coop receipt flow** – `docs/coop_receipt_endpoints.md` describes the PKCE callback, required headers, and the authentication cookie.
+- **Decision log** – `docs/decisions.md` records major architectural choices.
+- Keep docs in sync with code changes; add a PR note when you modify public APIs.
+
+---
+
+## 6. Deployment & Release Process
+
+1. **Prepare release branch** – create a release candidate branch from `main` (e.g., `release/vX.Y.Z`).
+2. **Run full test suite** (unit, integration, Playwright/browser) against a clean environment.
+3. **Run deployment checks** – see the `scripts/deploy_check.sh` script which:
+   - Verifies Docker build passes.
+   - Checks that migration scripts run cleanly on a fresh DB.
+   - Ensures no secrets are leaked.
+4. **Tag the release** – after checks pass, create an annotated git tag:
+   ```bash
+   git tag -a vX.Y.Z -m "Release vX.Y.Z"
+   git push origin vX.Y.Z
+   ```
+5. **Publish Docker image** – the CI pipeline builds and pushes the image to the internal registry under the `vX.Y.Z` tag.
+6. **Deploy to staging** – the `scripts/deploy_staging.sh` script pulls the new image and runs it behind the staging ingress. Run sanity smoke tests.
+7. **Promote to production** – after stakeholder sign‑off, run `scripts/deploy_prod.sh` which rolls out the new image with a canary deployment and monitors health checks.
+8. **Post‑release** – update the `CHANGELOG.md` (generated by `git-changelog`), notify the Slack channel `#home-kitchen-release`, and close related issues.
+
+---
+
+## 7. Development Tips
+
+- Use the **Chrome DevTools** skill (`chrome-devtools`) for quick debugging of UI‑related providers.
+- Run the **automation** skill to generate routine tasks (e.g., nightly DB backups).
+- Leverage the **/plan** slash command for complex refactors: it creates a step‑by‑step plan before any code changes.
+- For heavy operations (Docker builds, large migrations) request a background task via the `/schedule` command.
+
+---
+
+## 8. Good First Issues
+
+- Look for issues labelled `good‑first‑issue`. They are scoped to be self‑contained and have clear acceptance criteria.
+- Typical starter tasks:
+  - Add missing type hints to a module.
+  - Update a failing unit test after a recent migration.
+  - Improve documentation for a newly added API endpoint.
+
+---
+
+## 9. Community & Support
+
+- **Slack channel** – `#home-kitchen-dev` for quick questions.
+- **Weekly sync** – a 30 min stand‑up (see `AGENTS.md` for the agenda template).
+- **Code of conduct** – adhere to the repository’s `CODE_OF_CONDUCT.md`.
+
+---
+
+*This guide is intended as a single source of truth for onboarding new contributors. Feel free to edit and expand it as the project evolves.*

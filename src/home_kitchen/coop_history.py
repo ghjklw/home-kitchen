@@ -50,7 +50,7 @@ class CoopAuthenticationError(RuntimeError):
     """Missing or invalid Coop credentials or unauthenticated response."""
 
 
-def _normalize_comma_decimal(value: Any) -> Any:
+def _normalize_coop_decimal(value: Any) -> Any:
     """Normalize Coop decimal strings, including spaced thousands separators."""
     if isinstance(value, str):
         normalized = value.strip()
@@ -64,7 +64,7 @@ def _normalize_comma_decimal(value: Any) -> Any:
 
 
 # The validator must wrap the nullable union, so "" can normalize to None.
-type CommaDecimal = Annotated[Decimal | None, BeforeValidator(_normalize_comma_decimal)]
+type CoopDecimal = Annotated[Decimal | None, BeforeValidator(_normalize_coop_decimal)]
 
 
 class CoopReceiptLine(BaseModel):
@@ -74,11 +74,11 @@ class CoopReceiptLine(BaseModel):
     ean13: str | None = None
     gtin13: str | None = None
     barcode: str | None = None
-    quantity: CommaDecimal = None
-    amount: CommaDecimal = None
-    discount: CommaDecimal = None
-    discount_amount_per_quantity: CommaDecimal = None
-    unit_price: CommaDecimal = None
+    quantity: CoopDecimal = None
+    amount: CoopDecimal = None
+    discount: CoopDecimal = None
+    discount_amount_per_quantity: CoopDecimal = None
+    unit_price: CoopDecimal = None
 
 
 class CoopReceipt(BaseModel):
@@ -92,10 +92,10 @@ class CoopReceipt(BaseModel):
     store_name: str | None = None
     store_id: str | None = None
     chain_id: str | None = None
-    amount: CommaDecimal = None
-    total_discount: CommaDecimal = None
+    amount: CoopDecimal = None
+    total_discount: CoopDecimal = None
     total_discount_formatted: str | None = None
-    member_bonus: CommaDecimal = None
+    member_bonus: CoopDecimal = None
     lines: list[CoopReceiptLine] | None = None
     source_uri: str = COOP_SCHEMA_SOURCE
     source_schema_version: str = COOP_SCHEMA_VERSION
@@ -111,8 +111,8 @@ class CoopPurchaseStub(BaseModel):
     store_name: str | None = None
     store_id: str | None = None
     chain_id: str | None = None
-    amount: CommaDecimal = None
-    total_discount: CommaDecimal = None
+    amount: CoopDecimal = None
+    total_discount: CoopDecimal = None
 
 
 def _revision_id(raw: dict[str, Any]) -> str:

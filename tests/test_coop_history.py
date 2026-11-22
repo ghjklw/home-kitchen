@@ -158,6 +158,59 @@ def test_receipt_detail_accepts_grouped_amounts_and_blank_optional_decimals():
     assert record.payload["lines"][0]["quantity"] is None
 
 
+def test_every_coop_decimal_field_uses_localized_format_and_empty_as_missing():
+    raw = "1\u00a0088,02"
+    list_items = parse_purchase_list(
+        {
+            "purchases": [
+                {"summaryId": "list-1", "amount": raw, "totalDiscount": raw},
+                {"summaryId": "list-2", "amount": "", "totalDiscount": ""},
+            ]
+        }
+    )
+    assert list_items[0].amount == list_items[0].total_discount == Decimal("1088.02")
+    assert list_items[1].amount is None
+    assert list_items[1].total_discount is None
+
+    receipt = parse_receipt_detail(
+        {
+            "summary": {
+                "summaryId": "detail-all-fields",
+                "amount": raw,
+                "totalDiscount": raw,
+                "memberBonus": raw,
+                "lines": [
+                    {
+                        "productName": "Synthetic item",
+                        "quantity": raw,
+                        "amount": raw,
+                        "discount": raw,
+                        "discountAmountPerQuantity": raw,
+                        "unitPrice": raw,
+                    },
+                    {
+                        "productName": "Synthetic item without numbers",
+                        "quantity": "",
+                        "amount": "",
+                        "discount": "",
+                        "discountAmountPerQuantity": "",
+                        "unitPrice": "",
+                    },
+                ],
+            }
+        }
+    )
+    for field in ("amount", "total_discount", "member_bonus"):
+        assert getattr(receipt, field) == Decimal("1088.02")
+    assert receipt.lines is not None
+    numeric_line_fields = (
+        "quantity", "amount", "discount", "discount_amount_per_quantity", "unit_price"
+    )
+    for field in numeric_line_fields:
+        assert getattr(receipt.lines[0], field) == Decimal("1088.02")
+        assert getattr(receipt.lines[1], field) is None
+
+
 def test_receipt_decimal_rejects_malformed_grouping():
     with pytest.raises(ValidationError):
         parse_purchase_list(

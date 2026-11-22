@@ -10,6 +10,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from pydantic import ValidationError
 
 from home_kitchen.bootstrap import create_in_memory_shopping_service
 from home_kitchen.catalogue.identity import (
@@ -22,6 +23,7 @@ from home_kitchen.history import HistoryEntry, HistoryEntryCreate
 from home_kitchen.models import (
     Ingredient,
     MealCreate,
+    MealUpdate,
     PrepCategory,
     Recipe,
     RecipeActivityStats,
@@ -32,7 +34,7 @@ from home_kitchen.models import (
     ShoppingItemCreate,
     SourceIngredient,
 )
-from home_kitchen.planning import create_in_memory_meal_agenda_service
+from home_kitchen.planning import MealEditConflict, create_in_memory_meal_agenda_service
 from home_kitchen.recipe_feedback import RecipeFeedbackCreate, RecipeFeedbackService
 from home_kitchen.recipes.adapters.memory import MemoryRecipeRepository
 from home_kitchen.recipes.bootstrap import create_in_memory_recipe_service
@@ -251,6 +253,9 @@ def test_in_memory_meal_agenda_crud_ordering_and_scaling() -> None:
     )
     agenda, meal_repo, _ = create_in_memory_meal_agenda_service(recipes={recipe.id: recipe})
 
+    with pytest.raises(ValidationError, match="expected_version"):
+        MealUpdate(date=date(2026, 3, 2), recipe_id=recipe.id, servings=2)
+
     with pytest.raises(KeyError):
         agenda.plan_meal(MealCreate(date=date(2026, 3, 2), recipe_id=uuid4(), servings=2))
 
@@ -274,16 +279,54 @@ def test_in_memory_meal_agenda_crud_ordering_and_scaling() -> None:
     with pytest.raises(ValueError, match="end must be on or after start"):
         agenda.list_meals(date(2026, 3, 5), date(2026, 3, 2))
 
+    with pytest.raises(ValueError, match="expected_version is required"):
+        agenda.update_meal(
+            untimed.id,
+            MealCreate(date=date(2026, 3, 2), recipe_id=recipe.id, servings=6, label="Festmiddag"),
+        )
+
     updated = agenda.update_meal(
         untimed.id,
-        MealCreate(date=date(2026, 3, 2), recipe_id=recipe.id, servings=6, label="Festmiddag"),
+        MealUpdate(
+            date=date(2026, 3, 2),
+            recipe_id=recipe.id,
+            servings=6,
+            label="Festmiddag",
+            expected_version=1,
+        ),
     )
     assert updated.servings == 6
     assert updated.label == "Festmiddag"
+    assert updated.version == 2
+
+    with pytest.raises(MealEditConflict) as conflict:
+        agenda.update_meal(
+            untimed.id,
+            MealUpdate(
+                date=date(2026, 3, 2),
+                recipe_id=recipe.id,
+                servings=9,
+                expected_version=1,
+            ),
+        )
+    assert conflict.value.current_version == 2
+    assert agenda.list_meals(date(2026, 3, 2), date(2026, 3, 2))[1].servings == 6
+
+    retried = agenda.update_meal(
+        untimed.id,
+        MealUpdate(
+            date=date(2026, 3, 2),
+            recipe_id=recipe.id,
+            servings=8,
+            expected_version=updated.version,
+        ),
+    )
+    assert retried.version == 3
+    assert retried.servings == 8
 
     scaled = agenda.meal_recipe(untimed.id)
-    assert scaled.servings == 6
-    assert scaled.ingredients[0].quantity == Decimal("300")
+    assert scaled.servings == 8
+    assert scaled.ingredients[0].quantity == Decimal("400")
     assert meal_repo.has_meals_for_recipe(recipe.id) is True
 
     agenda.delete_meal(later_day.id)

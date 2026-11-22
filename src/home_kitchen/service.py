@@ -14,6 +14,7 @@ from home_kitchen.catalogue.unmapped_service import UnmappedIngredientService
 from home_kitchen.models import (
     Meal,
     MealCreate,
+    MealUpdate,
     PlannedMealRecipe,
     PrepCategory,
     Recipe,
@@ -117,8 +118,9 @@ class _LegacyStoreAdapter:
     def get_meal(self, meal_id: UUID) -> Meal:
         return self._store.get("meal", meal_id, Meal)
 
-    def update_meal(self, meal: Meal) -> None:
-        self._store.update_meal(meal)
+    def update_meal(self, meal: Meal, *, expected_version: int) -> Meal:
+        updated = self._store.update_meal(meal, expected_version=expected_version)
+        return updated or self._store.get("meal", meal.id, Meal)
 
     def list_meals(self) -> list[Meal]:
         return list(self._store.list("meal", Meal))
@@ -329,8 +331,11 @@ class KitchenService:
     def plan_meal(self, data: MealCreate) -> Meal:
         return self.meal_agenda.plan_meal(data)
 
-    def update_meal(self, meal_id: UUID, data: MealCreate) -> Meal:
+    def update_meal(self, meal_id: UUID, data: MealUpdate) -> Meal:
         return self.meal_agenda.update_meal(meal_id, data)
+
+    def get_meal(self, meal_id: UUID) -> Meal:
+        return self.meal_agenda.get_meal(meal_id)
 
     def list_meals(self, start: date, end: date) -> list[Meal]:
         return self.meal_agenda.list_meals(start, end)

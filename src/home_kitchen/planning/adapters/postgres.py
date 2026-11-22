@@ -15,6 +15,7 @@ from home_kitchen.context import HistoryChannel, history_context
 from home_kitchen.history import HistoryEntryCreate, HistoryRepository
 from home_kitchen.models import Meal, Recipe
 from home_kitchen.planning.domain.exceptions import (
+    MealEditConflict,
     ProposalActorMismatch,
     ProposalNotFound,
 )
@@ -164,8 +165,11 @@ class PostgresMealWriter(MealWriter):
     def update_meal(self, meal: Meal) -> bool:
         values = entity_values(meal)
         values.pop("id")
+        values.pop("version", None)
+        statement = meals.update().where(meals.c.id == meal.id)
+        statement = statement.where(meals.c.version == meal.version)
         updated = self.connection.execute(
-            meals.update().where(meals.c.id == meal.id).values(**values).returning(meals.c.id)
+            statement.values(**values, version=meals.c.version + 1).returning(meals.c.id)
         ).scalar_one_or_none()
         return updated is not None
 
@@ -306,27 +310,43 @@ class PostgresMealAgendaRepository(MealAgendaRepository):
             raise KeyError(str(meal_id))
         return Meal.model_validate(dict(row))
 
-    def update_meal(self, meal: Meal) -> None:
+    def update_meal(self, meal: Meal, *, expected_version: int) -> Meal:
         values = entity_values(meal)
         values.pop("id")
+        values.pop("version", None)
         with self.engine.begin() as connection:
-            result = connection.execute(update(meals).where(meals.c.id == meal.id).values(**values))
-            if result.rowcount == 0:
-                raise KeyError(str(meal.id))
+            statement = update(meals).where(meals.c.id == meal.id)
+            statement = statement.where(meals.c.version == expected_version)
+            row = (
+                connection.execute(
+                    statement.values(**values, version=meals.c.version + 1).returning(meals)
+                )
+                .mappings()
+                .first()
+            )
+            if row is None:
+                current_version = connection.execute(
+                    select(meals.c.version).where(meals.c.id == meal.id)
+                ).scalar_one_or_none()
+                if current_version is None:
+                    raise KeyError(str(meal.id))
+                raise MealEditConflict(expected_version, current_version)
+            updated_meal = Meal.model_validate(dict(row))
             self.history.record(
                 HistoryEntryCreate(
                     channel=history_context.get().channel,
                     kind="planning",
                     message="Updated planned meal",
-                    recipe_id=meal.recipe_id,
+                    recipe_id=updated_meal.recipe_id,
                     structured={
                         "entity_type": "meal",
-                        "entity_id": str(meal.id),
-                        "data": meal.model_dump(mode="json"),
+                        "entity_id": str(updated_meal.id),
+                        "data": updated_meal.model_dump(mode="json"),
                     },
                 ),
                 connection=connection,
             )
+            return updated_meal
 
     def list_meals(self) -> list[Meal]:
         with self.engine.begin() as connection:

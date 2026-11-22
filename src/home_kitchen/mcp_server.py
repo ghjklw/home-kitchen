@@ -17,6 +17,7 @@ from .mcp_auth import MCPActorMiddleware
 from .models import (
     Meal,
     MealCreate,
+    MealUpdate,
     PlannedMealRecipe,
     Recipe,
     RecipeActivityStats,
@@ -171,8 +172,8 @@ def build_mcp(
         return service.plan_meal(data)
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True})
-    def update_meal(meal_id: UUID, data: MealCreate) -> Meal:
-        """Update only the planned meal identified by meal_id."""
+    def update_meal(meal_id: UUID, data: MealUpdate) -> Meal:
+        """Update one meal using required data.expected_version from the version previously read. Re-read with list_meals after a conflict before deciding whether to retry."""
         return service.update_meal(meal_id, data)
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True})

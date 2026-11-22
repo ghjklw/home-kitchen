@@ -321,6 +321,7 @@ def test_rest_api_cookidoo_plan_sync_import_shared_dates_repeats_edits_and_tm6(
 
         edited_meal = next(r for r in meal_rows if r["id"] == edit_target_meal_id)
         assert edited_meal["servings"] == 6
+        assert edited_meal["version"] == 2
 
         nov23_risottos = [
             r for r in meal_rows if r["date"] == date(2026, 11, 23) and r["id"] != existing_meal_id

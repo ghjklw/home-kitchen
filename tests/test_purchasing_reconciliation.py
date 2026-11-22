@@ -13,7 +13,7 @@ from home_kitchen.basket.repository import BasketService
 from home_kitchen.context import HistoryContext, history_context
 from home_kitchen.history import HistoryRepository
 from home_kitchen.inventory import InventoryService
-from home_kitchen.models import Ingredient, MealCreate, RecipeCreate, ShoppingItemCreate
+from home_kitchen.models import Ingredient, MealCreate, MealUpdate, RecipeCreate, ShoppingItemCreate
 from home_kitchen.purchasing_reconciliation import (
     PurchasedLineCreate,
     PurchasedProductCreate,
@@ -373,7 +373,15 @@ def test_extras_and_store_trip_checkmarks_survive_meal_plan_mutations(services):
 
     # Add another meal, edit the first meal, then delete the added meal.
     pasta_meal = kitchen.plan_meal(MealCreate(date=today, recipe_id=pasta.id, servings=2))
-    kitchen.update_meal(soup_meal.id, MealCreate(date=today, recipe_id=soup.id, servings=4))
+    kitchen.update_meal(
+        soup_meal.id,
+        MealUpdate(
+            date=today,
+            recipe_id=soup.id,
+            servings=4,
+            expected_version=soup_meal.version,
+        ),
+    )
     kitchen.delete_meal(pasta_meal.id)
 
     after_trip = trip_service.review(today, today)

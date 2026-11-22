@@ -43,7 +43,16 @@ class PostgresCookidooPlanSyncSession:
     def update_meal(self, meal: Meal) -> None:
         values = entity_values(meal)
         values.pop("id")
-        self._connection.execute(update(meals).where(meals.c.id == meal.id).values(**values))
+        values.pop("version", None)
+        updated_id = self._connection.execute(
+            update(meals)
+            .where(meals.c.id == meal.id)
+            .where(meals.c.version == meal.version)
+            .values(**values, version=meals.c.version + 1)
+            .returning(meals.c.id)
+        ).scalar_one_or_none()
+        if updated_id is None:
+            raise ValueError("Måltidet ble endret før bekreftelse; forhåndsvis på nytt.")
 
     def delete_meal(self, meal_id: UUID) -> None:
         self._connection.execute(meals.delete().where(meals.c.id == meal_id))
@@ -241,7 +250,10 @@ class MemoryCookidooPlanSyncSession:
         return found.model_copy(deep=True) if found is not None else None
 
     def update_meal(self, meal: Meal) -> None:
-        self._meals[meal.id] = meal.model_copy(deep=True)
+        current = self._meals.get(meal.id)
+        if current is None or current.version != meal.version:
+            raise ValueError("Måltidet ble endret før bekreftelse; forhåndsvis på nytt.")
+        self._meals[meal.id] = meal.model_copy(update={"version": current.version + 1}, deep=True)
 
     def delete_meal(self, meal_id: UUID) -> None:
         self._meals.pop(meal_id, None)

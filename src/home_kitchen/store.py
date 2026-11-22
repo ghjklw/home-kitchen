@@ -106,6 +106,7 @@ meals = Table(
     Column("scheduled_time", Time),
     Column("recipe_id", Uuid, ForeignKey("recipes.id"), nullable=False),
     Column("servings", Integer, nullable=False),
+    Column("version", Integer, nullable=False, server_default="1"),
 )
 items = Table(
     "items",
@@ -249,8 +250,8 @@ class Store:
         else:
             raise KeyError(kind)
 
-    def update_meal(self, entity: Meal) -> None:
-        self._meals_repo().update_meal(entity)
+    def update_meal(self, entity: Meal, *, expected_version: int) -> Meal:
+        return self._meals_repo().update_meal(entity, expected_version=expected_version)
 
     def get(self, kind: str, entity_id: UUID, model: type[Model]) -> Model:
         if kind == "recipe":

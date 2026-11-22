@@ -478,6 +478,7 @@ def test_rest_router_proposal_additions_edits_validation_and_rollback():
         assert confirmed.json()["status"] == "applied"
         assert len(uow.meals) == 2
         assert uow.meals[existing.id].servings == 5
+        assert uow.meals[existing.id].version == existing.version + 1
 
 
 @pytest.mark.asyncio
@@ -535,5 +536,6 @@ async def test_mcp_tools_support_meal_entries_with_additions_and_edits():
             assert confirmed.structured_content["status"] == "applied"
             assert len(uow.meals) == 2
             assert uow.meals[existing.id].servings == 4
+            assert uow.meals[existing.id].version == existing.version + 1
     finally:
         history_context.reset(token)

@@ -97,7 +97,8 @@ def sqlite_engine(tmp_path):
                     label TEXT,
                     scheduled_time TEXT,
                     recipe_id TEXT NOT NULL,
-                    servings INTEGER NOT NULL
+                    servings INTEGER NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 1
                 )
                 """
             )

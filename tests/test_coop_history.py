@@ -42,6 +42,25 @@ def test_purchase_list_maps_fixture_stub_fields_and_overlapping_page():
     assert parsed[0].total_discount == Decimal("3.25")
 
 
+def test_purchase_list_accepts_comma_and_dot_decimal_amounts():
+    parsed = parse_purchase_list(
+        {
+            "purchases": [
+                {"summaryId": "comma", "amount": " 7,00 ", "totalDiscount": "-0,50"},
+                {"summaryId": "dot", "amount": "12.34", "totalDiscount": None},
+                {"summaryId": "numeric", "amount": 42.5, "totalDiscount": 0},
+            ]
+        }
+    )
+
+    assert parsed[0].amount == Decimal("7.00")
+    assert parsed[0].total_discount == Decimal("-0.50")
+    assert parsed[1].amount == Decimal("12.34")
+    assert parsed[1].total_discount is None
+    assert parsed[2].amount == Decimal("42.5")
+    assert parsed[2].total_discount == Decimal("0")
+
+
 def test_receipt_detail_preserves_fixture_ids_amounts_lines_and_attribution():
     fixture = coop_receipt_detail_revisions()[0]
     parsed = parse_receipt_detail(fixture.payload)

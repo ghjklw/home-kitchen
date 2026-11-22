@@ -85,37 +85,7 @@ class CoopReceipt(BaseModel):
     revision_id: str
 
 
-class CommaDecimal(Decimal):
-    """Decimal subclass that accepts European‑style comma separators (e.g., "7,00")."""
-
-    @classmethod
-    def __get_validators__(cls):
-        yield cls.validate
-
-    @classmethod
-    def validate(cls, v: Any) -> Decimal:
-        if isinstance(v, str):
-            v = v.replace(',', '.').strip()
-        return Decimal(v)
-
 class CoopPurchaseStub(BaseModel):
-    model_config = ConfigDict(extra="ignore", alias_generator=_to_camel, populate_by_name=True)
-
-    summary_id: str | None = None
-    purchase_date: AwareDatetime | None = None
-    store_name: str | None = None
-    store_id: str | None = None
-    chain_id: str | None = None
-    amount: CommaDecimal | None = None
-    total_discount: CommaDecimal | None = None
-    @field_validator('total_discount', 'amount', mode='before')
-    def _parse_decimal(cls, v: Any) -> Any:
-        """Accept numbers formatted with commas (e.g., "7,00") and convert to Decimal.
-        This fixes UAT parsing errors where the Coop API returns European‑style decimal strings.
-        """
-        if isinstance(v, str):
-            v = v.replace(',', '.').strip()
-        return v
     model_config = ConfigDict(extra="ignore", alias_generator=_to_camel, populate_by_name=True)
 
     summary_id: str | None = None
@@ -125,6 +95,14 @@ class CoopPurchaseStub(BaseModel):
     chain_id: str | None = None
     amount: Decimal | None = None
     total_discount: Decimal | None = None
+
+    @field_validator("amount", "total_discount", mode="before")
+    @classmethod
+    def normalize_decimal(cls, value: Any) -> Any:
+        """Accept comma decimal separators while retaining Decimal field types."""
+        if isinstance(value, str):
+            return value.replace(",", ".").strip()
+        return value
 
 
 def _revision_id(raw: dict[str, Any]) -> str:

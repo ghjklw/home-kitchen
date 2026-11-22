@@ -1,10 +1,13 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const {
   applyDiscardIfActive,
   applyIfActive,
   buildUpload,
+  preparePhotoFile,
   MAX_PHOTO_BYTES,
 } = require("../src/home_kitchen/static/recipe-photo.js");
 
@@ -140,4 +143,63 @@ test("failed photo discard leaves the editable draft available", async () => {
   );
   assert.equal(changed, false);
   assert.deepEqual(draft, before);
+});
+
+test("preparePhotoFile keeps valid <= 8 MiB JPEG/PNG/WebP unchanged and downscales oversized photos", async () => {
+  const smallJpeg = new Blob([Uint8Array.from([1, 2, 3])], { type: "image/jpeg" });
+  assert.equal(await preparePhotoFile(smallJpeg), smallJpeg);
+
+  const oversized = new Blob([new Uint8Array(MAX_PHOTO_BYTES + 10)], { type: "image/jpeg" });
+  const compressed = new Blob([Uint8Array.from([4, 5, 6])], { type: "image/jpeg" });
+  let drawn = null;
+  const prepared = await preparePhotoFile(oversized, {
+    createImageBitmap: async () => ({ width: 4000, height: 3000, close() {} }),
+    document: {
+      createElement: () => ({
+        width: 0,
+        height: 0,
+        getContext: () => ({
+          drawImage(_bmp, _x, _y, w, h) {
+            drawn = { w, h };
+          },
+        }),
+        toBlob: (cb) => cb(compressed),
+      }),
+    },
+  });
+  assert.equal(prepared, compressed);
+  assert.ok(drawn && drawn.w <= 3200 && drawn.h <= 2400);
+
+  const highResUnderLimit = new Blob([Uint8Array.from([1, 2, 3])], { type: "image/jpeg" });
+  let resizedHighRes = false;
+  const preparedHighRes = await preparePhotoFile(highResUnderLimit, {
+    createImageBitmap: async () => ({ width: 6000, height: 4000, close() {} }),
+    document: {
+      createElement: () => ({
+        width: 0,
+        height: 0,
+        getContext: () => ({
+          drawImage() {
+            resizedHighRes = true;
+          },
+        }),
+        toBlob: (cb) => cb(compressed),
+      }),
+    },
+  });
+  assert.equal(resizedHighRes, true);
+  assert.equal(preparedHighRes, compressed);
+});
+
+test("recipePhotoForm lets Android users pick from gallery/files or capture directly with camera", () => {
+  const appSource = fs.readFileSync(
+    path.join(__dirname, "../src/home_kitchen/static/app.js"),
+    "utf8",
+  );
+  const fnMatch = appSource.match(/function recipePhotoForm\(\) \{[\s\S]*?\n\}(?=\nfunction recipeCollectionConnectionPrompt)/u);
+  assert.ok(fnMatch, "recipePhotoForm exists");
+  assert.doesNotMatch(fnMatch[0], /image\.input\.capture\s*=/u);
+  assert.match(fnMatch[0], /cameraInput\.capture\s*=\s*"environment"/u);
+  assert.match(fnMatch[0], /Ta bilde med kamera/u);
+  assert.match(fnMatch[0], /preparePhotoFile/u);
 });

@@ -30,6 +30,7 @@ REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 CONFIRMATION_PHRASE = "PROMOTE TO PRODUCTION"
 PROMOTION_ACTIONS = frozenset({"promote", "rollback"})
+UAT_RELEASE_CHANNELS = frozenset({"uat", "beta"})
 LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 MANIFEST_ACCEPT_HEADER = ", ".join(
     [
@@ -650,8 +651,14 @@ def verify_uat_endpoint(
     clean_token = bearer_token.strip()
     if clean_token:
         version_doc = _get_json("/api/version", token=clean_token)
+        observed_channel = version_doc.get("channel")
+        if observed_channel not in UAT_RELEASE_CHANNELS:
+            raise ValueError(
+                f"UAT /api/version channel {observed_channel!r} is not an isolated UAT channel "
+                f"(expected one of {sorted(UAT_RELEASE_CHANNELS)})"
+            )
         observed_rev = version_doc.get("revision")
-        if expected_sha and observed_rev and observed_rev != expected_sha:
+        if expected_sha and observed_rev != expected_sha:
             raise ValueError(
                 f"UAT /api/version revision {observed_rev!r} != expected {expected_sha!r}"
             )
@@ -662,7 +669,7 @@ def verify_uat_endpoint(
             )
         result["version_checked"] = True
         result["version"] = version_doc.get("version")
-        result["channel"] = version_doc.get("channel")
+        result["channel"] = observed_channel
         result["revision"] = observed_rev
 
     return result
@@ -945,6 +952,15 @@ def handle_verify() -> int:
                 f"- **Publish run**: `{identity.run_id}` (attempt `{identity.run_attempt}`, "
                 f"tag `{metadata['tag']}`)",
                 f"- **Previous `:latest` digest**: `{continuity['previous_latest_digest'] or 'none'}`",
+                *(
+                    [
+                        f"- **UAT probe**: `{uat_probe['url']}` "
+                        f"(`/healthz={uat_probe['healthz']}`, `/readyz={uat_probe['readyz']}`, "
+                        f"`version_checked={str(uat_probe['version_checked']).lower()}`)"
+                    ]
+                    if uat_probe is not None
+                    else []
+                ),
                 f"- **UAT evidence**: {req.uat_evidence_ref}",
                 f"- **Planned production tags**: {', '.join(f'`{t}`' for t in planned_tags)}",
                 "- **Next gate**: "

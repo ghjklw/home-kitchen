@@ -332,6 +332,8 @@ class Settings(BaseSettings):
             raise ValueError("database_url must be a valid PostgreSQL URL") from None
         if driver != "postgresql+psycopg":
             raise ValueError("database_url must use postgresql+psycopg")
+        if self.local_dev and self.release_channel in {"production", "release"}:
+            raise ValueError("local_dev cannot be enabled for production or release channels")
         if not self.local_dev and not all(
             [self.entra_tenant_id, self.entra_audience, self.entra_allowed_group]
         ):

@@ -12,7 +12,7 @@ const helper = source.match(/function agendaMeals\(meals, date\) \{([\s\S]*?)\n\
 assert.ok(helper, "app.js should define the selected-date agenda selector");
 const agendaMeals = new Function("meals", "date", helper[1]);
 function sourceFunction(name) {
-  const match = source.match(new RegExp(`function ${name}\\([^)]*\\) \\{([\\s\\S]*?)\\n\\}`));
+  const match = source.match(new RegExp(`function ${name}\\([\\s\\S]*?\\) \\{([\\s\\S]*?)\\n\\}`));
   assert.ok(match, `app.js should define ${name}`);
   return match[0];
 }
@@ -154,6 +154,74 @@ function buildWeekHarness({ week, selectedDate, meals = [], recipes = [] }) {
   };
 }
 
+function buildMealFormHarness({ week, selectedDate, existingMeal = null }) {
+  const state = {
+    week,
+    selectedDate,
+    recipes: [{ id: "r-1", title: "Fiskesuppe" }],
+    household: { default_servings: 2 },
+    weekWriteInFlight: 0,
+  };
+  const formActions = [];
+  const apiCalls = [];
+  const root = new DomNode("div");
+  const modal = { close() {} };
+  const context = {
+    state,
+    el: (tag, text = "", className = "") => new DomNode(tag, text, className),
+    add: (parent, ...children) => {
+      children.filter(Boolean).forEach((child) => parent.append(child));
+      return parent;
+    },
+    button: (text, action, className = "") => {
+      const node = new DomNode("button", text, className);
+      node.addEventListener("click", action);
+      return node;
+    },
+    openDialog: () => root,
+    field: (label, type = "text", value = "", help = "") => {
+      const wrap = new DomNode("label", "", "field");
+      const input = new DomNode(type === "select" ? "select" : "input");
+      input.type = type;
+      input.value = value ?? "";
+      wrap.append(new DomNode("span", label), input);
+      if (help) wrap.append(new DomNode("small", help));
+      return { wrap, input };
+    },
+    formSubmit: (_form, _text, action) => formActions.push(action),
+    buildMealWriteRequest,
+    mealSlotLabel,
+    parseDate: (value) => {
+      if (!/^\d{4}-\d{2}-\d{2}$/u.test(value || "")) return null;
+      const [year, month, date] = value.split("-").map(Number);
+      const parsed = new Date(year, month - 1, date, 12);
+      return parsed;
+    },
+    localDate: (value) => {
+      const date = new Date(value);
+      date.setHours(12, 0, 0, 0);
+      return date;
+    },
+    iso: (date) => [date.getFullYear(), String(date.getMonth() + 1).padStart(2, "0"), String(date.getDate()).padStart(2, "0")].join("-"),
+    startOfWeek: (date) => {
+      const aligned = new Date(date);
+      aligned.setHours(12, 0, 0, 0);
+      const offset = aligned.getDay() === 0 ? -6 : 1 - aligned.getDay();
+      aligned.setDate(aligned.getDate() + offset);
+      return aligned;
+    },
+    api: async (...args) => apiCalls.push(args),
+    $: () => modal,
+    syncPlannerUrl: () => {},
+    refreshView: async () => {},
+    notify: () => {},
+    location: { hash: "" },
+    addRecipeForm: () => {},
+  };
+  vm.runInNewContext(sourceFunction("mealForm"), context);
+  return { context, root, formActions, apiCalls, state };
+}
+
 test("selects all existing meals for one date without sorting or mutating them", () => {
   const rows = [
     { id: "late", date: "2026-11-18", scheduled_time: "19:00" },
@@ -239,7 +307,7 @@ test("startOfWeek aligns any weekday to Monday of that week", () => {
   assert.equal(iso(startOfWeek(new Date(2026, 10, 22, 12))), "2026-11-16"); // Sun -> Mon
 });
 
-test("renderWeek renders a 7-day Monday-to-Sunday planning grid with meals, empty states, and quick-add buttons", () => {
+test("renderWeek presents a week-level meal list without requiring daily assignment", () => {
   const wednesday = new Date(2026, 10, 18, 12);
   const harness = buildWeekHarness({
     week: wednesday,
@@ -254,41 +322,65 @@ test("renderWeek renders a 7-day Monday-to-Sunday planning grid with meals, empt
   harness.context.renderWeek(harness.main);
 
   assert.equal(harness.context.iso(harness.state.week), "2026-11-16");
-  const grid = harness.main.querySelector(".week-grid");
-  assert.ok(grid, "week-grid should be rendered");
-  const dayCards = grid.querySelectorAll(".day");
-  assert.equal(dayCards.length, 7);
+  assert.equal(harness.main.querySelector(".week-grid"), null);
+  const weekPlan = harness.main.querySelector(".week-plan-list");
+  assert.ok(weekPlan, "week-level list should be rendered");
+  const entries = weekPlan.querySelectorAll(".week-plan-entry");
+  assert.equal(entries.length, 2);
   assert.deepEqual(
-    dayCards.map((card) => card.dataset.date),
-    [
-      "2026-11-16",
-      "2026-11-17",
-      "2026-11-18",
-      "2026-11-19",
-      "2026-11-20",
-      "2026-11-21",
-      "2026-11-22",
-    ],
+    entries.map((entry) => entry.querySelector(".week-plan-entry-date").textContent),
+    ["Denne uken", "onsdag 18. nov."],
   );
+  assert.equal(entries[0].querySelector(".meal-title").textContent, "Fiskesuppe");
+  assert.equal(entries[1].querySelector(".agenda-meal").querySelector(".muted").textContent.includes("18:00"), true);
 
-  // Selected day highlight on Wednesday
-  assert.equal(dayCards[2].classList.contains("selected-day"), true);
-  assert.equal(dayCards[0].classList.contains("selected-day"), false);
+  const addMeal = weekPlan.querySelector(".add-meal-button");
+  assert.ok(addMeal);
+  assert.equal(addMeal.textContent, "+ Legg til måltid i uken");
+  addMeal.click();
+  assert.deepEqual(harness.mealFormCalls, [["2026-11-16"]]);
+});
 
-  // Meals rendered on Monday and Wednesday; empty states on other days
-  assert.equal(dayCards[0].querySelectorAll(".agenda-meal").length, 1);
-  assert.equal(dayCards[0].querySelector(".meal-title").textContent, "Fiskesuppe");
-  assert.equal(dayCards[1].querySelector(".empty-day").textContent, "Ingen planlagte måltider");
-  assert.equal(dayCards[2].querySelectorAll(".agenda-meal").length, 1);
+test("new week meals use the Monday anchor without a date picker", async () => {
+  const harness = buildMealFormHarness({
+    week: new Date(2026, 10, 16, 12),
+    selectedDate: new Date(2026, 10, 18, 12),
+  });
 
-  // Quick-add button sets selectedDate and invokes mealForm with that day's ISO date
-  const fridayAdd = dayCards[4].querySelector(".add-meal-button");
-  assert.ok(fridayAdd);
-  assert.equal(fridayAdd.textContent, "+ Legg til måltid");
-  assert.equal(fridayAdd.dataset.date, "2026-11-20");
-  fridayAdd.click();
-  assert.equal(harness.context.iso(harness.state.selectedDate), "2026-11-20");
-  assert.deepEqual(harness.mealFormCalls, [["2026-11-20"]]);
+  harness.context.mealForm("2026-11-18");
+
+  assert.equal(harness.root.querySelectorAll("input").some((input) => input.type === "date"), false);
+  harness.root.querySelector("select").value = "r-1";
+  assert.equal(harness.formActions.length, 1);
+  await harness.formActions[0]();
+  assert.deepEqual(harness.apiCalls[0], ["/meals", "POST", {
+    date: "2026-11-16",
+    label: null,
+    scheduled_time: null,
+    recipe_id: "r-1",
+    servings: 2,
+  }]);
+});
+
+test("editing a week meal preserves its existing date without a date picker", async () => {
+  const harness = buildMealFormHarness({
+    week: new Date(2026, 10, 16, 12),
+    selectedDate: new Date(2026, 10, 18, 12),
+  });
+  const existingMeal = { id: "m-1", date: "2026-11-18", recipe_id: "r-1", servings: 3 };
+
+  harness.context.mealForm("2026-11-16", "r-1", existingMeal);
+
+  assert.equal(harness.root.querySelectorAll("input").some((input) => input.type === "date"), false);
+  assert.equal(harness.formActions.length, 1);
+  await harness.formActions[0]();
+  assert.deepEqual(harness.apiCalls[0], ["/meals/m-1", "PUT", {
+    date: "2026-11-18",
+    label: null,
+    scheduled_time: null,
+    recipe_id: "r-1",
+    servings: 3,
+  }]);
 });
 
 test("weekControls navigates previous/next week and jumps to selected date while keeping Monday alignment", async () => {

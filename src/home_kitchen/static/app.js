@@ -1185,6 +1185,22 @@ async function refreshView() {
       state.meals = meals;
       state.recipes = recipes;
       state.weekLastRefreshedAt = Date.now();
+      if (!state.cookidooAutoSyncInFlight) {
+        state.cookidooAutoSyncInFlight = true;
+        api("/cookidoo/plan-sync/auto-import" + weekRange, "POST")
+          .then((result) => {
+            if (
+              state.view === "week" &&
+              Number(result?.added || 0) + Number(result?.updated || 0) + Number(result?.removed || 0) > 0
+            ) {
+              refreshHouseholdViewIfSafe("week", true);
+            }
+          })
+          .catch(() => {})
+          .finally(() => {
+            state.cookidooAutoSyncInFlight = false;
+          });
+      }
     }
     if (state.view === "recipes") state.recipes = await api("/recipes?include_stats=true");
     if (state.view === "settings") await loadConnectionStatus();
@@ -1833,54 +1849,47 @@ function renderWeek(main) {
         typeof openCookidooPlanSync === "function"
           ? button("Synkroniser med Cookidoo", openCookidooPlanSync)
           : null,
-        button("Planlegg et måltid", () => mealForm(iso(state.selectedDate)), "primary"),
+        button("Planlegg et måltid", () => mealForm(iso(day(0))), "primary"),
       ],
     ),
     weekControls(),
   );
-  const grid = el("div", null, "week-grid");
-  for (let i = 0; i < 7; i++) {
-    const date = day(i);
-    const dateIso = iso(date);
-    const dayMeals = agendaMeals(state.meals, dateIso);
-    const isToday = dateIso === iso(new Date());
-    const isSelected = dateIso === iso(state.selectedDate);
-    const card = el(
-      "section",
-      null,
-      "day" + (isToday ? " today" : "") + (isSelected ? " selected-day" : ""),
-    );
-    card.dataset.date = dateIso;
-    add(
-      card,
-      el("h3", dateLabel(date, { weekday: "long" })),
-      el(
-        "p",
-        dateLabel(date, { month: "short", day: "numeric" }) +
-          (isToday ? " · I dag" : ""),
-        "date",
-      ),
-    );
-    if (dayMeals.length) {
-      const list = el("div", null, "agenda-list");
-      dayMeals.forEach((meal) => add(list, renderAgendaMeal(meal)));
-      add(card, list);
-    } else {
-      add(card, el("p", "Ingen planlagte måltider", "muted empty-day"));
-    }
-    const quickAdd = button("+ Legg til måltid", () => {
-      state.selectedDate = new Date(date);
-      mealForm(dateIso);
-    }, "quiet small add-meal-button");
-    quickAdd.dataset.date = dateIso;
-    quickAdd.setAttribute(
-      "aria-label",
-      "Legg til måltid for " + dateLabel(date, { weekday: "long", day: "numeric", month: "short" }),
-    );
-    add(card, quickAdd);
-    add(grid, card);
+  const weekPlan = el("section", null, "week-plan-list");
+  add(
+    weekPlan,
+    el("h2", "Måltider denne uken"),
+    el("p", "Planlegg oppskriftene for uken, og bestem selv hvilken dag dere lager dem.", "muted"),
+  );
+  const meals = [...(state.meals || [])].sort((left, right) =>
+    String(left.date || "").localeCompare(String(right.date || "")),
+  );
+  if (meals.length) {
+    const list = el("div", null, "week-plan-entries");
+    meals.forEach((meal) => {
+      const row = el("article", null, "week-plan-entry");
+      const plannedDate = parseDate(meal.date);
+      add(
+        row,
+        el(
+          "span",
+          plannedDate && iso(plannedDate) !== iso(day(0))
+            ? dateLabel(plannedDate, { weekday: "long", month: "short", day: "numeric" })
+            : "Denne uken",
+          "week-plan-entry-date",
+        ),
+        renderAgendaMeal(meal),
+      );
+      add(list, row);
+    });
+    add(weekPlan, list);
+  } else {
+    add(weekPlan, el("p", "Ingen måltider planlagt ennå.", "muted week-plan-empty"));
   }
-  add(main, grid);
+  add(
+    weekPlan,
+    button("+ Legg til måltid i uken", () => mealForm(iso(day(0))), "quiet small add-meal-button"),
+  );
+  add(main, weekPlan);
 }
 function renderAgendaMeal(meal) {
   const recipe = state.recipes.find((item) => item.id === meal.recipe_id);
@@ -2214,20 +2223,19 @@ async function suggestWeek() {
     );
   }
 }
-function mealForm(date = iso(state.selectedDate), recipeId, existingMeal = null) {
+function mealForm(date = iso(startOfWeek(state.week || state.selectedDate || new Date())), recipeId, existingMeal = null) {
   if (!state.recipes.length) {
     const root = openDialog("Start med en oppskrift");
     add(
       root,
-      el("p", "Legg til den første oppskriften, og velg deretter en dag.", "muted"),
+      el("p", "Legg til den første oppskriften før du planlegger måltider for uken.", "muted"),
       button("Legg til oppskrift", addRecipeForm, "primary"),
     );
     return;
   }
   const root = openDialog(existingMeal ? "Rediger måltid" : "Planlegg et måltid");
   const form = el("form");
-  const chosenDate = field("Dato", "date", date);
-  chosenDate.input.required = true;
+  const mealDate = existingMeal?.date || iso(startOfWeek(parseDate(date) || state.week || state.selectedDate || new Date()));
   const label = field(
     "Etikett (valgfritt)",
     "text",
@@ -2254,9 +2262,8 @@ function mealForm(date = iso(state.selectedDate), recipeId, existingMeal = null)
   servings.input.min = 1;
   servings.input.max = 100;
   servings.input.required = true;
-  add(form, chosenDate.wrap, label.wrap, scheduledTime.wrap, recipe.wrap, servings.wrap);
+  add(form, label.wrap, scheduledTime.wrap, recipe.wrap, servings.wrap);
   formSubmit(form, existingMeal ? "Lagre endringer" : "Legg til i ukeplanen", async () => {
-    const mealDate = chosenDate.input.value;
     const request = buildMealWriteRequest(existingMeal, {
       date: mealDate,
       label: label.input.value,

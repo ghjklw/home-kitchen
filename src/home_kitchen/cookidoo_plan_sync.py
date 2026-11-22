@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from contextlib import AbstractContextManager
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
@@ -22,6 +23,7 @@ from home_kitchen.recipes.collections import CollectionEntry
 from home_kitchen.recipes.ports import ExtractedRecipeDraft, GenerationLockableProvider
 
 SyncDirection = Literal["cookidoo_to_kitchen", "kitchen_to_cookidoo"]
+_LOG = logging.getLogger(__name__)
 
 
 class CookidooMyWeekProviderPort(GenerationLockableProvider, Protocol):
@@ -50,6 +52,10 @@ class CookidooMyWeekProviderPort(GenerationLockableProvider, Protocol):
         previous_is_custom: bool = False,
     ) -> CookidooMyWeekEntry: ...
 
+    async def remove_from_my_week(
+        self, recipe_id: str, planned_date: date, *, is_custom: bool = False
+    ) -> None: ...
+
 
 class CookidooRecipeImporterPort(Protocol):
     """Port for deduplicating and atomically importing Cookidoo recipes."""
@@ -76,6 +82,12 @@ class CookidooPlanSyncSession(Protocol):
 
     def update_meal(self, meal: Meal) -> None: ...
 
+    def delete_meal(self, meal_id: UUID) -> None: ...
+
+    def find_sync_history(
+        self, direction: str, external_entry_id: str
+    ) -> dict[str, Any] | None: ...
+
     def record_sync_history(
         self,
         *,
@@ -90,6 +102,7 @@ class CookidooPlanSyncSession(Protocol):
         message: str,
         external_entry_id: str | None = None,
         include_external_entry_id: bool = False,
+        sync_state: dict[str, Any] | None = None,
     ) -> None: ...
 
 
@@ -104,6 +117,8 @@ class CookidooPlanSyncUnitOfWork(Protocol):
         dict[UUID, tuple[str, str]],
         dict[str, UUID],
     ]: ...
+
+    def load_sync_history(self) -> list[dict[str, Any]]: ...
 
     def session(self) -> AbstractContextManager[CookidooPlanSyncSession]: ...
 
@@ -213,6 +228,33 @@ def _extract_cookidoo_id_from_url(source_url: str | None) -> str | None:
     return None
 
 
+def _cookidoo_entry_key(entry_id: str | None, recipe_id: str, scheduled_date: date) -> str:
+    return entry_id or f"{recipe_id}@{scheduled_date.isoformat()}"
+
+
+def _week_anchor(day: date) -> date:
+    """Represent a flexible week-level meal by Monday while retaining legacy dates."""
+    return day - timedelta(days=day.weekday())
+
+
+def _meal_sync_state(meal: Meal) -> dict[str, Any]:
+    return {
+        "date": meal.date.isoformat(),
+        "recipe_id": str(meal.recipe_id),
+        "servings": meal.servings,
+        "label": meal.label,
+    }
+
+
+def _cookidoo_sync_state(entry: CookidooMyWeekEntry) -> dict[str, Any]:
+    return {
+        "date": entry.date.isoformat(),
+        "cookidoo_recipe_id": entry.cookidoo_recipe_id,
+        "servings": entry.servings,
+        "label": entry.label,
+    }
+
+
 class CookidooPlanSyncService:
     """Preview and explicitly confirm meal plan sync between Kitchen and Cookidoo My Week."""
 
@@ -299,6 +341,15 @@ class CookidooPlanSyncService:
         dict[str, UUID],
     ]:
         return self._uow.load_kitchen_state(start, end)
+
+    async def _load_sync_history(self) -> list[dict[str, Any]]:
+        loader = getattr(self._uow, "load_sync_history", None)
+        if not callable(loader):
+            return []
+        loaded = await asyncio.to_thread(loader)
+        if not isinstance(loaded, list):
+            return []
+        return [cast(dict[str, Any], record) for record in loaded if isinstance(record, dict)]
 
     @staticmethod
     def _validate_range(start: date, end: date) -> None:
@@ -530,7 +581,8 @@ class CookidooPlanSyncService:
                     )
                     continue
 
-                same_date_mw = [entry for entry in my_week_entries if entry.date == meal.date]
+                target_date = meal.date + timedelta(days=6 - meal.date.weekday())
+                same_date_mw = [entry for entry in my_week_entries if entry.date == target_date]
                 same_date_titles = [entry.title for entry in same_date_mw]
                 repeated_count = sum(
                     1 for entry in same_date_mw if entry.cookidoo_recipe_id == cookidoo_recipe_id
@@ -553,7 +605,7 @@ class CookidooPlanSyncService:
                             item_id=f"edit-{idx}",
                             action="edit",
                             direction=request.direction,
-                            date=meal.date,
+                            date=target_date,
                             title=rec_title,
                             servings=meal.servings,
                             label=meal.label,
@@ -572,7 +624,7 @@ class CookidooPlanSyncService:
                                 "label": target_mw.label,
                             },
                             after={
-                                "date": meal.date.isoformat(),
+                                "date": target_date.isoformat(),
                                 "cookidoo_recipe_id": cookidoo_recipe_id,
                                 "title": rec_title,
                                 "servings": meal.servings,
@@ -589,7 +641,7 @@ class CookidooPlanSyncService:
                             item_id=f"add-{idx}",
                             action="addition",
                             direction=request.direction,
-                            date=meal.date,
+                            date=target_date,
                             title=rec_title,
                             servings=meal.servings,
                             label=meal.label,
@@ -782,6 +834,11 @@ class CookidooPlanSyncService:
                             source_url=item.source_url,
                             scheduled_date=item.date,
                             message="Synkroniserte måltid fra Cookidoo Min uke",
+                            external_entry_id=_cookidoo_entry_key(
+                                item.external_entry_id, item.cookidoo_recipe_id, item.date
+                            ),
+                            include_external_entry_id=True,
+                            sync_state=_meal_sync_state(new_meal),
                         )
                     else:
                         assert item.kitchen_meal_id is not None
@@ -821,9 +878,507 @@ class CookidooPlanSyncService:
                             source_url=item.source_url,
                             scheduled_date=item.date,
                             message="Oppdaterte måltid fra Cookidoo Min uke",
+                            external_entry_id=_cookidoo_entry_key(
+                                item.external_entry_id, item.cookidoo_recipe_id, item.date
+                            ),
+                            include_external_entry_id=True,
+                            sync_state=_meal_sync_state(updated_meal),
                         )
 
         await asyncio.to_thread(_commit)
+
+    async def sync_cookidoo_to_kitchen_best_effort(
+        self, actor_id: str, start: date, end: date
+    ) -> dict[str, int]:
+        """Pull safe, already-known Cookidoo week changes without replacing reviewed data.
+
+        Automatically managed rows are tracked by Cookidoo entry ID. Existing rows are
+        changed or removed only while they still match the last state written by this sync.
+        New recipes that need importing remain in the explicit review flow.
+        """
+        result = {"added": 0, "updated": 0, "removed": 0, "skipped": 0}
+        try:
+            self._validate_range(start, end)
+            generation = await asyncio.to_thread(self.provider.generation, actor_id)
+            source_entries = await self.provider.get_my_week_plan(start, end)
+            meals, recipes_by_id, links_by_recipe, links_by_ext_id = await asyncio.to_thread(
+                self._load_kitchen_state, start, end
+            )
+            recipe_by_source_url = {
+                str(recipe.get("source_url")): recipe_id
+                for recipe_id, recipe in recipes_by_id.items()
+                if recipe.get("source_url")
+                and str(recipe.get("source") or "") == str(RecipeSource.COOKIDOO)
+            }
+            history = await self._load_sync_history()
+
+            # The latest durable inbound record owns a source entry. A meal edited locally
+            # since that record no longer matches sync_state and is left untouched.
+            inbound_by_entry: dict[str, dict[str, Any]] = {}
+            for record in history:
+                if record.get("direction") != "cookidoo_to_kitchen":
+                    continue
+                entry_id = record.get("external_entry_id")
+                if isinstance(entry_id, str) and entry_id:
+                    inbound_by_entry[entry_id] = record
+
+            kitchen_by_id = {meal.id: meal for meal in meals}
+            source_by_key: dict[str, CookidooMyWeekEntry] = {}
+            for entry in source_entries:
+                key = _cookidoo_entry_key(
+                    entry.external_entry_id, entry.cookidoo_recipe_id, entry.date
+                )
+                source_by_key[key] = entry
+
+            operations: list[tuple[str, str, CookidooMyWeekEntry, UUID | None, Meal | None]] = []
+            counts: dict[tuple[date, UUID], int] = {}
+            for meal in meals:
+                week_key = _week_anchor(meal.date)
+                counts[(week_key, meal.recipe_id)] = counts.get((week_key, meal.recipe_id), 0) + 1
+            reserved_counts: dict[tuple[date, UUID], int] = {}
+
+            for key, entry in source_by_key.items():
+                recipe_id = links_by_ext_id.get(entry.cookidoo_recipe_id)
+                if recipe_id is None:
+                    recipe_id = next(
+                        (
+                            rid
+                            for rid, (_external_id, source_url) in links_by_recipe.items()
+                            if source_url == entry.source_url
+                        ),
+                        None,
+                    )
+                if recipe_id is None:
+                    recipe_id = recipe_by_source_url.get(entry.source_url)
+                # Importing an unknown Cookidoo recipe changes source data and still needs
+                # the established recipe review flow.
+                if recipe_id is None:
+                    result["skipped"] += 1
+                    continue
+
+                prior = inbound_by_entry.get(key)
+                if prior is not None and prior.get("action") == "removed":
+                    prior = None
+                mapped_id: UUID | None = None
+                if prior is not None:
+                    try:
+                        mapped_id = UUID(str(prior.get("meal_id")))
+                    except (ValueError, TypeError):
+                        mapped_id = None
+                mapped_meal = kitchen_by_id.get(mapped_id) if mapped_id else None
+                if mapped_meal is not None and prior is not None:
+                    prior_state = prior.get("sync_state") or {}
+                    if _meal_sync_state(mapped_meal) != prior_state:
+                        result["skipped"] += 1
+                        continue
+                    desired = Meal(
+                        id=mapped_meal.id,
+                        date=(
+                            mapped_meal.date
+                            if _week_anchor(mapped_meal.date) == _week_anchor(entry.date)
+                            else _week_anchor(entry.date)
+                        ),
+                        recipe_id=recipe_id,
+                        servings=entry.servings,
+                        label=entry.label,
+                    )
+                    if _meal_sync_state(desired) != prior_state:
+                        operations.append(("update", key, entry, mapped_meal.id, desired))
+                    continue
+                if prior is not None:
+                    # A user removed a previously synced Kitchen meal. Do not silently
+                    # recreate it while the source entry remains in Cookidoo.
+                    result["skipped"] += 1
+                    continue
+
+                kitchen_date = _week_anchor(entry.date)
+                duplicate_key = (kitchen_date, recipe_id)
+                already_present = reserved_counts.get(duplicate_key, 0)
+                if already_present < counts.get(duplicate_key, 0):
+                    reserved_counts[duplicate_key] = already_present + 1
+                    continue
+                operations.append(("add", key, entry, None, None))
+                reserved_counts[duplicate_key] = already_present + 1
+
+            active_keys = set(source_by_key)
+            for key, prior in inbound_by_entry.items():
+                if key in active_keys or prior.get("action") == "removed":
+                    continue
+                try:
+                    prior_date = date.fromisoformat(str(prior.get("date")))
+                except (TypeError, ValueError):
+                    continue
+                if not start <= prior_date <= end:
+                    continue
+                try:
+                    meal_id = UUID(str(prior.get("meal_id")))
+                except (ValueError, TypeError):
+                    continue
+                meal = kitchen_by_id.get(meal_id)
+                if meal is None:
+                    continue
+                if _meal_sync_state(meal) != (prior.get("sync_state") or {}):
+                    result["skipped"] += 1
+                    continue
+                source_url = str(prior.get("source_url") or "")
+                removed_entry = CookidooMyWeekEntry(
+                    external_entry_id=key,
+                    cookidoo_recipe_id=str(prior.get("cookidoo_recipe_id") or "unknown"),
+                    title="Removed from Cookidoo Min uke",
+                    date=date.fromisoformat(str(prior.get("date"))),
+                    servings=meal.servings,
+                    source_url=source_url
+                    or "https://cookidoo.international/recipes/recipe/nb-NO/unknown",
+                    label=meal.label,
+                )
+                operations.append(("remove", key, removed_entry, meal_id, meal))
+
+            def _commit() -> None:
+                with self._uow.session() as session:
+                    session.lock_provider_generation(self.provider, actor_id, generation)
+                    for action, key, entry, meal_id, desired in operations:
+                        planned_prior = inbound_by_entry.get(key)
+                        current_prior = session.find_sync_history("cookidoo_to_kitchen", key)
+                        if current_prior != planned_prior:
+                            # Another sync may have committed this source entry after the
+                            # external read. Re-check under the credential row lock before
+                            # writing so overlapping connect/view/periodic triggers stay idempotent.
+                            result["skipped"] += 1
+                            continue
+                        recipe_id = links_by_ext_id.get(entry.cookidoo_recipe_id)
+                        if recipe_id is None:
+                            recipe_id = next(
+                                (
+                                    rid
+                                    for rid, (_external_id, source_url) in links_by_recipe.items()
+                                    if source_url == entry.source_url
+                                ),
+                                None,
+                            )
+                        if action == "add":
+                            if recipe_id is None:
+                                result["skipped"] += 1
+                                continue
+                            meal = Meal(
+                                id=uuid4(),
+                                date=_week_anchor(entry.date),
+                                recipe_id=recipe_id,
+                                servings=entry.servings,
+                                label=entry.label,
+                            )
+                            session.add_meal(meal)
+                            result["added"] += 1
+                            session.record_sync_history(
+                                actor_id=actor_id,
+                                direction="cookidoo_to_kitchen",
+                                action="addition",
+                                meal_id=meal.id,
+                                recipe_id=recipe_id,
+                                cookidoo_recipe_id=entry.cookidoo_recipe_id,
+                                source_url=entry.source_url,
+                                scheduled_date=meal.date,
+                                message="Synkroniserte måltid fra Cookidoo Min uke",
+                                external_entry_id=key,
+                                include_external_entry_id=True,
+                                sync_state=_meal_sync_state(meal),
+                            )
+                        elif action == "update" and meal_id is not None and desired is not None:
+                            current = session.get_meal(meal_id)
+                            prior = inbound_by_entry.get(key) or {}
+                            if current is None or _meal_sync_state(current) != (
+                                prior.get("sync_state") or {}
+                            ):
+                                result["skipped"] += 1
+                                continue
+                            if recipe_id is None:
+                                result["skipped"] += 1
+                                continue
+                            desired.recipe_id = recipe_id
+                            session.update_meal(desired)
+                            result["updated"] += 1
+                            session.record_sync_history(
+                                actor_id=actor_id,
+                                direction="cookidoo_to_kitchen",
+                                action="edit",
+                                meal_id=desired.id,
+                                recipe_id=recipe_id,
+                                cookidoo_recipe_id=entry.cookidoo_recipe_id,
+                                source_url=entry.source_url,
+                                scheduled_date=entry.date,
+                                message="Oppdaterte måltid fra Cookidoo Min uke",
+                                external_entry_id=key,
+                                include_external_entry_id=True,
+                                sync_state=_meal_sync_state(desired),
+                            )
+                        elif action == "remove" and meal_id is not None:
+                            current = session.get_meal(meal_id)
+                            prior = inbound_by_entry.get(key) or {}
+                            if current is None:
+                                continue
+                            if _meal_sync_state(current) != (prior.get("sync_state") or {}):
+                                result["skipped"] += 1
+                                continue
+                            session.delete_meal(meal_id)
+                            result["removed"] += 1
+                            session.record_sync_history(
+                                actor_id=actor_id,
+                                direction="cookidoo_to_kitchen",
+                                action="removed",
+                                meal_id=meal_id,
+                                recipe_id=current.recipe_id,
+                                cookidoo_recipe_id=entry.cookidoo_recipe_id,
+                                source_url=entry.source_url,
+                                scheduled_date=current.date,
+                                message="Fjernet synkronisert måltid som ikke lenger finnes i Cookidoo Min uke",
+                                external_entry_id=key,
+                                include_external_entry_id=True,
+                                sync_state=_meal_sync_state(current),
+                            )
+
+            if operations:
+                await asyncio.to_thread(_commit)
+        except Exception:
+            _LOG.info("Automatic Cookidoo-to-Kitchen sync failed", exc_info=True)
+        return result
+
+    async def sync_forever(
+        self, interval_seconds: float = 300.0, *, actor_id: str = "system"
+    ) -> None:
+        """Periodically import safe Cookidoo My Week changes for the current week."""
+        if interval_seconds <= 0:
+            raise ValueError("interval_seconds must be positive")
+        while True:
+            today = datetime.now().date()
+            week_start = today - timedelta(days=today.weekday())
+            week_end = week_start + timedelta(days=6)
+            await self.sync_cookidoo_to_kitchen_best_effort(actor_id, week_start, week_end)
+            await asyncio.sleep(interval_seconds)
+
+    async def sync_kitchen_to_cookidoo_best_effort(
+        self, actor_id: str, start: date, end: date
+    ) -> dict[str, int]:
+        """Reconcile Cookidoo-linked Kitchen meals to their week's Sunday, best-effort."""
+        result = {"added": 0, "updated": 0, "removed": 0, "skipped": 0}
+        try:
+            self._validate_range(start, end)
+            generation = await asyncio.to_thread(self.provider.generation, actor_id)
+            meals, recipes_by_id, links_by_recipe, _links_by_ext_id = await asyncio.to_thread(
+                self._load_kitchen_state, start, end
+            )
+            history = await self._load_sync_history()
+            outbound_by_meal: dict[str, dict[str, Any]] = {}
+            for record in history:
+                if record.get("direction") != "kitchen_to_cookidoo":
+                    continue
+                meal_id = record.get("meal_id")
+                if isinstance(meal_id, str) and meal_id:
+                    outbound_by_meal[meal_id] = record
+
+            live_entries = await self.provider.get_my_week_plan(start, end)
+            live_by_entry_id = {
+                entry.external_entry_id: entry for entry in live_entries if entry.external_entry_id
+            }
+            live_meal_ids = {str(meal.id) for meal in meals}
+            pending_history: list[dict[str, Any]] = []
+            claimed_entry_ids = {
+                str(record.get("external_entry_id"))
+                for meal_id, record in outbound_by_meal.items()
+                if meal_id in live_meal_ids
+                and record.get("action") != "removed"
+                and record.get("external_entry_id")
+            }
+
+            for meal in meals:
+                linked = links_by_recipe.get(meal.recipe_id)
+                rec = recipes_by_id.get(meal.recipe_id)
+                if rec is None:
+                    continue
+                if linked is not None:
+                    cookidoo_recipe_id, source_url = linked
+                elif str(rec.get("source") or "") == str(RecipeSource.COOKIDOO):
+                    source_url = str(rec.get("source_url") or "")
+                    cookidoo_recipe_id = _extract_cookidoo_id_from_url(source_url)
+                    if not cookidoo_recipe_id:
+                        continue
+                else:
+                    continue
+                target_date = meal.date + timedelta(days=6 - meal.date.weekday())
+                prior = outbound_by_meal.get(str(meal.id))
+                if prior is not None and prior.get("action") == "removed":
+                    prior = None
+                prior_entry_id = str(prior.get("external_entry_id") or "") if prior else ""
+                target_entry = live_by_entry_id.get(prior_entry_id) if prior_entry_id else None
+                if target_entry is not None and prior is not None:
+                    claimed_entry_ids.add(prior_entry_id)
+                    expected = prior.get("sync_state") or {}
+                    if _cookidoo_sync_state(target_entry) != expected:
+                        result["skipped"] += 1
+                        continue
+                    desired_state = {
+                        "date": target_date.isoformat(),
+                        "cookidoo_recipe_id": cookidoo_recipe_id,
+                        "servings": meal.servings,
+                        "label": meal.label,
+                    }
+                    if expected == desired_state:
+                        continue
+                    if (
+                        target_entry.cookidoo_recipe_id != cookidoo_recipe_id
+                        or target_entry.date != target_date
+                    ) and sum(
+                        candidate.cookidoo_recipe_id == target_entry.cookidoo_recipe_id
+                        and candidate.date == target_entry.date
+                        for candidate in live_entries
+                    ) > 1:
+                        result["skipped"] += 1
+                        continue
+                    written = await self.provider.add_to_my_week(
+                        cookidoo_recipe_id,
+                        target_date,
+                        servings=meal.servings,
+                        label=meal.label,
+                        entry_id=prior_entry_id,
+                        read_before_write=False,
+                        is_custom="/created-recipes/" in source_url,
+                        previous_recipe_id=target_entry.cookidoo_recipe_id,
+                        previous_date=target_entry.date,
+                        previous_is_custom=target_entry.is_custom,
+                    )
+                    result["updated"] += 1
+                else:
+                    candidate = next(
+                        (
+                            entry
+                            for entry in live_entries
+                            if entry.external_entry_id
+                            and entry.external_entry_id not in claimed_entry_ids
+                            and entry.cookidoo_recipe_id == cookidoo_recipe_id
+                            and entry.date == target_date
+                        ),
+                        None,
+                    )
+                    if candidate is not None:
+                        written = candidate
+                        claimed_entry_ids.add(candidate.external_entry_id or "")
+                    else:
+                        written = await self.provider.add_to_my_week(
+                            cookidoo_recipe_id,
+                            target_date,
+                            servings=meal.servings,
+                            label=meal.label,
+                            read_before_write=False,
+                            is_custom="/created-recipes/" in source_url,
+                        )
+                        result["added"] += 1
+                        if written.external_entry_id:
+                            claimed_entry_ids.add(written.external_entry_id)
+                pending_history.append(
+                    {
+                        "direction": "kitchen_to_cookidoo",
+                        "action": "addition" if prior is None else "edit",
+                        "meal_id": str(meal.id),
+                        "recipe_id": meal.recipe_id,
+                        "cookidoo_recipe_id": cookidoo_recipe_id,
+                        "source_url": source_url,
+                        "date": target_date,
+                        "external_entry_id": written.external_entry_id,
+                        "sync_state": _cookidoo_sync_state(written),
+                        "message": "Synkroniserte måltid til Cookidoo Min uke",
+                    }
+                )
+
+            for meal_id, prior in outbound_by_meal.items():
+                if meal_id in live_meal_ids or prior.get("action") == "removed":
+                    continue
+                try:
+                    prior_date = date.fromisoformat(
+                        str((prior.get("sync_state") or {}).get("date"))
+                    )
+                except (TypeError, ValueError):
+                    try:
+                        prior_date = date.fromisoformat(str(prior.get("date")))
+                    except (TypeError, ValueError):
+                        continue
+                if not start <= prior_date <= end:
+                    continue
+                external_entry_id = str(prior.get("external_entry_id") or "")
+                entry = live_by_entry_id.get(external_entry_id)
+                if entry is None:
+                    continue
+                if _cookidoo_sync_state(entry) != (prior.get("sync_state") or {}):
+                    result["skipped"] += 1
+                    continue
+                if any(
+                    str(meal.id) != meal_id
+                    and (link := links_by_recipe.get(meal.recipe_id)) is not None
+                    and link[0] == entry.cookidoo_recipe_id
+                    and meal.date + timedelta(days=6 - meal.date.weekday()) == entry.date
+                    for meal in meals
+                ):
+                    result["skipped"] += 1
+                    continue
+                if (
+                    sum(
+                        candidate.cookidoo_recipe_id == entry.cookidoo_recipe_id
+                        and candidate.date == entry.date
+                        for candidate in live_entries
+                    )
+                    > 1
+                ):
+                    result["skipped"] += 1
+                    continue
+                await self.provider.remove_from_my_week(
+                    entry.cookidoo_recipe_id,
+                    entry.date,
+                    is_custom=entry.is_custom,
+                )
+                result["removed"] += 1
+                pending_history.append(
+                    {
+                        "direction": "kitchen_to_cookidoo",
+                        "action": "removed",
+                        "meal_id": meal_id,
+                        "recipe_id": prior.get("recipe_id"),
+                        "cookidoo_recipe_id": entry.cookidoo_recipe_id,
+                        "source_url": entry.source_url,
+                        "date": entry.date,
+                        "external_entry_id": external_entry_id,
+                        "sync_state": _cookidoo_sync_state(entry),
+                        "message": "Fjernet måltid fra Cookidoo Min uke etter fjerning i Kjøkken",
+                    }
+                )
+
+            if pending_history:
+
+                def _record() -> None:
+                    with self._uow.session() as session:
+                        session.lock_provider_generation(self.provider, actor_id, generation)
+                        for record in pending_history:
+                            session.record_sync_history(
+                                actor_id=actor_id,
+                                direction=record["direction"],
+                                action=record["action"],
+                                meal_id=UUID(record["meal_id"]),
+                                recipe_id=(
+                                    record["recipe_id"]
+                                    if isinstance(record["recipe_id"], UUID)
+                                    else UUID(str(record["recipe_id"]))
+                                    if record["recipe_id"]
+                                    else None
+                                ),
+                                cookidoo_recipe_id=record["cookidoo_recipe_id"],
+                                source_url=record["source_url"],
+                                scheduled_date=record["date"],
+                                message=record["message"],
+                                external_entry_id=record["external_entry_id"],
+                                include_external_entry_id=True,
+                                sync_state=record["sync_state"],
+                            )
+
+                await asyncio.to_thread(_record)
+        except Exception:
+            _LOG.info("Automatic Kitchen-to-Cookidoo sync failed", exc_info=True)
+        return result
 
     async def _apply_kitchen_to_cookidoo(
         self,
@@ -844,6 +1399,7 @@ class CookidooPlanSyncService:
                         "Cookidoo-oppføringen ble endret eller fjernet før bekreftelse; forhåndsvis på nytt."
                     )
 
+        written_entries: dict[str, CookidooMyWeekEntry] = {}
         for item in selected_items:
             target_mw = (
                 live_mw_by_id.get(item.external_entry_id or "") if item.action == "edit" else None
@@ -862,6 +1418,7 @@ class CookidooPlanSyncService:
             )
             item.status = "applied"
             item.applied_external_entry_id = written.external_entry_id
+            written_entries[item.item_id] = written
 
         def _record_history() -> None:
             with self._uow.session() as session:
@@ -878,6 +1435,11 @@ class CookidooPlanSyncService:
                         scheduled_date=item.date,
                         external_entry_id=item.applied_external_entry_id,
                         include_external_entry_id=True,
+                        sync_state=(
+                            _cookidoo_sync_state(written_entries[item.item_id])
+                            if item.item_id in written_entries
+                            else None
+                        ),
                         message="Synkroniserte måltid til Cookidoo Min uke",
                     )
 

@@ -3,7 +3,7 @@
 import asyncio
 import base64
 import binascii
-from datetime import date
+from datetime import date, time, timedelta
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 from uuid import UUID
@@ -83,6 +83,20 @@ class BasketBatchSelectionInputEnvelope(BaseModel):
     end: date
     job_id: str = Field(min_length=1, max_length=64)
     selections: list[BasketBatchSelectionInput] = Field(min_length=1, max_length=100)
+
+
+WeekMealDate = date
+
+
+class WeekMealProposalEntry(BaseModel):
+    """Meal proposal item with an optional date in the selected week."""
+
+    recipe_id: UUID
+    servings: int = Field(gt=0)
+    date: WeekMealDate | None = None
+    label: str | None = Field(default=None, max_length=80)
+    scheduled_time: time | None = None
+    meal_id: UUID | None = None
 
 
 def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: BasketService) -> None:
@@ -237,6 +251,25 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
         if meals is not None and meal_entries is not None:
             raise ValueError("Provide either meal_entries or meals, not both")
         entries = meal_entries if meal_entries is not None else (meals or [])
+        return features.plan_proposals.create(actor(), entries)
+
+    @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
+    def propose_week_meal_plan(
+        week_start: date,
+        meal_entries: list[WeekMealProposalEntry],
+    ) -> ProposalRead:
+        """Prepare a week-level meal list; omitted dates use Monday as the storage anchor.
+
+        Explicit per-meal dates are preserved. This only prepares a reviewed proposal and
+        does not save plan changes.
+        """
+        anchor = week_start - timedelta(days=week_start.weekday())
+        entries = [
+            MealEntry.model_validate(
+                {**entry.model_dump(exclude={"date"}), "date": entry.date or anchor}
+            )
+            for entry in meal_entries
+        ]
         return features.plan_proposals.create(actor(), entries)
 
     @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
@@ -761,6 +794,21 @@ def install_feature_tools(mcp: FastMCP, features: KitchenFeatures, basket: Baske
         try:
             entries = await features.cookidoo_plan_sync.provider.get_my_week_plan(start, end)
             return [entry.model_dump(mode="json") for entry in entries]
+        except CookidooError as exc:
+            raise ToolError(exc.detail) from None
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True})
+    async def sync_known_cookidoo_meals_to_kitchen(start: date, end: date) -> dict[str, int]:
+        """Apply safe Cookidoo week changes for already-known recipes.
+
+        This creates, updates, or removes only meals previously synced by this flow while
+        they still match their last synced state. New recipe imports and locally edited meals
+        remain in the explicit preview and confirmation flow.
+        """
+        try:
+            return await features.cookidoo_plan_sync.sync_cookidoo_to_kitchen_best_effort(
+                actor(), start, end
+            )
         except CookidooError as exc:
             raise ToolError(exc.detail) from None
 

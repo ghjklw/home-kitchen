@@ -635,6 +635,15 @@ test("Cookidoo interactive login flow sends credentials and displays clear secur
   assert.ok(emailInput, "Email input is present");
   assert.ok(passwordInput, "Password input is present");
   assert.equal(passwordInput.type, "password", "Password field has type='password'");
+  assert.equal(emailInput.id, "cookidoo-username");
+  assert.equal(emailInput.name, "username");
+  assert.equal(emailInput.autocomplete, "username");
+  assert.equal(passwordInput.id, "cookidoo-password");
+  assert.equal(passwordInput.name, "password");
+  assert.equal(passwordInput.autocomplete, "current-password");
+  const labels = harness.modalContent.querySelectorAll("label");
+  assert.ok(labels.some((label) => label.getAttribute("for") === emailInput.id));
+  assert.ok(labels.some((label) => label.getAttribute("for") === passwordInput.id));
   assert.ok(countryInput, "Country input is present");
   assert.equal(countryInput.value, "no", "Country defaults to 'no'");
 
@@ -643,6 +652,8 @@ test("Cookidoo interactive login flow sends credentials and displays clear secur
   countryInput.value = "no";
 
   const loginForm = harness.modalContent.querySelectorAll("form")[0];
+  assert.equal(loginForm.id, "cookidoo-login");
+  assert.equal(loginForm.autocomplete, "on");
   await loginForm.submit();
 
   assert.equal(harness.calls.length, 1);

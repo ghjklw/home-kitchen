@@ -8166,10 +8166,19 @@ function openConnectorModal(integration, options = {}) {
     );
 
     const loginForm = el("form", null, "stack");
-    loginForm.autocomplete = "off";
+    loginForm.id = "cookidoo-login";
+    loginForm.autocomplete = "on";
 
     const emailField = field("E-post", "email", "", "E-postadressen til din Cookidoo-konto");
     const passwordField = field("Passord", "password", "", "Passordet til din Cookidoo-konto");
+    emailField.input.id = "cookidoo-username";
+    emailField.wrap.setAttribute("for", emailField.input.id);
+    emailField.input.name = "username";
+    emailField.input.autocomplete = "username";
+    passwordField.input.id = "cookidoo-password";
+    passwordField.wrap.setAttribute("for", passwordField.input.id);
+    passwordField.input.name = "password";
+    passwordField.input.autocomplete = "current-password";
     const countryField = field("Land", "text", "no", "Landskode (standard: 'no')");
     add(loginForm, emailField.wrap, passwordField.wrap, countryField.wrap);
 

@@ -204,7 +204,11 @@ def test_every_coop_decimal_field_uses_localized_format_and_empty_as_missing():
         assert getattr(receipt, field) == Decimal("1088.02")
     assert receipt.lines is not None
     numeric_line_fields = (
-        "quantity", "amount", "discount", "discount_amount_per_quantity", "unit_price"
+        "quantity",
+        "amount",
+        "discount",
+        "discount_amount_per_quantity",
+        "unit_price",
     )
     for field in numeric_line_fields:
         assert getattr(receipt.lines[0], field) == Decimal("1088.02")

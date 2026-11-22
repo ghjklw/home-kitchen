@@ -1022,6 +1022,22 @@ function shouldRefreshShopping(view, visibility, modalOpen, formOpen) {
 function shouldRefreshWeek(view, visibility, modalOpen, formOpen, dirty = false) {
   return shouldRefreshHouseholdView("week", view, visibility, modalOpen, formOpen, dirty);
 }
+function hasOpenWeekForm(main = $("#main"), activeElement = document.activeElement) {
+  if (!main || typeof main.querySelectorAll !== "function") return Boolean($("#main form"));
+  const forms = Array.from(main.querySelectorAll("form"));
+  if (!forms.length) return Boolean($("#main form"));
+  return forms.some((form) => {
+    const isWeekChat =
+      form.classList?.contains?.("week-chat-form") ||
+      /\bweek-chat-form\b/.test(String(form.className || ""));
+    if (!isWeekChat) return true;
+    if (state.weekChat?.sending || state.weekChat?.applyingTurnIndex !== null) return true;
+    if (activeElement && typeof form.contains === "function" && form.contains(activeElement)) {
+      return true;
+    }
+    return Boolean(state.weekChat?.draft?.trim());
+  });
+}
 function isCurrentPeriodLoad(expectedView, view, activeSequence, requestSequence, currentPeriod, requestPeriod) {
   return view === expectedView && activeSequence === requestSequence && currentPeriod === requestPeriod;
 }
@@ -1099,7 +1115,9 @@ async function refreshHouseholdViewIfSafe(targetView, force = false) {
   const formOpen =
     targetView === "shopping"
       ? hasOpenShoppingForm($("#main"), document.activeElement)
-      : Boolean($("#main form"));
+      : targetView === "week"
+        ? hasOpenWeekForm($("#main"), document.activeElement)
+        : Boolean($("#main form"));
   const dirty = targetView === "week" ? Boolean(state.mealPlanEditorDirty) : false;
   if (
     !shouldRefreshHouseholdView(
@@ -1756,6 +1774,10 @@ function render() {
 }
 function renderWeek(main) {
   state.week = startOfWeek(state.week || state.selectedDate || new Date());
+  const weekChatApi =
+    typeof globalThis !== "undefined" && globalThis.KitchenWeekPlannerChat
+      ? globalThis.KitchenWeekPlannerChat
+      : null;
   add(
     main,
     title(
@@ -1764,6 +1786,9 @@ function renderWeek(main) {
       "Oversikt over ukens måltider for husholdningen.",
       [
         button("Foreslå måltider", suggestWeek),
+        typeof weekChatApi?.focusOrOpen === "function"
+          ? button("Planlegg med KI-chat", () => weekChatApi.focusOrOpen(state))
+          : null,
         typeof openCookidooPlanSync === "function"
           ? button("Synkroniser med Cookidoo", openCookidooPlanSync)
           : null,
@@ -1815,6 +1840,22 @@ function renderWeek(main) {
     add(grid, card);
   }
   add(main, grid);
+  if (typeof weekChatApi?.renderSection === "function") {
+    add(
+      main,
+      weekChatApi.renderSection({
+        state,
+        weekStartIso: iso(day(0)),
+        days: 7,
+        api,
+        refreshView,
+        dateLabel,
+        formatUiTime,
+        connectionSettingsButton,
+        document,
+      }),
+    );
+  }
 }
 function renderAgendaMeal(meal) {
   const recipe = state.recipes.find((item) => item.id === meal.recipe_id);

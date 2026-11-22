@@ -117,6 +117,12 @@ from home_kitchen.recipes.images import (
 )
 from home_kitchen.recipes.photo_storage import PhotoAcquisition, StoredPhoto
 from home_kitchen.recipes.photos import MAX_PHOTO_BYTES
+from home_kitchen.week_chat import (
+    WeekChatApplyRequest,
+    WeekChatApplyResponse,
+    WeekChatRequest,
+    WeekChatResponse,
+)
 
 MAX_PHOTO_JSON_BYTES = ((MAX_PHOTO_BYTES + 2) // 3) * 4 + 16_384
 
@@ -648,6 +654,38 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
                 proposal_id, authenticated_actor(request), reviewed=data.reviewed
             )
         except ProposalConflict as exc:
+            raise HTTPException(409, str(exc)) from None
+
+    @router.post("/ai/week-chat")
+    async def week_plan_chat(
+        data: WeekChatRequest, request: Request, response: Response
+    ) -> WeekChatResponse:
+        actor = authenticated_actor(request)
+        response.headers["Cache-Control"] = "no-store"
+        if not (getattr(features, "week_chat_agent", None) or features.settings.ai_configured):
+            raise HTTPException(
+                503, "Konfigurer en KI-modell og API-nøkkel for å bruke ukeplan-assistenten"
+            )
+        try:
+            return await features.chat_week(data, actor_id=actor)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        except Exception:
+            raise HTTPException(
+                502, "Ukeplan-assistenten er midlertidig utilgjengelig; prøv igjen"
+            ) from None
+
+    @router.post("/ai/week-chat/apply")
+    def apply_week_plan_chat_changes(
+        data: WeekChatApplyRequest, request: Request, response: Response
+    ) -> WeekChatApplyResponse:
+        actor = authenticated_actor(request)
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return features.apply_week_chat_changes(data, actor_id=actor)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        except KeyError as exc:
             raise HTTPException(409, str(exc)) from None
 
     @router.get("/integrations")

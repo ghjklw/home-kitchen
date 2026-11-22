@@ -13,6 +13,25 @@ from home_kitchen.recipes.discovery import (
     RecipeDiscoveryResponse,
 )
 from home_kitchen.recommendations import PlanDraft
+from home_kitchen.week_chat import (
+    InventoryReaderPort,
+    PlanningHistoryPort,
+    RecipeStatsReaderPort,
+    WeekChatApplyRequest,
+    WeekChatApplyResponse,
+    WeekChatRequest,
+    WeekChatResponse,
+    WeekPlanningBackendPort,
+)
+
+__all__ = [
+    "AiWorkflowPort",
+    "EvidenceProviderPort",
+    "InventoryReaderPort",
+    "PlanningHistoryPort",
+    "RecipeStatsReaderPort",
+    "WeekPlanningBackendPort",
+]
 
 
 class EvidenceProviderPort(Protocol):
@@ -24,11 +43,19 @@ class EvidenceProviderPort(Protocol):
 
 
 class AiWorkflowPort(Protocol):
-    """Port for AI recipe drafting, weekly recommendations, and discovery."""
+    """Port for AI recipe drafting, weekly recommendations, chat planning, and discovery."""
 
     async def draft_recipe(self, provider_id: str, data: RecipeDraftRequest) -> RecipeDraft: ...
 
     async def recommend_week(self, start: date, days: int = 7) -> PlanDraft: ...
+
+    async def chat_week(
+        self, request: WeekChatRequest, *, actor_id: str | None = None
+    ) -> WeekChatResponse: ...
+
+    def apply_week_chat_changes(
+        self, request: WeekChatApplyRequest, *, actor_id: str | None = None
+    ) -> WeekChatApplyResponse: ...
 
     def discovery_context(self, query: str = "") -> DiscoveryContext: ...
 

@@ -91,6 +91,15 @@ from home_kitchen.recommendations import PlanDraft, build_planner, recommend_pla
 from home_kitchen.service import KitchenService
 from home_kitchen.settings import Household, Settings
 from home_kitchen.units import canonicalize_quantity
+from home_kitchen.week_chat import (
+    WeekChatApplyRequest,
+    WeekChatApplyResponse,
+    WeekChatRequest,
+    WeekChatResponse,
+    apply_week_chat_changes,
+    build_week_chat_agent,
+    execute_week_chat,
+)
 
 
 def _build_purchase_adapter(
@@ -252,6 +261,7 @@ class KitchenFeatures:
             self.oda,
             context_provider=self.discovery_context,
         )
+        self.week_chat_agent: Any = None
 
     @staticmethod
     def _history_snippet(entry: Any) -> EvidenceSnippet:
@@ -415,6 +425,44 @@ class KitchenFeatures:
                 "evidence_ids": [item.evidence_id for item in evidence],
                 "identity_correction_citations": correction_citations,
             }
+        )
+
+    async def chat_week(
+        self, request: WeekChatRequest, *, actor_id: str | None = None
+    ) -> WeekChatResponse:
+        def _safe_evidence(query: str) -> list[EvidenceSnippet]:
+            if (
+                type(self.history) is HistoryRepository
+                and getattr(self.history, "engine", None) is None
+                and type(self).evidence is KitchenFeatures.evidence
+            ):
+                return []
+            return self.evidence(query)
+
+        return await execute_week_chat(
+            request=request,
+            settings=self.settings,
+            household=self.household(),
+            planning=self.kitchen,
+            inventory=self.inventory,
+            evidence_fn=_safe_evidence,
+            purchase_history_fn=lambda: self.purchase_history_context(limit=25),
+            catalogue_identities=self.catalogue_identities,
+            household_id=self.household_id,
+            history_repo=self.history,
+            actor_id=actor_id,
+            agent_override=self.week_chat_agent,
+            agent_factory=build_week_chat_agent,
+        )
+
+    def apply_week_chat_changes(
+        self, request: WeekChatApplyRequest, *, actor_id: str | None = None
+    ) -> WeekChatApplyResponse:
+        return apply_week_chat_changes(
+            planning=self.kitchen,
+            request=request,
+            history_repo=self.history,
+            actor_id=actor_id,
         )
 
     def _resolve_home_assistant_client(self) -> HomeAssistantTodoClient:

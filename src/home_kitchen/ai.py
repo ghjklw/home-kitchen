@@ -12,13 +12,33 @@ from home_kitchen.ai_credentials import anthropic_model
 from home_kitchen.models import GuidedCookingStep, PurchaseEstimate, RecipeCreate
 from home_kitchen.recommendations import PlanDraft, build_planner, recommend_plan
 from home_kitchen.settings import Household, Settings
+from home_kitchen.week_chat import (
+    WeekChatApplyRequest,
+    WeekChatApplyResponse,
+    WeekChatRequest,
+    WeekChatResponse,
+    WeekChatTurn,
+    WeekPlanChange,
+    WeekPlanToolbox,
+    build_week_chat_agent,
+    run_week_chat,
+)
 
 __all__ = [
     "PlanDraft",
+    "WeekChatApplyRequest",
+    "WeekChatApplyResponse",
+    "WeekChatRequest",
+    "WeekChatResponse",
+    "WeekChatTurn",
+    "WeekPlanChange",
+    "WeekPlanToolbox",
     "build_planner",
+    "build_week_chat_agent",
     "draft_recipe",
     "recipe_agent",
     "recommend_plan",
+    "run_week_chat",
 ]
 
 if TYPE_CHECKING:

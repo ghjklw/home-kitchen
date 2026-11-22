@@ -21,6 +21,15 @@ from home_kitchen.recipes.discovery import (
     RecipeDiscoveryResponse,
 )
 from home_kitchen.recommendations import PlanDraft, build_planner, recommend_plan
+from home_kitchen.week_chat import (
+    WeekChatApplyRequest,
+    WeekChatApplyResponse,
+    WeekChatRequest,
+    WeekChatResponse,
+    apply_week_chat_changes,
+    build_week_chat_agent,
+    execute_week_chat,
+)
 
 
 class AiWorkflowService(AiWorkflowPort):
@@ -202,3 +211,32 @@ class AiWorkflowService(AiWorkflowPort):
         self, request: RecipeDiscoveryRequest, *, actor_id: str | None = None
     ) -> RecipeDiscoveryResponse:
         return await self.recipe_discovery.search(request, actor_id=actor_id)
+
+    async def chat_week(
+        self, request: WeekChatRequest, *, actor_id: str | None = None
+    ) -> WeekChatResponse:
+        return await execute_week_chat(
+            request=request,
+            settings=self.settings,
+            household=self.household(),
+            planning=self.kitchen,
+            inventory=self.inventory,
+            evidence_fn=self.evidence,
+            purchase_history_fn=lambda: self.purchase_history_context(limit=25),
+            catalogue_identities=self.catalogue_identities,
+            household_id=self.household_id,
+            history_repo=self.history,
+            actor_id=actor_id,
+            agent_override=getattr(self, "week_chat_agent", None),
+            agent_factory=build_week_chat_agent,
+        )
+
+    def apply_week_chat_changes(
+        self, request: WeekChatApplyRequest, *, actor_id: str | None = None
+    ) -> WeekChatApplyResponse:
+        return apply_week_chat_changes(
+            planning=self.kitchen,
+            request=request,
+            history_repo=self.history,
+            actor_id=actor_id,
+        )

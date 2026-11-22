@@ -489,6 +489,6 @@ test("the persistent assistant shell is present and its script is cached by the 
   assert.match(html, /id="assistant-messages"[\s\S]*?role="log"/u);
   assert.match(html, /id="assistant-input"[\s\S]*?maxlength="4000"/u);
   assert.match(html, /\/static\/assistant-chat\.js/u);
-  assert.match(serviceWorker, /kitchen-shell-v23/u);
+  assert.match(serviceWorker, /kitchen-shell-v25/u);
   assert.match(serviceWorker, /'\/static\/assistant-chat\.js'/u);
 });

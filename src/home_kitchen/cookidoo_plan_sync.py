@@ -863,6 +863,7 @@ class CookidooPlanSyncService:
                             recipe_id=recipe_id,
                             servings=item.servings,
                             label=item.label,
+                            version=current.version,
                         )
                         session.update_meal(updated_meal)
                         item.status = "applied"
@@ -1093,7 +1094,9 @@ class CookidooPlanSyncService:
                             if recipe_id is None:
                                 result["skipped"] += 1
                                 continue
-                            desired.recipe_id = recipe_id
+                            desired = desired.model_copy(
+                                update={"recipe_id": recipe_id, "version": current.version}
+                            )
                             session.update_meal(desired)
                             result["updated"] += 1
                             session.record_sync_history(

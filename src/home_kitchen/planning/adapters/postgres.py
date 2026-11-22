@@ -166,11 +166,10 @@ class PostgresMealWriter(MealWriter):
         values = entity_values(meal)
         values.pop("id")
         values.pop("version", None)
+        statement = meals.update().where(meals.c.id == meal.id)
+        statement = statement.where(meals.c.version == meal.version)
         updated = self.connection.execute(
-            meals.update()
-            .where(meals.c.id == meal.id)
-            .values(**values, version=meals.c.version + 1)
-            .returning(meals.c.id)
+            statement.values(**values, version=meals.c.version + 1).returning(meals.c.id)
         ).scalar_one_or_none()
         return updated is not None
 

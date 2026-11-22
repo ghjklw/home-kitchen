@@ -207,7 +207,7 @@ class PlanningProposalService:
                             current_meal = target_meals[entry.meal_id]
                             meal = Meal(
                                 id=entry.meal_id,
-                                version=current_meal.version + 1,
+                                version=current_meal.version,
                                 **payload,
                             )
                             if not session.meals.update_meal(meal):

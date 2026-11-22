@@ -95,9 +95,10 @@ class InMemoryMealWriter(MealWriter):
     def update_meal(self, meal: Meal) -> bool:
         if meal.id not in self.meals:
             return False
-        self.meals[meal.id] = meal.model_copy(
-            update={"version": self.meals[meal.id].version + 1}, deep=True
-        )
+        current = self.meals[meal.id]
+        if current.version != meal.version:
+            return False
+        self.meals[meal.id] = meal.model_copy(update={"version": current.version + 1}, deep=True)
         return True
 
 

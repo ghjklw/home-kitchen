@@ -106,6 +106,7 @@ class CoopPurchaseStub(BaseModel):
     amount: CommaDecimal | None = None
     total_discount: CommaDecimal | None = None
 
+
 def _revision_id(raw: dict[str, Any]) -> str:
     encoded = json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()

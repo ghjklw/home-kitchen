@@ -89,9 +89,7 @@ def test_publish_reuses_upstream_ci_instead_of_rerunning_tests():
         "pytest",
     )
     assert not any(
-        command in step.get("run", "")
-        for step in steps
-        for command in forbidden_commands
+        command in step.get("run", "") for step in steps for command in forbidden_commands
     )
     summary = next(
         step for step in steps if step.get("name") == "Record successful upstream CI gate"

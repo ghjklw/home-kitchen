@@ -2,11 +2,11 @@ from decimal import Decimal
 
 import httpx
 import pytest
-from pydantic import ValidationError
 from fixtures.synthetic_kitchen.purchase_history import (
     coop_purchase_list_pages,
     coop_receipt_detail_revisions,
 )
+from pydantic import ValidationError
 from sqlalchemy import create_engine, func, select
 
 from home_kitchen.coop_history import (
@@ -217,9 +217,7 @@ def test_every_coop_decimal_field_uses_localized_format_and_empty_as_missing():
 
 def test_receipt_decimal_rejects_malformed_grouping():
     with pytest.raises(ValidationError):
-        parse_purchase_list(
-            {"purchases": [{"summaryId": "invalid", "totalDiscount": "12 34.56"}]}
-        )
+        parse_purchase_list({"purchases": [{"summaryId": "invalid", "totalDiscount": "12 34.56"}]})
 
 
 def test_revision_hash_is_stable_and_distinguishes_fixture_correction():

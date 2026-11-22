@@ -77,6 +77,24 @@ def test_settings_normalizes_build_revision_and_release_channel():
         )
 
 
+def test_settings_forbids_local_dev_in_production_or_release_channels():
+    for channel in ("production", "release"):
+        with pytest.raises(ValueError, match="local_dev"):
+            Settings(
+                database_url="postgresql+psycopg://localhost/kitchen_test",
+                local_dev=True,
+                release_channel=channel,
+            )
+
+    for allowed_channel in ("local", "beta", "uat", None):
+        cfg = Settings(
+            database_url="postgresql+psycopg://localhost/kitchen_test",
+            local_dev=True,
+            release_channel=allowed_channel,
+        )
+        assert cfg.release_channel == allowed_channel
+
+
 def test_healthz_and_readyz_allow_unauthenticated_probes_while_api_version_requires_auth():
     expected_head, head_count = get_expected_alembic_head()
     assert head_count == 1 and expected_head is not None

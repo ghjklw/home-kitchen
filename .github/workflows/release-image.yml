@@ -101,6 +101,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GHCR_TOKEN: ${{ github.token }}
+          UAT_API_TOKEN: ${{ secrets.UAT_API_TOKEN }}
           INPUT_RELEASE_TAG: ${{ github.event.inputs.release_tag }}
           INPUT_SOURCE_SHA: ${{ github.event.inputs.source_sha }}
           INPUT_SOURCE_DIGEST: ${{ github.event.inputs.source_digest }}

@@ -143,6 +143,8 @@ def test_release_workflow_requires_manual_dispatch_and_production_environment():
         "actions": "read",
         "packages": "read",
     }
+    verify_step = next(s for s in jobs["verify"]["steps"] if s.get("id") == "verify")
+    assert verify_step["env"]["UAT_API_TOKEN"] == "${{ secrets.UAT_API_TOKEN }}"
     assert jobs["promote"]["needs"] == ["verify"]
     assert jobs["promote"]["environment"] == "production"
     assert "inputs.dry_run != true" in jobs["promote"]["if"]
@@ -626,17 +628,42 @@ def test_verify_uat_endpoint_validates_health_readiness_and_version_without_leak
     assert secret_token not in json.dumps(report)
     assert seen_auth == [None, None, f"Bearer {secret_token}"]
 
-    # Mismatched revision must fail without leaking bearer token.
-    responses["https://kitchen-uat.maki.maloline.fr/api/version"]["revision"] = "b" * 40
-    with pytest.raises(ValueError, match="revision") as exc_info:
-        release_promotion.verify_uat_endpoint(
-            "https://kitchen-uat.maki.maloline.fr",
-            expected_sha=SAMPLE_SHA,
-            expected_alembic_head="0031_alias_household_source_type",
-            bearer_token=secret_token,
-            urlopen=fake_urlopen,
-        )
-    assert secret_token not in str(exc_info.value)
+    # Mismatched or missing revision must fail without leaking bearer token.
+    for bad_rev in ("b" * 40, None, ""):
+        responses["https://kitchen-uat.maki.maloline.fr/api/version"]["revision"] = bad_rev
+        with pytest.raises(ValueError, match="revision") as exc_info:
+            release_promotion.verify_uat_endpoint(
+                "https://kitchen-uat.maki.maloline.fr",
+                expected_sha=SAMPLE_SHA,
+                expected_alembic_head="0031_alias_household_source_type",
+                bearer_token=secret_token,
+                urlopen=fake_urlopen,
+            )
+        assert secret_token not in str(exc_info.value)
+
+    # Restore valid revision and check UAT vs production channel isolation.
+    responses["https://kitchen-uat.maki.maloline.fr/api/version"]["revision"] = SAMPLE_SHA
+    responses["https://kitchen-uat.maki.maloline.fr/api/version"]["channel"] = "beta"
+    beta_report = release_promotion.verify_uat_endpoint(
+        "https://kitchen-uat.maki.maloline.fr",
+        expected_sha=SAMPLE_SHA,
+        expected_alembic_head="0031_alias_household_source_type",
+        bearer_token=secret_token,
+        urlopen=fake_urlopen,
+    )
+    assert beta_report["channel"] == "beta"
+
+    for non_uat_channel in ("production", "release", "local", None):
+        responses["https://kitchen-uat.maki.maloline.fr/api/version"]["channel"] = non_uat_channel
+        with pytest.raises(ValueError, match="isolated UAT channel") as exc_info:
+            release_promotion.verify_uat_endpoint(
+                "https://kitchen-uat.maki.maloline.fr",
+                expected_sha=SAMPLE_SHA,
+                expected_alembic_head="0031_alias_household_source_type",
+                bearer_token=secret_token,
+                urlopen=fake_urlopen,
+            )
+        assert secret_token not in str(exc_info.value)
 
 
 def test_handle_promote_refuses_dry_run_and_records_rollback_previous_latest(monkeypatch, tmp_path):
@@ -779,5 +806,7 @@ def test_handle_verify_dry_run_writes_verification_metadata_and_checks_uat(monke
     assert verification["digest"] == index_digest
     assert verification["image_ref"] == f"ghcr.io/ghjklw/home-kitchen@{index_digest}"
     assert verification["uat_probe"]["readyz"] == "ready"
-    assert "Dry run complete" in summary_file.read_text(encoding="utf-8")
+    summary_text = summary_file.read_text(encoding="utf-8")
+    assert "Dry run complete" in summary_text
+    assert "**UAT probe**: `https://kitchen-uat.maki.maloline.fr`" in summary_text
     assert f"source_digest={index_digest}" in output_file.read_text(encoding="utf-8")

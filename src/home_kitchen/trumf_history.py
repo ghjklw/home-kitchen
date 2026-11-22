@@ -19,7 +19,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import urllib.parse
 from base64 import b64decode, urlsafe_b64encode
+from datetime import UTC, date, datetime
+from datetime import time as dt_time
 from decimal import Decimal
 from typing import Any, Literal, Protocol, runtime_checkable
 from uuid import UUID, uuid4
@@ -31,6 +34,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    ValidationError,
     field_validator,
 )
 
@@ -69,6 +73,106 @@ class TrumfAdapterStatus(BaseModel):
     limitations: str = TRUMF_LIMITATIONS
 
 
+_COOKIE_ATTR_FLAGS = frozenset({"httponly", "secure", "partitioned"})
+_COOKIE_ATTR_NAMES = frozenset({"path", "domain", "expires", "max-age", "samesite", "priority"})
+
+
+def _is_missing_rsc_value(value: object) -> bool:
+    if value is None:
+        return True
+    return isinstance(value, str) and value.strip() in ("", "$undefined")
+
+
+def _clean_optional_str(value: object) -> str | None:
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s or s == "$undefined":
+        return None
+    return s
+
+
+def _clean_optional_decimal(value: object) -> object:
+    if _is_missing_rsc_value(value):
+        return None
+    if isinstance(value, bool):
+        raise ValueError("Boolean is not a valid decimal value")
+    return value
+
+
+def _clean_required_decimal(value: object) -> object:
+    if isinstance(value, bool):
+        raise ValueError("Boolean is not a valid decimal value")
+    if isinstance(value, str) and value.strip() == "$undefined":
+        raise ValueError("Missing decimal value ($undefined)")
+    return value
+
+
+def _validate_finite_decimal(value: Decimal | None) -> Decimal | None:
+    if value is not None and not value.is_finite():
+        raise ValueError("Decimal value must be finite")
+    return value
+
+
+def _normalize_timestamp(value: object) -> object:
+    if _is_missing_rsc_value(value):
+        return None
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value
+    if isinstance(value, str):
+        s = value.strip()
+        if s.startswith("$D"):
+            s = s[2:].strip()
+        if not s or s == "$undefined":
+            return None
+        if len(s) == 10 and s.count("-") == 2:
+            return datetime.combine(date.fromisoformat(s), dt_time.min, tzinfo=UTC)
+        parsed = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed
+    return value
+
+
+def _coerce_optional_list(value: object) -> object:
+    if _is_missing_rsc_value(value):
+        return []
+    return value
+
+
+def _coerce_bool_with_default(value: object, *, default: bool) -> object:
+    if _is_missing_rsc_value(value):
+        return default
+    return value
+
+
+def _normalize_cookie_header(raw_cookie: str) -> str:
+    """Strip Cookie/Set-Cookie prefixes, newlines, and attributes for HTTP requests."""
+    cookies: dict[str, str] = {}
+    for segment in re.split(r"[\r\n;]+", raw_cookie):
+        cleaned = re.sub(r"^(?:cookie|set-cookie):\s*", "", segment.strip(), flags=re.IGNORECASE)
+        if not cleaned or cleaned.lower() in _COOKIE_ATTR_FLAGS:
+            continue
+        if "=" not in cleaned:
+            continue
+        name, val = cleaned.split("=", 1)
+        name = name.strip()
+        val = val.strip()
+        if not name or name.lower() in _COOKIE_ATTR_NAMES:
+            continue
+        cookies[name] = val
+    if cookies:
+        return "; ".join(f"{k}={v}" for k, v in cookies.items())
+    stripped = re.sub(r"[\r\n]+", " ", raw_cookie).strip()
+    if stripped.lower() in _COOKIE_ATTR_FLAGS:
+        return ""
+    if "=" in stripped:
+        attr_name = stripped.split("=", 1)[0].strip().lower()
+        if attr_name in _COOKIE_ATTR_NAMES:
+            return ""
+    return stripped
+
+
 class TrumfSaving(BaseModel):
     """Discount, offer, or campaign line associated with a purchased product."""
 
@@ -85,6 +189,21 @@ class TrumfSaving(BaseModel):
         validation_alias=AliasChoices("belop", "amount"),
         serialization_alias="belop",
     )
+
+    @field_validator("type", "beskrivelse", mode="before")
+    @classmethod
+    def clean_optional_text(cls, value: object) -> str | None:
+        return _clean_optional_str(value)
+
+    @field_validator("belop", mode="before")
+    @classmethod
+    def clean_belop(cls, value: object) -> object:
+        return _clean_optional_decimal(value)
+
+    @field_validator("belop", mode="after")
+    @classmethod
+    def check_finite_belop(cls, value: Decimal | None) -> Decimal | None:
+        return _validate_finite_decimal(value)
 
 
 class TrumfReceiptLine(BaseModel):
@@ -104,7 +223,8 @@ class TrumfReceiptLine(BaseModel):
         validation_alias=AliasChoices("antall", "quantity"),
         serialization_alias="antall",
     )
-    belop: Decimal = Field(
+    belop: Decimal | None = Field(
+        default=None,
         validation_alias=AliasChoices("belop", "total", "amount"),
         serialization_alias="belop",
     )
@@ -125,23 +245,33 @@ class TrumfReceiptLine(BaseModel):
         serialization_alias="besparelser",
     )
 
-    @field_validator("ean", mode="before")
+    @field_validator("ean", "enhets_type", mode="before")
     @classmethod
-    def normalize_ean(cls, value: object) -> str | None:
-        if value is None or value == "$undefined" or value == "":
-            return None
-        s = str(value).strip()
-        if not s or s == "$undefined":
-            return None
-        return s
+    def normalize_optional_str(cls, value: object) -> str | None:
+        return _clean_optional_str(value)
 
     @field_validator("produkt_beskrivelse", mode="before")
     @classmethod
     def clean_name(cls, value: object) -> str:
-        s = str(value or "").strip()
+        s = _clean_optional_str(value)
         if not s:
             raise ValueError("produktBeskrivelse must be non-empty")
         return s
+
+    @field_validator("antall", "belop", "moms_prosent", "bonus", mode="before")
+    @classmethod
+    def clean_decimals(cls, value: object) -> object:
+        return _clean_optional_decimal(value)
+
+    @field_validator("antall", "belop", "moms_prosent", "bonus", mode="after")
+    @classmethod
+    def check_finite_decimals(cls, value: Decimal | None) -> Decimal | None:
+        return _validate_finite_decimal(value)
+
+    @field_validator("besparelser", mode="before")
+    @classmethod
+    def clean_besparelser(cls, value: object) -> object:
+        return _coerce_optional_list(value)
 
 
 class TrumfTransaction(BaseModel):
@@ -201,6 +331,51 @@ class TrumfTransaction(BaseModel):
         serialization_alias="transaksjonKategori",
     )
 
+    @field_validator(
+        "batch_id",
+        "filter_category",
+        "partner_id",
+        "medlem_id",
+        "transaksjon_kategori",
+        mode="before",
+    )
+    @classmethod
+    def clean_optional_fields(cls, value: object) -> str | None:
+        return _clean_optional_str(value)
+
+    @field_validator("beskrivelse", mode="before")
+    @classmethod
+    def clean_beskrivelse(cls, value: object) -> str:
+        s = _clean_optional_str(value)
+        if not s:
+            raise ValueError("beskrivelse must be non-empty")
+        return s
+
+    @field_validator("belop", mode="before")
+    @classmethod
+    def clean_belop(cls, value: object) -> object:
+        return _clean_required_decimal(value)
+
+    @field_validator("bonus", mode="before")
+    @classmethod
+    def clean_bonus(cls, value: object) -> object:
+        return _clean_optional_decimal(value)
+
+    @field_validator("belop", "bonus", mode="after")
+    @classmethod
+    def check_finite_decimals(cls, value: Decimal | None) -> Decimal | None:
+        return _validate_finite_decimal(value)
+
+    @field_validator("transaksjons_tidspunkt", mode="before")
+    @classmethod
+    def clean_timestamp(cls, value: object) -> object:
+        return _normalize_timestamp(value)
+
+    @field_validator("har_kvittering", mode="before")
+    @classmethod
+    def clean_har_kvittering(cls, value: object) -> object:
+        return _coerce_bool_with_default(value, default=True)
+
 
 def chain_of(transaction: TrumfTransaction) -> str | None:
     """Infer chain identifier: filterCategory > partnerId > first word of store description."""
@@ -212,6 +387,17 @@ def chain_of(transaction: TrumfTransaction) -> str | None:
         first_word = transaction.beskrivelse.split()[0]
         return first_word if first_word else None
     return None
+
+
+def _has_line_identity(item: object) -> bool:
+    if isinstance(item, TrumfReceiptLine):
+        return bool(_clean_optional_str(item.produkt_beskrivelse))
+    if not isinstance(item, dict):
+        return True
+    for key in ("produktBeskrivelse", "vareTekst", "produkt_beskrivelse", "name"):
+        if _clean_optional_str(item.get(key)) is not None:
+            return True
+    return False
 
 
 class TrumfReceipt(BaseModel):
@@ -267,6 +453,40 @@ class TrumfReceipt(BaseModel):
     source_updated_at: None = None
     revision_id: str
 
+    @field_validator("batch_id", "kvitterings_id", "store_name", "chain", mode="before")
+    @classmethod
+    def clean_optional_fields(cls, value: object) -> str | None:
+        return _clean_optional_str(value)
+
+    @field_validator("belop", "bonus", mode="before")
+    @classmethod
+    def clean_decimals(cls, value: object) -> object:
+        return _clean_optional_decimal(value)
+
+    @field_validator("belop", "bonus", mode="after")
+    @classmethod
+    def check_finite_decimals(cls, value: Decimal | None) -> Decimal | None:
+        return _validate_finite_decimal(value)
+
+    @field_validator("transaksjons_tidspunkt", mode="before")
+    @classmethod
+    def clean_timestamp(cls, value: object) -> object:
+        return _normalize_timestamp(value)
+
+    @field_validator("has_receipt", mode="before")
+    @classmethod
+    def clean_has_receipt(cls, value: object) -> object:
+        return _coerce_bool_with_default(value, default=True)
+
+    @field_validator("varelinjer", mode="before")
+    @classmethod
+    def clean_varelinjer(cls, value: object) -> object:
+        coerced = _coerce_optional_list(value)
+        if isinstance(coerced, list):
+            # Skip non-item discount/summary rows lacking a product description.
+            return [item for item in coerced if _has_line_identity(item)]
+        return coerced
+
 
 def _revision_id(raw: dict[str, Any]) -> str:
     """Compute a deterministic hash of provider payload contents."""
@@ -281,6 +501,135 @@ def _revision_id(raw: dict[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _scan_bracketed_json_slice(html: str, start: int, *, escaped: bool) -> int | None:
+    """Return end index of the balanced JSON container starting at `start`, or None."""
+    open_c = html[start]
+    close_c = "]" if open_c == "[" else "}"
+    depth = 0
+    in_str = False
+    json_escaped = False
+    j = start
+    n = len(html)
+
+    while j < n:
+        c = html[j]
+        if escaped:
+            if c == "\\" and j + 1 < n:
+                nxt = html[j + 1]
+                if nxt == '"':
+                    if not in_str:
+                        in_str = True
+                        json_escaped = False
+                    elif json_escaped:
+                        json_escaped = False
+                    else:
+                        in_str = False
+                        json_escaped = False
+                elif in_str and nxt == "\\":
+                    json_escaped = not json_escaped
+                else:
+                    json_escaped = False
+                j += 2
+                continue
+            json_escaped = False
+            if not in_str:
+                if c == open_c:
+                    depth += 1
+                elif c == close_c:
+                    depth -= 1
+                    if depth == 0:
+                        return j + 1
+            j += 1
+        else:
+            if in_str:
+                if c == "\\":
+                    j += 2
+                    continue
+                if c == '"':
+                    in_str = False
+            else:
+                if c == '"':
+                    in_str = True
+                elif c == open_c:
+                    depth += 1
+                elif c == close_c:
+                    depth -= 1
+                    if depth == 0:
+                        return j + 1
+            j += 1
+
+    return None
+
+
+def _decode_rsc_raw_slice(raw: str, *, escaped: bool) -> str:
+    if not escaped:
+        return re.sub(r'"\$D', '"', raw)
+    try:
+        decoded = json.loads(f'"{raw}"', strict=False)
+    except json.JSONDecodeError:
+        decoded = re.sub(
+            r"\\(.)",
+            lambda m: m.group(1) if m.group(1) in ('"', "\\", "/") else m.group(0),
+            raw,
+        )
+    return re.sub(r'"\$D', '"', decoded)
+
+
+def _extract_rsc_flight_entry(html: str, key: str) -> tuple[bool, Any]:
+    """Extract (found_key, parsed_value) for `key` in an RSC flight payload."""
+    escaped_marker = f'\\"{key}\\":'
+    unescaped_marker = f'"{key}":'
+
+    saw_null_or_undefined = False
+    for marker, is_escaped in ((escaped_marker, True), (unescaped_marker, False)):
+        search_from = 0
+        while True:
+            at = html.find(marker, search_from)
+            if at < 0:
+                break
+            i = at + len(marker)
+            while i < len(html) and html[i].isspace():
+                i += 1
+            if i >= len(html):
+                break
+
+            if html.startswith("null", i):
+                saw_null_or_undefined = True
+                search_from = i + 4
+                continue
+
+            undef_lit = '\\"$undefined\\"' if is_escaped else '"$undefined"'
+            if html.startswith(undef_lit, i):
+                saw_null_or_undefined = True
+                search_from = i + len(undef_lit)
+                continue
+
+            if html[i] in "[{":
+                end_idx = _scan_bracketed_json_slice(html, i, escaped=is_escaped)
+                if end_idx is None:
+                    search_from = i + 1
+                    continue
+                decoded = _decode_rsc_raw_slice(html[i:end_idx], escaped=is_escaped)
+                try:
+                    return True, json.loads(decoded)
+                except json.JSONDecodeError as err:
+                    raise UnsupportedTrumfContract(f"Malformed JSON in RSC payload: {err}") from err
+
+            # Non-container literal (e.g., string/number/boolean)
+            end_m = re.search(r"[,}\]]", html[i:])
+            lit_end = i + end_m.start() if end_m else len(html)
+            raw_lit = html[i:lit_end].strip()
+            decoded_lit = _decode_rsc_raw_slice(raw_lit, escaped=is_escaped)
+            try:
+                return True, json.loads(decoded_lit)
+            except json.JSONDecodeError as err:
+                raise UnsupportedTrumfContract(f"Malformed JSON in RSC payload: {err}") from err
+
+    if saw_null_or_undefined:
+        return True, None
+    return False, None
+
+
 def extract_rsc_flight_json(html: str, key: str) -> Any | None:
     """Extract and parse a JSON array or object following key in an RSC flight payload.
 
@@ -289,66 +638,30 @@ def extract_rsc_flight_json(html: str, key: str) -> Any | None:
     unescapes quotes and backslashes, strips the RSC '$D' date prefix, and parses JSON.
     Returns None if the key marker or structure is not found.
     """
-    marker = key + '\\":'
-    at = html.find(marker)
-    if at < 0:
-        marker = key + '":'
-        at = html.find(marker)
-    if at < 0:
-        return None
+    _, value = _extract_rsc_flight_entry(html, key)
+    return value
 
-    i = at + len(marker)
-    while i < len(html) and html[i] not in "[{":
-        i += 1
-    if i >= len(html):
-        return None
 
-    open_c = html[i]
-    close_c = "]" if open_c == "[" else "}"
-    depth = 0
-    in_str = False
-    j = i
-    while j < len(html):
-        c = html[j]
-        if in_str:
-            if c == "\\" and j + 1 < len(html) and html[j + 1] == '"':
-                b = 0
-                k = j
-                while k >= 0 and html[k] == "\\":
-                    b += 1
-                    k -= 1
-                if b % 2 == 1:
-                    in_str = False
-                j += 2
-                continue
-            elif c == '"':
-                in_str = False
-        else:
-            if c == "\\" and j + 1 < len(html) and html[j + 1] == '"':
-                in_str = True
-                j += 2
-                continue
-            elif c == '"':
-                in_str = True
-            elif c == open_c:
-                depth += 1
-            elif c == close_c:
-                depth -= 1
-                if depth == 0:
-                    j += 1
-                    break
-        j += 1
-
-    if depth != 0:
-        return None
-
-    raw = html[i:j]
-    unescaped = raw.replace('\\"', '"').replace("\\\\", "\\")
-    unescaped = re.sub(r'"\$D', '"', unescaped)
-    try:
-        return json.loads(unescaped)
-    except json.JSONDecodeError as err:
-        raise UnsupportedTrumfContract(f"Malformed JSON in RSC payload: {err}") from err
+def _is_unauthenticated_dict(data: dict[str, Any]) -> bool:
+    if data.get("authenticated") is False:
+        return True
+    status = data.get("status") or data.get("statusCode")
+    if status in (401, 403):
+        return True
+    error = str(
+        data.get("error") or data.get("message") or data.get("title") or data.get("detail") or ""
+    ).casefold()
+    return any(
+        marker in error
+        for marker in (
+            "unauthorized",
+            "unauthenticated",
+            "forbidden",
+            "logg inn",
+            "innlogging",
+            "login required",
+        )
+    )
 
 
 def parse_transactions(
@@ -363,6 +676,10 @@ def parse_transactions(
     if isinstance(payload, list):
         raw_list = payload
     elif isinstance(payload, dict):
+        if _is_unauthenticated_dict(payload):
+            raise TrumfAuthenticationError(
+                "Missing or invalid Trumf session payload; unauthenticated response from provider"
+            )
         if "transactionsData" in payload:
             raw_list = payload["transactionsData"]
         elif "purchases" in payload:
@@ -373,16 +690,16 @@ def parse_transactions(
             raise UnsupportedTrumfContract("Trumf transaction response missing transactionsData")
     elif isinstance(payload, str):
         stripped = payload.strip()
-        if (stripped.startswith("{") and stripped.endswith("}")) or (
-            stripped.startswith("[") and stripped.endswith("]")
-        ):
+        if stripped.startswith(("{", "[")) and "__next_f" not in payload:
             try:
                 parsed_json = json.loads(stripped)
-                return parse_transactions(parsed_json)
-            except json.JSONDecodeError:
-                pass
-        extracted = extract_rsc_flight_json(payload, "transactionsData")
-        if extracted is None:
+            except json.JSONDecodeError as err:
+                raise UnsupportedTrumfContract(
+                    f"Malformed JSON in Trumf transaction payload: {err}"
+                ) from err
+            return parse_transactions(parsed_json)
+        found, extracted = _extract_rsc_flight_entry(payload, "transactionsData")
+        if not found:
             raise TrumfAuthenticationError(
                 "Missing or invalid Trumf session payload; no transaction data found in page"
             )
@@ -393,7 +710,14 @@ def parse_transactions(
     if not isinstance(raw_list, list):
         raise UnsupportedTrumfContract("Trumf transactions data must be an array")
 
-    return [TrumfTransaction.model_validate(item) for item in raw_list]
+    try:
+        return [TrumfTransaction.model_validate(item) for item in raw_list]
+    except ValidationError as err:
+        raise UnsupportedTrumfContract(f"Invalid transaction in Trumf list: {err}") from err
+
+
+def _has_non_missing_key(mapping: dict[str, Any], *keys: str) -> bool:
+    return any(key in mapping and not _is_missing_rsc_value(mapping[key]) for key in keys)
 
 
 def parse_receipt(
@@ -408,6 +732,10 @@ def parse_receipt(
     """
     raw_dict: Any
     if isinstance(payload, dict):
+        if _is_unauthenticated_dict(payload):
+            raise TrumfAuthenticationError(
+                "Missing or invalid Trumf session payload; unauthenticated response from provider"
+            )
         if "purchaseDetails" in payload:
             raw_dict = payload["purchaseDetails"]
         elif "summary" in payload:
@@ -416,14 +744,16 @@ def parse_receipt(
             raw_dict = payload
     elif isinstance(payload, str):
         stripped = payload.strip()
-        if stripped.startswith("{") and stripped.endswith("}"):
+        if stripped.startswith("{") and "__next_f" not in payload:
             try:
                 parsed_json = json.loads(stripped)
-                return parse_receipt(parsed_json, transaction=transaction)
-            except json.JSONDecodeError:
-                pass
-        extracted = extract_rsc_flight_json(payload, "purchaseDetails")
-        if extracted is None:
+            except json.JSONDecodeError as err:
+                raise UnsupportedTrumfContract(
+                    f"Malformed JSON in Trumf receipt payload: {err}"
+                ) from err
+            return parse_receipt(parsed_json, transaction=transaction)
+        found, extracted = _extract_rsc_flight_entry(payload, "purchaseDetails")
+        if not found:
             raise TrumfAuthenticationError(
                 "Missing or invalid Trumf session payload; no receipt details found in page"
             )
@@ -436,33 +766,42 @@ def parse_receipt(
 
     enriched = dict(raw_dict)
     if transaction is not None:
-        if "batchId" not in enriched and "batchid" not in enriched:
+        if (
+            not _has_non_missing_key(enriched, "batchId", "batchid", "batch_id")
+            and transaction.batch_id
+        ):
             enriched["batchId"] = transaction.batch_id
         if (
-            "storeName" not in enriched
-            and "beskrivelse" not in enriched
+            not _has_non_missing_key(enriched, "storeName", "store_name", "beskrivelse")
             and transaction.beskrivelse
         ):
             enriched["storeName"] = transaction.beskrivelse
-        if (
-            "chain" not in enriched
-            and "filterCategory" not in enriched
-            and "kjedeid" not in enriched
-        ):
+        if not _has_non_missing_key(enriched, "chain", "filterCategory", "kjedeid"):
             chain = chain_of(transaction)
             if chain:
                 enriched["chain"] = chain
-        if "transaksjonsTidspunkt" not in enriched and "dato" not in enriched:
+        if not _has_non_missing_key(
+            enriched,
+            "transaksjonsTidspunkt",
+            "dato",
+            "transaksjons_tidspunkt",
+            "purchaseDate",
+        ):
             enriched["transaksjonsTidspunkt"] = transaction.transaksjons_tidspunkt
-        if "belop" not in enriched:
+        if not _has_non_missing_key(enriched, "belop", "amount", "total"):
             enriched["belop"] = transaction.belop
-        if "bonus" not in enriched and transaction.bonus is not None:
+        if not _has_non_missing_key(enriched, "bonus") and transaction.bonus is not None:
             enriched["bonus"] = transaction.bonus
+        if not _has_non_missing_key(enriched, "hasReceipt", "has_receipt", "harKvittering"):
+            enriched["hasReceipt"] = transaction.har_kvittering
 
     if "revision_id" not in enriched:
         enriched["revision_id"] = _revision_id(enriched)
 
-    return TrumfReceipt.model_validate(enriched)
+    try:
+        return TrumfReceipt.model_validate(enriched)
+    except ValidationError as err:
+        raise UnsupportedTrumfContract(f"Invalid Trumf receipt structure: {err}") from err
 
 
 def build_transaction_receipt_stub(transaction: TrumfTransaction) -> TrumfReceipt:
@@ -593,6 +932,22 @@ class TrumfFixtureSource:
         return parse_receipt(raw, transaction=tx)
 
 
+def _validate_trumf_batch_id(batch_id: str) -> str:
+    if not isinstance(batch_id, str):
+        raise UnsupportedTrumfContract("Ugyldig Trumf batchId")
+    cleaned = batch_id.strip()
+    if (
+        not cleaned
+        or cleaned == "$undefined"
+        or ".." in cleaned
+        or "/" in cleaned
+        or "\\" in cleaned
+        or any(ord(ch) < 32 for ch in cleaned)
+    ):
+        raise UnsupportedTrumfContract(f"Ugyldig Trumf batchId: {batch_id!r}")
+    return cleaned
+
+
 class TrumfHttpSource:
     """Live HTTP source for Trumf kvitteringer using session cookies."""
 
@@ -603,7 +958,8 @@ class TrumfHttpSource:
         base_url: str = "https://www.trumf.no",
         transport: httpx.BaseTransport | None = None,
     ) -> None:
-        clean_cookie = session_cookie.strip() if isinstance(session_cookie, str) else ""
+        raw_cookie = session_cookie if isinstance(session_cookie, str) else ""
+        clean_cookie = _normalize_cookie_header(raw_cookie)
         if not clean_cookie:
             raise TrumfAuthenticationError("Trumf-informasjonskapsel mangler.")
         self.session_cookie = clean_cookie
@@ -627,7 +983,7 @@ class TrumfHttpSource:
         url = f"{self.base_url}/trumf-profil/kvitteringer"
         with self._client() as client:
             resp = client.get(url)
-        if resp.status_code in (401, 403, 302, 303, 307):
+        if resp.status_code in (401, 403) or 300 <= resp.status_code < 400:
             raise TrumfAuthenticationError(
                 "Trumf-sesjonen er utløpt eller ugyldig; forny eller koble til på nytt i Innstillinger."
             )
@@ -640,20 +996,26 @@ class TrumfHttpSource:
         return txs
 
     def get_receipt(self, account_id: str, batch_id: str) -> TrumfReceipt | None:
-        url = f"{self.base_url}/trumf-profil/kvitteringer/{batch_id}"
+        clean_batch_id = _validate_trumf_batch_id(batch_id)
+        encoded_batch_id = urllib.parse.quote(clean_batch_id, safe="")
+        url = f"{self.base_url}/trumf-profil/kvitteringer/{encoded_batch_id}"
         with self._client() as client:
             resp = client.get(url)
         if resp.status_code == 404:
             return None
-        if resp.status_code in (401, 403, 302, 303, 307):
+        if resp.status_code in (401, 403) or 300 <= resp.status_code < 400:
             raise TrumfAuthenticationError(
                 "Trumf-sesjonen er utløpt eller ugyldig; forny eller koble til på nytt i Innstillinger."
             )
         if resp.status_code >= 400:
             raise UnsupportedTrumfContract(
-                f"Trumf kvittering {batch_id} svarte med HTTP {resp.status_code}"
+                f"Trumf kvittering {clean_batch_id} svarte med HTTP {resp.status_code}"
             )
-        return parse_receipt(resp.text, transaction=self._tx_cache.get(batch_id))
+        if "__next_f" in resp.text:
+            found, extracted = _extract_rsc_flight_entry(resp.text, "purchaseDetails")
+            if found and extracted is None:
+                return None
+        return parse_receipt(resp.text, transaction=self._tx_cache.get(clean_batch_id))
 
 
 class TrumfPurchaseHistoryAdapter:
@@ -686,6 +1048,7 @@ class TrumfPurchaseHistoryAdapter:
         self.page_size = page_size
         self.max_pages = max_pages
         self.include_non_receipt_transactions = include_non_receipt_transactions
+        self._scan_snapshots: dict[str, list[TrumfTransaction]] = {}
 
     def status(self) -> TrumfAdapterStatus:
         """Return provider status metadata and limitations."""
@@ -709,8 +1072,13 @@ class TrumfPurchaseHistoryAdapter:
                 next_page=1,
                 state="scanning",
             )
-
-        transactions = self.source.get_transactions(account_id)
+            transactions = self.source.get_transactions(account_id)
+            self._scan_snapshots = {scan.scan_id: transactions}
+        else:
+            transactions = self._scan_snapshots.get(scan.scan_id)
+            if transactions is None:
+                transactions = self.source.get_transactions(account_id)
+                self._scan_snapshots[scan.scan_id] = transactions
 
         page_num = scan.next_page
         start_idx = (page_num - 1) * self.page_size
@@ -726,6 +1094,8 @@ class TrumfPurchaseHistoryAdapter:
             if tx.har_kvittering and tx.batch_id:
                 receipt = self.source.get_receipt(account_id, tx.batch_id)
                 if receipt is not None:
+                    if not receipt.batch_id:
+                        receipt = receipt.model_copy(update={"batch_id": tx.batch_id})
                     records.append(to_provider_order_record(receipt))
                 elif self.include_non_receipt_transactions:
                     stub = build_transaction_receipt_stub(tx)
@@ -733,6 +1103,9 @@ class TrumfPurchaseHistoryAdapter:
             elif self.include_non_receipt_transactions:
                 stub = build_transaction_receipt_stub(tx)
                 records.append(to_provider_order_record(stub))
+
+        if not has_more:
+            self._scan_snapshots.pop(scan.scan_id, None)
 
         next_cursor = _encode_cursor(
             scan.model_copy(

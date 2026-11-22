@@ -23,6 +23,7 @@ from home_kitchen.trumf_history import (
     TrumfAuthenticationError,
     TrumfHttpSource,
     TrumfPurchaseHistoryAdapter,
+    UnsupportedTrumfContract,
 )
 
 pytestmark = pytest.mark.mocked_provider
@@ -200,6 +201,58 @@ def test_trumf_http_source_fetches_transactions_and_raises_on_redirect():
     )
     with pytest.raises(TrumfAuthenticationError):
         expired_source.get_transactions("u1")
+
+
+def test_trumf_http_source_cookie_normalization_batch_id_validation_redirects_and_null_receipt():
+    with pytest.raises(TrumfAuthenticationError):
+        TrumfHttpSource("Path=/; HttpOnly; Secure")
+
+    seen_urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_urls.append(str(request.url))
+        assert request.headers.get("cookie") == "a=1; b=2"
+        if request.url.path == "/trumf-profil/kvitteringer":
+            return httpx.Response(
+                200,
+                text=(
+                    '<script>self.__next_f.push([1,"{\\"transactionsData\\":['
+                    '{\\"batchId\\":\\"b 1\\",\\"transaksjonsTidspunkt\\":\\"2026-11-18T15:00:00Z\\",'
+                    '\\"beskrivelse\\":\\"KIWI\\",\\"belop\\":\\"55.00\\",\\"harKvittering\\":true}'
+                    ']}"])</script>'
+                ),
+            )
+        if request.url.path == "/trumf-profil/kvitteringer/b%201":
+            return httpx.Response(
+                200,
+                text='<script>self.__next_f.push([1,"{\\"purchaseDetails\\":null}"])</script>',
+            )
+        return httpx.Response(404)
+
+    source = TrumfHttpSource(
+        "Cookie: a=1; Path=/;\nb=2; HttpOnly",
+        transport=httpx.MockTransport(handler),
+    )
+    adapter = TrumfPurchaseHistoryAdapter(source, account_id="u1")
+    page = adapter.fetch_page("u1", None)
+    assert len(page.records) == 1
+    assert page.records[0].external_id == "b 1"
+    assert page.records[0].payload["hasReceipt"] is False
+    assert any(url.endswith("/trumf-profil/kvitteringer/b%201") for url in seen_urls)
+
+    for bad_batch_id in ("", "  ", "../secret", "a/b", "$undefined"):
+        with pytest.raises(UnsupportedTrumfContract):
+            source.get_receipt("u1", bad_batch_id)
+
+    for redirect_code in (301, 308):
+        redir_source = TrumfHttpSource(
+            "session=abc",
+            transport=httpx.MockTransport(lambda req, code=redirect_code: httpx.Response(code)),
+        )
+        with pytest.raises(TrumfAuthenticationError):
+            redir_source.get_transactions("u1")
+        with pytest.raises(TrumfAuthenticationError):
+            redir_source.get_receipt("u1", "b-1")
 
 
 def test_build_purchase_adapter_wires_all_three_providers():

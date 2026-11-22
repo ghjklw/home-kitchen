@@ -1769,3 +1769,59 @@ def test_refresh_expiring_connections_persists_last_error_when_refresh_material_
     assert meta is not None
     assert "refresh_token" in str(meta.metadata.get("last_error"))
     assert "secret-coop-access" not in str(meta.metadata.get("last_error"))
+
+
+def test_trumf_session_validation_rejects_past_server_expiry_and_refresh_advances_stale_expiry(
+    sqlite_engine, cipher
+):
+    past_iso = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+    app_past, _, store_past, hh_past = create_test_app(
+        sqlite_engine,
+        cipher,
+        mock_transport=httpx.MockTransport(
+            lambda req: httpx.Response(
+                200,
+                json={"user": {"name": "Malo"}, "expires": past_iso},
+            )
+        ),
+    )
+    client_past = TestClient(app_past)
+    resp_past = client_past.post(
+        "/api/integrations/trumf/connect",
+        json={"auth_mode": "session_cookie", "session_cookie": "__Secure-authjs.session-token.0=x"},
+    )
+    assert resp_past.status_code == 401
+    assert store_past.get_credentials(hh_past, "trumf") is None
+
+    app, _, store, household_id = create_test_app(
+        sqlite_engine,
+        cipher,
+        mock_transport=httpx.MockTransport(
+            lambda req: httpx.Response(
+                200,
+                json={"user": {"name": "Malo"}},
+                headers=[
+                    (
+                        "Set-Cookie",
+                        "__Secure-authjs.session-token.0=renewed-stale; Path=/; HttpOnly; Secure",
+                    )
+                ],
+            )
+        ),
+    )
+    store.save_connection(
+        household_id=household_id,
+        provider_id="trumf",
+        auth_mode="session_cookie",
+        credentials={"session_cookie": "__Secure-authjs.session-token.0=old-stale"},
+        expires_at=datetime.now(UTC) - timedelta(hours=1),
+        actor_id="malo",
+    )
+    client = TestClient(app)
+    resp = client.post("/api/integrations/trumf/refresh")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "connected"
+    meta = store.get_connection_metadata(household_id, "trumf")
+    assert meta is not None
+    assert meta.expires_at is not None
+    assert meta.expires_at > datetime.now(UTC) + timedelta(hours=23)

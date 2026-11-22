@@ -878,10 +878,6 @@ def standardize_provider_receipt(provider: str, payload: dict[str, Any]) -> Rece
             from home_kitchen.trumf_history import TrumfReceipt
 
             return TrumfReceipt.model_validate(payload).standardize()
-        if provider == "oda" and isinstance(payload.get("order"), dict):
-            from home_kitchen.oda.purchase_history import Order
-
-            return Order.model_validate(payload["order"]).standardize()
     except (InvalidOperation, ValidationError, ValueError):
         return None
     return None

@@ -93,7 +93,9 @@ def test_publish_reuses_upstream_ci_instead_of_rerunning_tests():
         for step in steps
         for command in forbidden_commands
     )
-    summary = next(step for step in steps if step.get("name") == "Record successful upstream CI gate")
+    summary = next(
+        step for step in steps if step.get("name") == "Record successful upstream CI gate"
+    )
     assert summary["env"]["CI_RUN_URL"] == "${{ github.event.workflow_run.html_url }}"
     assert summary["env"]["CI_HEAD_SHA"] == "${{ github.event.workflow_run.head_sha }}"
     assert any("docker/build-push-action@" in step.get("uses", "") for step in steps)

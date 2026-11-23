@@ -32,7 +32,7 @@ This document details the HTTP API endpoints used by the Coop Medlem app (`no.co
 
 ## Observed live-field mapping
 
-A sanitized 26-line receipt check showed that the sum of line price values equals totalSum, including weighed lines. Treat price as the charged amount for the whole line; keep quantity and any unit embedded in its string separate, and do not multiply price by quantity. No separate EAN/GTIN or unit field was present in the sampled response, so the importer does not invent those values.
+A sanitized 26-line receipt check showed that the sum of line price values equals totalSum, including weighed lines. Treat price as the charged amount for the whole line; keep quantity and any unit embedded in its string separate, and do not multiply price by quantity. Coop's blank quantity string defaults to one item; a quantity field omitted from the response stays unknown. No separate EAN/GTIN or unit field was present in the sampled response, so the importer does not invent those values.
 
 The automated tests use mocked Coop responses. The live response shapes and line-price semantics were checked separately against the connected local integration; receipt counts vary by account and time.
 

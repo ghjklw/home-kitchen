@@ -165,7 +165,7 @@ def test_receipt_detail_maps_live_wire_fields_and_preserves_weighted_line_total(
         + hashlib.sha256(
             json.dumps(
                 {
-                    "normalizer_version": "2",
+                    "normalizer_version": "3",
                     "history_year": None,
                     "history_month": None,
                     "source": raw_summary,
@@ -211,14 +211,17 @@ def test_receipt_detail_accepts_grouped_amounts_and_blank_optional_decimals():
     assert receipt.total_discount == Decimal("1088.02")
     assert receipt.amount == Decimal("1234.50")
     assert receipt.lines is not None
-    assert receipt.lines[0].quantity is None
+    assert receipt.lines[0].quantity is not None
+    assert receipt.lines[0].quantity.value == Decimal("1")
+    assert receipt.lines[0].quantity.unit is None
     assert receipt.lines[0].amount == Decimal("1088.02")
     assert receipt.lines[0].discount is None
     record = to_provider_order_record(receipt)
-    assert record.payload["lines"][0]["quantity"] is None
+    assert record.payload["lines"][0]["quantity"] == {"value": "1", "unit": None}
+    assert receipt.standardize().lines[0].quantity == Decimal("1")
 
 
-def test_every_coop_decimal_field_uses_localized_format_and_empty_as_missing():
+def test_coop_decimal_fields_parse_localized_format_and_blank_quantity_defaults_to_one():
     raw = "1\u00a0088,02"
     list_items = parse_purchase_list(
         {
@@ -272,7 +275,9 @@ def test_every_coop_decimal_field_uses_localized_format_and_empty_as_missing():
     assert receipt.lines[0].quantity is not None
     assert receipt.lines[0].quantity.value == Decimal("1088.02")
     assert receipt.lines[0].quantity.unit is None
-    assert receipt.lines[1].quantity is None
+    assert receipt.lines[1].quantity is not None
+    assert receipt.lines[1].quantity.value == Decimal("1")
+    assert receipt.standardize().lines[1].quantity == Decimal("1")
     for field in numeric_line_fields:
         assert getattr(receipt.lines[0], field) == Decimal("1088.02")
         assert getattr(receipt.lines[1], field) is None

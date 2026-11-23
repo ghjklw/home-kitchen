@@ -372,6 +372,16 @@ def _to_utc(dt: datetime | None) -> datetime | None:
     return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
 
 
+def _order_purchase_time(order: Any) -> datetime | None:
+    """Use ingestion time as a fallback except for Coop, whose scan revisits history."""
+    transaction_at = getattr(order, "transaction_at", None)
+    if transaction_at is not None:
+        return transaction_at
+    if normalize_provider_key(getattr(order, "provider", None)) == "coop":
+        return None
+    return getattr(order, "observed_at", None)
+
+
 def _to_decimal(val: Any) -> Decimal | None:
     if val is None or isinstance(val, bool):
         return None
@@ -597,9 +607,7 @@ class PurchaseHistoryBrowseService:
             effective_orders = get_orders(include_inactive=True) if callable(get_orders) else []
             for order in effective_orders:
                 prov = normalize_provider_key(getattr(order, "provider", "unknown"))
-                tx_at = _to_utc(
-                    getattr(order, "transaction_at", None) or getattr(order, "observed_at", None)
-                )
+                tx_at = _to_utc(_order_purchase_time(order))
                 if not getattr(order, "is_cancellation", False) and not getattr(
                     order, "is_return", False
                 ):
@@ -1076,9 +1084,7 @@ def filter_orders_by_date(
     """Utility to filter orders by transaction date range."""
     results: list[Any] = []
     for order in orders:
-        tx_at = _to_utc(
-            getattr(order, "transaction_at", None) or getattr(order, "observed_at", None)
-        )
+        tx_at = _to_utc(_order_purchase_time(order))
         if tx_at is None:
             continue
         d = tx_at.date()

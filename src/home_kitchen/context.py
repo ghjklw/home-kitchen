@@ -120,9 +120,10 @@ def build_purchase_history_context(
 
     for order in effective_orders:
         prov_raw = str(getattr(order, "provider", "") or "").strip().lower()
-        tx_at = _to_utc(
-            getattr(order, "transaction_at", None) or getattr(order, "observed_at", None)
-        )
+        transaction_at = getattr(order, "transaction_at", None)
+        if transaction_at is None and normalize_provider_key(prov_raw) != "coop":
+            transaction_at = getattr(order, "observed_at", None)
+        tx_at = _to_utc(transaction_at)
         if prov_raw and tx_at is not None:
             norm_prov = normalize_provider_key(prov_raw)
             is_stub = getattr(order, "lifecycle", None) == "non_receipt_stub"

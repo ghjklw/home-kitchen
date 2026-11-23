@@ -17,6 +17,7 @@ from home_kitchen.feature_api import feature_router
 from home_kitchen.history import HistoryEntry
 from home_kitchen.purchase_history_view import (
     PurchaseHistoryBrowseService,
+    filter_orders_by_date,
     resolve_purchase_category,
 )
 from home_kitchen.purchase_sync import (
@@ -278,6 +279,72 @@ def test_browse_service_filters_by_query_provider_store_category_and_date():
 
     with pytest.raises(ValueError, match="date_to"):
         svc.browse(date_from=date(2026, 11, 20), date_to=date(2026, 11, 10))
+
+
+def test_coop_without_transaction_time_does_not_use_observed_at_as_purchase_date():
+    observed_at = datetime.now(UTC).replace(microsecond=0)
+    line = SimpleNamespace(
+        name="Synthetic milk",
+        raw_name="Synthetic milk",
+        canonical_product_id=None,
+        quantity=Decimal("1"),
+        unit="stk",
+        amount=Decimal("10.00"),
+        ean=None,
+        oda_product_id=None,
+        category=None,
+        is_return=False,
+    )
+    coop_order = SimpleNamespace(
+        provider="coop",
+        external_id="coop-without-transaction-date",
+        transaction_at=None,
+        observed_at=observed_at,
+        is_cancellation=False,
+        is_return=False,
+        is_active_purchase=True,
+        provenance="provider_verified",
+        lifecycle="purchase",
+        store_name="Coop",
+        lines=[line],
+        total_amount=Decimal("10.00"),
+        is_correction=False,
+        revision_count=1,
+        evidence_ref=None,
+    )
+    oda_order = SimpleNamespace(
+        **{
+            **vars(coop_order),
+            "provider": "oda",
+            "external_id": "oda-without-transaction-date",
+            "store_name": "Oda",
+        }
+    )
+
+    class PurchaseSync:
+        def get_effective_orders(self, *, include_inactive=True):
+            return [coop_order, oda_order]
+
+    service = PurchaseHistoryBrowseService(purchase_sync=PurchaseSync())
+    unfiltered = service.browse(as_of=observed_at)
+
+    baskets_by_provider = {basket.provider: basket for basket in unfiltered.baskets}
+    assert baskets_by_provider["coop"].purchased_at is None
+    assert baskets_by_provider["oda"].purchased_at == observed_at
+    assert unfiltered.provider_windows.get("coop") is None
+
+    year_range = service.browse(
+        date_from=date(observed_at.year, 1, 1),
+        date_to=date(observed_at.year, 12, 31),
+        as_of=observed_at,
+    )
+    assert {basket.provider for basket in year_range.baskets} == {"oda"}
+    date_filtered_orders = filter_orders_by_date(
+        [coop_order, oda_order],
+        date_from=date(observed_at.year, 1, 1),
+        date_to=date(observed_at.year, 12, 31),
+    )
+    assert [order.external_id for order in date_filtered_orders] == ["oda-without-transaction-date"]
 
 
 def test_rest_api_purchase_history_endpoint():

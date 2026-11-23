@@ -38,19 +38,25 @@ def test_coop_http_source_fetches_purchases_and_receipt_detail():
         assert request.headers.get("authorization") is None
         assert request.headers.get("x-gltlocale") == "nb_NO"
         assert request.headers.get("x-deviceid")
-        if request.url.path == "/user/pay/history/list":
-            assert request.url.params.get("n") == "50"
+        if request.url.path == "/user/pay/history/search":
+            assert request.url.params.get("text") == ""
             return httpx.Response(
                 200,
                 json={
-                    "purchases": [
+                    "hitsPerMonth": [
                         {
-                            "summaryId": "sum-1",
-                            "storeName": "Coop Prix",
-                            "purchaseDate": "2026-11-18T12:00:00Z",
-                            "amount": "149.50",
+                            "monthOfYear": {"year": 2023, "month": 4},
+                            "periodPurchases": [
+                                {
+                                    "summaryId": "sum-1",
+                                    "storeName": "Coop Prix",
+                                    "dateTime": "07.04. 16:40",
+                                    "amount": "149.50",
+                                }
+                            ],
                         }
-                    ]
+                    ],
+                    "continuationToken": None,
                 },
             )
         if request.url.path == "/user/pay/history/details":
@@ -61,7 +67,7 @@ def test_coop_http_source_fetches_purchases_and_receipt_detail():
                         "summaryId": "sum-1",
                         "receiptId": "rcp-1",
                         "storeName": "Coop Prix",
-                        "purchaseDate": "2026-11-18T12:00:00Z",
+                        "dateTime": "07.04. 16:40",
                         "amount": "149.50",
                         "lines": [
                             {
@@ -80,12 +86,26 @@ def test_coop_http_source_fetches_purchases_and_receipt_detail():
     purchases = source.get_purchases("user-1")
     assert len(purchases) == 1
     assert purchases[0].summary_id == "sum-1"
+    assert purchases[0].history_year == 2023
+    assert purchases[0].history_month == 4
+    assert purchases[0].purchase_date is not None
+    assert purchases[0].purchase_date.year == 2023
 
-    receipt = source.get_receipt("user-1", "sum-1")
+    receipt = source.get_receipt(
+        "user-1",
+        "sum-1",
+        history_year=purchases[0].history_year,
+        history_month=purchases[0].history_month,
+    )
     assert receipt is not None
     assert len(receipt.lines) == 1
     assert receipt.lines[0].ean13 == "7038010000188"
-    assert len(calls) == 2
+    assert calls == [
+        "GET /user/pay/history/search?text=",
+        "GET /user/pay/history/details?summaryId=sum-1",
+    ]
+    assert receipt.purchase_date is not None
+    assert receipt.purchase_date.year == 2023
 
 
 def test_coop_http_source_raises_on_401():

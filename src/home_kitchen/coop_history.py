@@ -37,7 +37,7 @@ DEFAULT_COOP_USER_AGENT = "Android(14)/Coop(4.42.0)/2.7.7"
 DEFAULT_COOP_LOCALE = "nb_NO"
 DEFAULT_COOP_PURCHASES_COUNT = 50
 DEFAULT_COOP_SEARCH_MAX_PAGES = 100
-COOP_NORMALIZER_VERSION = "4"
+COOP_NORMALIZER_VERSION = "5"
 _COOP_LOCAL_TIMEZONE = ZoneInfo("Europe/Oslo")
 _COOP_NORWEGIAN_MONTHS = {
     "januar": 1,
@@ -254,12 +254,14 @@ type CoopDecimal = Annotated[Decimal | None, BeforeValidator(_normalize_coop_dec
 
 def _split_coop_quantity(value: Any) -> tuple[Any, str | None]:
     if isinstance(value, str):
-        parts = value.strip().rsplit(maxsplit=1)
+        normalized = re.sub(r"^antall\s*:\s*", "", value.strip(), flags=re.IGNORECASE)
+        parts = normalized.rsplit(maxsplit=1)
         if len(parts) == 2:
             number, unit = parts
             if any(character.isalpha() for character in unit):
-                return number, unit
-    return value, None
+                return _normalize_coop_decimal(number), unit
+        return _normalize_coop_decimal(normalized), None
+    return _normalize_coop_decimal(value), None
 
 
 class CoopQuantity(BaseModel):
@@ -274,7 +276,12 @@ class CoopQuantity(BaseModel):
     @classmethod
     def _parse_source_quantity(cls, value: Any) -> Any:
         if isinstance(value, dict):
-            return value
+            normalized = dict(value)
+            number, embedded_unit = _split_coop_quantity(normalized.get("value"))
+            normalized["value"] = number
+            if not normalized.get("unit") and embedded_unit:
+                normalized["unit"] = embedded_unit
+            return normalized
         number, unit = _split_coop_quantity(value)
         return {"value": _normalize_coop_decimal(number), "unit": unit}
 
@@ -284,6 +291,11 @@ def _normalize_coop_quantity_input(value: Any) -> Any:
         # Coop sends an empty quantity for ordinary single-item lines. Keep
         # omitted fields unknown, but use the agreed one-item default for blanks.
         return {"value": Decimal("1"), "unit": None}
+    if isinstance(value, dict) and isinstance(value.get("value"), str):
+        raw_value = re.sub(r"^antall\s*:\s*", "", value["value"].strip(), flags=re.IGNORECASE)
+        if not raw_value:
+            # Some responses wrap the same blank quantity in an object.
+            return {**value, "value": Decimal("1")}
     if value is None:
         return None
     return value

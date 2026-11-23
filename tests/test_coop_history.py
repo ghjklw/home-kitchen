@@ -128,6 +128,40 @@ def test_receipt_detail_accepts_comma_decimal_amounts_and_line_quantities():
     assert receipt.lines[0].unit_price == Decimal("2.50")
 
 
+def test_receipt_detail_parses_labeled_quantities_in_string_and_object_shapes():
+    receipt = parse_receipt_detail(
+        {
+            "summary": {
+                "summaryId": "labeled-quantity-detail",
+                "lines": [
+                    {"name": "Count-labeled item", "quantity": {"value": "Antall: 15.83"}},
+                    {"name": "Unit-labeled item", "quantity": "Antall: 1,5 kg"},
+                    {
+                        "name": "Explicit unit item",
+                        "quantity": {"value": "Antall: 2,0", "unit": "stk"},
+                    },
+                    {"name": "Blank wrapped quantity", "quantity": {"value": "", "unit": None}},
+                    {"name": "Missing quantity"},
+                ],
+            }
+        }
+    )
+
+    assert receipt.lines is not None
+    assert receipt.lines[0].quantity is not None
+    assert receipt.lines[0].quantity.value == Decimal("15.83")
+    assert receipt.lines[0].quantity.unit is None
+    assert receipt.lines[1].quantity is not None
+    assert receipt.lines[1].quantity.value == Decimal("1.5")
+    assert receipt.lines[1].quantity.unit == "kg"
+    assert receipt.lines[2].quantity is not None
+    assert receipt.lines[2].quantity.value == Decimal("2.0")
+    assert receipt.lines[2].quantity.unit == "stk"
+    assert receipt.lines[3].quantity is not None
+    assert receipt.lines[3].quantity.value == Decimal("1")
+    assert receipt.lines[4].quantity is None
+
+
 def test_receipt_detail_maps_live_wire_fields_and_preserves_weighted_line_total():
     raw_summary = {
         "summaryId": "synthetic-live-wire-shape",
@@ -165,7 +199,7 @@ def test_receipt_detail_maps_live_wire_fields_and_preserves_weighted_line_total(
         + hashlib.sha256(
             json.dumps(
                 {
-                    "normalizer_version": "3",
+                    "normalizer_version": "4",
                     "history_year": None,
                     "history_month": None,
                     "source": raw_summary,

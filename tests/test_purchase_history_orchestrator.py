@@ -626,7 +626,14 @@ def test_app_lifespan_starts_and_cancels_purchase_sync_when_not_test_env(monkeyp
     async def fake_refresh_forever(self, interval: float = 300.0) -> None:
         await asyncio.sleep(60)
 
+    async def fake_photo_cleanup_forever(self, interval: float = 3600.0) -> None:
+        await asyncio.sleep(60)
+
     monkeypatch.setattr("home_kitchen.app._is_test_env", lambda: False)
+    monkeypatch.setattr(
+        "home_kitchen.recipes.photo_storage.PhotoRecipeService.cleanup_forever",
+        fake_photo_cleanup_forever,
+    )
     monkeypatch.setattr(PurchaseHistorySyncService, "sync_forever", fake_sync_forever)
     monkeypatch.setattr(
         "home_kitchen.app.ConnectorAuthService.refresh_forever", fake_refresh_forever

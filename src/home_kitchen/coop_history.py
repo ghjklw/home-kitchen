@@ -16,9 +16,10 @@ from typing import Annotated, Any, Literal, Protocol, runtime_checkable
 from uuid import UUID, uuid4
 
 import httpx
-from pydantic import AwareDatetime, BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
-from home_kitchen.purchase_sync import ProviderOrderRecord, ProviderPage
+from home_kitchen.purchase_sync import ProviderOrderRecord, ProviderPage, extract_line_ean
+from home_kitchen.receipts import Receipt, ReceiptLine
 
 COOP_SCHEMA_SOURCE = "https://gist.github.com/HelgeSverre/80a7f34f874336324184a0c513c2e6a2"
 COOP_SCHEMA_VERSION = "4.17.3"
@@ -67,6 +68,44 @@ def _normalize_coop_decimal(value: Any) -> Any:
 type CoopDecimal = Annotated[Decimal | None, BeforeValidator(_normalize_coop_decimal)]
 
 
+def _split_coop_quantity(value: Any) -> tuple[Any, str | None]:
+    if isinstance(value, str):
+        parts = value.strip().rsplit(maxsplit=1)
+        if len(parts) == 2:
+            number, unit = parts
+            if any(character.isalpha() for character in unit):
+                return number, unit
+    return value, None
+
+
+class CoopQuantity(BaseModel):
+    """Coop receipt quantity with its optional source unit."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    value: CoopDecimal = None
+    unit: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _parse_source_quantity(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return value
+        number, unit = _split_coop_quantity(value)
+        return {"value": _normalize_coop_decimal(number), "unit": unit}
+
+
+def _normalize_coop_quantity_input(value: Any) -> Any:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    return value
+
+
+type CoopQuantityInput = Annotated[
+    CoopQuantity | None, BeforeValidator(_normalize_coop_quantity_input)
+]
+
+
 class CoopReceiptLine(BaseModel):
     model_config = ConfigDict(extra="ignore", alias_generator=_to_camel, populate_by_name=True)
 
@@ -74,11 +113,52 @@ class CoopReceiptLine(BaseModel):
     ean13: str | None = None
     gtin13: str | None = None
     barcode: str | None = None
-    quantity: CoopDecimal = None
+    quantity: CoopQuantityInput = None
     amount: CoopDecimal = None
     discount: CoopDecimal = None
     discount_amount_per_quantity: CoopDecimal = None
     unit_price: CoopDecimal = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _attach_explicit_quantity_unit(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        explicit_unit = value.get("quantityUnit") or value.get("quantity_unit")
+        raw_quantity = value.get("quantity")
+        if not explicit_unit or raw_quantity is None:
+            return value
+        normalized = dict(value)
+        if isinstance(raw_quantity, dict):
+            if raw_quantity.get("unit"):
+                return value
+            quantity_value = raw_quantity.get("value")
+            number, embedded_unit = _split_coop_quantity(quantity_value)
+            normalized["quantity"] = {
+                "value": number,
+                "unit": embedded_unit or explicit_unit,
+            }
+            return normalized
+        number, embedded_unit = _split_coop_quantity(raw_quantity)
+        if embedded_unit:
+            return value
+        normalized["quantity"] = {"value": number, "unit": explicit_unit}
+        return normalized
+
+    def standardize(self) -> ReceiptLine:
+        quantity = self.quantity
+        return ReceiptLine(
+            name=self.product_name or "Unknown item",
+            raw_name=self.product_name,
+            quantity=quantity.value if quantity is not None else None,
+            unit=quantity.unit if quantity is not None else None,
+            amount=self.amount,
+            ean=extract_line_ean(
+                {"ean13": self.ean13, "gtin13": self.gtin13, "barcode": self.barcode}
+            ),
+            is_return=(quantity is not None and quantity.value is not None and quantity.value < 0)
+            or (self.amount is not None and self.amount < 0),
+        )
 
 
 class CoopReceipt(BaseModel):
@@ -101,6 +181,25 @@ class CoopReceipt(BaseModel):
     source_schema_version: str = COOP_SCHEMA_VERSION
     source_updated_at: None = None
     revision_id: str
+
+    def standardize(self) -> Receipt:
+        lines = [line.standardize() for line in self.lines or []]
+        return Receipt(
+            provider="coop",
+            external_id=self.summary_id or self.receipt_id,
+            revision_id=self.revision_id,
+            transaction_at=self.purchase_date,
+            store_name=self.store_name,
+            store_id=self.store_id,
+            chain=self.chain_id,
+            total_amount=self.amount,
+            total_discount=self.total_discount,
+            has_receipt=bool(lines),
+            lines=lines,
+            source_uri=self.source_uri,
+            source_schema_version=self.source_schema_version,
+            source_updated_at=self.source_updated_at,
+        )
 
 
 class CoopPurchaseStub(BaseModel):
@@ -163,7 +262,8 @@ def to_provider_order_record(receipt: CoopReceipt) -> ProviderOrderRecord:
     distinguishes changed detail snapshots, while observed_at is recorded by the
     neutral persistence layer.
     """
-    external_id = receipt.summary_id or receipt.receipt_id
+    standardized = receipt.standardize()
+    external_id = standardized.external_id
     if not external_id:
         raise UnsupportedCoopContract("Coop receipt has no summaryId or receiptId")
     return ProviderOrderRecord(

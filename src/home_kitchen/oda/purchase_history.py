@@ -10,6 +10,7 @@ import asyncio
 import json
 from base64 import b64decode, urlsafe_b64encode
 from datetime import date
+from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID, uuid4
@@ -25,7 +26,13 @@ from pydantic import (
     field_validator,
 )
 
-from home_kitchen.purchase_sync import ProviderOrderRecord, ProviderPage
+from home_kitchen.purchase_sync import (
+    ProviderOrderRecord,
+    ProviderPage,
+    extract_line_ean,
+    extract_line_name,
+)
+from home_kitchen.receipts import Receipt, ReceiptLine
 
 if TYPE_CHECKING:
     from .service import OdaService
@@ -56,10 +63,59 @@ class OrderProduct(SourceModel):
     unitName: StrictStr
 
 
+def _to_decimal(value: object) -> Decimal | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        decimal_value = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    return decimal_value if decimal_value.is_finite() else None
+
+
 class OrderLine(SourceModel):
     product: OrderProduct
     quantity: StrictInt | StrictFloat
     totalGrossAmount: StrictStr
+
+    def standardize(self) -> ReceiptLine:
+        product_extra = self.product.model_extra or {}
+        line_extra = self.model_extra or {}
+        categories = product_extra.get("categories")
+        category = product_extra.get("category") or line_extra.get("category")
+        if not category and isinstance(categories, list) and categories:
+            first_category = categories[0]
+            category = (
+                first_category.get("name") if isinstance(first_category, dict) else first_category
+            )
+        amount = _to_decimal(self.totalGrossAmount)
+        quantity = Decimal(str(self.quantity))
+        ean = extract_line_ean(line_extra)
+        canonical_product_id = line_extra.get("canonical_product_id") or product_extra.get(
+            "canonical_product_id"
+        )
+        canonical_unit_id = line_extra.get("canonical_unit_id") or product_extra.get(
+            "canonical_unit_id"
+        )
+        return ReceiptLine(
+            name=self.product.name,
+            raw_name=(
+                extract_line_name(line_extra)
+                or str(line_extra.get("sourceName") or "").strip()
+                or None
+            ),
+            quantity=quantity,
+            unit=self.product.unitName,
+            amount=amount,
+            ean=ean,
+            canonical_product_id=(
+                str(canonical_product_id) if canonical_product_id is not None else None
+            ),
+            canonical_unit_id=str(canonical_unit_id) if canonical_unit_id is not None else None,
+            oda_product_id=str(self.product.id),
+            category=str(category).strip() if category else None,
+            is_return=(quantity < 0) or (amount is not None and amount < 0),
+        )
 
 
 class Order(SourceModel):
@@ -76,6 +132,16 @@ class Order(SourceModel):
             raise ValueError("deliveryDate must be an ISO date string")
         date.fromisoformat(value)
         return value
+
+    def standardize(self) -> Receipt:
+        return Receipt(
+            provider="oda",
+            external_id=self.orderNumber,
+            transaction_at=self.deliveryDate,
+            total_amount=_to_decimal(self.grossAmount),
+            currency=self.currency,
+            lines=[line.standardize() for line in self.products],
+        )
 
 
 class OrdersResponse(SourceModel):
@@ -217,12 +283,13 @@ class OdaPurchaseHistoryAdapter:
         truncated = scan.next_page == 50 and orders.hasMore
         has_more = orders.hasMore and not truncated
         records = []
-        for order in response["orders"]:
-            payload = {"order": order}
+        for order_data, order in zip(response["orders"], orders.orders, strict=True):
+            standardized = order.standardize()
+            payload = {"order": order_data}
             if self.fetch_tracking:
-                tracking = await self.service.track_order(account_id, order["orderNumber"])
+                tracking = await self.service.track_order(account_id, order.orderNumber)
                 TrackingResponse.model_validate(tracking)
-                if tracking["orderNumber"] != order["orderNumber"]:
+                if tracking["orderNumber"] != order.orderNumber:
                     raise ValueError("Oda tracking order number mismatch")
                 payload["tracking"] = tracking
             digest = sha256(
@@ -236,7 +303,7 @@ class OdaPurchaseHistoryAdapter:
             ).hexdigest()
             records.append(
                 ProviderOrderRecord(
-                    external_id=order["orderNumber"],
+                    external_id=standardized.external_id or order.orderNumber,
                     revision_id="oda-snapshot-v1:" + digest,
                     source_updated_at=None,
                     payload=payload,

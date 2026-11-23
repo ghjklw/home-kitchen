@@ -38,7 +38,8 @@ from pydantic import (
     field_validator,
 )
 
-from home_kitchen.purchase_sync import ProviderOrderRecord, ProviderPage
+from home_kitchen.purchase_sync import ProviderOrderRecord, ProviderPage, extract_line_ean
+from home_kitchen.receipts import Receipt, ReceiptLine
 
 TRUMF_SCHEMA_SOURCE = "https://www.trumf.no/trumf-profil/kvitteringer"
 TRUMF_SCHEMA_VERSION = "rsc-flight-v1"
@@ -273,6 +274,18 @@ class TrumfReceiptLine(BaseModel):
     def clean_besparelser(cls, value: object) -> object:
         return _coerce_optional_list(value)
 
+    def standardize(self) -> ReceiptLine:
+        return ReceiptLine(
+            name=self.produkt_beskrivelse,
+            raw_name=self.produkt_beskrivelse,
+            quantity=self.antall,
+            unit=self.enhets_type,
+            amount=self.belop,
+            ean=extract_line_ean({"ean": self.ean}),
+            is_return=(self.antall is not None and self.antall < 0)
+            or (self.belop is not None and self.belop < 0),
+        )
+
 
 class TrumfTransaction(BaseModel):
     """Summary header from the Trumf transaction list."""
@@ -486,6 +499,23 @@ class TrumfReceipt(BaseModel):
             # Skip non-item discount/summary rows lacking a product description.
             return [item for item in coerced if _has_line_identity(item)]
         return coerced
+
+    def standardize(self) -> Receipt:
+        lines = [line.standardize() for line in self.varelinjer]
+        return Receipt(
+            provider="trumf",
+            external_id=self.batch_id,
+            revision_id=self.revision_id,
+            transaction_at=self.transaksjons_tidspunkt,
+            store_name=self.store_name,
+            chain=self.chain,
+            total_amount=self.belop,
+            has_receipt=self.has_receipt,
+            lines=lines,
+            source_uri=self.source_uri,
+            source_schema_version=self.source_schema_version,
+            source_updated_at=self.source_updated_at,
+        )
 
 
 def _revision_id(raw: dict[str, Any]) -> str:
@@ -839,7 +869,7 @@ def to_provider_order_record(receipt: TrumfReceipt) -> ProviderOrderRecord:
     distinguishes changed detail snapshots, while observed_at is recorded by the
     neutral persistence layer.
     """
-    external_id = receipt.batch_id
+    external_id = receipt.standardize().external_id
     if not external_id or not external_id.strip():
         raise UnsupportedTrumfContract("Trumf receipt has no batchId")
     return ProviderOrderRecord(

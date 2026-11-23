@@ -38,7 +38,8 @@ from pydantic import (
     field_validator,
 )
 
-from home_kitchen.purchase_sync import ProviderOrderRecord, ProviderPage
+from home_kitchen.purchase_sync import ProviderOrderRecord, ProviderPage, extract_line_ean
+from home_kitchen.receipts import Receipt, ReceiptLine
 
 REMA1000_SCHEMA_SOURCE = "https://ae.rema1000.no"
 REMA1000_SCHEMA_VERSION = "v1"
@@ -193,6 +194,18 @@ class Rema1000ReceiptLine(BaseModel):
         if not s or s == "$undefined":
             return None
         return s
+
+    def standardize(self) -> ReceiptLine:
+        return ReceiptLine(
+            name=self.name or "Unknown item",
+            raw_name=self.name,
+            quantity=self.quantity,
+            unit=self.unit,
+            amount=self.amount,
+            ean=extract_line_ean({"ean": self.ean}),
+            is_return=(self.quantity is not None and self.quantity < 0)
+            or (self.amount is not None and self.amount < 0),
+        )
 
 
 class Rema1000Transaction(BaseModel):
@@ -356,6 +369,25 @@ class Rema1000Receipt(BaseModel):
     def filter_non_item_lines(cls, value: list[Rema1000ReceiptLine]) -> list[Rema1000ReceiptLine]:
         # Skip non-item bonus/summary rows that lack both product name and barcode.
         return [line for line in value if line.name is not None or line.ean is not None]
+
+    def standardize(self) -> Receipt:
+        lines = [line.standardize() for line in self.lines]
+        return Receipt(
+            provider="rema1000",
+            external_id=self.receipt_id,
+            revision_id=self.revision_id,
+            transaction_at=self.timestamp,
+            store_name=self.store_name,
+            store_id=self.store_id,
+            chain=self.chain,
+            total_amount=self.total_amount,
+            total_discount=self.total_discount,
+            has_receipt=self.has_receipt,
+            lines=lines,
+            source_uri=self.source_uri,
+            source_schema_version=self.source_schema_version,
+            source_updated_at=self.source_updated_at,
+        )
 
 
 def _revision_id(raw: dict[str, Any]) -> str:
@@ -609,7 +641,7 @@ def to_provider_order_record(receipt: Rema1000Receipt) -> ProviderOrderRecord:
     distinguishes changed detail snapshots, while observed_at is recorded by the
     neutral persistence layer.
     """
-    external_id = receipt.receipt_id
+    external_id = receipt.standardize().external_id
     if not external_id or not external_id.strip():
         raise UnsupportedRema1000Contract("Rema 1000 receipt has no receipt_id")
     return ProviderOrderRecord(

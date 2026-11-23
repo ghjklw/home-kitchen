@@ -75,7 +75,8 @@ def test_receipt_detail_preserves_fixture_ids_amounts_lines_and_attribution():
     assert parsed.lines[0].ean13 is None
     assert parsed.lines[0].gtin13 is None
     assert parsed.lines[0].barcode is None
-    assert parsed.lines[0].quantity == Decimal("2")
+    assert parsed.lines[0].quantity is not None
+    assert parsed.lines[0].quantity.value == Decimal("2")
     assert parsed.lines[0].discount == Decimal("1.50")
     assert parsed.lines[0].unit_price == Decimal("9.50")
     assert parsed.lines[1].product_name == "Fictional grain parcel"
@@ -98,7 +99,7 @@ def test_receipt_detail_accepts_comma_decimal_amounts_and_line_quantities():
                 "lines": [
                     {
                         "productName": "Sample product",
-                        "quantity": "1,5",
+                        "quantity": "1,5 kg",
                         "amount": "3,75",
                         "discount": "0,25",
                         "discountAmountPerQuantity": "0,10",
@@ -113,7 +114,9 @@ def test_receipt_detail_accepts_comma_decimal_amounts_and_line_quantities():
     assert receipt.total_discount == Decimal("10.25")
     assert receipt.member_bonus == Decimal("0.50")
     assert receipt.lines is not None
-    assert receipt.lines[0].quantity == Decimal("1.5")
+    assert receipt.lines[0].quantity is not None
+    assert receipt.lines[0].quantity.value == Decimal("1.5")
+    assert receipt.lines[0].quantity.unit == "kg"
     assert receipt.lines[0].amount == Decimal("3.75")
     assert receipt.lines[0].discount == Decimal("0.25")
     assert receipt.lines[0].discount_amount_per_quantity == Decimal("0.10")
@@ -204,12 +207,15 @@ def test_every_coop_decimal_field_uses_localized_format_and_empty_as_missing():
         assert getattr(receipt, field) == Decimal("1088.02")
     assert receipt.lines is not None
     numeric_line_fields = (
-        "quantity",
         "amount",
         "discount",
         "discount_amount_per_quantity",
         "unit_price",
     )
+    assert receipt.lines[0].quantity is not None
+    assert receipt.lines[0].quantity.value == Decimal("1088.02")
+    assert receipt.lines[0].quantity.unit is None
+    assert receipt.lines[1].quantity is None
     for field in numeric_line_fields:
         assert getattr(receipt.lines[0], field) == Decimal("1088.02")
         assert getattr(receipt.lines[1], field) is None

@@ -198,15 +198,25 @@ class HouseholdAzureProvider(AzureProvider):
         expected_origin = f"{public.scheme}://{public.netloc}"
         form = await request.form()
         csrf = str(form.get("csrf_token", ""))
-        cookie_name = self._cookie_name("MCP_CONSENT_STATE")
-        browser_tokens = (
-            self._decode_list_cookie(request, "MCP_CONSENT_STATE")
-            if request.cookies.get(cookie_name)
-            else []
-        )
-        if request.headers.get("origin") != expected_origin or not any(
+        if request.headers.get("origin") != expected_origin:
+            return JSONResponse({"detail": "Invalid consent request"}, status_code=400)
+        # FastMCP 3 stored CSRF tokens in a signed list cookie; FastMCP 4
+        # stores one signed cookie per token, named by its hash. Check the
+        # browser binding before delegating so the public error stays generic.
+        browser_tokens = self._decode_list_cookie(request, "MCP_CONSENT_STATE")
+        csrf_was_issued_to_browser = any(
             secrets.compare_digest(csrf.encode(), value.encode()) for value in browser_tokens
-        ):
+        )
+        read_state_cookies = getattr(self, "_read_consent_state_cookies", None)
+        if not csrf_was_issued_to_browser and callable(read_state_cookies):
+            cookie_name = self._cookie_name(
+                f"MCP_CONSENT_STATE_{sha256(csrf.encode()).hexdigest()[:32]}"
+            )
+            state = read_state_cookies(request).get(cookie_name)
+            csrf_was_issued_to_browser = state is not None and secrets.compare_digest(
+                state[0].encode(), str(form.get("txn_id", "")).encode()
+            )
+        if not csrf_was_issued_to_browser:
             return JSONResponse({"detail": "Invalid consent request"}, status_code=400)
         return await super()._submit_consent(request)
 

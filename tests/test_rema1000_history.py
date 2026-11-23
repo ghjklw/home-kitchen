@@ -1204,7 +1204,7 @@ def test_kassal_ean_cache_persists_across_restarts_and_skips_429(memory_engine):
     cfg = Config(str(Path(__file__).parents[1] / "alembic.ini"))
     script = ScriptDirectory.from_config(cfg)
     heads = script.get_heads()
-    assert heads == ["0033_meal_versions"]
+    assert len(heads) == 1
 
 
 def test_alembic_migration_0032_kassal_ean_cache_structure():

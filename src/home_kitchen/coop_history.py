@@ -31,6 +31,31 @@ DEFAULT_COOP_PURCHASES_COUNT = 50
 DEFAULT_COOP_SEARCH_MAX_PAGES = 100
 COOP_NORMALIZER_VERSION = "2"
 _COOP_LOCAL_TIMEZONE = ZoneInfo("Europe/Oslo")
+_COOP_NORWEGIAN_MONTHS = {
+    "januar": 1,
+    "jan": 1,
+    "februar": 2,
+    "feb": 2,
+    "mars": 3,
+    "mar": 3,
+    "april": 4,
+    "apr": 4,
+    "mai": 5,
+    "juni": 6,
+    "jun": 6,
+    "juli": 7,
+    "jul": 7,
+    "august": 8,
+    "aug": 8,
+    "september": 9,
+    "sep": 9,
+    "oktober": 10,
+    "okt": 10,
+    "november": 11,
+    "nov": 11,
+    "desember": 12,
+    "des": 12,
+}
 _COOP_AUTH_ERROR_CODES = frozenset(
     {
         "INVALID_TOKEN",
@@ -106,6 +131,42 @@ def _parse_coop_purchase_datetime(
         except ValueError:
             continue
         return apply_history_context(parsed.replace(tzinfo=_COOP_LOCAL_TIMEZONE))
+
+    # Coop's nb_NO history search can return dates such as "10. november 18:59".
+    # A missing year is supplied only by the authoritative search grouping.
+    named_month_match = re.fullmatch(
+        r"(?P<day>\d{1,2})\.\s+(?P<month_name>[A-Za-zÆØÅæøå]+)\.?"
+        r"(?:\s+(?P<year>\d{4}))?"
+        r"(?:\s+(?P<hour>\d{1,2}):(?P<minute>\d{2})(?::(?P<second>\d{2}))?)?",
+        normalized,
+        re.IGNORECASE,
+    )
+    if named_month_match:
+        month = _COOP_NORWEGIAN_MONTHS.get(named_month_match.group("month_name").casefold())
+        if month is not None:
+            year_value = named_month_match.group("year")
+            year = int(year_value) if year_value is not None else history_year
+            if year is None:
+                return None
+            if history_month is not None and month != history_month:
+                raise UnsupportedCoopContract(
+                    "Coop purchase timestamp month conflicts with its history grouping"
+                )
+            try:
+                parsed = datetime(
+                    year,
+                    month,
+                    int(named_month_match.group("day")),
+                    int(named_month_match.group("hour") or 0),
+                    int(named_month_match.group("minute") or 0),
+                    int(named_month_match.group("second") or 0),
+                    tzinfo=_COOP_LOCAL_TIMEZONE,
+                )
+            except ValueError:
+                raise UnsupportedCoopContract(
+                    "Coop purchase timestamp has an invalid date"
+                ) from None
+            return apply_history_context(parsed)
 
     # Norwegian timestamps that omit the year are resolvable only with the
     # authoritative month/year supplied by the search grouping. Parse numeric
@@ -425,13 +486,42 @@ def _history_month_context(value: Any) -> tuple[int, int]:
     return year, month
 
 
+def _coop_search_shape_hint(response: Any) -> str:
+    """Describe an unexpected response without logging receipt contents."""
+    if not isinstance(response, dict):
+        return f"received {type(response).__name__}"
+    parts = []
+    for key, value in sorted(response.items(), key=lambda item: str(item[0]))[:16]:
+        safe_key = re.sub(r"[^A-Za-z0-9_.-]", "?", str(key))[:48]
+        parts.append(f"{safe_key}:{type(value).__name__}")
+    if len(response) > 16:
+        parts.append("...")
+    return "top-level " + ", ".join(parts)
+
+
 def parse_coop_search_page(response: Any) -> tuple[list[CoopPurchaseStub], str | None]:
     """Parse the observed month-grouped search envelope and its continuation token."""
     if not isinstance(response, dict):
-        raise UnsupportedCoopContract("unsupported Coop history search response shape")
-    allowed = {"hitsPerMonth", "continuationToken", "resultCode", "errorCode", "errorMessage"}
-    if set(response) - allowed or not isinstance(response.get("hitsPerMonth"), list):
-        raise UnsupportedCoopContract("unsupported Coop history search response shape")
+        raise UnsupportedCoopContract(
+            f"unsupported Coop history search response shape ({_coop_search_shape_hint(response)})"
+        )
+    allowed = {
+        "hitsPerMonth",
+        "continuationToken",
+        "searchText",
+        "resultCode",
+        "errorCode",
+        "errorMessage",
+    }
+    search_text = response.get("searchText")
+    if (
+        set(response) - allowed
+        or (search_text is not None and not isinstance(search_text, str))
+        or not isinstance(response.get("hitsPerMonth"), list)
+    ):
+        raise UnsupportedCoopContract(
+            f"unsupported Coop history search response shape ({_coop_search_shape_hint(response)})"
+        )
     if "continuationToken" not in response:
         raise UnsupportedCoopContract("Coop history search response is missing continuationToken")
 

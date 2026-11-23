@@ -19,6 +19,7 @@ from home_kitchen.coop_history import (
     CoopPurchaseHistoryAdapter,
     CoopPurchaseStub,
     UnsupportedCoopContract,
+    parse_coop_search_page,
     parse_purchase_list,
     parse_receipt_detail,
     to_provider_order_record,
@@ -387,6 +388,23 @@ def _search_response(*groups: dict, token: str | None = None) -> dict:
     return {"hitsPerMonth": list(groups), "continuationToken": token}
 
 
+def test_coop_search_accepts_search_text_echo_and_rejects_unexpected_shapes():
+    payload = {
+        "hitsPerMonth": [],
+        "continuationToken": None,
+        "searchText": "",
+        "resultCode": "OK",
+        "errorCode": None,
+        "errorMessage": None,
+    }
+    assert parse_coop_search_page(payload) == ([], None)
+
+    with pytest.raises(UnsupportedCoopContract, match="searchText:int"):
+        parse_coop_search_page({**payload, "searchText": 42})
+    with pytest.raises(UnsupportedCoopContract, match="unsupportedField:dict"):
+        parse_coop_search_page({**payload, "unsupportedField": {}})
+
+
 def test_coop_http_source_searches_all_pages_and_preserves_authoritative_years():
     calls: list[tuple[str, dict[str, str]]] = []
     first = [
@@ -601,6 +619,34 @@ def test_coop_detail_yearless_date_uses_search_month_context_and_revision_change
     assert older.purchase_date is not None and older.purchase_date.year == 2023
     assert newer.purchase_date is not None and newer.purchase_date.year == 2026
     assert older.revision_id != newer.revision_id
+
+
+def test_coop_norwegian_month_name_uses_authoritative_history_context():
+    purchase = CoopPurchaseStub.model_validate(
+        {
+            "summaryId": "norwegian-month",
+            "dateTime": "10. november 18:59",
+            "historyYear": 2026,
+            "historyMonth": 11,
+        }
+    )
+    assert purchase.purchase_date is not None
+    assert purchase.purchase_date.isoformat() == "2026-11-10T18:59:00+01:00"
+
+    no_context = CoopPurchaseStub.model_validate(
+        {"summaryId": "no-context", "dateTime": "10. november 18:59"}
+    )
+    assert no_context.purchase_date is None
+
+    with pytest.raises(ValidationError, match="month conflicts with its history grouping"):
+        CoopPurchaseStub.model_validate(
+            {
+                "summaryId": "conflicting-month",
+                "dateTime": "10. november 18:59",
+                "historyYear": 2026,
+                "historyMonth": 4,
+            }
+        )
 
 
 def test_coop_search_fails_closed_for_malformed_or_truncated_traversal():

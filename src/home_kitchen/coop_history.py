@@ -37,7 +37,7 @@ DEFAULT_COOP_USER_AGENT = "Android(14)/Coop(4.42.0)/2.7.7"
 DEFAULT_COOP_LOCALE = "nb_NO"
 DEFAULT_COOP_PURCHASES_COUNT = 50
 DEFAULT_COOP_SEARCH_MAX_PAGES = 100
-COOP_NORMALIZER_VERSION = "3"
+COOP_NORMALIZER_VERSION = "4"
 _COOP_LOCAL_TIMEZONE = ZoneInfo("Europe/Oslo")
 _COOP_NORWEGIAN_MONTHS = {
     "januar": 1,
@@ -280,7 +280,11 @@ class CoopQuantity(BaseModel):
 
 
 def _normalize_coop_quantity_input(value: Any) -> Any:
-    if value is None or (isinstance(value, str) and not value.strip()):
+    if isinstance(value, str) and not value.strip():
+        # Coop sends an empty quantity for ordinary single-item lines. Keep
+        # omitted fields unknown, but use the agreed one-item default for blanks.
+        return {"value": Decimal("1"), "unit": None}
+    if value is None:
         return None
     return value
 

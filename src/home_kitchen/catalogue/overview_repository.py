@@ -878,7 +878,9 @@ class PostgresProductOverviewRepository:
                 for eff in resolve_effective_orders(normalized_rows):
                     if eff.is_cancellation or eff.is_return:
                         continue
-                    purchased_at = eff.transaction_at or eff.observed_at
+                    purchased_at = eff.transaction_at
+                    if purchased_at is None and eff.provider != "coop":
+                        purchased_at = eff.observed_at
                     for line in eff.lines:
                         if line.is_return:
                             continue
@@ -1054,7 +1056,9 @@ class PostgresProductOverviewRepository:
                 for eff in resolve_effective_orders(normalized_rows):
                     if eff.is_cancellation or eff.is_return:
                         continue
-                    tx_at = eff.transaction_at or eff.observed_at
+                    tx_at = eff.transaction_at
+                    if tx_at is None and eff.provider != "coop":
+                        tx_at = eff.observed_at
                     _acc(
                         eff.provider,
                         tx_at,

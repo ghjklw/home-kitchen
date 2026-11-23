@@ -16,6 +16,8 @@ from home_kitchen.coop_history import (
     DEFAULT_COOP_USER_AGENT,
     CoopAuthenticationError,
     CoopHttpSource,
+    CoopPurchaseHistoryAdapter,
+    CoopPurchaseStub,
     UnsupportedCoopContract,
     parse_purchase_list,
     parse_receipt_detail,
@@ -308,11 +310,95 @@ def test_fixture_imports_dedupe_overlap_and_preserve_correction_revisions():
         engine.dispose()
 
 
-def test_coop_http_source_defaults_and_falls_back_from_list_404_to_search():
-    calls: list[tuple[str, str, str]] = []
+class _MutableCoopSource:
+    def __init__(self, summary_ids: list[str]) -> None:
+        self.purchase_calls = 0
+        self.receipt_calls: list[str] = []
+        self.summary_ids = summary_ids
+
+    def get_purchases(self, account_id: str) -> list[CoopPurchaseStub]:
+        self.purchase_calls += 1
+        return [
+            CoopPurchaseStub.model_validate(
+                {"summaryId": summary_id, "historyYear": 2026, "historyMonth": 11}
+            )
+            for summary_id in self.summary_ids
+        ]
+
+    def get_receipt(
+        self,
+        account_id: str,
+        summary_id: str,
+        *,
+        history_year: int | None = None,
+        history_month: int | None = None,
+    ):
+        self.receipt_calls.append(summary_id)
+        return parse_receipt_detail(
+            {"summary": {"summaryId": summary_id, "amount": "1.00"}},
+            history_year=history_year,
+            history_month=history_month,
+        )
+
+
+def test_coop_adapter_caches_one_stable_purchase_snapshot_per_scan():
+    source = _MutableCoopSource(["a", "b", "c", "d"])
+    adapter = CoopPurchaseHistoryAdapter(source, "user-1", page_size=2)
+
+    first_page = adapter.fetch_page("user-1", None)
+    assert [record.external_id for record in first_page.records] == ["a", "b"]
+    assert first_page.has_more is True
+    assert source.purchase_calls == 1
+
+    source.summary_ids = ["new", "a", "b", "c", "d"]
+    second_page = adapter.fetch_page("user-1", first_page.next_cursor)
+    assert [record.external_id for record in second_page.records] == ["c", "d"]
+    assert second_page.has_more is False
+    assert source.purchase_calls == 1
+
+    next_scan = adapter.fetch_page("user-1", second_page.next_cursor)
+    assert [record.external_id for record in next_scan.records] == ["new", "a"]
+    assert source.purchase_calls == 2
+
+
+def test_coop_adapter_restarts_at_page_one_when_scanning_cursor_cache_is_stale():
+    source = _MutableCoopSource(["a", "b", "c"])
+    original_adapter = CoopPurchaseHistoryAdapter(source, "user-1", page_size=1)
+    original_first_page = original_adapter.fetch_page("user-1", None)
+    stale_cursor = original_first_page.next_cursor
+    assert [record.external_id for record in original_first_page.records] == ["a"]
+
+    source.summary_ids = ["new", "x", "y", "z"]
+    restarted_adapter = CoopPurchaseHistoryAdapter(source, "user-1", page_size=1)
+    restarted_page = restarted_adapter.fetch_page("user-1", stale_cursor)
+    assert [record.external_id for record in restarted_page.records] == ["new"]
+    assert restarted_page.next_cursor != stale_cursor
+    assert source.purchase_calls == 2
+
+
+def _history_group(year: int, month: int, purchases: list[dict]) -> dict:
+    return {
+        "monthOfYear": {"year": year, "month": month},
+        "periodPurchases": purchases,
+    }
+
+
+def _search_response(*groups: dict, token: str | None = None) -> dict:
+    return {"hitsPerMonth": list(groups), "continuationToken": token}
+
+
+def test_coop_http_source_searches_all_pages_and_preserves_authoritative_years():
+    calls: list[tuple[str, dict[str, str]]] = []
+    first = [
+        {"summaryId": f"coop-new-{index:02}", "dateTime": "18.11. 12:00"} for index in range(51)
+    ]
+    second = [
+        {"summaryId": "coop-new-50", "dateTime": "18.11. 12:00"},
+        *[{"summaryId": f"coop-old-{index:02}", "dateTime": "07.04. 16:40"} for index in range(9)],
+    ]
 
     def handler(request: httpx.Request) -> httpx.Response:
-        calls.append((request.url.host, request.url.path, request.url.query.decode()))
+        calls.append((request.url.path, dict(request.url.params)))
         assert request.headers.get("accept") == "application/json;charset=UTF-8"
         assert request.headers.get("content-type") == "application/json; charset=utf-8"
         assert request.headers.get("user-agent") == DEFAULT_COOP_USER_AGENT
@@ -320,23 +406,21 @@ def test_coop_http_source_defaults_and_falls_back_from_list_404_to_search():
         assert request.headers.get("x-token") == "coop-token"
         assert request.headers.get("authorization") is None
         assert request.headers.get("x-deviceid") == source.device_id
-        if request.url.path == "/user/pay/history/list":
-            assert request.url.params.get("n") == "50"
-            return httpx.Response(404)
         if request.url.path == "/user/pay/history/search":
             assert request.url.params.get("text") == ""
             return httpx.Response(
                 200,
-                json={
-                    "purchases": [
-                        {
-                            "summaryId": "coop-search-1",
-                            "storeName": "Coop Mega Bislett",
-                            "purchaseDate": "2026-11-18T12:00:00Z",
-                            "amount": "210.00",
-                        }
-                    ]
-                },
+                json=_search_response(_history_group(2026, 11, first), token="page-2"),
+            )
+        if request.url.path == "/user/pay/history/search/continue":
+            assert request.url.params.get("token") == "page-2"
+            return httpx.Response(
+                200,
+                json=_search_response(
+                    _history_group(2026, 11, second[:1]),
+                    _history_group(2023, 4, second[1:]),
+                    token=None,
+                ),
             )
         return httpx.Response(404)
 
@@ -344,122 +428,215 @@ def test_coop_http_source_defaults_and_falls_back_from_list_404_to_search():
     assert source.base_url == DEFAULT_COOP_BASE_URL == "https://coopay.coop.no"
     assert len(source.device_id) == 16
     purchases = source.get_purchases("user-1")
-    assert [p.summary_id for p in purchases] == ["coop-search-1"]
-    assert purchases[0].amount == Decimal("210.00")
+    assert len(purchases) == 60
+    assert purchases[0].summary_id == "coop-new-00"
+    assert purchases[-1].summary_id == "coop-old-08"
+    assert purchases[0].purchase_date is not None
+    assert purchases[0].purchase_date.year == 2026
+    assert purchases[0].purchase_date.month == 11
+    assert purchases[-1].purchase_date is not None
+    assert purchases[-1].purchase_date.year == 2023
+    assert purchases[-1].purchase_date.month == 4
+    assert purchases[-1].history_year == 2023
+    assert purchases[-1].history_month == 4
     assert calls == [
-        ("coopay.coop.no", "/user/pay/history/list", "n=50"),
-        ("coopay.coop.no", "/user/pay/history/search", "text="),
+        ("/user/pay/history/search", {"text": ""}),
+        ("/user/pay/history/search/continue", {"token": "page-2"}),
     ]
 
 
-def test_coop_http_source_fetches_list_with_n_param_and_custom_device_id():
-    calls: list[tuple[str, str]] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append((request.url.path, request.url.query.decode()))
-        assert request.headers.get("x-deviceid") == "custom-device-id"
-        assert request.headers.get("x-token") == "coop-token"
-        if request.url.path == "/user/pay/history/list":
-            assert request.url.params.get("n") == "50"
-            return httpx.Response(
-                200,
-                json={
-                    "purchases": [
-                        {
-                            "summaryId": "coop-list-50",
-                            "storeName": "Coop Extra",
-                            "purchaseDate": "2026-11-19T12:00:00Z",
-                            "amount": "120.00",
-                        }
-                    ]
-                },
-            )
-        return httpx.Response(404)
-
+def test_coop_search_overlap_deduplicates_summary_ids_across_groups_and_pages():
+    pages = iter(
+        [
+            _search_response(
+                _history_group(
+                    2026, 11, [{"summaryId": "same", "purchaseDate": "2026-11-01T10:00:00Z"}]
+                ),
+                token="more",
+            ),
+            _search_response(
+                _history_group(
+                    2026, 11, [{"summaryId": "same", "purchaseDate": "2026-11-01T10:00:00Z"}]
+                ),
+                _history_group(
+                    2025, 12, [{"summaryId": "other", "purchaseDate": "2025-12-01T10:00:00Z"}]
+                ),
+            ),
+        ]
+    )
     source = CoopHttpSource(
         access_token="coop-token",
-        device_id="custom-device-id",
-        transport=httpx.MockTransport(handler),
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=next(pages))),
+    )
+    assert [purchase.summary_id for purchase in source.get_purchases("user-1")] == [
+        "same",
+        "other",
+    ]
+
+
+def test_coop_search_rejects_duplicate_summary_with_conflicting_month_context():
+    pages = iter(
+        [
+            _search_response(
+                _history_group(
+                    2026,
+                    11,
+                    [{"summaryId": "same", "dateTime": "07.11. 16:40"}],
+                ),
+                token="more",
+            ),
+            _search_response(
+                _history_group(
+                    2023,
+                    11,
+                    [{"summaryId": "same", "dateTime": "07.11. 16:40"}],
+                )
+            ),
+        ]
+    )
+    source = CoopHttpSource(
+        access_token="coop-token",
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=next(pages))),
+    )
+
+    with pytest.raises(UnsupportedCoopContract, match="conflicting history month context"):
+        source.get_purchases("user-1")
+
+
+def test_coop_month_group_corrects_mismatched_year_but_rejects_month_conflict():
+    corrected_source = CoopHttpSource(
+        access_token="coop-token",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json=_search_response(
+                    _history_group(
+                        2023,
+                        4,
+                        [{"summaryId": "corrected", "purchaseDate": "2026-04-07T16:40:00Z"}],
+                    )
+                ),
+            )
+        ),
+    )
+    corrected = corrected_source.get_purchases("user-1")[0]
+    assert corrected.purchase_date is not None
+    assert corrected.purchase_date.year == 2023
+    assert corrected.purchase_date.month == 4
+    assert corrected.purchase_date.day == 7
+
+    conflicting_source = CoopHttpSource(
+        access_token="coop-token",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json=_search_response(
+                    _history_group(
+                        2023,
+                        4,
+                        [{"summaryId": "conflict", "purchaseDate": "2026-03-07T16:40:00Z"}],
+                    )
+                ),
+            )
+        ),
+    )
+    with pytest.raises(UnsupportedCoopContract, match="month conflicts with its history grouping"):
+        conflicting_source.get_purchases("user-1")
+
+
+def test_coop_search_rejects_unaddressable_purchase_summary():
+    source = CoopHttpSource(
+        access_token="coop-token",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json=_search_response(_history_group(2023, 4, [{"amount": "10.00"}])),
+            )
+        ),
+    )
+    with pytest.raises(UnsupportedCoopContract, match="missing summaryId; scan is incomplete"):
+        source.get_purchases("user-1")
+
+
+def test_coop_missing_or_yearless_date_never_uses_current_year():
+    source = CoopHttpSource(
+        access_token="coop-token",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json=_search_response(
+                    _history_group(
+                        2023,
+                        4,
+                        [
+                            {"summaryId": "has-no-date"},
+                            {"summaryId": "yearless-no-context", "dateTime": "07.04. 16:40"},
+                        ],
+                    )
+                ),
+            )
+        ),
     )
     purchases = source.get_purchases("user-1")
-    assert [p.summary_id for p in purchases] == ["coop-list-50"]
-    assert calls == [("/user/pay/history/list", "n=50")]
-
-
-def test_coop_http_source_falls_back_to_month_and_dashboard_on_404():
-    month_calls: list[tuple[str, dict[str, str]]] = []
-
-    def month_handler(request: httpx.Request) -> httpx.Response:
-        month_calls.append((request.url.path, dict(request.url.params)))
-        if request.url.path in ("/user/pay/history/list", "/user/pay/history/search"):
-            return httpx.Response(404)
-        if request.url.path == "/user/pay/history/month":
-            return httpx.Response(
-                200,
-                json={
-                    "purchases": [
-                        {
-                            "summaryId": "coop-month-1",
-                            "storeName": "Extra Sagene",
-                            "purchaseDate": "2026-11-15T10:30:00Z",
-                            "amount": "95.50",
-                        }
-                    ]
-                },
-            )
-        return httpx.Response(404)
-
-    month_source = CoopHttpSource(
-        access_token="coop-token", transport=httpx.MockTransport(month_handler)
+    assert purchases[0].purchase_date is None
+    assert purchases[1].purchase_date is not None
+    assert purchases[1].purchase_date.year == 2023
+    no_context = parse_receipt_detail(
+        {"summary": {"summaryId": "partial", "dateTime": "07.04. 16:40"}}
     )
-    purchases = month_source.get_purchases("user-1")
-    assert [p.summary_id for p in purchases] == ["coop-month-1"]
-    assert [path for path, _ in month_calls] == [
-        "/user/pay/history/list",
-        "/user/pay/history/search",
-        "/user/pay/history/month",
-    ]
-    assert set(month_calls[2][1]) == {"year", "month"}
+    assert no_context.purchase_date is None
 
-    dash_calls: list[str] = []
 
-    def dashboard_handler(request: httpx.Request) -> httpx.Response:
-        dash_calls.append(request.url.path)
-        if request.url.path == "/user/pay/history/dashboard":
-            return httpx.Response(
-                200,
-                json={
-                    "monthlyBreakdown": [
-                        {
-                            "month": "2026-11",
-                            "purchases": [
-                                {
-                                    "summaryId": "coop-dash-1",
-                                    "storeName": "Coop Prix",
-                                    "purchaseDate": "2026-11-10T09:00:00Z",
-                                    "amount": "64.00",
-                                }
-                            ],
-                        }
-                    ]
-                },
-            )
-        return httpx.Response(404)
-
-    dash_source = CoopHttpSource(
-        access_token="coop-token", transport=httpx.MockTransport(dashboard_handler)
+def test_coop_detail_yearless_date_uses_search_month_context_and_revision_changes():
+    older = parse_receipt_detail(
+        {"summary": {"summaryId": "same", "dateTime": "07.04. 16:40"}},
+        history_year=2023,
+        history_month=4,
     )
-    dash_purchases = dash_source.get_purchases("user-1")
-    assert [p.summary_id for p in dash_purchases] == ["coop-dash-1"]
-    assert dash_calls == [
-        "/user/pay/history/list",
-        "/user/pay/history/search",
-        "/user/pay/history/month",
-        "/user/pay/history/dashboard",
-    ]
+    newer = parse_receipt_detail(
+        {"summary": {"summaryId": "same", "dateTime": "07.04. 16:40"}},
+        history_year=2026,
+        history_month=4,
+    )
+    assert older.purchase_date is not None and older.purchase_date.year == 2023
+    assert newer.purchase_date is not None and newer.purchase_date.year == 2026
+    assert older.revision_id != newer.revision_id
 
 
-def test_coop_http_source_raises_auth_or_contract_error_when_fallbacks_fail():
+def test_coop_search_fails_closed_for_malformed_or_truncated_traversal():
+    malformed_source = CoopHttpSource(
+        access_token="coop-token",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"hitsPerMonth": []})
+        ),
+    )
+    with pytest.raises(UnsupportedCoopContract, match="missing continuationToken"):
+        malformed_source.get_purchases("user-1")
+
+    repeated_source = CoopHttpSource(
+        access_token="coop-token",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json=_search_response(token="loop"),
+            )
+        ),
+    )
+    with pytest.raises(UnsupportedCoopContract, match="repeated a continuation token"):
+        repeated_source.get_purchases("user-1")
+
+    truncated_source = CoopHttpSource(
+        access_token="coop-token",
+        max_search_pages=1,
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json=_search_response(token="more"))
+        ),
+    )
+    with pytest.raises(UnsupportedCoopContract, match="exceeded its page limit"):
+        truncated_source.get_purchases("user-1")
+
+
+def test_coop_http_source_preserves_auth_and_upgrade_errors():
     all_404 = CoopHttpSource(
         access_token="coop-token",
         transport=httpx.MockTransport(lambda req: httpx.Response(404)),
@@ -468,8 +645,6 @@ def test_coop_http_source_raises_auth_or_contract_error_when_fallbacks_fail():
         all_404.get_purchases("user-1")
 
     def auth_fail_on_fallback(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/user/pay/history/list":
-            return httpx.Response(404)
         return httpx.Response(403)
 
     unauth_source = CoopHttpSource(

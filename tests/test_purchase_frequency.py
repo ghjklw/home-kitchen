@@ -309,6 +309,59 @@ def test_build_purchase_history_context_ranks_by_recency_and_includes_frequency_
     assert "never to assert current stock" in instructions
 
 
+def test_bought_before_context_uses_observed_at_fallback_only_for_non_coop_orders():
+    observed_at = datetime.now(UTC).replace(microsecond=0)
+    rows = [
+        {
+            "id": "coop-undated",
+            "provider": "coop",
+            "account_id": "synthetic-account",
+            "external_id": "coop-undated",
+            "revision_id": "r1",
+            "source_updated_at": None,
+            "observed_at": observed_at,
+            "payload": {
+                "summary": {
+                    "summaryId": "coop-undated",
+                    "lines": [{"productName": "Coop synthetic item", "quantity": 1, "amount": 5}],
+                }
+            },
+        },
+        {
+            "id": "oda-undated",
+            "provider": "oda",
+            "account_id": "synthetic-account",
+            "external_id": "oda-undated",
+            "revision_id": "r1",
+            "source_updated_at": None,
+            "observed_at": observed_at,
+            "payload": {
+                "order": {
+                    "orderNumber": "oda-undated",
+                    "products": [
+                        {
+                            "product": {"id": 321, "name": "Oda synthetic item"},
+                            "quantity": 1,
+                        }
+                    ],
+                },
+                "tracking": {"status": "delivered"},
+            },
+        },
+    ]
+
+    effective = resolve_effective_orders(rows)
+    context = build_purchase_history_context(effective, as_of=observed_at)
+    items = {item.provider: item for item in context.bought_before}
+
+    assert items["coop"].last_purchased_at is None
+    assert items["coop"].recency_score is None
+    assert items["coop"].provider_coverage_days is None
+    assert items["oda"].last_purchased_at == observed_at
+    assert items["oda"].recency_score is not None
+    assert set(context.source_providers) == {"coop", "oda"}
+
+
 def test_history_repository_compute_item_purchase_frequency_uses_recency_weighting():
     engine = create_engine("sqlite:///:memory:")
     with engine.begin() as conn:

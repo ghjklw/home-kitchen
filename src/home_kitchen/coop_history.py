@@ -10,10 +10,11 @@ import hashlib
 import json
 import re
 from base64 import b64decode, urlsafe_b64encode
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal, Protocol, runtime_checkable
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 import httpx
 from pydantic import AwareDatetime, BaseModel, BeforeValidator, ConfigDict, Field, model_validator
@@ -27,6 +28,9 @@ DEFAULT_COOP_BASE_URL = "https://coopay.coop.no"
 DEFAULT_COOP_USER_AGENT = "Android(14)/Coop(4.42.0)/2.7.7"
 DEFAULT_COOP_LOCALE = "nb_NO"
 DEFAULT_COOP_PURCHASES_COUNT = 50
+DEFAULT_COOP_SEARCH_MAX_PAGES = 100
+COOP_NORMALIZER_VERSION = "2"
+_COOP_LOCAL_TIMEZONE = ZoneInfo("Europe/Oslo")
 _COOP_AUTH_ERROR_CODES = frozenset(
     {
         "INVALID_TOKEN",
@@ -49,6 +53,117 @@ class UnsupportedCoopContract(ValueError):
 
 class CoopAuthenticationError(RuntimeError):
     """Missing or invalid Coop credentials or unauthenticated response."""
+
+
+def _parse_coop_purchase_datetime(
+    value: Any, *, history_year: int | None = None, history_month: int | None = None
+) -> datetime | None:
+    """Parse full timestamps, or add a year only from the provider's month grouping.
+
+    Coop's history search groups stubs by an authoritative month and year. Some
+    fields omit the year, so they are usable only when that grouping is present.
+    A genuinely absent date stays absent; the current date is never consulted.
+    """
+
+    def apply_history_context(parsed: datetime) -> datetime:
+        if history_month is not None and parsed.month != history_month:
+            raise UnsupportedCoopContract(
+                "Coop purchase timestamp month conflicts with its history grouping"
+            )
+        if history_year is not None and parsed.year != history_year:
+            try:
+                parsed = parsed.replace(year=history_year)
+            except ValueError:
+                raise UnsupportedCoopContract(
+                    "Coop purchase timestamp conflicts with its history year"
+                ) from None
+        return parsed
+
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        parsed = value.replace(tzinfo=_COOP_LOCAL_TIMEZONE) if value.tzinfo is None else value
+        return apply_history_context(parsed)
+    if not isinstance(value, str):
+        raise UnsupportedCoopContract("Coop purchase timestamp has an unsupported value")
+
+    normalized = value.strip()
+    if not normalized:
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+    except ValueError:
+        pass
+    else:
+        parsed = parsed.replace(tzinfo=_COOP_LOCAL_TIMEZONE) if parsed.tzinfo is None else parsed
+        return apply_history_context(parsed)
+
+    # Full Norwegian timestamp (optionally seconds), with an explicit year.
+    for pattern in ("%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M", "%d.%m.%Y"):
+        try:
+            parsed = datetime.strptime(normalized, pattern)
+        except ValueError:
+            continue
+        return apply_history_context(parsed.replace(tzinfo=_COOP_LOCAL_TIMEZONE))
+
+    # Norwegian timestamps that omit the year are resolvable only with the
+    # authoritative month/year supplied by the search grouping. Parse numeric
+    # parts directly so Python never supplies an implicit current year.
+    partial_match = re.fullmatch(
+        r"(?P<day>\d{1,2})\.(?P<month>\d{1,2})\.(?:\s+(?P<hour>\d{1,2}):(?P<minute>\d{2})(?::(?P<second>\d{2}))?)?",
+        normalized,
+    )
+    if partial_match:
+        day = int(partial_match.group("day"))
+        month = int(partial_match.group("month"))
+        hour = int(partial_match.group("hour") or 0)
+        minute = int(partial_match.group("minute") or 0)
+        second = int(partial_match.group("second") or 0)
+        if history_year is None:
+            return None
+        if history_month is not None and month != history_month:
+            raise UnsupportedCoopContract(
+                "Coop purchase timestamp month conflicts with its history grouping"
+            )
+        try:
+            return datetime(
+                history_year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                tzinfo=_COOP_LOCAL_TIMEZONE,
+            )
+        except ValueError:
+            raise UnsupportedCoopContract("Coop purchase timestamp has an invalid date") from None
+
+    # Time-only values cannot identify a calendar date. Treat them as missing
+    # rather than assigning today's date or inventing a day from the grouping.
+    if re.fullmatch(r"\d{1,2}:\d{2}(?::\d{2})?", normalized):
+        return None
+    raise UnsupportedCoopContract("Coop purchase timestamp has an unsupported format")
+
+
+def _purchase_date_payload(
+    raw: dict[str, Any], *, history_year: int | None = None, history_month: int | None = None
+) -> dict[str, Any]:
+    """Copy a provider summary and normalize whichever timestamp field it uses."""
+    normalized = dict(raw)
+    timestamp_keys = ("purchaseDate", "purchase_date", "dateTime", "date_time", "date")
+    timestamp_key = next(
+        (key for key in timestamp_keys if key in raw and raw[key] is not None and raw[key] != ""),
+        None,
+    )
+    if timestamp_key is not None:
+        parsed = _parse_coop_purchase_datetime(
+            raw[timestamp_key], history_year=history_year, history_month=history_month
+        )
+        normalized["purchaseDate"] = parsed
+    elif any(key in raw for key in timestamp_keys):
+        normalized["purchaseDate"] = None
+    return normalized
 
 
 def _normalize_coop_decimal(value: Any) -> Any:
@@ -207,25 +322,45 @@ class CoopPurchaseStub(BaseModel):
 
     summary_id: str | None = None
     purchase_date: AwareDatetime | None = None
+    history_year: int | None = Field(default=None, exclude=True)
+    history_month: int | None = Field(default=None, exclude=True)
     store_name: str | None = None
     store_id: str | None = None
     chain_id: str | None = None
     amount: CoopDecimal = None
     total_discount: CoopDecimal = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_timestamp(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        year = value.get("historyYear", value.get("history_year"))
+        month = value.get("historyMonth", value.get("history_month"))
+        return _purchase_date_payload(value, history_year=year, history_month=month)
 
-def _revision_id(raw: dict[str, Any]) -> str:
-    encoded = json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+def _revision_id(
+    raw: dict[str, Any], *, history_year: int | None = None, history_month: int | None = None
+) -> str:
+    # Bump the normalizer identity so a corrected interpretation of an
+    # unchanged historical payload is stored as a new immutable revision.
+    revision_input = {
+        "normalizer_version": COOP_NORMALIZER_VERSION,
+        "history_year": history_year,
+        "history_month": history_month,
+        "source": raw,
+    }
+    encoded = json.dumps(revision_input, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def parse_purchase_list(
     response: dict[str, Any], *, continuation_observed: bool = False
 ) -> list[CoopPurchaseStub]:
-    """Parse only the documented `{purchases: [...]}` response envelope.
+    """Parse a legacy `{purchases: [...]}` envelope used by offline fixtures.
 
-    `continuation_observed` is a local harness signal, not a provider field.
-    The gist names a continuation route but does not specify its response shape.
+    Live history ingestion uses :func:`parse_coop_search_page` instead.
     """
     if continuation_observed:
         raise UnsupportedCoopContract(
@@ -240,7 +375,11 @@ def parse_purchase_list(
 
 
 def parse_receipt_detail(
-    response: dict[str, Any], *, continuation_observed: bool = False
+    response: dict[str, Any],
+    *,
+    continuation_observed: bool = False,
+    history_year: int | None = None,
+    history_month: int | None = None,
 ) -> CoopReceipt:
     """Normalize a documented `{summary: PurchaseSummary}` detail response."""
     if continuation_observed:
@@ -252,7 +391,75 @@ def parse_receipt_detail(
     raw = response["summary"]
     if not isinstance(raw, dict):
         raise UnsupportedCoopContract("Coop receipt-detail summary must be an object")
-    return CoopReceipt.model_validate({**raw, "revision_id": _revision_id(raw)})
+    normalized = _purchase_date_payload(raw, history_year=history_year, history_month=history_month)
+    return CoopReceipt.model_validate(
+        {
+            **normalized,
+            "revision_id": _revision_id(
+                raw, history_year=history_year, history_month=history_month
+            ),
+        }
+    )
+
+
+def _history_month_context(value: Any) -> tuple[int, int]:
+    if not isinstance(value, dict):
+        raise UnsupportedCoopContract("Coop history month grouping must be an object")
+    year = value.get("year")
+    month = value.get("month")
+    if (
+        isinstance(year, bool)
+        or isinstance(month, bool)
+        or not isinstance(year, (int, str))
+        or not isinstance(month, (int, str))
+    ):
+        raise UnsupportedCoopContract("Coop history month grouping has invalid year/month")
+    try:
+        year, month = int(year), int(month)
+    except (TypeError, ValueError):
+        raise UnsupportedCoopContract(
+            "Coop history month grouping has invalid year/month"
+        ) from None
+    if not 1900 <= year <= 2200 or not 1 <= month <= 12:
+        raise UnsupportedCoopContract("Coop history month grouping has invalid year/month")
+    return year, month
+
+
+def parse_coop_search_page(response: Any) -> tuple[list[CoopPurchaseStub], str | None]:
+    """Parse the observed month-grouped search envelope and its continuation token."""
+    if not isinstance(response, dict):
+        raise UnsupportedCoopContract("unsupported Coop history search response shape")
+    allowed = {"hitsPerMonth", "continuationToken", "resultCode", "errorCode", "errorMessage"}
+    if set(response) - allowed or not isinstance(response.get("hitsPerMonth"), list):
+        raise UnsupportedCoopContract("unsupported Coop history search response shape")
+    if "continuationToken" not in response:
+        raise UnsupportedCoopContract("Coop history search response is missing continuationToken")
+
+    token = response["continuationToken"]
+    if token is not None and (not isinstance(token, str) or not token.strip()):
+        raise UnsupportedCoopContract("Coop history search continuation token is malformed")
+
+    purchases: list[CoopPurchaseStub] = []
+    for group in response["hitsPerMonth"]:
+        if not isinstance(group, dict) or set(group) - {"monthOfYear", "periodPurchases"}:
+            raise UnsupportedCoopContract("unsupported Coop history month grouping shape")
+        year, month = _history_month_context(group.get("monthOfYear"))
+        period_purchases = group.get("periodPurchases")
+        if not isinstance(period_purchases, list):
+            raise UnsupportedCoopContract("Coop periodPurchases must be an array")
+        for purchase in period_purchases:
+            if not isinstance(purchase, dict):
+                raise UnsupportedCoopContract("Coop history purchase summary must be an object")
+            summary_id = purchase.get("summaryId", purchase.get("summary_id"))
+            if not isinstance(summary_id, str) or not summary_id.strip():
+                raise UnsupportedCoopContract(
+                    "Coop history purchase summary is missing summaryId; scan is incomplete"
+                )
+            enriched = _purchase_date_payload(purchase, history_year=year, history_month=month)
+            enriched["historyYear"] = year
+            enriched["historyMonth"] = month
+            purchases.append(CoopPurchaseStub.model_validate(enriched))
+    return purchases, token.strip() if isinstance(token, str) and token.strip() else None
 
 
 def to_provider_order_record(receipt: CoopReceipt) -> ProviderOrderRecord:
@@ -278,7 +485,8 @@ COOP_AUTH_METHOD = "oidc_pkce"
 COOP_LIMITATIONS = (
     "Coop purchase history is derived from Android APK 4.17.3 OpenAPI reverse engineering. "
     "Auth uses Auth0 OIDC with PKCE S256 and offline_access. "
-    "The continuation response schema is undocumented, and no source update timestamp is reported."
+    "History search continuation and month-grouped summaries are based on observed wire responses; "
+    "no source update timestamp is reported."
 )
 
 
@@ -329,7 +537,14 @@ class CoopSource(Protocol):
 
     def get_purchases(self, account_id: str) -> list[CoopPurchaseStub]: ...
 
-    def get_receipt(self, account_id: str, summary_id: str) -> CoopReceipt | None: ...
+    def get_receipt(
+        self,
+        account_id: str,
+        summary_id: str,
+        *,
+        history_year: int | None = None,
+        history_month: int | None = None,
+    ) -> CoopReceipt | None: ...
 
 
 class CoopFixtureSource:
@@ -357,7 +572,14 @@ class CoopFixtureSource:
             raise self._failure
         return list(self._purchases)
 
-    def get_receipt(self, account_id: str, summary_id: str) -> CoopReceipt | None:
+    def get_receipt(
+        self,
+        account_id: str,
+        summary_id: str,
+        *,
+        history_year: int | None = None,
+        history_month: int | None = None,
+    ) -> CoopReceipt | None:
         self.receipt_calls.append(summary_id)
         if self._failure is not None:
             raise self._failure
@@ -366,43 +588,7 @@ class CoopFixtureSource:
             return None
         if isinstance(raw, CoopReceipt):
             return raw
-        return parse_receipt_detail(raw)
-
-
-def _extract_coop_purchase_stubs(data: Any) -> list[CoopPurchaseStub]:
-    raw_list: list[Any]
-    if isinstance(data, list):
-        raw_list = data
-    elif isinstance(data, dict):
-        purchases = data.get("purchases")
-        items = data.get("items")
-        monthly = data.get("monthlyBreakdown")
-        if purchases is not None and not isinstance(purchases, list):
-            raise UnsupportedCoopContract("Coop purchase list response has unexpected shape")
-        if items is not None and not isinstance(items, list):
-            raise UnsupportedCoopContract("Coop purchase list response has unexpected shape")
-        if monthly is not None and not isinstance(monthly, list):
-            raise UnsupportedCoopContract("Coop purchase list response has unexpected shape")
-        if purchases:
-            raw_list = purchases
-        elif items:
-            raw_list = items
-        elif monthly:
-            raw_list = []
-            for entry in monthly:
-                if not isinstance(entry, dict):
-                    continue
-                if isinstance(entry.get("purchases"), list):
-                    raw_list.extend(entry["purchases"])
-                elif isinstance(entry.get("items"), list):
-                    raw_list.extend(entry["items"])
-                elif "summaryId" in entry or "summary_id" in entry:
-                    raw_list.append(entry)
-        else:
-            raw_list = []
-    else:
-        raise UnsupportedCoopContract("Coop purchase list response has unexpected shape")
-    return [CoopPurchaseStub.model_validate(item) for item in raw_list]
+        return parse_receipt_detail(raw, history_year=history_year, history_month=history_month)
 
 
 def _check_coop_base_response(data: Any) -> None:
@@ -438,6 +624,7 @@ class CoopHttpSource:
         locale: str = DEFAULT_COOP_LOCALE,
         device_id: str | None = None,
         transport: httpx.BaseTransport | None = None,
+        max_search_pages: int = DEFAULT_COOP_SEARCH_MAX_PAGES,
     ) -> None:
         clean_token = access_token.strip() if isinstance(access_token, str) else ""
         clean_cookie = session_cookie.strip() if isinstance(session_cookie, str) else ""
@@ -447,6 +634,8 @@ class CoopHttpSource:
         if not clean_device_id:
             seed = clean_token or clean_cookie
             clean_device_id = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+        if max_search_pages < 1 or max_search_pages > 1000:
+            raise ValueError("max_search_pages must be between 1 and 1000")
         self.access_token = clean_token or None
         self.session_cookie = clean_cookie or None
         self.base_url = base_url.rstrip("/")
@@ -454,6 +643,7 @@ class CoopHttpSource:
         self.locale = locale
         self.device_id = clean_device_id
         self.transport = transport
+        self.max_search_pages = max_search_pages
 
     def _client(self) -> httpx.Client:
         headers = {
@@ -497,49 +687,59 @@ class CoopHttpSource:
         if resp.status_code >= 400:
             raise UnsupportedCoopContract(f"{context} svarte med HTTP {resp.status_code}")
 
-    def _parse_purchases_response(self, resp: httpx.Response) -> list[CoopPurchaseStub]:
-        self._raise_for_response_status(resp)
-        payload = resp.json()
-        _check_coop_base_response(payload)
-        return _extract_coop_purchase_stubs(payload)
-
     def get_purchases(self, account_id: str) -> list[CoopPurchaseStub]:
-        now = datetime.now(UTC)
         with self._client() as client:
-            resp = client.get(
-                f"{self.base_url}/user/pay/history/list",
-                params={"n": str(DEFAULT_COOP_PURCHASES_COUNT)},
-            )
-            if resp.status_code < 400:
-                return self._parse_purchases_response(resp)
+            response = client.get(f"{self.base_url}/user/pay/history/search", params={"text": ""})
+            purchases: list[CoopPurchaseStub] = []
+            summary_contexts: dict[str, tuple[int | None, int | None]] = {}
+            seen_tokens: set[str] = set()
 
-            if resp.status_code == 404:
-                resp = client.get(
-                    f"{self.base_url}/user/pay/history/search",
-                    params={"text": ""},
+            for page_number in range(1, self.max_search_pages + 1):
+                self._raise_for_response_status(response, context="Coop history search")
+                payload = response.json()
+                _check_coop_base_response(payload)
+                page_purchases, next_token = parse_coop_search_page(payload)
+                for purchase in page_purchases:
+                    summary_id = purchase.summary_id
+                    if summary_id:
+                        context = (purchase.history_year, purchase.history_month)
+                        previous_context = summary_contexts.get(summary_id)
+                        if previous_context is not None:
+                            if previous_context != context:
+                                raise UnsupportedCoopContract(
+                                    "Coop repeated a summaryId with conflicting history month context; "
+                                    "scan is incomplete"
+                                )
+                            continue
+                        summary_contexts[summary_id] = context
+                    purchases.append(purchase)
+
+                if next_token is None:
+                    return purchases
+                if next_token in seen_tokens:
+                    raise UnsupportedCoopContract(
+                        "Coop history search repeated a continuation token; scan is incomplete"
+                    )
+                if page_number == self.max_search_pages:
+                    raise UnsupportedCoopContract(
+                        "Coop history search exceeded its page limit; scan is incomplete"
+                    )
+                seen_tokens.add(next_token)
+                response = client.get(
+                    f"{self.base_url}/user/pay/history/search/continue",
+                    params={"token": next_token},
                 )
-            if resp.status_code != 404:
-                return self._parse_purchases_response(resp)
 
-            month_resp = client.get(
-                f"{self.base_url}/user/pay/history/month",
-                params={"year": str(now.year), "month": str(now.month)},
-            )
-            self._raise_for_response_status(month_resp, allow_404=True)
-            month_stubs: list[CoopPurchaseStub] | None = None
-            if month_resp.status_code < 400:
-                month_payload = month_resp.json()
-                _check_coop_base_response(month_payload)
-                month_stubs = _extract_coop_purchase_stubs(month_payload)
-                if month_stubs:
-                    return month_stubs
+        raise AssertionError("unreachable Coop history search state")
 
-            dash_resp = client.get(f"{self.base_url}/user/pay/history/dashboard")
-            if dash_resp.status_code == 404 and month_stubs is not None:
-                return month_stubs
-            return self._parse_purchases_response(dash_resp)
-
-    def get_receipt(self, account_id: str, summary_id: str) -> CoopReceipt | None:
+    def get_receipt(
+        self,
+        account_id: str,
+        summary_id: str,
+        *,
+        history_year: int | None = None,
+        history_month: int | None = None,
+    ) -> CoopReceipt | None:
         url = f"{self.base_url}/user/pay/history/details"
         with self._client() as client:
             resp = client.get(url, params={"summaryId": summary_id})
@@ -549,8 +749,8 @@ class CoopHttpSource:
         payload = resp.json()
         _check_coop_base_response(payload)
         if isinstance(payload, dict) and isinstance(payload.get("summary"), dict):
-            return parse_receipt_detail({"summary": payload["summary"]})
-        return parse_receipt_detail(payload)
+            payload = {"summary": payload["summary"]}
+        return parse_receipt_detail(payload, history_year=history_year, history_month=history_month)
 
 
 class CoopPurchaseHistoryAdapter:
@@ -576,6 +776,7 @@ class CoopPurchaseHistoryAdapter:
         self.account_id = account_id
         self.page_size = page_size
         self.max_pages = max_pages
+        self._scan_purchase_snapshots: dict[str, list[CoopPurchaseStub]] = {}
 
     def status(self) -> CoopAdapterStatus:
         return CoopAdapterStatus()
@@ -588,7 +789,11 @@ class CoopPurchaseHistoryAdapter:
         if scan is not None and scan.account_id != account_id:
             raise ValueError("Coop history cursor account mismatch")
 
-        if scan is None or scan.state != "scanning":
+        if (
+            scan is None
+            or scan.state != "scanning"
+            or scan.scan_id not in self._scan_purchase_snapshots
+        ):
             scan = _CoopScanCursor(
                 version=1,
                 mode="full_rescan",
@@ -597,8 +802,10 @@ class CoopPurchaseHistoryAdapter:
                 next_page=1,
                 state="scanning",
             )
-
-        purchases = self.source.get_purchases(account_id)
+            purchases = self.source.get_purchases(account_id)
+            self._scan_purchase_snapshots[scan.scan_id] = purchases
+        else:
+            purchases = self._scan_purchase_snapshots[scan.scan_id]
 
         page_num = scan.next_page
         start_idx = (page_num - 1) * self.page_size
@@ -613,7 +820,12 @@ class CoopPurchaseHistoryAdapter:
         for p in page_purchases:
             summary_id = p.summary_id
             if summary_id:
-                receipt = self.source.get_receipt(account_id, summary_id)
+                receipt = self.source.get_receipt(
+                    account_id,
+                    summary_id,
+                    history_year=p.history_year,
+                    history_month=p.history_month,
+                )
                 if receipt is not None:
                     records.append(to_provider_order_record(receipt))
 
@@ -634,6 +846,9 @@ class CoopPurchaseHistoryAdapter:
             if truncated
             else None
         )
+
+        if not has_more:
+            self._scan_purchase_snapshots.pop(scan.scan_id, None)
 
         return ProviderPage(
             records=records,

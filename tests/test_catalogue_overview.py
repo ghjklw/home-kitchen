@@ -1491,3 +1491,75 @@ def test_postgres_repository_excludes_cancelled_and_returned_provider_orders(
     assert len(overview.previously_purchased_skus) == 1
     assert overview.previously_purchased_skus[0].provider == "rema1000"
     assert overview.previously_purchased_skus[0].purchase_count == 1
+
+
+def test_postgres_repository_does_not_date_undated_coop_receipt_by_observation_time(
+    overview_sqlite_engine,
+):
+    hid = UUID("00000000-0000-0000-0000-000000000001")
+    product_id = uuid4()
+    observed_at = datetime.now(UTC).replace(microsecond=0)
+
+    with overview_sqlite_engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO kitchen_canonical_products (id, canonical_name, variant) "
+                "VALUES (:pid, 'synthetic milk', '')"
+            ),
+            {"pid": product_id},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO provider_order_sources "
+                "(id, provider, account_id, external_id, revision_id, payload, observed_at) "
+                "VALUES "
+                "(:coop_id, 'coop', 'synthetic-account', 'coop-undated', 'r1', :coop_payload, :ts), "
+                "(:oda_id, 'oda', 'synthetic-account', 'oda-undated', 'r1', :oda_payload, :ts)"
+            ),
+            {
+                "coop_id": uuid4(),
+                "coop_payload": json.dumps(
+                    {
+                        "summary": {
+                            "summaryId": "coop-undated",
+                            "lines": [
+                                {
+                                    "productName": "synthetic milk",
+                                    "quantity": 1,
+                                    "amount": 10.0,
+                                }
+                            ],
+                        }
+                    }
+                ),
+                "oda_id": uuid4(),
+                "oda_payload": json.dumps(
+                    {
+                        "order": {
+                            "orderNumber": "oda-undated",
+                            "products": [
+                                {
+                                    "product": {"id": 321, "name": "synthetic milk"},
+                                    "quantity": 1,
+                                    "totalGrossAmount": 10.0,
+                                }
+                            ],
+                        },
+                        "tracking": {"status": "delivered"},
+                    }
+                ),
+                "ts": observed_at.isoformat(),
+            },
+        )
+
+    repository = PostgresProductOverviewRepository(overview_sqlite_engine)
+    product = repository.get_product(product_id)
+    assert product is not None
+    aliases = repository.get_aliases_for_products([product_id]).get(product_id, [])
+    evidence = repository.get_purchase_evidence_for_product(product, aliases, [], hid)
+    windows = repository.get_provider_coverage_windows(hid)
+
+    assert [item.provider for item in evidence] == ["oda"]
+    assert evidence[0].purchased_at == observed_at
+    assert "coop" not in windows
+    assert windows["oda"].start == observed_at

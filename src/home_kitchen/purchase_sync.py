@@ -185,6 +185,9 @@ def extract_receipt_lines(record: ProviderOrderRecord) -> list[dict[str, Any]]:
     payload = record.payload
     if not isinstance(payload, dict):
         return []
+    order = payload.get("order")
+    if isinstance(order, dict) and isinstance(order.get("products"), list):
+        return [item for item in order["products"] if isinstance(item, dict)]
     for key in ("lines", "varelinjer", "items", "receiptLines"):
         val = payload.get(key)
         if isinstance(val, list):
@@ -522,6 +525,7 @@ def sync_account(
     connector_store: ConnectorCredentialPort | None = None,
     household_id: UUID | None = None,
     on_unmapped_lines: Callable[[list[dict[str, Any]]], None] | None = None,
+    on_new_receipt_lines: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> int:
     """Fetch pages; terminal-page cursor is saved for the next provider poll."""
     provider, account_id = _identity(provider, account_id)
@@ -627,6 +631,28 @@ def sync_account(
 
         if all_unmapped and callable(on_unmapped_lines):
             on_unmapped_lines(all_unmapped)
+        if callable(on_new_receipt_lines) and records_to_enrich:
+            from home_kitchen.product_mapping import source_line_metadata
+
+            new_lines: list[dict[str, Any]] = []
+            for rec in records_to_enrich:
+                raw_lines = extract_receipt_lines(rec)
+                for index, raw_line in enumerate(raw_lines):
+                    name = extract_line_name(raw_line)
+                    nested_product = raw_line.get("product")
+                    if not name and isinstance(nested_product, dict):
+                        name = extract_line_name(nested_product)
+                    if not name:
+                        continue
+                    new_lines.append(
+                        {
+                            "retailer": provider,
+                            "description": name,
+                            **source_line_metadata(provider, rec.payload, index),
+                        }
+                    )
+            if new_lines:
+                on_new_receipt_lines(new_lines)
 
         if page.incomplete_reason is not None:
             # Persist first: the terminal cursor allows the next poll to restart,
@@ -847,6 +873,9 @@ def extract_receipt_lines_from_payload(payload: dict[str, Any]) -> list[dict[str
     """Extract raw line dicts from any supported provider payload dict."""
     if not isinstance(payload, dict):
         return []
+    order = payload.get("order")
+    if isinstance(order, dict) and isinstance(order.get("products"), list):
+        return [item for item in order["products"] if isinstance(item, dict)]
     for key in ("lines", "varelinjer", "items", "receiptLines"):
         val = payload.get(key)
         if isinstance(val, list):
@@ -1441,6 +1470,7 @@ class PurchaseHistorySyncService:
         connector_auth: Any | None = None,
         identity_service: ReceiptIdentityResolver | None = None,
         receipt_mapper: ReceiptMappingPort | None = None,
+        product_mapping_suggester: Any | None = None,
         kassal_client: Any | None = None,
     ) -> None:
         self.engine = engine
@@ -1465,6 +1495,7 @@ class PurchaseHistorySyncService:
         self._partial_auth_failure: dict[str, bool] = {}
         self.identity_service: ReceiptIdentityResolver | None = identity_service
         self.receipt_mapper: ReceiptMappingPort | None = receipt_mapper
+        self.product_mapping_suggester = product_mapping_suggester
         self.kassal_client: Any = kassal_client
         self._kassal_clients_by_key: dict[str, tuple[Any, Any]] = {}
 
@@ -1582,6 +1613,25 @@ class PurchaseHistorySyncService:
         import threading
 
         threading.Thread(target=_thread, daemon=True).start()
+
+    def _dispatch_background_product_suggestions(self, items: list[dict[str, Any]]) -> None:
+        """Infer package/product metadata for a bounded set of newly imported lines."""
+        suggester = self.product_mapping_suggester
+        if not items or suggester is None:
+            return
+
+        async def _run() -> None:
+            try:
+                await suggester.suggest_items(items)
+            except Exception:
+                _LOG.warning("Background retailer product suggestions failed", exc_info=True)
+
+        def _thread() -> None:
+            asyncio.run(_run())
+
+        import threading
+
+        threading.Thread(target=_thread, name="kitchen-product-suggestions", daemon=True).start()
 
     def register_adapter(
         self,
@@ -2135,6 +2185,7 @@ class PurchaseHistorySyncService:
                 connector_store=self.connector_store,
                 household_id=self.household_id,
                 on_unmapped_lines=self._dispatch_background_mapping,
+                on_new_receipt_lines=self._dispatch_background_product_suggestions,
             )
 
         for target_account_id, adapter in targets:

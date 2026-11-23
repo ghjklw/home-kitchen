@@ -303,5 +303,8 @@ def test_kitchen_features_wires_explicit_ports_without_monkey_patching():
         features.basket_matching.identity_corrections, CanonicalIdentityCorrectionAdapter
     )
     assert features.purchase_sync.identity_service is identities
-    assert isinstance(features.purchase_sync.receipt_mapper, CatalogueReceiptMappingAdapter)
+    # Purchase-history AI suggestions are stored in the reviewable product-mapping
+    # overlay; the legacy automatic receipt mapper must not write inferred IDs into
+    # immutable provider revisions.
+    assert features.purchase_sync.receipt_mapper is None
     assert not hasattr(features.purchase_sync, "mapping_store")

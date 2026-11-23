@@ -16,6 +16,7 @@ from home_kitchen.catalogue.overview_models import (
     PurchaseFrequencyOverview,
 )
 from home_kitchen.catalogue.seeds import V1_PRODUCTS, get_reference_category
+from home_kitchen.product_mapping import source_line_metadata
 from home_kitchen.purchase_frequency import (
     DEFAULT_HALF_LIFE_DAYS,
     PROVIDER_RETENTION_MONTHS,
@@ -51,233 +52,6 @@ CATEGORY_LABELS_NB: dict[str, str] = {
 
 _SEED_CATEGORY_BY_PID: dict[str, str] = {str(prod.id): prod.category for prod in V1_PRODUCTS}
 _SEED_NAME_BY_PID: dict[str, str] = {str(prod.id): prod.canonical_name for prod in V1_PRODUCTS}
-
-_CATEGORY_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    (
-        "Dairy",
-        (
-            "melk",
-            "helmelk",
-            "lettmelk",
-            "skummet",
-            "havremelk",
-            "yoghurt",
-            "kvarg",
-            "rømme",
-            "fløte",
-            "kremfløte",
-            "ost",
-            "gulost",
-            "norvegia",
-            "jarlsberg",
-            "brunost",
-            "mozzarella",
-            "parmesan",
-            "smør",
-            "margarin",
-            "egg",
-            "milk",
-            "cheese",
-            "butter",
-        ),
-    ),
-    (
-        "Produce",
-        (
-            "eple",
-            "banan",
-            "pære",
-            "appelsin",
-            "sitron",
-            "lime",
-            "druer",
-            "bær",
-            "blåbær",
-            "bringebær",
-            "jordbær",
-            "avokado",
-            "gulrot",
-            "gulrøtter",
-            "potet",
-            "løk",
-            "rødløk",
-            "hvitløk",
-            "tomat",
-            "agurk",
-            "paprika",
-            "salat",
-            "spinat",
-            "brokkoli",
-            "blomkål",
-            "sopp",
-            "squas",
-            "aubergine",
-            "grønnsak",
-            "frukt",
-            "carrot",
-            "tomato",
-            "onion",
-            "potato",
-            "apple",
-            "banana",
-        ),
-    ),
-    (
-        "Bakery",
-        (
-            "brød",
-            "rundstykke",
-            "baguette",
-            "bolle",
-            "croissant",
-            "knekkebrød",
-            "lompe",
-            "lefse",
-            "tortilla",
-            "polarbrød",
-            "bread",
-            "bakery",
-        ),
-    ),
-    (
-        "Meat",
-        (
-            "kylling",
-            "kalkun",
-            "kjøttdeig",
-            "karbonadedeig",
-            "svin",
-            "biff",
-            "entrecote",
-            "storfe",
-            "lam",
-            "bacon",
-            "skinke",
-            "pølse",
-            "kjøtt",
-            "chicken",
-            "beef",
-            "pork",
-        ),
-    ),
-    (
-        "Fish",
-        (
-            "laks",
-            "torsk",
-            "sei",
-            "makrell",
-            "ørret",
-            "sild",
-            "fiskekake",
-            "fiskebolle",
-            "fiskegrateng",
-            "salmon",
-            "cod",
-            "fish",
-        ),
-    ),
-    ("Seafood", ("reke", "reker", "krabbe", "blåskjell", "scampi", "shrimp", "seafood")),
-    (
-        "Frozen",
-        ("frossen", "fryste", "frosne", "iskrem", "is ", "grandiosa", "frozen", "ice cream"),
-    ),
-    (
-        "Chilled",
-        ("pålegg", "leverpostei", "kaviar", "majones", "hummus", "pesto", "salami", "servelat"),
-    ),
-    (
-        "Drinks",
-        (
-            "kaffe",
-            "te ",
-            "espresso",
-            "juice",
-            "eplejuice",
-            "appelsinjuice",
-            "brus",
-            "cola",
-            "farris",
-            "vann",
-            "øl",
-            "cider",
-            "vin",
-            "smoothie",
-            "coffee",
-            "juice",
-        ),
-    ),
-    (
-        "Spices",
-        (
-            "salt",
-            "pepper",
-            "krydder",
-            "kanel",
-            "karri",
-            "paprikapulver",
-            "oregano",
-            "basilikum",
-            "timian",
-            "spisskummen",
-            "chili",
-            "spice",
-        ),
-    ),
-    (
-        "Household",
-        (
-            "toalettpapir",
-            "dopapir",
-            "tørkepapir",
-            "oppvask",
-            "vaskemiddel",
-            "zalo",
-            "såpe",
-            "sjampo",
-            "tannkrem",
-            "bakepapir",
-            "aluminiumsfolie",
-            "plastpose",
-            "avfallspose",
-            "serviett",
-        ),
-    ),
-    (
-        "Pantry",
-        (
-            "mel",
-            "hvetemel",
-            "havregryn",
-            "pasta",
-            "spaghetti",
-            "ris",
-            "nudler",
-            "sukker",
-            "honning",
-            "olje",
-            "olivenolje",
-            "rapsolje",
-            "eddik",
-            "bønner",
-            "linser",
-            "kikerter",
-            "hermetikk",
-            "hakkede tomater",
-            "tomatpure",
-            "kokosmelk",
-            "syltetøy",
-            "sjokolade",
-            "nøtter",
-            "mandler",
-            "bakepulver",
-            "gjær",
-            "flour",
-            "pasta",
-            "rice",
-        ),
-    ),
-)
 
 _EXTRA_CATEGORY_ALIASES: dict[str, str] = {
     "vegetables": "Produce",
@@ -357,12 +131,6 @@ def resolve_purchase_category(
             key = _SEED_CATEGORY_BY_PID[pid]
             return key, category_label_nb(key)
 
-    text_norm = f" {' '.join(product_name.casefold().split())} "
-    if text_norm.strip():
-        for cat_key, keywords in _CATEGORY_KEYWORDS:
-            if any(kw in text_norm for kw in keywords):
-                return cat_key, CATEGORY_LABELS_NB[cat_key]
-
     return "Other", CATEGORY_LABELS_NB["Other"]
 
 
@@ -396,10 +164,35 @@ class PurchaseLineItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
+    row_id: str | None = None
     name: str
     raw_name: str | None = None
+    retailer_product_id: str | None = None
     canonical_product_id: str | None = None
     canonical_product_name: str | None = None
+    base_product_id: str | None = None
+    base_product_name: str | None = None
+    suggested_product_name: str | None = None
+    suggested_category: str | None = None
+    product_evidence: str | None = None
+    category_evidence: str | None = None
+    mapping_id: str | None = None
+    mapping_source: str | None = None
+    mapping_confidence: float | None = None
+    mapping_review_status: Literal["pending", "confirmed", "ignored"] = "pending"
+    category_source: str | None = None
+    category_confidence: float | None = None
+    category_review_status: Literal["pending", "confirmed", "ignored"] = "pending"
+    package_size: Decimal | None = None
+    package_unit: str | None = None
+    package_inference_source: str | None = None
+    package_confidence: float | None = None
+    package_evidence: str | None = None
+    mapping_match: Literal["exact", "similar", "none"] = "none"
+    mapping_match_source: (
+        Literal["retailer_product_id", "ean", "exact_description", "opted_in_exact_description"]
+        | None
+    ) = None
     category: str = "Other"
     category_label: str = "Annet"
     quantity: Decimal | None = None
@@ -465,6 +258,7 @@ class PurchaseTableRow(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
+    row_id: str | None = None
     basket_id: str
     purchased_at: AwareDatetime | None = None
     provider: str
@@ -472,7 +266,32 @@ class PurchaseTableRow(BaseModel):
     store_name: str | None = None
     product_name: str
     raw_name: str | None = None
+    retailer_product_id: str | None = None
     canonical_product_id: str | None = None
+    canonical_product_name: str | None = None
+    base_product_id: str | None = None
+    base_product_name: str | None = None
+    suggested_product_name: str | None = None
+    suggested_category: str | None = None
+    product_evidence: str | None = None
+    category_evidence: str | None = None
+    mapping_id: str | None = None
+    mapping_source: str | None = None
+    mapping_confidence: float | None = None
+    mapping_review_status: Literal["pending", "confirmed", "ignored"] = "pending"
+    category_source: str | None = None
+    category_confidence: float | None = None
+    category_review_status: Literal["pending", "confirmed", "ignored"] = "pending"
+    package_size: Decimal | None = None
+    package_unit: str | None = None
+    package_inference_source: str | None = None
+    package_confidence: float | None = None
+    package_evidence: str | None = None
+    mapping_match: Literal["exact", "similar", "none"] = "none"
+    mapping_match_source: (
+        Literal["retailer_product_id", "ean", "exact_description", "opted_in_exact_description"]
+        | None
+    ) = None
     category: str = "Other"
     category_label: str = "Annet"
     quantity: Decimal | None = None
@@ -652,19 +471,31 @@ class PurchaseHistoryBrowseService:
                         canonical_product_id=canon_pid_str,
                         canonical_category_map=canon_cats,
                     )
+                    source_meta = source_line_metadata(
+                        prov,
+                        getattr(order, "payload", {})
+                        if isinstance(getattr(order, "payload", {}), dict)
+                        else {},
+                        idx,
+                    )
+                    line_id = f"{basket_id}:line:{idx}"
                     lines_out.append(
                         PurchaseLineItem(
-                            id=f"{basket_id}:line:{idx}",
+                            id=line_id,
+                            row_id=line_id,
                             name=name,
                             raw_name=raw_name,
+                            retailer_product_id=source_meta.get("retailer_product_id"),
                             canonical_product_id=canon_pid_str,
                             canonical_product_name=canon_display,
+                            base_product_id=None,
+                            base_product_name=None,
                             category=cat_key,
                             category_label=cat_nb,
                             quantity=qty,
                             unit=getattr(line, "unit", None),
                             amount=amt,
-                            ean=getattr(line, "ean", None),
+                            ean=getattr(line, "ean", None) or source_meta.get("ean"),
                             oda_product_id=getattr(line, "oda_product_id", None),
                         )
                     )
@@ -758,6 +589,7 @@ class PurchaseHistoryBrowseService:
                     lines_out.append(
                         PurchaseLineItem(
                             id=f"trip:{trip_key}:line:{idx}",
+                            row_id=f"trip:{trip_key}:line:{idx}",
                             name=name,
                             canonical_product_id=canon_pid_str,
                             canonical_product_name=canon_display,
@@ -888,15 +720,38 @@ class PurchaseHistoryBrowseService:
                 filtered_rows.append(
                     PurchaseTableRow(
                         id=line.id,
+                        row_id=line.row_id or line.id,
                         basket_id=basket.id,
                         purchased_at=basket.purchased_at,
                         provider=basket.provider,
                         provider_label=basket.provider_label,
                         store_name=basket.store_name,
                         product_name=line.canonical_product_name or line.name,
+                        canonical_product_name=line.canonical_product_name,
                         raw_name=line.raw_name
                         or (line.name if line.canonical_product_name else None),
                         canonical_product_id=line.canonical_product_id,
+                        retailer_product_id=line.retailer_product_id,
+                        base_product_id=line.base_product_id,
+                        base_product_name=line.base_product_name,
+                        suggested_product_name=line.suggested_product_name,
+                        suggested_category=line.suggested_category,
+                        product_evidence=line.product_evidence,
+                        category_evidence=line.category_evidence,
+                        mapping_id=line.mapping_id,
+                        mapping_source=line.mapping_source,
+                        mapping_confidence=line.mapping_confidence,
+                        mapping_review_status=line.mapping_review_status,
+                        category_source=line.category_source,
+                        category_confidence=line.category_confidence,
+                        category_review_status=line.category_review_status,
+                        package_size=line.package_size,
+                        package_unit=line.package_unit,
+                        package_inference_source=line.package_inference_source,
+                        package_confidence=line.package_confidence,
+                        package_evidence=line.package_evidence,
+                        mapping_match=line.mapping_match,
+                        mapping_match_source=line.mapping_match_source,
                         category=line.category,
                         category_label=line.category_label,
                         quantity=line.quantity,

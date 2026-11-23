@@ -93,6 +93,78 @@
     return provenance === "user_confirmed" ? "Registrert handletur" : "Bekreftet kvittering";
   }
 
+  function formatMappingSource(source) {
+    const labels = {
+      user: "Bekreftet av deg",
+      retailer_identifier: "Butikkens vare-ID",
+      ean: "EAN",
+      description: "Foreslått fra varetekst",
+      ai: "KI-forslag",
+      retailer: "Oppgitt av butikk",
+      description_rule: "Avledet fra varetekst",
+    };
+    return labels[source] || (source ? String(source).replaceAll("_", " ") : "Ukjent kilde");
+  }
+
+  function formatConfidence(confidence) {
+    if (confidence == null || confidence === "") return null;
+    const value = Number(confidence);
+    if (!Number.isFinite(value)) return null;
+    const percent = value >= 0 && value <= 1 ? value * 100 : value;
+    return `${Math.round(percent)} % sikkerhet`;
+  }
+
+  function isLowConfidence(confidence) {
+    if (String(confidence || "").toLowerCase() === "low") return true;
+    const value = Number(confidence);
+    return Number.isFinite(value) && value >= 0 && value < 0.7;
+  }
+
+  function supportsProductMapping(provider) {
+    return ["oda", "coop", "trumf", "rema1000"].includes(
+      String(provider || "").trim().toLowerCase(),
+    );
+  }
+
+  function formatMappingMatchLabel(source, match) {
+    const labels = {
+      retailer_product_id: "Treff på butikkens vare-ID",
+      ean: "Eksakt EAN-treff",
+      exact_description: "Eksakt varetekst i samme butikk",
+      opted_in_exact_description: "Identisk varetekst gjenbrukt etter bekreftelse",
+    };
+    if (labels[source]) return labels[source];
+    if (match === "exact") return "Eksakt treff";
+    if (match === "similar") return "Kobling gjenbrukt etter bekreftelse";
+    return null;
+  }
+
+  function formatCategoryDisplayLabel(category) {
+    const value = String(category ?? "").trim();
+    if (!value) return "Annet";
+    const labels = {
+      Produce: "Frukt og grønt",
+      Bakery: "Bakeri",
+      Meat: "Kjøtt",
+      Seafood: "Sjømat",
+      Fish: "Fisk",
+      Dairy: "Meieri",
+      "Dairy & Eggs": "Meieri og egg",
+      Chilled: "Kjølevarer",
+      Pantry: "Tørrvarer",
+      Baking: "Bakevarer",
+      Spices: "Krydder",
+      Drinks: "Drikke",
+      Household: "Husholdning",
+      Frozen: "Frysevarer",
+      Other: "Annet",
+      non_food: "Ikke-mat",
+      unmapped: "Uavklart",
+    };
+    const key = Object.keys(labels).find((candidate) => candidate.toLowerCase() === value.toLowerCase());
+    return labels[key] || value;
+  }
+
   function toIsoDateOnly(isoValue) {
     if (!isoValue) return "";
     const dt = isoValue instanceof Date ? isoValue : new Date(isoValue);
@@ -576,9 +648,18 @@
           const li = makeEl("li", "purchase-basket-line");
           const lineLeft = makeEl("div", "purchase-line-main");
           lineLeft.append(
-            makeEl("span", "purchase-line-name", line.canonical_product_name || line.name),
+            makeEl("span", "purchase-line-name", line.raw_name || line.name || "Varelinje"),
           );
-          lineLeft.append(makeEl("span", "badge purchase-category-badge", line.category_label || "Annet"));
+          const categoryIgnored = String(line.category_review_status || "").toLowerCase() === "ignored";
+          const categoryLabel = !categoryIgnored && (line.suggested_category || (
+            line.category_review_status === "confirmed" ? line.category_label : null
+          ));
+          const categoryPrefix = line.category_review_status === "confirmed" ? "Kategori" : "Kategoriforslag";
+          lineLeft.append(makeEl(
+            "span",
+            `badge purchase-category-badge${line.category_review_status === "pending" ? " purchase-category-pending" : ""}`,
+            categoryIgnored ? "Ikke kategorisert" : categoryLabel ? `${categoryPrefix}: ${formatCategoryDisplayLabel(categoryLabel)}` : "Kategori ikke bekreftet",
+          ));
 
           const hasQuantity = line.quantity != null && String(line.quantity).trim() !== "";
           const unitText = String(line.unit ?? "").trim();
@@ -603,7 +684,9 @@
             metadata.push(["Linjesum", formatCurrencyNb(line.amount, basket.currency)]);
           }
           if (line.ean) metadata.push(["EAN", String(line.ean)]);
-          if (line.raw_name && line.raw_name !== (line.canonical_product_name || line.name)) {
+          if (line.retailer_product_id) metadata.push(["Butikkens vare-ID", String(line.retailer_product_id)]);
+          if (line.category_evidence) metadata.push(["Grunnlag for kategoriforslag", String(line.category_evidence)]);
+          if (line.raw_name && line.raw_name !== line.name) {
             metadata.push(["Tekst på kvitteringen", String(line.raw_name)]);
           }
 
@@ -619,6 +702,7 @@
             lineDetails.append(metadataList);
             li.append(lineDetails);
           }
+          li.append(renderProductMappingPanel(line, basket.provider));
           lineList.append(li);
         });
         details.append(lineList);
@@ -627,6 +711,337 @@
       });
 
       return section;
+    }
+
+    function renderProductMappingPanel(line, provider) {
+      const panel = makeEl("section", "purchase-line-mapping");
+      panel.setAttribute("aria-label", `Produktkobling for ${line.raw_name || line.name || "varelinje"}`);
+      const reviewStatus = String(line.mapping_review_status || "pending").toLowerCase();
+      const productId = reviewStatus === "ignored" ? null : (line.base_product_id || null);
+      const productName = line.base_product_name || null;
+      const mappingStatus = reviewStatus === "confirmed"
+        ? "Bekreftet av deg"
+        : reviewStatus === "ignored"
+          ? "Ikke koblet · ignorert"
+          : productId
+            ? "Foreslått kobling · må kontrolleres"
+            : "Ikke koblet";
+      const top = makeEl("div", "purchase-line-mapping-top");
+      const baseProduct = makeEl("div", "purchase-line-base-product");
+      baseProduct.append(
+        makeEl("span", "purchase-line-mapping-label", "Grunnprodukt"),
+        makeEl("strong", productId ? "purchase-line-base-name" : "purchase-line-unmapped", productId ? (productName || "Grunnprodukt") : "Ikke koblet"),
+        makeEl("span", "badge purchase-mapping-status", mappingStatus),
+      );
+
+      if (productId && line.mapping_source) {
+        baseProduct.append(makeEl("span", "purchase-line-source", `Kilde: ${formatMappingSource(line.mapping_source)}`));
+      }
+      const suggestedProductName = reviewStatus === "ignored" ? null : (line.suggested_product_name || (
+        !productId && line.mapping_source === "ai" ? line.base_product_name : null
+      ));
+      if (suggestedProductName) {
+        baseProduct.append(
+          makeEl("span", "purchase-line-suggestion-label", `Forslag: ${suggestedProductName}`),
+          makeEl("span", "badge purchase-suggestion-review", "KI-forslag · må kontrolleres"),
+        );
+      } else if (productId && reviewStatus === "pending" && ["retailer_identifier", "ean"].includes(line.mapping_source)) {
+        baseProduct.append(makeEl("span", "badge purchase-suggestion-review", "Eksakt butikkmatch · må kontrolleres"));
+      }
+      if (line.product_evidence) {
+        baseProduct.append(makeEl("span", "purchase-line-evidence", `Grunnlag: ${line.product_evidence}`));
+      }
+      const mappingConfidence = formatConfidence(line.mapping_confidence);
+      if (mappingConfidence) {
+        const low = isLowConfidence(line.mapping_confidence);
+        baseProduct.append(makeEl("span", low ? "badge warning purchase-low-confidence" : "purchase-line-confidence", `${low ? "Lav sikkerhet · " : ""}${mappingConfidence}`));
+      }
+      const matchLabel = formatMappingMatchLabel(line.mapping_match_source, line.mapping_match);
+      if (matchLabel) baseProduct.append(makeEl("span", "purchase-line-source", matchLabel));
+
+      const suggestedCategory = line.suggested_category || null;
+      const categoryStatus = String(line.category_review_status || "").toLowerCase();
+      if (suggestedCategory || line.category_source || line.category_evidence || categoryStatus === "confirmed" || categoryStatus === "ignored") {
+        const categoryInfo = makeEl("div", "purchase-line-category");
+        const categoryConfirmed = categoryStatus === "confirmed";
+        categoryInfo.append(
+          makeEl("span", "purchase-line-mapping-label", "Kategori"),
+          makeEl("strong", categoryConfirmed ? "purchase-line-category-value" : "purchase-line-category-suggestion", categoryStatus === "ignored" ? "Ikke kategorisert" : formatCategoryDisplayLabel(suggestedCategory || (categoryConfirmed ? line.category_label : "Ikke bekreftet") || "Ikke bekreftet")),
+        );
+        if (line.category_source) {
+          categoryInfo.append(makeEl("span", "purchase-line-source", `Kilde: ${formatMappingSource(line.category_source)}`));
+        }
+        if (line.category_evidence) {
+          categoryInfo.append(makeEl("span", "purchase-line-evidence", `Grunnlag: ${line.category_evidence}`));
+        }
+        const categoryConfidence = formatConfidence(line.category_confidence);
+        if (categoryConfidence) {
+          const categoryLow = isLowConfidence(line.category_confidence);
+          categoryInfo.append(makeEl("span", categoryLow ? "badge warning purchase-low-confidence" : "purchase-line-confidence", `${categoryLow ? "Lav sikkerhet · " : ""}${categoryConfidence}`));
+        }
+        if (!categoryConfirmed && suggestedCategory) {
+          categoryInfo.append(makeEl("span", "badge purchase-suggestion-review", "Må kontrolleres"));
+        }
+        top.append(categoryInfo);
+      }
+
+      const packageInfo = makeEl("div", "purchase-line-package");
+      packageInfo.append(makeEl("span", "purchase-line-mapping-label", "Pakningsstørrelse"));
+      const hasPackageSize = line.package_size != null && String(line.package_size).trim() !== "";
+      packageInfo.append(makeEl("strong", hasPackageSize ? "purchase-line-package-value" : "purchase-line-package-missing", hasPackageSize ? formatQuantityNb(line.package_size, line.package_unit) : "Ikke oppgitt"));
+      if (line.package_inference_source) {
+        packageInfo.append(makeEl("span", "purchase-line-source", `Kilde: ${formatMappingSource(line.package_inference_source)}`));
+      }
+      const packageConfidence = formatConfidence(line.package_confidence);
+      if (packageConfidence) {
+        const low = isLowConfidence(line.package_confidence);
+        packageInfo.append(makeEl("span", low ? "badge warning purchase-low-confidence" : "purchase-line-confidence", `${low ? "Lav sikkerhet · " : ""}${packageConfidence}`));
+      }
+      top.append(baseProduct, packageInfo);
+      panel.append(top);
+
+      if (!supportsProductMapping(provider || line.provider)) {
+        panel.append(makeEl(
+          "p",
+          "purchase-line-manual-note",
+          "Denne handleturen er registrert manuelt. Produktkoblinger kan ikke endres her.",
+        ));
+        return panel;
+      }
+
+      const review = makeEl("details", "purchase-mapping-review");
+      const summary = makeEl("summary", "purchase-mapping-review-summary", "Gjennomgå eller endre");
+      review.append(summary);
+
+      const editor = makeEl("div", "purchase-mapping-editor");
+      const productSearchLabel = makeEl("label", null, "Søk etter grunnprodukt");
+      const productSearch = makeEl("input", "purchase-mapping-product-search");
+      productSearch.type = "search";
+      productSearch.value = productName || suggestedProductName || line.raw_name || line.name || "";
+      const initialProductSearchValue = productSearch.value.trim();
+      productSearch.setAttribute("aria-label", `Søk etter grunnprodukt for ${line.raw_name || line.name || "varelinje"}`);
+      productSearchLabel.append(productSearch);
+      const searchButton = makeEl("button", "quiet small purchase-mapping-search", "Søk etter grunnprodukt");
+      searchButton.type = "button";
+      const candidates = makeEl("div", "purchase-mapping-candidates");
+      candidates.setAttribute("role", "group");
+      candidates.setAttribute("aria-label", "Grunnprodukter som samsvarer med søket");
+      candidates.setAttribute("aria-live", "polite");
+      let selectedProduct = productId ? { id: productId, canonical_name: productName || "Grunnprodukt" } : null;
+      productSearch.addEventListener("input", () => {
+        if (selectedProduct && productSearch.value.trim() !== selectedProduct.canonical_name) {
+          selectedProduct = null;
+        }
+      });
+      const packageFields = makeEl("div", "purchase-mapping-package-fields");
+      const packageSizeLabel = makeEl("label", null, "Pakningsstørrelse");
+      const packageSize = makeEl("input", "purchase-mapping-package-size");
+      packageSize.type = "number";
+      packageSize.min = "0";
+      packageSize.step = "any";
+      packageSize.value = hasPackageSize ? String(line.package_size) : "";
+      const initialPackageSize = packageSize.value;
+      packageSizeLabel.append(packageSize);
+      const packageUnitLabel = makeEl("label", null, "Pakningsenhet");
+      const packageUnit = makeEl("input", "purchase-mapping-package-unit");
+      packageUnit.type = "text";
+      packageUnit.value = line.package_unit || "";
+      const initialPackageUnit = packageUnit.value;
+      packageUnit.setAttribute("placeholder", "f.eks. g, kg, ml eller stk");
+      packageUnitLabel.append(packageUnit);
+      packageFields.append(packageSizeLabel, packageUnitLabel);
+
+      const similarLabel = makeEl("label", "purchase-mapping-similar-label");
+      const similarCheckbox = makeEl("input");
+      similarCheckbox.type = "checkbox";
+      similarCheckbox.checked = true;
+      similarCheckbox.setAttribute("aria-label", "Bruk grunnproduktkoblingen på kjøp med identisk varetekst");
+      similarLabel.append(similarCheckbox, makeEl("span", null, " Bruk grunnproduktkoblingen på kjøp med identisk varetekst"));
+
+      const confirmLabel = makeEl("label", "purchase-mapping-confirm-label");
+      const confirmCheckbox = makeEl("input");
+      confirmCheckbox.type = "checkbox";
+      confirmCheckbox.setAttribute("aria-label", "Bekreft at produktkoblingen og pakningsdataene er riktige");
+      confirmLabel.append(confirmCheckbox, makeEl("span", null, " Jeg har kontrollert og bekrefter valget"));
+
+      const acceptOptions = makeEl("div", "purchase-mapping-accept-options");
+      const acceptProductCheckbox = makeEl("input");
+      acceptProductCheckbox.type = "checkbox";
+      acceptProductCheckbox.checked = Boolean(productId || suggestedProductName) && reviewStatus !== "confirmed";
+      acceptProductCheckbox.setAttribute("aria-label", "Bekreft grunnproduktforslaget");
+      const acceptProductLabel = makeEl("label", "purchase-mapping-accept-label");
+      acceptProductLabel.append(acceptProductCheckbox, makeEl("span", null, " Bekreft grunnprodukt"));
+      const acceptCategoryCheckbox = makeEl("input");
+      acceptCategoryCheckbox.type = "checkbox";
+      acceptCategoryCheckbox.checked = Boolean(suggestedCategory) && String(line.category_review_status || "").toLowerCase() !== "confirmed";
+      acceptCategoryCheckbox.setAttribute("aria-label", "Bekreft kategoriforslaget");
+      const acceptCategoryLabel = makeEl("label", "purchase-mapping-accept-label");
+      acceptCategoryLabel.append(acceptCategoryCheckbox, makeEl("span", null, " Bekreft kategori"));
+      if (productId || suggestedProductName) acceptOptions.append(acceptProductLabel);
+      if (suggestedCategory) acceptOptions.append(acceptCategoryLabel);
+
+      const status = makeEl("p", "purchase-mapping-editor-status");
+      status.setAttribute("role", "status");
+      status.setAttribute("aria-live", "polite");
+      const error = makeEl("p", "purchase-mapping-editor-error");
+      error.setAttribute("role", "alert");
+      error.hidden = true;
+      const actions = makeEl("div", "purchase-mapping-actions");
+
+      async function searchProducts() {
+        const query = productSearch.value.trim();
+        if (!query) {
+          candidates.replaceChildren(makeEl("p", "muted", "Skriv inn et søk først."));
+          return;
+        }
+        searchButton.disabled = true;
+        candidates.replaceChildren(makeEl("p", "muted", `Søker etter «${query}» …`));
+        try {
+          const result = await api(`/catalogue/identities/products?q=${encodeURIComponent(query)}&limit=10`);
+          const found = Array.isArray(result) ? result : (result?.items || result?.products || []);
+          candidates.replaceChildren();
+          if (!found.length) {
+            candidates.append(makeEl("p", "muted", "Fant ingen grunnprodukter. Prøv et annet søk."));
+            return;
+          }
+          found.forEach((candidate) => {
+            const label = [candidate.canonical_name || candidate.name, candidate.variant].filter(Boolean).join(" · ");
+            const button = makeEl("button", "quiet small purchase-mapping-candidate", label);
+            button.type = "button";
+            button.setAttribute("aria-pressed", selectedProduct?.id === candidate.id ? "true" : "false");
+            button.addEventListener("click", () => {
+              selectedProduct = { id: candidate.id, canonical_name: candidate.canonical_name || candidate.name || label };
+              productSearch.value = selectedProduct.canonical_name;
+              candidates.querySelectorAll("button").forEach((item) => {
+                item.setAttribute("aria-pressed", item === button ? "true" : "false");
+              });
+            });
+            candidates.append(button);
+          });
+        } catch (err) {
+          candidates.replaceChildren(makeEl("p", "purchase-mapping-editor-error", `Kunne ikke søke: ${err?.message || "Ukjent feil"}`));
+        } finally {
+          searchButton.disabled = false;
+        }
+      }
+      searchButton.addEventListener("click", searchProducts);
+
+      async function saveMapping(action) {
+        error.hidden = true;
+        error.textContent = "";
+        status.textContent = "";
+        if (action !== "infer" && !confirmCheckbox.checked) {
+          error.hidden = false;
+          error.textContent = "Bekreft at du har kontrollert endringen før du lagrer.";
+          confirmCheckbox.focus?.();
+          return;
+        }
+        const typedProductName = productSearch.value.trim();
+        const customProductName = typedProductName && typedProductName !== initialProductSearchValue
+          ? typedProductName
+          : "";
+        if (action === "remap" && !selectedProduct?.id && !customProductName) {
+          error.hidden = false;
+          error.textContent = "Søk etter og velg et grunnprodukt før du kobler varen.";
+          return;
+        }
+        const rowId = line.row_id || line.id;
+        if (!rowId) {
+          error.hidden = false;
+          error.textContent = "Denne varelinjen mangler ID og kan ikke endres.";
+          return;
+        }
+        const payload = {
+          row_id: rowId,
+          action,
+          apply_to_similar: ["confirm", "edit", "remap"].includes(action) && Boolean(similarCheckbox.checked),
+        };
+        if (action === "confirm") {
+          payload.confirm_product = Boolean(acceptProductCheckbox.checked);
+          payload.confirm_category = Boolean(acceptCategoryCheckbox.checked);
+          if (!payload.confirm_product && !payload.confirm_category) {
+            error.hidden = false;
+            error.textContent = "Velg om du vil bekrefte grunnproduktet, kategorien eller begge deler.";
+            return;
+          }
+        }
+        if (action === "remap" || action === "edit") {
+          if (selectedProduct?.id) payload.canonical_product_id = selectedProduct.id;
+          else if (customProductName) payload.canonical_product_name = customProductName;
+        }
+        const packageSizeValue = packageSize.value.trim();
+        const packageUnitValue = packageUnit.value.trim();
+        const packageChanged = packageSizeValue !== initialPackageSize || packageUnitValue !== initialPackageUnit;
+        if (action === "edit" || (action === "remap" && packageChanged)) {
+          if (Boolean(packageSizeValue) !== Boolean(packageUnitValue)) {
+            error.hidden = false;
+            error.textContent = "Oppgi både pakningsstørrelse og enhet, eller la begge feltene stå tomme.";
+            return;
+          }
+          if (packageSizeValue && (!Number.isFinite(Number(packageSizeValue)) || Number(packageSizeValue) <= 0)) {
+            error.hidden = false;
+            error.textContent = "Pakningsstørrelsen må være et tall større enn null.";
+            return;
+          }
+          payload.package_size = packageSizeValue === "" ? null : Number(packageSizeValue);
+          payload.package_unit = packageUnitValue || null;
+        }
+        const buttons = actions.querySelectorAll("button");
+        buttons.forEach((button) => { button.disabled = true; });
+        status.textContent = "Lagrer endringen …";
+        try {
+          const result = await api("/purchase-history/product-mappings", "POST", payload);
+          const affected = Number(result?.affected_rows || 0);
+          const similar = Number(result?.similar_rows || 0);
+          const note = similar > 0 ? ` Koblingen ble også brukt på ${similar} kjøp med identisk varetekst.` : "";
+          status.textContent = `Produktkoblingen ble lagret${affected > 0 ? ` for ${affected} varelinjer` : ""}.${note}`;
+          notify(status.textContent);
+          review.open = false;
+          await loadPurchaseHistory();
+        } catch (err) {
+          status.textContent = "";
+          error.hidden = false;
+          error.textContent = `Kunne ikke lagre produktkoblingen: ${err?.message || "Ukjent feil"}`;
+        } finally {
+          buttons.forEach((button) => { button.disabled = false; });
+        }
+      }
+
+      const saveButton = makeEl("button", "primary small", "Lagre produkt og pakning");
+      saveButton.type = "button";
+      saveButton.addEventListener("click", () => {
+        const typedProductName = productSearch.value.trim();
+        const customProductName = typedProductName && typedProductName !== initialProductSearchValue;
+        const isRemap = Boolean(selectedProduct?.id && selectedProduct.id !== productId) || Boolean(customProductName);
+        saveMapping(isRemap || (!productId && selectedProduct?.id) ? "remap" : "edit");
+      });
+      actions.append(saveButton);
+      const hasPendingProduct = Boolean(productId || suggestedProductName) && reviewStatus !== "confirmed";
+      const hasPendingCategory = Boolean(suggestedCategory) && String(line.category_review_status || "").toLowerCase() !== "confirmed";
+      if (hasPendingProduct || hasPendingCategory) {
+        const confirmButton = makeEl("button", "quiet small", "Bekreft forslag");
+        confirmButton.type = "button";
+        confirmButton.addEventListener("click", () => saveMapping("confirm"));
+        actions.append(confirmButton);
+      }
+      if (!productId) {
+        const inferButton = makeEl("button", "quiet small", "Foreslå pakning med KI");
+        inferButton.type = "button";
+        inferButton.addEventListener("click", () => saveMapping("infer"));
+        actions.append(inferButton);
+      }
+      if (reviewStatus !== "ignored") {
+        const ignoreButton = makeEl("button", "quiet small", "Behold som ukoblet");
+        ignoreButton.type = "button";
+        ignoreButton.addEventListener("click", () => saveMapping("ignore"));
+        actions.append(ignoreButton);
+      }
+
+      if (acceptOptions.children.length) editor.append(acceptOptions);
+      editor.append(productSearchLabel, searchButton, candidates, packageFields, similarLabel, confirmLabel, actions, status, error);
+      review.append(editor);
+      panel.append(review);
+      return panel;
     }
 
     function renderProductsMode(products) {
@@ -743,6 +1158,8 @@
       const COLUMNS = [
         { key: "purchased_at", label: "Dato" },
         { key: "product_name", label: "Vare" },
+        { key: "base_product_name", label: "Grunnprodukt" },
+        { key: "package_size", label: "Pakning" },
         { key: "category_label", label: "Kategori" },
         { key: "provider_label", label: "Leverandør" },
         { key: "store_name", label: "Butikk" },
@@ -794,16 +1211,23 @@
         }
         const cells = [
           formatDateNb(row.purchased_at),
-          row.product_name,
-          row.category_label || "Annet",
+          row.raw_name || row.product_name || "Varelinje",
+          row.base_product_id ? (row.base_product_name || "Grunnprodukt") : "Ikke koblet",
+          row.package_size != null ? formatQuantityNb(row.package_size, row.package_unit) : "Ikke oppgitt",
+          row.category_review_status === "ignored"
+            ? "Ikke kategorisert"
+            : row.suggested_category
+            ? `${row.category_review_status === "confirmed" ? "Kategori" : "Kategoriforslag"}: ${formatCategoryDisplayLabel(row.suggested_category)}`
+            : row.category_review_status === "confirmed" ? `Kategori: ${formatCategoryDisplayLabel(row.category_label || "Annet")}` : "Kategori ikke bekreftet",
           row.provider_label || formatProviderLabel(row.provider),
           row.store_name || "—",
           formatQuantityNb(row.quantity, row.unit),
           row.amount != null ? formatCurrencyNb(row.amount) : "—",
         ];
-        cells.forEach((val) => {
+        cells.forEach((val, index) => {
           const td = document.createElement("td");
           td.textContent = val;
+          if (index === 1) td.append(renderProductMappingPanel(row, row.provider));
           tr.append(td);
         });
         tbody.append(tr);
@@ -931,6 +1355,12 @@
     formatFrequencyBadgeText,
     formatFrequencyDetailText,
     formatProvenanceLabel,
+    formatMappingSource,
+    formatConfidence,
+    isLowConfidence,
+    supportsProductMapping,
+    formatMappingMatchLabel,
+    formatCategoryDisplayLabel,
     filterPurchaseData,
     groupProductsByCategory,
     sortPurchaseRows,

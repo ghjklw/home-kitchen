@@ -270,6 +270,7 @@ def create_purchase_sync_service(
     connector_auth: Any = None,
     identity_service: Any = None,
     receipt_mapper: Any = None,
+    product_mapping_suggester: Any = None,
     kassal_client: Any = None,
 ) -> Any:
     """Bootstrap a production `PurchaseHistorySyncService` with injected adapters."""
@@ -292,6 +293,7 @@ def create_purchase_sync_service(
         connector_auth=connector_auth,
         identity_service=identity_service,
         receipt_mapper=receipt_mapper,
+        product_mapping_suggester=product_mapping_suggester,
         kassal_client=kassal_client,
     )
 

@@ -17,6 +17,7 @@ class MockNode {
     this.listeners = new Map();
     this.dataset = {};
     this.disabled = false;
+    this.checked = false;
     this.value = "";
     this.hidden = false;
     this.type = "text";
@@ -395,6 +396,24 @@ test("renderPastPurchasesView supports all 3 Bokmål modes, filtering, sorting, 
   const container = document.createElement("div");
   const payload = sampleBrowsePayload();
   payload.baskets[0].lines[1].unit = null;
+  Object.assign(payload.baskets[0].lines[0], {
+    row_id: "row-milk-1",
+    base_product_id: "pid-melk",
+    base_product_name: "Helmelk",
+    package_size: "1000",
+    package_unit: "ml",
+    package_inference_source: "description_rule",
+    package_confidence: 0.42,
+    mapping_source: "description",
+    mapping_confidence: 0.48,
+    mapping_review_status: "pending",
+    mapping_match: "similar",
+    mapping_match_source: "opted_in_exact_description",
+    suggested_category: "Meieri",
+    category_source: "ai",
+    category_confidence: 0.61,
+    category_review_status: "pending",
+  });
 
   const view = pastPurchasesView.renderPastPurchasesView(container, {
     api: async (endpoint) => {
@@ -413,7 +432,14 @@ test("renderPastPurchasesView supports all 3 Bokmål modes, filtering, sorting, 
 
   // Explicit <label for> on all filter controls
   const labels = container.querySelectorAll("label");
-  const inputs = container.querySelectorAll("input, select");
+  const inputs = [
+    container.querySelector(".purchase-filter-search"),
+    container.querySelector(".purchase-filter-provider"),
+    container.querySelector(".purchase-filter-store"),
+    container.querySelector(".purchase-filter-category"),
+    container.querySelector(".purchase-filter-date-from"),
+    container.querySelector(".purchase-filter-date-to"),
+  ];
   assert.equal(inputs.length, 6);
   for (const inp of inputs) {
     assert.ok(inp.id, "every filter input/select should have an id");
@@ -447,6 +473,17 @@ test("renderPastPurchasesView supports all 3 Bokmål modes, filtering, sorting, 
   assert.match(firstLineDetails.textContent, /Linjesum45,80 kr/);
   assert.match(firstLineDetails.textContent, /EAN7038010001000/);
   assert.match(firstLineDetails.textContent, /Tekst på kvitteringenTINE HELMELK 1L/);
+  const mappingPanels = basketCards[0].querySelectorAll(".purchase-line-mapping");
+  assert.equal(mappingPanels.length, 2);
+  assert.match(mappingPanels[0].textContent, /GrunnproduktHelmelk/);
+  assert.match(mappingPanels[0].textContent, /Pakningsstørrelse1\s000 ml/);
+  assert.match(importedLines[0].textContent, /Kjøpt2 l/);
+  assert.match(mappingPanels[0].textContent, /Lav sikkerhet/);
+  assert.match(mappingPanels[0].textContent, /Identisk varetekst gjenbrukt etter bekreftelse/);
+  assert.match(mappingPanels[0].textContent, /KategoriMeieri/);
+  assert.match(mappingPanels[0].textContent, /Må kontrolleres/);
+  assert.match(mappingPanels[1].textContent, /GrunnproduktIkke koblet/);
+  assert.match(mappingPanels[1].textContent, /PakningsstørrelseIkke oppgitt/);
 
   // Switch to Mode 2: Produkter og kategorier
   await modeTabs[1].dispatchEvent({ type: "click" });
@@ -468,7 +505,7 @@ test("renderPastPurchasesView supports all 3 Bokmål modes, filtering, sorting, 
   const productSortBtn = sortButtons.find((b) => b.dataset.sortKey === "product_name");
   await productSortBtn.dispatchEvent({ type: "click" });
   const firstRowAfterSort = container.querySelectorAll("tbody tr")[0];
-  assert.match(firstRowAfterSort.textContent, /Helmelk/);
+  assert.match(firstRowAfterSort.textContent, /TINE HELMELK/);
 
   // Filter by provider = "oda"
   const provSelect = container.querySelector(".purchase-filter-provider");
@@ -506,6 +543,196 @@ test("renderPastPurchasesView shows Bokmål empty and error states", async () =>
   const alertBox = errContainer.querySelector('[role="alert"]');
   assert.ok(alertBox);
   assert.match(alertBox.textContent, /Kunne ikke laste kjøpshistorikk: Nettverksfeil/);
+});
+
+test("product mapping review requires confirmation and saves a remap for similar purchases", async () => {
+  globalThis.document = createMockDocument();
+  const container = document.createElement("div");
+  const payload = sampleBrowsePayload();
+  const calls = [];
+  const notices = [];
+  const view = pastPurchasesView.renderPastPurchasesView(container, {
+    notify: (message) => notices.push(message),
+    api: async (endpoint, method = "GET", body) => {
+      calls.push({ endpoint, method, body });
+      if (endpoint === "/purchase-history") return payload;
+      if (endpoint.startsWith("/catalogue/identities/products?")) {
+        return [{ id: "pid-carrot", canonical_name: "Gulrot", variant: null }];
+      }
+      if (endpoint === "/purchase-history/product-mappings") {
+        return { mapping: {}, affected_rows: 3, similar_rows: 2 };
+      }
+      throw new Error(`Unexpected API call ${endpoint}`);
+    },
+  });
+  await view.ready;
+
+  const unmappedPanel = container.querySelectorAll(".purchase-line-mapping")[1];
+  const searchInput = unmappedPanel.querySelector(".purchase-mapping-product-search");
+  searchInput.value = "gulrot";
+  await unmappedPanel.querySelector(".purchase-mapping-search").dispatchEvent({ type: "click" });
+  const candidate = unmappedPanel.querySelector(".purchase-mapping-candidate");
+  assert.ok(candidate);
+  await candidate.dispatchEvent({ type: "click" });
+
+  const confirmation = unmappedPanel.querySelector(".purchase-mapping-confirm-label input");
+  const similar = unmappedPanel.querySelector(".purchase-mapping-similar-label input");
+  unmappedPanel.querySelector(".purchase-mapping-package-size").value = "2";
+  unmappedPanel.querySelector(".purchase-mapping-package-unit").value = "kg";
+  similar.checked = false;
+  const saveButton = unmappedPanel.querySelector(".purchase-mapping-actions button");
+  await saveButton.dispatchEvent({ type: "click" });
+  assert.equal(calls.some((call) => call.endpoint === "/purchase-history/product-mappings"), false);
+  assert.match(unmappedPanel.querySelector('[role="alert"]').textContent, /Bekreft/);
+
+  confirmation.checked = true;
+  await saveButton.dispatchEvent({ type: "click" });
+  const post = calls.find((call) => call.endpoint === "/purchase-history/product-mappings");
+  assert.equal(post.method, "POST");
+  assert.deepEqual(post.body, {
+    row_id: "trumf:t-1:line:1",
+    action: "remap",
+    apply_to_similar: false,
+    canonical_product_id: "pid-carrot",
+    package_size: 2,
+    package_unit: "kg",
+  });
+  assert.ok(notices.some((message) => /2 kjøp med identisk varetekst/.test(message)));
+});
+
+test("AI package inference can start without confirming a pending suggestion", async () => {
+  globalThis.document = createMockDocument();
+  const container = document.createElement("div");
+  const calls = [];
+  const payload = sampleBrowsePayload();
+  const view = pastPurchasesView.renderPastPurchasesView(container, {
+    api: async (endpoint, method = "GET", body) => {
+      calls.push({ endpoint, method, body });
+      if (endpoint === "/purchase-history") return payload;
+      if (endpoint === "/purchase-history/product-mappings") return { affected_rows: 1, similar_rows: 0 };
+      throw new Error(`Unexpected API call ${endpoint}`);
+    },
+  });
+  await view.ready;
+
+  const panel = container.querySelectorAll(".purchase-line-mapping")[0];
+  const confirmation = panel.querySelector(".purchase-mapping-confirm-label input");
+  assert.equal(confirmation.checked, false);
+  const inferButton = panel.querySelectorAll(".purchase-mapping-actions button").find(
+    (button) => button.textContent === "Foreslå pakning med KI",
+  );
+  assert.ok(inferButton);
+  await inferButton.dispatchEvent({ type: "click" });
+
+  const post = calls.find((call) => call.endpoint === "/purchase-history/product-mappings");
+  assert.deepEqual(post.body, {
+    row_id: "trumf:t-1:line:0",
+    action: "infer",
+    apply_to_similar: false,
+  });
+});
+
+test("manual shopping trips show mapping context without mutation controls", async () => {
+  globalThis.document = createMockDocument();
+  const container = document.createElement("div");
+  const payload = sampleBrowsePayload();
+  payload.baskets.push({
+    id: "trip:manual-1",
+    provider: "store",
+    provider_label: "Manuell handletur",
+    store_name: "Lokal butikk",
+    purchased_at: "2026-11-20T12:00:00Z",
+    total_amount: "49.00",
+    currency: "NOK",
+    item_count: 1,
+    provenance: "user_confirmed",
+    lines: [{ id: "trip:manual-1:line:0", name: "Bleier", raw_name: "Bleier", quantity: "1", unit: "pk" }],
+  });
+  const view = pastPurchasesView.renderPastPurchasesView(container, {
+    api: async () => payload,
+  });
+  await view.ready;
+
+  const panels = container.querySelectorAll(".purchase-line-mapping");
+  const manualPanel = panels[panels.length - 1];
+  assert.match(manualPanel.textContent, /Ikke koblet/);
+  assert.match(manualPanel.textContent, /registrert manuelt/);
+  assert.equal(manualPanel.querySelector(".purchase-mapping-review"), null);
+  assert.equal(pastPurchasesView.supportsProductMapping("store"), false);
+  assert.equal(pastPurchasesView.supportsProductMapping("coop"), true);
+});
+
+test("AI product and category suggestions stay unconfirmed until the user accepts them", async () => {
+  globalThis.document = createMockDocument();
+  const container = document.createElement("div");
+  const payload = sampleBrowsePayload();
+  Object.assign(payload.baskets[0].lines[0], {
+    row_id: "row-ai-1",
+    base_product_id: null,
+    base_product_name: "Helmelk",
+    suggested_product_name: "Helmelk",
+    mapping_source: "ai",
+    mapping_confidence: 0.41,
+    mapping_review_status: "pending",
+    suggested_category: "Meieri",
+    category_source: "ai",
+    category_confidence: 0.53,
+    category_review_status: "pending",
+  });
+  const calls = [];
+  const view = pastPurchasesView.renderPastPurchasesView(container, {
+    api: async (endpoint, method = "GET", body) => {
+      calls.push({ endpoint, method, body });
+      return endpoint === "/purchase-history" ? payload : { affected_rows: 1, similar_rows: 0 };
+    },
+  });
+  await view.ready;
+
+  const panel = container.querySelectorAll(".purchase-line-mapping")[0];
+  assert.match(panel.textContent, /GrunnproduktIkke koblet/);
+  assert.match(panel.textContent, /Forslag: Helmelk/);
+  assert.match(panel.textContent, /KI-forslag · må kontrolleres/);
+  assert.match(panel.textContent, /Lav sikkerhet/);
+  assert.match(panel.textContent, /KategoriMeieri/);
+  assert.equal(panel.querySelector(".purchase-line-base-name"), null);
+
+  const confirmButton = panel.querySelectorAll(".purchase-mapping-actions button").find((button) => button.textContent === "Bekreft forslag");
+  assert.ok(confirmButton);
+  const acknowledgement = panel.querySelector(".purchase-mapping-confirm-label input");
+  const confirmOptions = panel.querySelectorAll(".purchase-mapping-accept-label input");
+  assert.equal(confirmOptions.length, 2);
+  await confirmButton.dispatchEvent({ type: "click" });
+  assert.equal(calls.some((call) => call.endpoint === "/purchase-history/product-mappings"), false);
+  acknowledgement.checked = true;
+  await confirmButton.dispatchEvent({ type: "click" });
+
+  const post = calls.find((call) => call.endpoint === "/purchase-history/product-mappings");
+  assert.deepEqual(post.body, {
+    row_id: "row-ai-1",
+    action: "confirm",
+    apply_to_similar: true,
+    confirm_product: true,
+    confirm_category: true,
+  });
+});
+
+test("mapping provenance and confidence helpers preserve source distinctions", () => {
+  assert.equal(pastPurchasesView.formatMappingSource("retailer_identifier"), "Butikkens vare-ID");
+  assert.equal(pastPurchasesView.formatMappingSource("description_rule"), "Avledet fra varetekst");
+  assert.equal(pastPurchasesView.formatConfidence(0.42), "42 % sikkerhet");
+  assert.equal(pastPurchasesView.isLowConfidence(0.42), true);
+  assert.equal(pastPurchasesView.isLowConfidence(0.9), false);
+  assert.equal(pastPurchasesView.formatMappingMatchLabel("retailer_product_id", "exact"), "Treff på butikkens vare-ID");
+  assert.equal(pastPurchasesView.formatMappingMatchLabel("ean", "exact"), "Eksakt EAN-treff");
+  assert.equal(pastPurchasesView.formatMappingMatchLabel("exact_description", "exact"), "Eksakt varetekst i samme butikk");
+  assert.equal(
+    pastPurchasesView.formatMappingMatchLabel("opted_in_exact_description", "similar"),
+    "Identisk varetekst gjenbrukt etter bekreftelse",
+  );
+  assert.equal(pastPurchasesView.formatMappingMatchLabel(null, "exact"), "Eksakt treff");
+  assert.equal(pastPurchasesView.formatCategoryDisplayLabel("non_food"), "Ikke-mat");
+  assert.equal(pastPurchasesView.formatCategoryDisplayLabel("Household"), "Husholdning");
+  assert.equal(pastPurchasesView.formatCategoryDisplayLabel("Bakery"), "Bakeri");
 });
 
 test("index.html and app.js wire Tidligere kjøp navigation view", () => {

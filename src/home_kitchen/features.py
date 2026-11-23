@@ -31,7 +31,6 @@ from home_kitchen.bootstrap import (
     create_store_trip_service,
     create_trip_completion_service,
 )
-from home_kitchen.catalogue.adapters import CatalogueReceiptMappingAdapter
 from home_kitchen.catalogue.identity import IdentityCorrectionCitation, IdentityCorrectionEvent
 from home_kitchen.catalogue.overview_repository import (
     MemoryProductOverviewRepository,
@@ -69,6 +68,7 @@ from home_kitchen.integrations import (
 from home_kitchen.models import RecipeCreate, ShoppingItem, ShoppingItemCreate
 from home_kitchen.oda.cart import OdaCartService
 from home_kitchen.planning import create_planning_proposal_service
+from home_kitchen.product_mapping import ProductMappingService
 from home_kitchen.purchase_sync import ProviderAdapter
 from home_kitchen.purchasing import InStoreMode, OdaMode, PurchaseModes
 from home_kitchen.recipe_feedback import RecipeFeedbackService
@@ -199,6 +199,16 @@ class KitchenFeatures:
             catalogue_skus=self.catalogue_skus,
             household_id=self.household_id,
         )
+        self.product_mappings = (
+            ProductMappingService(
+                kitchen.store.engine,
+                identities=self.catalogue_identities,
+                product_repository=self.product_overview_repo,
+                settings=settings,
+            )
+            if kitchen.store.engine is not None
+            else None
+        )
 
         self.basket_matching = BasketMatchingService(
             self.inventory,
@@ -231,8 +241,10 @@ class KitchenFeatures:
             adapter_factory=_build_purchase_adapter,
             connector_auth=self.connector_auth,
             identity_service=self.catalogue_identities,
-            receipt_mapper=CatalogueReceiptMappingAdapter(kitchen.store, self.catalogue_identities),
+            product_mapping_suggester=self.product_mappings,
         )
+        if self.product_mappings is not None:
+            self.product_mappings.purchase_sync = self.purchase_sync
         self.recipe_providers = create_recipe_providers(settings, ai_agent=ai)
         self.recipe_photos = PhotoRecipeService(
             settings, self.household_id, kitchen.store.engine, household
@@ -322,7 +334,7 @@ class KitchenFeatures:
             history=getattr(self, "history", None),
             product_overview_repo=getattr(self, "product_overview_repo", None),
         )
-        return svc.browse(
+        response = svc.browse(
             q=q,
             provider=provider,
             store=store,
@@ -331,6 +343,9 @@ class KitchenFeatures:
             date_to=date_to,
             limit=limit,
         )
+        if self.product_mappings is not None:
+            return self.product_mappings.enrich_purchase_history(response)
+        return response
 
     def evidence(self, query: str) -> list[EvidenceSnippet]:
         # Explicit feedback/preferences and actual purchases remain relevant even

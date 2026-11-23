@@ -204,12 +204,9 @@ def test_extract_normalized_lines_preserves_category_metadata():
     assert lines[0].category == "Dairy"
 
 
-def test_resolve_purchase_category_handles_explicit_seed_and_keywords():
+def test_resolve_purchase_category_uses_explicit_categories_without_substring_guessing():
     assert resolve_purchase_category(raw_category="Dairy") == ("Dairy", "Meieri")
-    assert resolve_purchase_category(product_name="Ferske jordbær 400g") == (
-        "Produce",
-        "Frukt og grønt",
-    )
+    assert resolve_purchase_category(product_name="Ferske jordbær 400g") == ("Other", "Annet")
     assert resolve_purchase_category(product_name="Ukjent spesialvare") == ("Other", "Annet")
 
 
@@ -369,8 +366,10 @@ def test_rest_api_purchase_history_endpoint():
 
         filtered = client.get("/api/purchase-history?provider=oda&category=Produce")
         assert filtered.status_code == 200
-        assert filtered.json()["total_rows"] == 1
-        assert filtered.json()["rows"][0]["product_name"] == "Gulrot"
+        # Unknown source categories stay unclassified until structured AI review.
+        assert filtered.json()["total_rows"] == 0
+        carrot = next(row for row in payload["rows"] if row["product_name"] == "Gulrot")
+        assert carrot["category"] == "Other"
 
         invalid = client.get("/api/purchase-history?date_from=2026-11-20&date_to=2026-11-01")
         assert invalid.status_code == 422

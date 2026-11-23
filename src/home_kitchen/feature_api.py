@@ -91,6 +91,7 @@ from home_kitchen.inventory import InventoryItem, InventoryItemCreate, PurchaseP
 from home_kitchen.models import MealEntry, Recipe
 from home_kitchen.oda import OdaError
 from home_kitchen.planning_proposals import ProposalConflict, ProposalRead
+from home_kitchen.product_mapping import ProductMappingMutation, ProductMappingMutationResponse
 from home_kitchen.purchase_history_view import (
     PurchaseHistoryBrowseResponse,
     PurchaseHistoryBrowseService,
@@ -981,7 +982,7 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
             history=getattr(features, "history", None),
             product_overview_repo=getattr(features, "product_overview_repo", None),
         )
-        return svc.browse(
+        response = svc.browse(
             q=q,
             provider=provider,
             store=store,
@@ -990,6 +991,33 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
             date_to=date_to,
             limit=limit,
         )
+        mapping_service = getattr(features, "product_mappings", None)
+        if mapping_service is not None:
+            return mapping_service.enrich_purchase_history(response)
+        return response
+
+    @router.post(
+        "/purchase-history/product-mappings", response_model=ProductMappingMutationResponse
+    )
+    async def update_purchase_product_mapping(
+        data: ProductMappingMutation, request: Request, response: Response
+    ) -> ProductMappingMutationResponse:
+        actor = authenticated_actor(request)
+        mapping_service = getattr(features, "product_mappings", None)
+        if mapping_service is None:
+            raise HTTPException(503, "Product mapping is unavailable")
+        response.headers["Cache-Control"] = "no-store"
+        channel = "app" if request.headers.get("sec-fetch-site") == "same-origin" else "api"
+        try:
+            return await mapping_service.mutate(data, actor_id=actor, channel=channel)
+        except KeyError:
+            raise HTTPException(404, "Purchase row not found") from None
+        except ValueError as exc:
+            if "not configured" in str(exc).casefold():
+                raise HTTPException(503, "AI product suggestions are not configured") from None
+            raise HTTPException(422, str(exc)) from None
+        except Exception:
+            raise HTTPException(502, "Product mapping could not be saved") from None
 
     @router.get("/purchase-history/status")
     def purchase_history_status(request: Request) -> PurchaseHistoryStatusResponse:
@@ -1110,6 +1138,16 @@ def feature_router(features: KitchenFeatures, basket: BasketService) -> APIRoute
     def food_products(food_id: UUID, response: Response) -> list[RetailerProductOption]:
         response.headers["Cache-Control"] = "no-store"
         return features.catalogue_skus.list_options(features.household_id, food_id)
+
+    @router.get("/catalogue/identities/products")
+    def search_canonical_products(
+        q: str | None = Query(default=None, max_length=200),
+        limit: int = Query(default=10, ge=1, le=100),
+    ) -> list[CanonicalProduct]:
+        repo = getattr(features, "product_overview_repo", None)
+        if repo is None:
+            return []
+        return repo.list_products(q)[:limit]
 
     @router.post("/catalogue/identities/products", status_code=201)
     def create_canonical_product(data: ProductIdentityCreate) -> CanonicalProduct:

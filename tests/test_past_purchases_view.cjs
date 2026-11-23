@@ -394,6 +394,7 @@ test("renderPastPurchasesView supports all 3 Bokmål modes, filtering, sorting, 
   globalThis.document = createMockDocument();
   const container = document.createElement("div");
   const payload = sampleBrowsePayload();
+  payload.baskets[0].lines[1].unit = null;
 
   const view = pastPurchasesView.renderPastPurchasesView(container, {
     api: async (endpoint) => {
@@ -434,6 +435,18 @@ test("renderPastPurchasesView supports all 3 Bokmål modes, filtering, sorting, 
   assert.match(basketCards[0].textContent, /MENY Majorstuen/);
   assert.match(basketCards[0].textContent, /324,50 kr/);
   assert.match(basketCards[0].textContent, /Vis varelinjer \(2\)/);
+  const importedQuantities = basketCards[0].querySelectorAll(".purchase-line-qty");
+  assert.equal(importedQuantities[0].textContent, "2 l");
+  assert.equal(importedQuantities[0].getAttribute("aria-label"), "Kjøpt mengde: 2 l");
+  const importedLines = basketCards[0].querySelectorAll(".purchase-basket-line");
+  assert.equal(importedLines[0].querySelector(".purchase-line-missing-unit"), null);
+  assert.equal(importedLines[1].querySelector(".purchase-line-qty").textContent, "1");
+  assert.equal(importedLines[1].querySelector(".purchase-line-missing-unit").textContent, "Enhet ikke oppgitt");
+  const firstLineDetails = basketCards[0].querySelector(".purchase-line-details");
+  assert.equal(firstLineDetails.querySelector("summary").textContent, "Flere detaljer");
+  assert.match(firstLineDetails.textContent, /Linjesum45,80 kr/);
+  assert.match(firstLineDetails.textContent, /EAN7038010001000/);
+  assert.match(firstLineDetails.textContent, /Tekst på kvitteringenTINE HELMELK 1L/);
 
   // Switch to Mode 2: Produkter og kategorier
   await modeTabs[1].dispatchEvent({ type: "click" });

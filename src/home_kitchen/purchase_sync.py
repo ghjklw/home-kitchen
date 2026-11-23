@@ -622,7 +622,19 @@ def sync_account(
             if unmapped:
                 all_unmapped.extend(unmapped)
 
-        order_store.persist_page(provider, account_id, page, expected_cursor=cursor)
+        try:
+            order_store.persist_page(provider, account_id, page, expected_cursor=cursor)
+        except CheckpointConflict:
+            # Another sync may have fetched and committed this same provider page
+            # while this request was doing network I/O or enrichment. Its checkpoint
+            # is authoritative; discard our stale page and resume from that cursor.
+            latest_cursor = order_store.get_checkpoint(provider, account_id)
+            if latest_cursor == cursor:
+                # The checkpoint did not actually advance (for example, a conflict
+                # raised during the guarded commit), so preserve the original error.
+                raise
+            cursor = latest_cursor
+            continue
         for rec in page.records:
             existing_by_key[(rec.external_id, rec.revision_id)] = rec.model_dump(mode="json")[
                 "payload"

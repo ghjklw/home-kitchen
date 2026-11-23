@@ -95,6 +95,36 @@ def test_backfill_overlap_dedupe_and_next_poll_resumes_terminal_cursor(engine):
     assert count_sources(engine) == 3
 
 
+def test_sync_account_resumes_after_another_sync_advances_checkpoint(engine):
+    class ConcurrentPagedAdapter:
+        def __init__(self):
+            self.calls = []
+
+        def fetch_page(self, account_id, cursor):
+            self.calls.append((account_id, cursor))
+            if cursor is None:
+                # Simulate another sync committing this page during provider I/O.
+                persist_page(
+                    engine,
+                    "trumf",
+                    account_id,
+                    page([record("winner", "r1")], "page-2", True),
+                    expected_cursor=None,
+                )
+                return page([record("stale", "r1")], "page-2", True)
+            assert cursor == "page-2"
+            return page([record("next", "r1")], "terminal", False)
+
+    adapter = ConcurrentPagedAdapter()
+
+    # The stale page is discarded; sync continues at the checkpoint committed by
+    # the competing request and completes without surfacing a sync failure.
+    assert sync_account(engine, "trumf", "account-a", adapter) == 1
+    assert adapter.calls == [("account-a", None), ("account-a", "page-2")]
+    assert checkpoint(engine, "trumf", "account-a") == "terminal"
+    assert count_sources(engine) == 2
+
+
 def test_missing_provider_timestamp_is_nullable_and_replay_is_idempotent(engine):
     record_without_provider_time = ProviderOrderRecord(
         external_id="coop-summary-1",

@@ -1,3 +1,5 @@
+import hashlib
+import json
 from decimal import Decimal
 
 import httpx
@@ -124,6 +126,58 @@ def test_receipt_detail_accepts_comma_decimal_amounts_and_line_quantities():
     assert receipt.lines[0].discount == Decimal("0.25")
     assert receipt.lines[0].discount_amount_per_quantity == Decimal("0.10")
     assert receipt.lines[0].unit_price == Decimal("2.50")
+
+
+def test_receipt_detail_maps_live_wire_fields_and_preserves_weighted_line_total():
+    raw_summary = {
+        "summaryId": "synthetic-live-wire-shape",
+        "purchaseDate": "2026-11-10T18:59:00+01:00",
+        "totalSum": "12,00",
+        "lines": [
+            {
+                "name": "Synthetic weighed item",
+                "quantity": "2 kg",
+                "price": "5,00",
+            },
+            {"name": "Synthetic second item", "quantity": "1", "price": "7,00"},
+        ],
+    }
+    response = {"summary": raw_summary}
+
+    receipt = parse_receipt_detail(response)
+    normalized = receipt.standardize()
+    record = to_provider_order_record(receipt)
+
+    assert normalized.total_amount == Decimal("12.00")
+    assert normalized.lines[0].name == "Synthetic weighed item"
+    assert normalized.lines[0].amount == Decimal("5.00")
+    assert normalized.lines[0].quantity == Decimal("2")
+    assert normalized.lines[0].unit == "kg"
+    assert normalized.lines[0].ean is None
+    assert normalized.total_amount == sum(line.amount for line in normalized.lines)
+    assert normalized.lines[0].amount != normalized.lines[0].quantity * Decimal("5.00")
+    assert record.payload["amount"] == "12.00"
+    assert record.payload["lines"][0]["productName"] == "Synthetic weighed item"
+    assert record.payload["lines"][0]["amount"] == "5.00"
+
+    legacy_revision = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(
+                {
+                    "normalizer_version": "2",
+                    "history_year": None,
+                    "history_month": None,
+                    "source": raw_summary,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+    )
+    assert receipt.revision_id != legacy_revision
+    assert parse_receipt_detail(response).revision_id == receipt.revision_id
 
 
 @pytest.mark.parametrize("grouping", [" ", "\u00a0", "\u202f"])
@@ -403,6 +457,31 @@ def test_coop_search_accepts_search_text_echo_and_rejects_unexpected_shapes():
         parse_coop_search_page({**payload, "searchText": 42})
     with pytest.raises(UnsupportedCoopContract, match="unsupportedField:dict"):
         parse_coop_search_page({**payload, "unsupportedField": {}})
+
+
+def test_coop_search_maps_observed_total_sum_stub_field():
+    purchases, token = parse_coop_search_page(
+        _search_response(
+            _history_group(
+                2026,
+                11,
+                [
+                    {
+                        "summaryId": "synthetic-total-sum-stub",
+                        "dateTime": "10. november 18:59",
+                        "totalSum": "321,50",
+                    }
+                ],
+            )
+        )
+    )
+
+    assert token is None
+    assert len(purchases) == 1
+    assert purchases[0].amount == Decimal("321.50")
+    assert purchases[0].purchase_date is not None
+    assert purchases[0].purchase_date.year == 2026
+    assert purchases[0].purchase_date.month == 11
 
 
 def test_coop_http_source_searches_all_pages_and_preserves_authoritative_years():

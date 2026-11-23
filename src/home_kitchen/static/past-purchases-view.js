@@ -578,21 +578,47 @@
           lineLeft.append(
             makeEl("span", "purchase-line-name", line.canonical_product_name || line.name),
           );
-          if (line.canonical_product_name && line.raw_name && line.raw_name !== line.canonical_product_name) {
-            lineLeft.append(makeEl("small", "muted purchase-line-raw", `(${line.raw_name})`));
-          }
           lineLeft.append(makeEl("span", "badge purchase-category-badge", line.category_label || "Annet"));
 
-          const lineRight = makeEl("div", "purchase-line-numbers");
-          lineRight.append(
-            makeEl("span", "muted purchase-line-qty", formatQuantityNb(line.quantity, line.unit)),
-            makeEl(
-              "span",
-              "purchase-line-amount",
-              line.amount != null ? formatCurrencyNb(line.amount, basket.currency) : "—",
-            ),
+          const hasQuantity = line.quantity != null && String(line.quantity).trim() !== "";
+          const unitText = String(line.unit ?? "").trim();
+          const quantityText = hasQuantity
+            ? formatQuantityNb(line.quantity, unitText)
+            : "Mengde ikke oppgitt";
+          const lineQuantity = makeEl("div", "purchase-line-purchased");
+          lineQuantity.append(
+            makeEl("span", "purchase-line-quantity-label", "Kjøpt"),
+            makeEl("strong", "purchase-line-qty", quantityText),
           );
-          li.append(lineLeft, lineRight);
+          if (hasQuantity && !unitText) {
+            lineQuantity.append(makeEl("span", "purchase-line-missing-unit", "Enhet ikke oppgitt"));
+          }
+          lineQuantity.querySelector(".purchase-line-qty").setAttribute(
+            "aria-label",
+            `Kjøpt mengde: ${quantityText}`,
+          );
+
+          const metadata = [];
+          if (line.amount != null) {
+            metadata.push(["Linjesum", formatCurrencyNb(line.amount, basket.currency)]);
+          }
+          if (line.ean) metadata.push(["EAN", String(line.ean)]);
+          if (line.raw_name && line.raw_name !== (line.canonical_product_name || line.name)) {
+            metadata.push(["Tekst på kvitteringen", String(line.raw_name)]);
+          }
+
+          li.append(lineLeft, lineQuantity);
+          if (metadata.length) {
+            const lineDetails = makeEl("details", "purchase-line-details");
+            lineDetails.append(makeEl("summary", "purchase-line-details-summary", "Flere detaljer"));
+            const metadataList = makeEl("dl", "purchase-line-metadata");
+            metadata.forEach(([label, value]) => {
+              metadataList.append(makeEl("dt", "purchase-line-metadata-label", label));
+              metadataList.append(makeEl("dd", "purchase-line-metadata-value", value));
+            });
+            lineDetails.append(metadataList);
+            li.append(lineDetails);
+          }
           lineList.append(li);
         });
         details.append(lineList);

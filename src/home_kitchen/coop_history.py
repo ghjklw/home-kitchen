@@ -17,7 +17,15 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 import httpx
-from pydantic import AwareDatetime, BaseModel, BeforeValidator, ConfigDict, Field, model_validator
+from pydantic import (
+    AliasChoices,
+    AwareDatetime,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    model_validator,
+)
 
 from home_kitchen.purchase_sync import ProviderOrderRecord, ProviderPage, extract_line_ean
 from home_kitchen.receipts import Receipt, ReceiptLine
@@ -29,7 +37,7 @@ DEFAULT_COOP_USER_AGENT = "Android(14)/Coop(4.42.0)/2.7.7"
 DEFAULT_COOP_LOCALE = "nb_NO"
 DEFAULT_COOP_PURCHASES_COUNT = 50
 DEFAULT_COOP_SEARCH_MAX_PAGES = 100
-COOP_NORMALIZER_VERSION = "2"
+COOP_NORMALIZER_VERSION = "3"
 _COOP_LOCAL_TIMEZONE = ZoneInfo("Europe/Oslo")
 _COOP_NORWEGIAN_MONTHS = {
     "januar": 1,
@@ -285,12 +293,14 @@ type CoopQuantityInput = Annotated[
 class CoopReceiptLine(BaseModel):
     model_config = ConfigDict(extra="ignore", alias_generator=_to_camel, populate_by_name=True)
 
-    product_name: str | None = None
+    product_name: str | None = Field(
+        default=None, validation_alias=AliasChoices("productName", "name")
+    )
     ean13: str | None = None
     gtin13: str | None = None
     barcode: str | None = None
     quantity: CoopQuantityInput = None
-    amount: CoopDecimal = None
+    amount: CoopDecimal = Field(default=None, validation_alias=AliasChoices("amount", "price"))
     discount: CoopDecimal = None
     discount_amount_per_quantity: CoopDecimal = None
     unit_price: CoopDecimal = None
@@ -348,7 +358,7 @@ class CoopReceipt(BaseModel):
     store_name: str | None = None
     store_id: str | None = None
     chain_id: str | None = None
-    amount: CoopDecimal = None
+    amount: CoopDecimal = Field(default=None, validation_alias=AliasChoices("amount", "totalSum"))
     total_discount: CoopDecimal = None
     total_discount_formatted: str | None = None
     member_bonus: CoopDecimal = None
@@ -388,7 +398,7 @@ class CoopPurchaseStub(BaseModel):
     store_name: str | None = None
     store_id: str | None = None
     chain_id: str | None = None
-    amount: CoopDecimal = None
+    amount: CoopDecimal = Field(default=None, validation_alias=AliasChoices("amount", "totalSum"))
     total_discount: CoopDecimal = None
 
     @model_validator(mode="before")

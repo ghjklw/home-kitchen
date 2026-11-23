@@ -321,7 +321,7 @@ class HouseholdAzureProvider(AzureProvider):
                 ),
                 status_code=302,
             )
-            self._clear_consent_binding_cookie(request, response, state)
+            self._clear_consent_binding_cookie(response, state)
             return response
         except Exception:
             # Provider exception strings can contain credentials or code-bearing

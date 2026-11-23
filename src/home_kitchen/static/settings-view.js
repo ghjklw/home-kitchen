@@ -184,10 +184,6 @@
             "Sesjonen har utløpt. Koble til på nytt for å fortsette synkronisering."
           );
         }
-        const diffDays = Math.ceil((expiry - nowMs) / (1000 * 60 * 60 * 24));
-        if (diffDays <= 7) {
-          return `Sesjonen utløper om ${diffDays} ${diffDays === 1 ? "dag" : "dager"}. Vurder å fornye tilkoblingen snart.`;
-        }
       }
     }
     return null;

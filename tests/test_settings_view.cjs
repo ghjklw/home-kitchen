@@ -145,7 +145,7 @@ test("provides authentication labels for session token, cookie, and credentials 
   );
 });
 
-test("calculates expiry notices for expired and upcoming expiry states", () => {
+test("shows expiry notices for expired connections without upcoming expiry warnings", () => {
   const expiredIntegration = {
     id: "trumf",
     status: "expired",
@@ -157,16 +157,21 @@ test("calculates expiry notices for expired and upcoming expiry states", () => {
   );
 
   const nowMs = 1700000000000;
+  // 1 day in the future
+  const expiringTomorrow = {
+    id: "rema1000",
+    status: "connected",
+    expires_at: new Date(nowMs + 86400000).toISOString(),
+  };
+  assert.equal(integrationExpiryNotice(expiringTomorrow, nowMs), null);
+
   // 3 days in the future
   const expiringSoon = {
     id: "rema1000",
     status: "connected",
     expires_at: new Date(nowMs + 3 * 86400000).toISOString(),
   };
-  assert.equal(
-    integrationExpiryNotice(expiringSoon, nowMs),
-    "Sesjonen utløper om 3 dager. Vurder å fornye tilkoblingen snart.",
-  );
+  assert.equal(integrationExpiryNotice(expiringSoon, nowMs), null);
 
   // 30 days in the future (no warning needed)
   const farFuture = {

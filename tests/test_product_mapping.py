@@ -370,6 +370,32 @@ def test_existing_purchase_rows_receive_mapping_overlay_without_resync(mapping_r
     assert row.mapping_review_status == "confirmed"
 
 
+def test_mapping_enrichment_accepts_table_rows_with_product_name(mapping_repository):
+    service = ProductMappingService.__new__(ProductMappingService)
+    service.repository = mapping_repository
+    service.product_repository = SimpleNamespace(get_product=lambda _identity_id: None)
+    service.settings = None
+    service._background_lock = threading.Lock()
+    service._background_descriptions = set()
+    response = PurchaseHistoryBrowseResponse(
+        rows=[
+            PurchaseTableRow(
+                id="oda:order-1:line:0",
+                basket_id="oda:order-1",
+                provider="oda",
+                provider_label="Oda",
+                product_name="Oda product title",
+                raw_name=None,
+            )
+        ]
+    )
+
+    result = service.enrich_purchase_history(response)
+
+    assert result.rows[0].product_name == "Oda product title"
+    assert result.rows[0].mapping_match == "none"
+
+
 def test_ai_mapping_overlay_stays_suggestion_until_confirmed(mapping_repository):
     mapping_repository.upsert(
         retailer="coop",
@@ -574,3 +600,85 @@ async def test_import_suggestion_persists_explicit_package_without_ai(mapping_re
     assert row["package_unit"] == "g"
     assert row["package_inference_source"] == "description_rule"
     assert row["review_status"] == "pending"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["single", "batch"])
+@pytest.mark.parametrize(
+    ("confidence", "expected_status"),
+    [(0.9, "confirmed"), (0.899, "pending")],
+)
+async def test_high_confidence_existing_product_match_auto_confirms_identity_only(
+    mapping_repository, monkeypatch, path, confidence, expected_status
+):
+    product_id = uuid4()
+    description = "Oda havregryn 1kg"
+    suggestion = ProductIdentitySuggestion(
+        description=description,
+        suggested_existing_product_id=product_id,
+        suggested_category="Pantry",
+        product_confidence=confidence,
+        category_confidence=0.99,
+        product_evidence="The existing catalogue item matches the product and size in the title.",
+        category_evidence="Oats are a pantry item.",
+        package_size=Decimal("1"),
+        package_unit="kg",
+        package_confidence=0.99,
+        package_evidence="The retailer title includes 1kg.",
+    )
+
+    class SuggestionAgent:
+        async def run(self, _prompt):
+            return SimpleNamespace(output=SimpleNamespace(suggestions=[suggestion]))
+
+    monkeypatch.setattr(
+        "home_kitchen.product_mapping._build_identity_agent",
+        lambda _settings: SuggestionAgent(),
+    )
+    service = ProductMappingService.__new__(ProductMappingService)
+    service.repository = mapping_repository
+    service.product_repository = SimpleNamespace(
+        list_products=lambda: [
+            SimpleNamespace(id=product_id, canonical_name="Havregryn", variant=None)
+        ]
+    )
+    service.settings = SimpleNamespace(ai_configured=True)
+
+    source = {
+        "retailer": "oda",
+        "retailer_product_id": "oats-1kg",
+        "ean": None,
+        "description": description,
+    }
+    if path == "single":
+        await service._infer_row(source)
+    else:
+        await service.suggest_items([source])
+
+    row = mapping_repository.find("oda", "oats-1kg", None, description)
+    assert row is not None
+    if expected_status == "confirmed":
+        assert row["canonical_product_id"] == str(product_id)
+        assert row["review_status"] == "confirmed"
+    else:
+        assert row["canonical_product_id"] is None
+        assert row["review_status"] == "pending"
+        assert row["suggested_product_id"] == str(product_id)
+    assert row["mapping_confidence"] == confidence
+    assert row["category_review_status"] == "pending"
+    assert row["suggested_category"] == "Pantry"
+    assert row["package_size"] == Decimal("1")
+    assert row["package_unit"] == "kg"
+
+    with mapping_repository.engine.connect() as connection:
+        event = connection.execute(
+            text(
+                "SELECT actor_id, action FROM kitchen_retailer_product_mapping_events "
+                "WHERE actor_id IN ('system:ai_auto_confirm', 'system:ai_suggestion') "
+                "ORDER BY occurred_at DESC LIMIT 1"
+            )
+        ).one()
+    if expected_status == "confirmed":
+        assert event == ("system:ai_auto_confirm", "ai_auto_confirm")
+    else:
+        assert event == ("system:ai_suggestion", "ai_suggestion")

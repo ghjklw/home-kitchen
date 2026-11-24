@@ -66,6 +66,7 @@ _CATEGORY_OPTIONS = (
     "non_food",
     "unmapped",
 )
+_AUTO_CONFIRM_PRODUCT_IDENTITY_CONFIDENCE = 0.9
 
 
 def normalize_product_description(value: str) -> str:
@@ -143,6 +144,17 @@ class ProductIdentitySuggestion(BaseModel):
         if (self.package_size is None) != (self.package_unit is None):
             raise ValueError("AI package size and unit must either both be present or both be null")
         return self
+
+
+def _can_auto_confirm_product_identity(
+    suggestion: ProductIdentitySuggestion, valid_product_ids: set[UUID]
+) -> bool:
+    """Confirm only strongly evidenced AI matches to an existing canonical product."""
+    return bool(
+        suggestion.suggested_existing_product_id in valid_product_ids
+        and suggestion.product_confidence >= _AUTO_CONFIRM_PRODUCT_IDENTITY_CONFIDENCE
+        and suggestion.product_evidence.strip()
+    )
 
 
 class ProductMappingMutation(BaseModel):
@@ -576,7 +588,12 @@ class ProductMappingService:
         mappings = self.repository.list_all()
 
         def enrich(item: Any, retailer_override: str | None = None) -> Any:
-            description = str(item.raw_name or item.name or "").strip()
+            description = str(
+                getattr(item, "raw_name", None)
+                or getattr(item, "name", None)
+                or getattr(item, "product_name", None)
+                or ""
+            ).strip()
             retailer = (
                 str(retailer_override or getattr(item, "provider", "") or "").strip().casefold()
             )
@@ -1064,8 +1081,9 @@ class ProductMappingService:
         suggested_id = suggestion.suggested_existing_product_id
         if suggested_id not in valid_ids:
             suggested_id = None
+        auto_confirm = _can_auto_confirm_product_identity(suggestion, valid_ids)
         values = {
-            "canonical_product_id": None,
+            "canonical_product_id": suggested_id if auto_confirm else None,
             "suggested_product_id": suggested_id,
             "suggested_product_name": suggestion.suggested_product_name,
             "suggested_category": suggestion.suggested_category,
@@ -1073,7 +1091,7 @@ class ProductMappingService:
             "category_evidence": suggestion.category_evidence,
             "mapping_source": "ai",
             "mapping_confidence": suggestion.product_confidence,
-            "review_status": "pending",
+            "review_status": "confirmed" if auto_confirm else "pending",
             "category_source": current.get("category_source")
             if current.get("category_review_status") == "confirmed"
             else "ai",
@@ -1095,9 +1113,9 @@ class ProductMappingService:
             ean=source.get("ean"),
             description=str(source["description"]),
             values=values,
-            actor_id="system:ai_suggestion",
+            actor_id="system:ai_auto_confirm" if auto_confirm else "system:ai_suggestion",
             channel="system",
-            action="ai_suggestion",
+            action="ai_auto_confirm" if auto_confirm else "ai_suggestion",
             apply_to_similar=False,
         )
 
@@ -1236,6 +1254,7 @@ class ProductMappingService:
                 suggested_id = suggestion.suggested_existing_product_id
                 if suggested_id not in valid_ids:
                     suggested_id = None
+                auto_confirm = _can_auto_confirm_product_identity(suggestion, valid_ids)
                 inferred_package = {
                     "package_size": item.get("package_size"),
                     "package_unit": item.get("package_unit"),
@@ -1260,7 +1279,7 @@ class ProductMappingService:
                     ean=item.get("ean"),
                     description=description,
                     values={
-                        "canonical_product_id": None,
+                        "canonical_product_id": suggested_id if auto_confirm else None,
                         "suggested_product_id": suggested_id,
                         "suggested_product_name": suggestion.suggested_product_name,
                         "suggested_category": suggestion.suggested_category,
@@ -1268,15 +1287,15 @@ class ProductMappingService:
                         "category_evidence": suggestion.category_evidence,
                         "mapping_source": "ai",
                         "mapping_confidence": suggestion.product_confidence,
-                        "review_status": "pending",
+                        "review_status": "confirmed" if auto_confirm else "pending",
                         "category_source": "ai",
                         "category_confidence": suggestion.category_confidence,
                         "category_review_status": "pending",
                         **inferred_package,
                     },
-                    actor_id="system:ai_suggestion",
+                    actor_id="system:ai_auto_confirm" if auto_confirm else "system:ai_suggestion",
                     channel="system",
-                    action="ai_suggestion",
+                    action="ai_auto_confirm" if auto_confirm else "ai_suggestion",
                     apply_to_similar=False,
                 )
                 count += 1
